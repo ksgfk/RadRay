@@ -15,7 +15,8 @@ enum class SceneGpuLoad { Transforms,
                           Parent,
                           Churn,
                           FirstUse,
-                          Growth };
+                          Growth,
+                          Once };
 
 class SceneGpuWorkload {
 public:
@@ -31,6 +32,9 @@ public:
     void Prepare(AppFrameContext& frame);
     void Submit(AppFrameContext& frame);
     void Drain();
+    uint64_t GetSceneAllocatedBytes() const noexcept;
+    /// Native allocator block/allocation bytes and counts; sampled outside the timed loop.
+    array<uint64_t, 4> GetNativeAllocatorUsage() const noexcept;
     void RestartColdScene();
     uint64_t UploadedBytes{0}, UploadRanges{0};
     double GpuMilliseconds{0};
@@ -46,6 +50,7 @@ private:
     SceneGpuLoad _load;
     SceneId _scene;
     vector<ShapeId> _objects;
+    vector<uint64_t> _sceneBytes = vector<uint64_t>(_timeline.GetFlightDataCount());
     vector<uint64_t> _serials;
     uint32_t _changes, _views, _step{0};
     string _error;

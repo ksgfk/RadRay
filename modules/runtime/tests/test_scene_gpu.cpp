@@ -68,15 +68,19 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
     const auto complete = [&](uint32_t f) {
         if (!serials[f]) return;
         ASSERT_TRUE(gpu->CompleteFlightIfReady(f, true));
-        const FlightCompletion completion{f, true, serials[f]};
-        renderer.OnFlightCompletedGT(completion);
-        gpu->ReleaseFrameResourcesGT(completion);
-        ScopedBufferMap map{readbacks[f].get(), {0, 128}};
-        ASSERT_TRUE(map);
-        const auto* values = map.DataAs<float>();
-        for (uint32_t i = 0; i < 16; ++i) EXPECT_FLOAT_EQ(values[i], snapshots[f].data()[i]);
-        for (uint32_t i = 0; i < 16; ++i) EXPECT_FLOAT_EQ(values[16 + i], other.data()[i]);
-        serials[f] = 0;
+        FlightCompletion completion;
+        while (timeline.TryReadCompletion(completion)) {
+            renderer.OnFlightCompletedGT(completion);
+            gpu->ReleaseFrameResourcesGT(completion);
+            const auto index = completion.FlightIndex;
+            if (serials[index] != completion.FrameSerial) continue;
+            ScopedBufferMap map{readbacks[index].get(), {0, 128}};
+            ASSERT_TRUE(map);
+            const auto* values = map.DataAs<float>();
+            for (uint32_t i = 0; i < 16; ++i) EXPECT_FLOAT_EQ(values[i], snapshots[index].data()[i]);
+            for (uint32_t i = 0; i < 16; ++i) EXPECT_FLOAT_EQ(values[16 + i], other.data()[i]);
+            serials[index] = 0;
+        }
     };
     for (uint32_t step = 0; step < flights * 6; ++step) {
         const uint32_t f = step % flights;
@@ -160,9 +164,11 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
         complete(flights - 1);
     }
     ASSERT_TRUE(gpu->CompleteFlightIfReady(0, true));
-    const FlightCompletion completion{0, true, frame.FrameSerial()};
-    renderer.OnFlightCompletedGT(completion);
-    gpu->ReleaseFrameResourcesGT(completion);
+    FlightCompletion completion;
+    while (timeline.TryReadCompletion(completion)) {
+        renderer.OnFlightCompletedGT(completion);
+        gpu->ReleaseFrameResourcesGT(completion);
+    }
     const auto rebuilt = renderer.CreateSceneGT();
     EXPECT_NE(rebuilt, scene);
     renderer.BeginStoppingGT();
@@ -179,7 +185,7 @@ TEST_P(SceneGpu, ReadbackFlightIsolationAndGenerationReuse) {
     RunObjectBuffers(backend, flights, threaded);
 }
 INSTANTIATE_TEST_SUITE_P(Backends, SceneGpu,
-                         testing::Combine(testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan), testing::Values(1u, 2u, 3u), testing::Bool()));
+                         testing::Combine(testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan), testing::Values(1u, 2u, 3u, 4u), testing::Bool()));
 
 TEST(SceneGpuLifetime, D3D12DeletionWaitsForCoveringFence) { RunObjectBuffers(render::RenderBackend::D3D12, 2, true, true); }
 TEST(SceneGpuLifetime, VulkanDeletionWaitsForCoveringFence) { RunObjectBuffers(render::RenderBackend::Vulkan, 2, true, true); }
@@ -263,7 +269,11 @@ void RunAllocationRecovery(render::RenderBackend backend) {
         }
         gpu->EndFrameRecordAndSubmit(0);
         ASSERT_TRUE(gpu->CompleteFlightIfReady(0, true));
-        mirror.Complete(0, frame.FrameSerial(), true, scene);
+        {
+            FlightCompletion notification;
+            while (timeline.TryReadCompletion(notification)) {
+            }
+        }
         gpu->ReleaseFrameResourcesGT({0, true, frame.FrameSerial()});
         if (view) {
             ScopedBufferMap map{readback.get(), {0, 18 * 64}};
@@ -280,38 +290,74 @@ void RunAllocationRecovery(render::RenderBackend backend) {
 TEST(SceneGpuAllocation, D3D12FailureGrowthAndSparseRanges) { RunAllocationRecovery(render::RenderBackend::D3D12); }
 TEST(SceneGpuAllocation, VulkanFailureGrowthAndSparseRanges) { RunAllocationRecovery(render::RenderBackend::Vulkan); }
 
-
 namespace {
 void RunInstanceParameters(render::RenderBackend backend) {
-    FrameTimeline timeline{1}; GpuSystemDescriptor descriptor{.FlightDataCount=1,.EnableFrameProfiler=false};
-    const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct,1};
-    if(backend==render::RenderBackend::Vulkan){render::VulkanDeviceDescriptor vk;vk.Queues=std::span{&queue,1};descriptor.Device=vk;}
-    RuntimeStartupResult startup;auto gpu=GpuSystem::TryCreate(descriptor,timeline,startup);
-    if(test::CanSkipRuntimeStartup(backend,startup))GTEST_SKIP()<<startup.Reason;
-    ASSERT_TRUE(gpu);RenderScene scene;SceneGpuData mirror{gpu->GetDevice(),1};radray::SceneApplyChanges changes;
-    InstanceParameterLayout layout{"Tint",16,{{"Color",0,16,0,1,1,4}}};
-    SceneUpdateBatch update;ShapeId id{3,0},high{8,0};update.CreateShapes={id,high};update.MeshStates={{.Id=id},{.Id=high}};
-    update.Parameters={{id,layout,vector<byte>(16,byte{7})},{high,layout,vector<byte>(16,byte{8})}};scene.Apply(update,&changes);mirror.ApplyChanges(changes);
-    for(uint32_t step=0;step<6;++step){
-        if(step==2){update.Clear();update.Parameters={{high,layout,vector<byte>(16,byte{10})},{id,layout,vector<byte>(16,byte{9})}};scene.Apply(update,&changes);EXPECT_TRUE(changes.Updated.empty());mirror.ApplyChanges(changes);}
-        if(step==4){update.Clear();update.RemoveShapes={id};id.Generation=1;update.CreateShapes={id};update.MeshStates={{.Id=id}};
-            update.Parameters={{id,layout,vector<byte>(16,byte{12})}};scene.Apply(update,&changes);mirror.ApplyChanges(changes);}
-        gpu->BeginUpdateForFlight(0);auto frame=gpu->BeginFrameRecord(0,{}, {},false);
-        const auto before=frame.GetHostWrites().GetStats().CommittedBytes;
-        auto first=mirror.Prepare(scene,frame);ASSERT_TRUE(first);ASSERT_EQ(first->Parameters.size(),1u);
-        const auto after=frame.GetHostWrites().GetStats().CommittedBytes;
-        EXPECT_EQ(after-before,step==0?160u:step==4?80u:step==2||step==3?32u:0u);
-        auto second=mirror.Prepare(scene,frame);ASSERT_TRUE(second);EXPECT_EQ(first->Parameters[0].Values,second->Parameters[0].Values);
-        EXPECT_EQ(frame.GetHostWrites().GetStats().CommittedBytes,after);
-        gpu->EndFrameRecordAndSubmit(0);ASSERT_TRUE(gpu->CompleteFlightIfReady(0,true));
-        mirror.Complete(0,frame.FrameSerial(),step!=2,scene);
-        FlightCompletion completed;ASSERT_TRUE(timeline.TryReadCompletion(completed));gpu->ReleaseFrameResourcesGT(completed);
-        timeline.MarkCompletedWaitFrames(0);timeline.CleanupCompletedFlights();
+    FrameTimeline timeline{1};
+    GpuSystemDescriptor descriptor{.FlightDataCount = 1, .EnableFrameProfiler = false};
+    const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
+    if (backend == render::RenderBackend::Vulkan) {
+        render::VulkanDeviceDescriptor vk;
+        vk.Queues = std::span{&queue, 1};
+        descriptor.Device = vk;
+    }
+    RuntimeStartupResult startup;
+    auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_TRUE(gpu);
+    RenderScene scene;
+    SceneGpuData mirror{gpu->GetDevice(), 1};
+    radray::SceneApplyChanges changes;
+    InstanceParameterLayout layout{"Tint", 16, {{"Color", 0, 16, 0, 1, 1, 4}}};
+    SceneUpdateBatch update;
+    ShapeId id{3, 0}, high{8, 0};
+    update.CreateShapes = {id, high};
+    update.MeshStates = {{.Id = id}, {.Id = high}};
+    update.Parameters = {{id, layout, vector<byte>(16, byte{7})}, {high, layout, vector<byte>(16, byte{8})}};
+    scene.Apply(update, &changes);
+    mirror.ApplyChanges(changes);
+    for (uint32_t step = 0; step < 6; ++step) {
+        if (step == 2) {
+            update.Clear();
+            update.Parameters = {{high, layout, vector<byte>(16, byte{10})}, {id, layout, vector<byte>(16, byte{9})}};
+            scene.Apply(update, &changes);
+            EXPECT_TRUE(changes.Updated.empty());
+            mirror.ApplyChanges(changes);
+        }
+        if (step == 4) {
+            update.Clear();
+            update.RemoveShapes = {id};
+            id.Generation = 1;
+            update.CreateShapes = {id};
+            update.MeshStates = {{.Id = id}};
+            update.Parameters = {{id, layout, vector<byte>(16, byte{12})}};
+            scene.Apply(update, &changes);
+            mirror.ApplyChanges(changes);
+        }
+        gpu->BeginUpdateForFlight(0);
+        auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+        const auto before = frame.GetHostWrites().GetStats().CommittedBytes;
+        auto first = mirror.Prepare(scene, frame);
+        ASSERT_TRUE(first);
+        ASSERT_EQ(first->Parameters.size(), 1u);
+        const auto after = frame.GetHostWrites().GetStats().CommittedBytes;
+        EXPECT_EQ(after - before, step == 0 ? 160u : step == 4 ? 80u
+                                                 : step == 2   ? 32u
+                                                               : 0u);
+        auto second = mirror.Prepare(scene, frame);
+        ASSERT_TRUE(second);
+        EXPECT_EQ(first->Parameters[0].Values, second->Parameters[0].Values);
+        EXPECT_EQ(frame.GetHostWrites().GetStats().CommittedBytes, after);
+        gpu->EndFrameRecordAndSubmit(0);
+        ASSERT_TRUE(gpu->CompleteFlightIfReady(0, true));
+        FlightCompletion completed;
+        ASSERT_TRUE(timeline.TryReadCompletion(completed));
+        gpu->ReleaseFrameResourcesGT(completed);
+        timeline.CleanupCompletedFlights();
     }
     gpu->AbandonUnpublishedResourcesTerminalGT();
 }
-}
-TEST(SceneGpuParameters, D3D12SparseUnorderedDirtyWarmZeroSkipRetryAndSlotGeneration){RunInstanceParameters(render::RenderBackend::D3D12);}
-TEST(SceneGpuParameters, VulkanSparseUnorderedDirtyWarmZeroSkipRetryAndSlotGeneration){RunInstanceParameters(render::RenderBackend::Vulkan);}
+}  // namespace
+TEST(SceneGpuParameters, D3D12SparseUnorderedDirtyWarmZeroSkipRetryAndSlotGeneration) { RunInstanceParameters(render::RenderBackend::D3D12); }
+TEST(SceneGpuParameters, VulkanSparseUnorderedDirtyWarmZeroSkipRetryAndSlotGeneration) { RunInstanceParameters(render::RenderBackend::Vulkan); }
 
 }  // namespace radray::test

@@ -13,6 +13,23 @@
 namespace radray {
 namespace {
 
+#if defined(RADRAY_ENABLE_VULKAN)
+uint32_t VulkanPresentValidationVersion() {
+    vector<VkLayerProperties> layers;
+    if (render::vulkan::EnumerateVectorFromVkFunc(layers, vkEnumerateInstanceLayerProperties) != VK_SUCCESS) {
+        ADD_FAILURE() << "Vulkan validation layer enumeration failed";
+        return 0;
+    }
+    for (const auto& layer : layers) {
+        if (std::string_view{layer.layerName} != "VK_LAYER_KHRONOS_validation") continue;
+        testing::Test::RecordProperty("vvl_spec_version", layer.specVersion);
+        return layer.specVersion;
+    }
+    ADD_FAILURE() << "Vulkan validation layer is unavailable";
+    return 0;
+}
+#endif
+
 void MultiWindowBufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
     const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{.Target = buffer, .Before = before, .After = after};
     commands->ResourceBarrier(std::span{&barrier, 1});
@@ -74,6 +91,7 @@ protected:
                 if (phase == 5 || phase == 7) EXPECT_EQ(window->GetSwapChain(), nullptr);
             } else {
                 EXPECT_TRUE(target) << "window=" << identity;
+                if (identity != 0) EXPECT_GE(window->GetNativeWindow()->GetPosition().y(), 0);
             }
             if (!target) continue;
 #if defined(RADRAY_ENABLE_VULKAN)
@@ -168,7 +186,7 @@ protected:
             _pending.erase(found);
         }
         SCOPED_TRACE(fmt::format("completed phase={}, serial={}", probe->Phase, completion.FrameSerial));
-        EXPECT_TRUE(completion.GpuWorkCompleted);
+        EXPECT_TRUE(completion.OutputsExecuted);
         EXPECT_EQ(completion.FlightIndex, probe->Flight);
         EXPECT_EQ(probe->Fence->GetCompletedValue(), probe->Signal);
         ScopedBufferMap map{probe->Readback.get(), {0, 16}};
@@ -217,20 +235,14 @@ private:
     }
 
     void RecordClear(render::CommandBuffer* commands, AppFrameTarget& target, uint32_t identity) {
-        auto* registry = GetRenderSystem()->GetRenderPassRegistry();
         const auto desc = target.BackBuffer->GetDesc();
-        const render::RenderPassColorAttachmentDescriptor attachment{desc.Format, desc.SampleCount, render::LoadAction::Clear, render::StoreAction::Store};
-        auto pass = registry->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
-        ASSERT_TRUE(pass);
         auto* view = target.BackBufferView;
-        auto framebuffer = registry->GetOrCreateFramebuffer({pass.Get(), std::span{&view, 1}, nullptr, desc.Width, desc.Height, 1});
-        ASSERT_TRUE(framebuffer);
         const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{
             .Target = target.BackBuffer, .Before = target.Window->GetBackBufferState(target.BackBufferIndex), .After = render::TextureState::RenderTarget};
         commands->ResourceBarrier(std::span{&before, 1});
         render::ColorClearValue clear{{0, 0, 0, 1}};
         clear.Value[identity] = 1.0f;
-        auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "Multi-window clear"});
+        auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, desc.Width, desc.Height, 1, {}, "Multi-window clear"});
         ASSERT_TRUE(encoder);
         commands->EndRenderPass(encoder.Release());
         const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{
@@ -259,6 +271,7 @@ private:
         desc.Width = 320;
         desc.Height = 240;
         desc.X = 320;
+        desc.Y = 100;
         desc.ActivateOnShow = false;
         auto created = co_await windows->CreateWindow(desc);
         EXPECT_EQ(created.Status, WindowOperationStatus::Completed);
@@ -345,6 +358,15 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
 #if !defined(RADRAY_PLATFORM_WINDOWS)
     GTEST_SKIP() << "Application window initialization currently requires Windows";
 #endif
+#if defined(RADRAY_ENABLE_VULKAN)
+    if (backend == render::RenderBackend::Vulkan) {
+        ASSERT_TRUE(render::InstanceVulkan::InitEnv({}));
+        const auto version = VulkanPresentValidationVersion();
+        render::InstanceVulkan::ShutdownEnv();
+        if (testing::Test::HasFailure()) return;
+        if (version < VK_MAKE_API_VERSION(0, 1, 4, 364)) GTEST_SKIP() << "Multi-swapchain sync validation requires VVL 1.4.364+ with fix #13248";
+    }
+#endif
     test::RuntimeLogCapture logs;
     {
         MultiWindowApp app{lifecycle};
@@ -374,13 +396,12 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
 
 TEST(RuntimeMultiWindow, D3D12SingleThreadOrderedSubmissions) { RunMultiWindow(render::RenderBackend::D3D12, false, false); }
 TEST(RuntimeMultiWindow, D3D12ThreadedOrderedSubmissions) { RunMultiWindow(render::RenderBackend::D3D12, true, false); }
-// TODO(VVL #13117): restore these multi-swapchain cases after upstream resolution.
-// TEST(RuntimeMultiWindow, VulkanSingleThreadOrderedSubmissions) { RunMultiWindow(render::RenderBackend::Vulkan, false, false); }
-// TEST(RuntimeMultiWindow, VulkanThreadedOrderedSubmissions) { RunMultiWindow(render::RenderBackend::Vulkan, true, false); }
+TEST(RuntimeMultiWindow, VulkanSingleThreadOrderedSubmissions) { RunMultiWindow(render::RenderBackend::Vulkan, false, false); }
+TEST(RuntimeMultiWindow, VulkanThreadedOrderedSubmissions) { RunMultiWindow(render::RenderBackend::Vulkan, true, false); }
 TEST(RuntimeMultiWindow, D3D12SingleThreadSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::D3D12, false, true); }
 TEST(RuntimeMultiWindow, D3D12ThreadedSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::D3D12, true, true); }
-// TEST(RuntimeMultiWindow, VulkanSingleThreadSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::Vulkan, false, true); }
-// TEST(RuntimeMultiWindow, VulkanThreadedSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::Vulkan, true, true); }
+TEST(RuntimeMultiWindow, VulkanSingleThreadSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::Vulkan, false, true); }
+TEST(RuntimeMultiWindow, VulkanThreadedSwapChainLifecycle) { RunMultiWindow(render::RenderBackend::Vulkan, true, true); }
 
 #if defined(RADRAY_ENABLE_VULKAN) && defined(RADRAY_PLATFORM_WINDOWS)
 
@@ -539,31 +560,96 @@ TEST_F(RuntimeVulkanSwapChain, WaitPreviousTimelineBeforePresent) {
     }
 }
 
-// TODO(VVL #13117): restore this multi-swapchain case after upstream resolution.
-/*
+TEST_F(RuntimeVulkanSwapChain, TransferFirstAcquirePreservesPresentedPixels) {
+    const auto pitch = Align(uint64_t{240 * 4}, uint64_t{_device->GetCapabilities().Detail.TextureDataPitchAlignment});
+    unordered_set<render::Texture*> initialized;
+    uint32_t copies = 0;
+    for (uint32_t round = 0; round < 12; ++round) {
+        SCOPED_TRACE(round);
+        auto acquired = _chain->AcquireNext(2000);
+        ASSERT_EQ(acquired.Status, render::SwapChainStatus::Success);
+        ASSERT_TRUE(acquired.Frame);
+        auto& frame = *acquired.Frame;
+        auto* image = frame.GetBackBuffer();
+        ASSERT_TRUE(image->GetDesc().Usage.HasFlag(render::TextureUse::CopySource));
+        const bool copy = !initialized.insert(image).second;
+        auto storage = _device->CreateCommandAllocator(_context.Queue).Unwrap();
+        auto commands = _device->CreateCommandBuffer(storage.get()).Unwrap();
+        auto view = _device->CreateTextureView({.Target = image, .Dim = render::TextureDimension::Dim2D, .Format = render::TextureFormat::BGRA8_UNORM, .Range = {0, 1, 0, 1}, .Usage = render::TextureViewUsage::RenderTarget}).Unwrap();
+        auto readback = _device->CreateBuffer({.Size = pitch * 180, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead}).Unwrap();
+        commands->Begin();
+        if (copy) {
+            const render::ResourceBarrierDescriptor barriers[]{
+                render::BarrierTextureDescriptor{image, render::TextureState::Present, render::TextureState::CopySource},
+                render::BarrierBufferDescriptor{readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination}};
+            commands->ResourceBarrier(barriers);
+            commands->CopyTextureToBuffer(readback.get(), 0, image, {0, 1, 0, 1});
+            MultiWindowBufferBarrier(commands.get(), readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
+        }
+        const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{
+            image, copy ? render::TextureState::CopySource : render::TextureState::Undefined, render::TextureState::RenderTarget};
+        commands->ResourceBarrier(std::span{&before, 1});
+        auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{view.get(), render::LoadAction::Clear, render::StoreAction::Store, {{1, 0, 0, 1}}}},
+                                                  {},
+                                                  240,
+                                                  180,
+                                                  1})
+                           .Unwrap();
+        commands->EndRenderPass(std::move(encoder));
+        const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{image, render::TextureState::RenderTarget, render::TextureState::Present};
+        commands->ResourceBarrier(std::span{&after, 1});
+        commands->End();
+        auto* raw = commands.get();
+        auto* fence = _fence.get();
+        uint64_t value = ++_signal;
+        render::SwapChainSyncObject* wait[]{frame.GetWaitToDraw()};
+        render::SwapChainSyncObject* ready[]{frame.GetReadyToPresent()};
+        _context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}, .SignalFences = std::span{&fence, 1}, .SignalValues = std::span{&value, 1}, .WaitToExecute = wait, .ReadyToPresent = ready});
+        _fence->Wait(value);
+        EXPECT_EQ(_chain->Present(std::move(frame)).Status, render::SwapChainStatus::Success);
+        if (copy) {
+            ++copies;
+            ScopedBufferMap map{readback.get(), {0, pitch * 180}};
+            ASSERT_TRUE(map);
+            readback->InvalidateMappedRange({0, pitch * 180});
+            for (uint32_t y = 0; y < 180; ++y) {
+                const auto* row = static_cast<const uint8_t*>(map.Data()) + y * pitch;
+                for (uint32_t x = 0; x < 240; ++x) {
+                    uint32_t pixel;
+                    std::memcpy(&pixel, row + x * 4, 4);
+                    ASSERT_EQ(pixel, 0xffff0000u) << "x=" << x << ", y=" << y;
+                }
+            }
+        }
+        storage->Reset();
+    }
+    EXPECT_GE(copies, 12u - _chain->GetBackBufferCount());
+}
+
 TEST_F(RuntimeVulkanSwapChain, MultiSwapChainHostWaitBeforePresent) {
+    const auto version = VulkanPresentValidationVersion();
+    if (testing::Test::HasFailure()) return;
+    if (version < VK_MAKE_API_VERSION(0, 1, 4, 364)) GTEST_SKIP() << "Multi-swapchain sync validation requires VVL 1.4.364+ with fix #13248";
     // Acquire all images, chain submissions through one timeline, wait on the host,
     // then present all windows. Syncval must preserve prior-present dependencies.
     vector<unique_ptr<NativeWindow>> windows;
     vector<unique_ptr<render::SwapChain>> chains;
     for (int i = 0; i < 3; ++i) {
         windows.push_back(NativeWindow::Create(Win32WindowCreateDescriptor{
-                                                   .Title = "Host wait reproduction", .Width = 240, .Height = 180, .X = 260 * i, .ActivateOnShow = false})
+                                                   .Title = "Host wait reproduction", .Width = 240, .Height = 180, .X = 260 * i, .Y = 100, .ActivateOnShow = false})
                               .Unwrap());
         auto desc = _chain->GetDesc();
         desc.NativeHandler = windows.back()->GetNativeHandler();
         chains.push_back(_device->CreateSwapChain(desc).Unwrap());
     }
     unordered_set<render::Texture*> initialized;
-    const render::RenderPassColorAttachmentDescriptor attachment{render::TextureFormat::BGRA8_UNORM, 1, render::LoadAction::Clear, render::StoreAction::Store};
-    auto pass = _device->CreateRenderPass({std::span{&attachment, 1}, {}}).Unwrap();
+
     for (uint32_t round = 0; round < 12; ++round) {
         SCOPED_TRACE(round);
         vector<render::SwapChainFrame> frames;
         auto storage = _device->CreateCommandAllocator(_context.Queue).Unwrap();
         vector<unique_ptr<render::CommandBuffer>> commands;
         vector<unique_ptr<render::TextureView>> views;
-        vector<unique_ptr<render::Framebuffer>> framebuffers;
         for (auto& chain : chains) {
             auto acquired = chain->AcquireNext(2000);
             ASSERT_EQ(acquired.Status, render::SwapChainStatus::Success);
@@ -580,9 +666,8 @@ TEST_F(RuntimeVulkanSwapChain, MultiSwapChainHostWaitBeforePresent) {
             command->ResourceBarrier(std::span{&before, 1});
             views.push_back(_device->CreateTextureView({.Target = frame.GetBackBuffer(), .Dim = render::TextureDimension::Dim2D, .Format = render::TextureFormat::BGRA8_UNORM, .Range = {.BaseArrayLayer = 0, .ArrayLayerCount = 1, .BaseMipLevel = 0, .MipLevelCount = 1}, .Usage = render::TextureViewUsage::RenderTarget}).Unwrap());
             auto* view = views.back().get();
-            framebuffers.push_back(_device->CreateFramebuffer({pass.get(), std::span{&view, 1}, nullptr, 240, 180, 1}).Unwrap());
             const render::ColorClearValue clear{{0, 0, 0, 1}};
-            auto encoder = command->BeginRenderPass({pass.get(), framebuffers.back().get(), std::span{&clear, 1}, {}, "Reproduce present synchronization"}).Unwrap();
+            auto encoder = command->BeginRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, 240, 180, 1, {}, "Reproduce present synchronization"}).Unwrap();
             command->EndRenderPass(std::move(encoder));
             const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{
                 .Target = frame.GetBackBuffer(), .Before = render::TextureState::RenderTarget, .After = render::TextureState::Present};
@@ -604,10 +689,10 @@ TEST_F(RuntimeVulkanSwapChain, MultiSwapChainHostWaitBeforePresent) {
             const size_t index = round % 2 == 0 ? step : chains.size() - 1 - step;
             EXPECT_EQ(chains[index]->Present(std::move(frames[index])).Status, render::SwapChainStatus::Success);
         }
+        storage->Reset();
     }
     _context.Queue->Wait();
 }
-*/
 
 #endif
 

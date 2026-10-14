@@ -5,8 +5,8 @@
 
 namespace radray {
 struct RasterFrameBindingCache;
-/// Cold reflection result. Owned by RasterDraw, borrows a RenderSystem program generation.
-struct RasterMaterialPlan {
+/// Cold reflection result. Owned by the immutable MaterialPass definition, borrows a RenderSystem program generation.
+struct RasterMaterialPlan : std::enable_shared_from_this<RasterMaterialPlan> {
     struct Group {
         uint32_t Index;
         bool Static;
@@ -82,10 +82,7 @@ public:
                                                           MaterialBindingView binding, const RasterMaterialValues& values = {});
     Nullable<render::GraphicsPipelineState*> PreparePipeline(PipelineContext& context, const RasterMaterialPlan& plan,
                                                              const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
-                                                             render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling = false);
-
-private:
-    vector<shared_ptr<RasterMaterialPlan>> _plans;
+                                                             const RenderOutputInfo& output, bool reverseCulling = false);
 };
 struct VisibleInstanceRange {
     uint32_t First{0}, Count{0};

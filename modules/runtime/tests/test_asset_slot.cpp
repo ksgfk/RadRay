@@ -1,5 +1,5 @@
 // AssetManager 的槽位生命周期。四条规则: (1) 引用归零才卸载; (2) 销毁对齐到 Pump;
-// (3) OnUnload 先于析构, 在那里经 DeferDestroy 交出数据; (4) AssetManager 先死时仍无条件走
+// (3) OnUnload 先于析构, 在那里直接释放已完成使用的数据; (4) AssetManager 先死时仍无条件走
 // 一遍 OnUnload。
 //
 // 【不需要 device】用假资产 (自己计数 OnUnload / 析构) 代替真资产, 无显卡也能跑。
@@ -66,7 +66,7 @@ public:
         uint32_t Destroyed{0};
         /// OnUnload 时 Destroyed 的值。为 0 才说明 OnUnload 确实跑在析构之前。
         uint32_t DestroyedAtUnload{0xffffffff};
-        /// DeferDestroy 交出的 payload 被销毁的次数。
+        /// OnUnload 的 payload 被销毁的次数。
         uint32_t PayloadDestroyed{0};
     };
 
@@ -74,8 +74,8 @@ public:
     /// 存活引用, 槽位要到 fixture 的 ~AssetManager 才回收 —— 那已经在用例函数返回【之后】,
     /// 栈上的 Counters 早已死亡, 于是 OnUnload 写进已失效的栈帧。那种写入不一定立刻崩,
     /// 表现为随机的挂死或串扰, 极难定位。共享所有权让计数器活到最后一个写入者之后。
-    ProbeAsset(shared_ptr<Counters> counters, bool wantsDeferredDestroy) noexcept
-        : _counters(std::move(counters)), _wantsDeferredDestroy(wantsDeferredDestroy) {}
+    ProbeAsset(shared_ptr<Counters> counters, bool ownsPayload) noexcept
+        : _counters(std::move(counters)), _ownsPayload(ownsPayload) {}
 
     ~ProbeAsset() noexcept override {
         if (_counters != nullptr) {
@@ -83,23 +83,23 @@ public:
         }
     }
 
-    void OnUnload(AssetManager& manager) override {
+    void OnUnload(AssetManager&) override {
         if (_counters != nullptr) {
             ++_counters->Unloaded;
             _counters->DestroyedAtUnload = _counters->Destroyed;
         }
-        if (!_wantsDeferredDestroy) {
+        if (!_ownsPayload) {
             return;
         }
         // 真资产在此把整包 GPU 对象交出去。这里交一个记账用的守卫即可 —— 被测的是路径,
         // 不是资源类型。
-        manager.DeferDestroy([guard = DestroyGuard{_counters}]() noexcept {});
+        DestroyGuard guard{_counters};
     }
 
 private:
     /// 析构时给 PayloadDestroyed +1, 被移走的那份不再记账。
     ///
-    /// 【为何必须显式写移动构造】: DeferDestroy 把 payload 移动进类型擦除的包装, 而
+    /// 移动守卫转移计数器所有权, 而
     /// 用户声明的析构函数会【抑制隐式移动构造】—— 那时移动静默退化为拷贝, 于是临时对象
     /// 与存下来的那份各记一次账, 计数翻倍。这正是本文件第一版失败的原因。
     class DestroyGuard {
@@ -121,7 +121,7 @@ private:
     };
 
     shared_ptr<Counters> _counters;
-    bool _wantsDeferredDestroy{false};
+    bool _ownsPayload{false};
 };
 
 using Counters = ProbeAsset::Counters;
@@ -229,8 +229,6 @@ private:
 /// manager 用它, 而那发生在 manager 析构期间。故 _waitFrame 声明在前 (逆序析构时后死)。
 class AssetSlotTest : public ::testing::Test {
 protected:
-    void SetUp() override { _assets.SetWaitFrameProcessor(&_waitFrame); }
-
     AssetManager& Assets() noexcept { return _assets; }
     CountingWaitFrame& WaitFrame() noexcept { return _waitFrame; }
 
@@ -339,9 +337,8 @@ TEST_F(AssetSlotTest, OnUnloadRunsBeforeTheDestructor) {
     EXPECT_EQ(counters->DestroyedAtUnload, 0u) << "OnUnload must observe an alive asset";
 }
 
-/// 资产在 OnUnload 里把需延迟销毁的数据整包交给 DeferDestroy, 那一包在【一个帧边界之后】
-/// 才销毁 —— 而不是随资产析构一起。
-TEST_F(AssetSlotTest, OnUnloadHandsPayloadsToTheWaitFrameProcessor) {
+/// 最后显式使用结束后 OnUnload 直接释放 payload，不额外等待帧边界。
+TEST_F(AssetSlotTest, OnUnloadReleasesCompletedPayloadsDirectly) {
     shared_ptr<Counters> counters = MakeCounters();
     {
         StreamingAssetRef<ProbeAsset> ref =
@@ -352,13 +349,13 @@ TEST_F(AssetSlotTest, OnUnloadHandsPayloadsToTheWaitFrameProcessor) {
     Assets().Pump();
 
     EXPECT_EQ(counters->Unloaded, 1u);
-    EXPECT_EQ(WaitFrame().Count, 1u) << "the payload must go through a frame boundary";
+    EXPECT_EQ(WaitFrame().Count, 0u) << "completed asset ownership unloads directly";
     EXPECT_EQ(counters->PayloadDestroyed, 1u);
 }
 
 /// 【一帧一个协程帧】: 同一次 Pump 里归零的多个资产共用一个等待帧边界的协程。故大量
 /// 资产同时归零不会产生大量协程。
-TEST_F(AssetSlotTest, PayloadsFromOnePumpShareOneFrameWait) {
+TEST_F(AssetSlotTest, CompletedPayloadsFromOnePumpReleaseDirectly) {
     shared_ptr<Counters> a = MakeCounters();
     shared_ptr<Counters> b = MakeCounters();
     shared_ptr<Counters> c = MakeCounters();
@@ -372,7 +369,7 @@ TEST_F(AssetSlotTest, PayloadsFromOnePumpShareOneFrameWait) {
     Assets().Pump();
 
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
-    EXPECT_EQ(WaitFrame().Count, 1u) << "three assets, one frame-boundary wait";
+    EXPECT_EQ(WaitFrame().Count, 0u) << "asset unloads require no extra frame wait";
     EXPECT_EQ(a->PayloadDestroyed, 1u);
     EXPECT_EQ(b->PayloadDestroyed, 1u);
     EXPECT_EQ(c->PayloadDestroyed, 1u);
@@ -1010,14 +1007,14 @@ TEST_F(AssetSlotTest, ManagerDestructionUnloadsEverySlotEvenWhenStillReferenced)
 
     {
         AssetManager assets;
-        assets.SetWaitFrameProcessor(&waitFrame);
+
         *leaked = assets.AddReady<ProbeAsset>(MakeId(25), make_unique<ProbeAsset>(counters, true));
         ASSERT_TRUE(leaked->IsReady());
     }
 
     EXPECT_EQ(counters->Unloaded, 1u);
     EXPECT_EQ(counters->Destroyed, 1u);
-    // payload 交出后已无从等待帧边界 (关停时 _retirementScope 已停), 故就地销毁 —— 关停路径
+    // payload 交出后已无从等待帧边界 (关停时加载 scope 已停), 故就地销毁 —— 关停路径
     // 在此之前已 device wait-idle 过。
     EXPECT_EQ(counters->PayloadDestroyed, 1u) << "payloads must not leak past the device";
     // The reference is now invalid: even Reset would access a released slot.
@@ -1035,7 +1032,7 @@ TEST_F(AssetSlotTest, ShutdownCommitsPendingResultsSoTheyStillUnload) {
 
     {
         AssetManager assets;
-        assets.SetWaitFrameProcessor(&waitFrame);
+
         // 无挂起点的 task 在 Load 返回前就跑完, 结果已写进 PendingResult 但尚未 Pump。
         StreamingAssetRefAny ref = assets.Load(AssetLoadRequest{
             .Id = MakeId(26),

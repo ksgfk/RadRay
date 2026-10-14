@@ -5,7 +5,6 @@ namespace radray {
 size_t GraphicsPipelineKeyHash::operator()(const GraphicsPipelineKey& key) const noexcept {
     HashCode hash;
     hash.Add(key.Program);
-    hash.Add(key.Pass);
     for (const auto& s : key.VertexInput.Streams) {
         hash.Add(s.Binding);
         hash.Add(s.ArrayStride);
@@ -71,7 +70,7 @@ Nullable<render::GraphicsPipelineState*> GraphicsPipelineCache::GetOrCreate(cons
     const auto found = _pipelines.find(key);
     if (found != _pipelines.end()) return found->second.get();
     const auto attributes = key.VertexInput.GetAttributes();
-    auto pso = _device->CreateGraphicsPipelineState({key.Program->GetPipelineLayout(), key.Program->GetStage(shader::ShaderStage::Vertex), key.Program->GetStage(shader::ShaderStage::Pixel), {key.VertexInput.Streams, attributes}, key.Primitive, key.Depth, key.Samples, key.Colors, key.Pass});
+    auto pso = _device->CreateGraphicsPipelineState({key.Program->GetPipelineLayout(), key.Program->GetStage(shader::ShaderStage::Vertex), key.Program->GetStage(shader::ShaderStage::Pixel), {key.VertexInput.Streams, attributes}, key.Primitive, key.Depth, key.Samples, key.Colors});
     if (!pso) return nullptr;
     return _pipelines.emplace(key, pso.Release()).first->second.get();
 }

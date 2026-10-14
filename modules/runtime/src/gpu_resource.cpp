@@ -271,7 +271,20 @@ void HostWriteBatch::Flush(render::Device& device) noexcept {
     _ranges.clear();
 }
 
+void HostWriteBatch::Seal() noexcept {
+    if (_reservations) RADRAY_ABORT("cannot seal host writes with uncommitted reservations");
+    _sealed = true;
+}
+void HostWriteBatch::BeginReservation() noexcept {
+    if (_sealed) RADRAY_ABORT("cannot reserve after host writes are sealed");
+    ++_reservations;
+}
+void HostWriteBatch::EndReservation() noexcept {
+    if (!_reservations) RADRAY_ABORT("invalid reservation accounting");
+    --_reservations;
+}
 void HostWriteBatch::Reset() noexcept {
+    if (_reservations) RADRAY_ABORT("cannot reset host writes with uncommitted reservations");
     _ranges.clear();
     _sealed = false;
 }
@@ -330,7 +343,9 @@ MappedUploadPage::Reservation::Reservation(
       _offset(offset),
       _capacity(capacity),
       _hostWrites(hostWrites),
-      _committed(false) {}
+      _committed(false) {
+    _hostWrites->BeginReservation();
+}
 
 MappedUploadPage::Reservation::Reservation(Reservation&& other) noexcept
     : _target(other._target),
@@ -368,11 +383,9 @@ MappedUploadPage::Reservation::~Reservation() noexcept {
 }
 
 void MappedUploadPage::Reservation::AbandonCheck() const noexcept {
-#ifdef RADRAY_IS_DEBUG
     if (_target != nullptr && !_committed) {
         RADRAY_ABORT("mapped upload reservation was destroyed without Commit");
     }
-#endif
 }
 
 MappedUploadPage::Allocation MappedUploadPage::Reservation::Commit(uint64_t actualSize) {
@@ -392,6 +405,7 @@ MappedUploadPage::Allocation MappedUploadPage::Reservation::Commit(uint64_t actu
             _capacity);
     }
     _committed = true;
+    _hostWrites->EndReservation();
     if (_hostWrites == nullptr) {
         RADRAY_ABORT("mapped upload reservation has no host-write batch");
     }
@@ -481,30 +495,28 @@ MappedUploadPage::Reservation MappedUploadPage::ReserveAt(
 
 StagingBufferPool::StagingBufferPool(
     render::Device* device,
-    uint32_t flightCount,
     const Descriptor& desc) noexcept
     : _device(device), _desc(desc) {
     if (_desc.PageSize == 0) {
         RADRAY_ABORT("StagingBufferPool page size must be non-zero");
     }
-    _pending.resize(flightCount);
 }
 
-StagingBufferPool::StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept
-    : StagingBufferPool(device, flightCount, Descriptor{}) {}
+StagingBufferPool::StagingBufferPool(render::Device* device) noexcept
+    : StagingBufferPool(device, Descriptor{}) {}
 
 StagingBufferPool::~StagingBufferPool() noexcept = default;
 
-void StagingBufferPool::BeginFlight(HostWriteBatch& hostWrites) {
-    if (_hostWrites != nullptr) {
-        RADRAY_ABORT("StagingBufferPool::BeginFlight called while another flight is active");
+void StagingBufferPool::BeginEpoch(HostWriteBatch& hostWrites) {
+    if (_hostWrites != nullptr || _sealed || !_active.empty()) {
+        RADRAY_ABORT("StagingBufferPool epoch must complete before reuse");
     }
     _hostWrites = &hostWrites;
 }
 
 StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool cacheable) {
     if (_hostWrites == nullptr) {
-        RADRAY_ABORT("StagingBufferPool cannot create a page outside BeginFlight/RetireToFlight");
+        RADRAY_ABORT("StagingBufferPool cannot create a page outside an open staging epoch");
     }
     render::BufferDescriptor desc{
         .Size = capacity,
@@ -592,30 +604,22 @@ StagingBufferPool::Reservation StagingBufferPool::TryReserve(uint64_t size, uint
     return reservation;
 }
 
-void StagingBufferPool::RetireToFlight(uint32_t flightIndex) {
-    RADRAY_ASSERT(flightIndex < _pending.size());
-    if (_hostWrites == nullptr) {
-        RADRAY_ABORT("StagingBufferPool::RetireToFlight requires an active flight");
-    }
-    auto& pending = _pending[flightIndex];
-    pending.insert(
-        pending.end(),
-        std::make_move_iterator(_active.begin()),
-        std::make_move_iterator(_active.end()));
-    _active.clear();
+void StagingBufferPool::SealEpoch() {
+    if (!_hostWrites || _sealed) RADRAY_ABORT("invalid staging seal");
     _hostWrites = nullptr;
+    _sealed = true;
 }
 
-void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
-    RADRAY_ASSERT(flightIndex < _pending.size());
-    auto& pending = _pending[flightIndex];
-    for (auto& page : pending) {
+void StagingBufferPool::CompleteEpoch() {
+    if (!_sealed) RADRAY_ABORT("staging completion requires a sealed epoch");
+    for (auto& page : _active) {
         if (page.Cacheable) {
             page.Upload->Reset();
             _freeList.emplace_back(std::move(page));
         }
     }
-    pending.clear();
+    _active.clear();
+    _sealed = false;
     TrimFreeList();
 }
 
@@ -640,23 +644,9 @@ void StagingBufferPool::TrimFreeList() noexcept {
     }
 }
 
-ResourceUploader::ResourceUploader(render::Device* device, uint32_t flightCount)
-    : _device(device),
-      _stagingPool(device, flightCount),
-      _flightCount(flightCount) {}
-
+ResourceUploader::ResourceUploader(render::Device* device, StagingBufferPool& stagingPool)
+    : _device(device), _stagingPool(stagingPool) {}
 ResourceUploader::~ResourceUploader() noexcept = default;
-
-void ResourceUploader::BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites) {
-    if (flightIndex >= _flightCount) {
-        RADRAY_ABORT("ResourceUploader flight index {} is out of range", flightIndex);
-    }
-    if (_activeFlightIndex != std::numeric_limits<uint32_t>::max()) {
-        RADRAY_ABORT("ResourceUploader already has an active flight");
-    }
-    _activeFlightIndex = flightIndex;
-    _stagingPool.BeginFlight(hostWrites);
-}
 
 void ResourceUploader::UploadBuffer(
     render::CommandBuffer* cmdBuffer,
@@ -899,21 +889,6 @@ bool ResourceUploader::TryUploadTextureRegions(render::CommandBuffer* commands, 
         commands->ResourceBarrier(std::span{&after, 1});
     }
     return true;
-}
-
-void ResourceUploader::EndFlight(uint32_t flightIndex) {
-    if (_activeFlightIndex != flightIndex) {
-        RADRAY_ABORT(
-            "ResourceUploader ended flight {} while flight {} is active",
-            flightIndex,
-            _activeFlightIndex);
-    }
-    _stagingPool.RetireToFlight(flightIndex);
-    _activeFlightIndex = std::numeric_limits<uint32_t>::max();
-}
-
-void ResourceUploader::CollectFlight(uint32_t flightIndex) {
-    _stagingPool.CollectFlight(flightIndex);
 }
 
 std::optional<GpuMesh> ResourceUploader::UploadMeshResource(

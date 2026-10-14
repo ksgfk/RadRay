@@ -29,11 +29,8 @@ public:
     Asset& operator=(Asset&&) = delete;
     virtual ~Asset() noexcept = default;
 
-    /// 引用归零、本资产即将析构之前调用一次 (由 AssetManager::Pump 驱动)。
-    ///
-    /// 【职责是"交出需要延迟销毁的数据", 不是"释放资源"】纯 CPU 数据交给析构函数, 那才是
-    /// 唯一正确的地方。这里只处理不能立刻析构的东西 —— GPU 对象可能仍被上一帧录进命令
-    /// 列表, 须经 manager.DeferDestroy 整包交出。不放进析构函数是因为析构里拿不到 manager。
+    /// Called on GT after the last asset use, including every accepted GPU work use, is released.
+    /// Release views before their backing storage; raw RHI users provide their own completion owner.
     virtual void OnUnload(AssetManager& manager) = 0;
 
     const AssetId& GetAssetId() const noexcept { return _id; }

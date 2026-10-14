@@ -33,43 +33,13 @@ struct PreparedSceneDraw {
 };
 class SceneDraw {
 public:
-    void PruneScenes(const SceneManager& scenes);
-    struct PrimitiveRecord {
-        const GpuMesh::DrawData* Draw;
-        const StaticMeshSection* Section;
-        MaterialBinding Binding;
-    };
-    /// Derived persistent records. Borrow expires at Apply; refresh checks shape generation and
-    /// geometry/material revisions before touching old asset addresses.
-    std::span<const PrimitiveRecord> GetObjectRecords(SceneId sceneId, const RenderScene& scene, ShapeId id);
     std::optional<PreparedSceneDraw> Prepare(
         PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
-        render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
+        const RenderOutputInfo& output, std::string_view passName,
         Nullable<const MaterialRenderData*> fallback, bool depthTest, Nullable<MaterialGpuState*> fallbackGpu = nullptr);
 
 private:
     RasterDraw _draw;
-    struct ObjectRecord {
-        ShapeId Id{};
-        uint64_t Geometry{0}, Materials{0};
-        shared_ptr<const vector<PrimitiveRecord>> Items;
-    };
-    struct TemplateKey {
-        const StaticMeshRenderData* Mesh;
-        const MaterialBinding* Materials;
-        size_t Count;
-        friend bool operator==(const TemplateKey&, const TemplateKey&) = default;
-    };
-    struct TemplateHash {
-        size_t operator()(const TemplateKey& key) const noexcept;
-    };
-    struct SceneCache {
-        uint64_t Revision{UINT64_MAX};
-        vector<ObjectRecord> Records;
-        vector<uint32_t> Active;
-        unordered_map<TemplateKey, shared_ptr<const vector<PrimitiveRecord>>, TemplateHash> Templates;
-    };
-    unordered_map<uint64_t, SceneCache> _scenes;
 };
 
 struct ScenePipelineDescriptor {

@@ -15,75 +15,14 @@ size_t SceneDrawKeyHash::operator()(const SceneDrawKey& key) const noexcept {
     hash.Add(key.Material);
     return hash.ToHashCode();
 }
-size_t SceneDraw::TemplateHash::operator()(const TemplateKey& key) const noexcept {
-    HashCode hash;
-    hash.Add(key.Mesh);
-    hash.Add(key.Materials);
-    hash.Add(key.Count);
-    return hash.ToHashCode();
-}
-void SceneDraw::PruneScenes(const SceneManager& scenes) {
-    for (auto it = _scenes.begin(); it != _scenes.end();) {
-        const SceneId id{uint32_t(it->first), uint32_t(it->first >> 32)};
-        if (!scenes.GetSceneRT(id))
-            it = _scenes.erase(it);
-        else
-            ++it;
-    }
-}
-std::span<const SceneDraw::PrimitiveRecord> SceneDraw::GetObjectRecords(SceneId sceneId, const RenderScene& scene, ShapeId id) {
-    auto& cache = _scenes[(uint64_t{sceneId.Generation} << 32) | sceneId.Index];
-    if (cache.Revision != scene.GetStructureRevision()) {
-        cache.Templates.clear();
-        size_t live = 0;
-        for (const auto index : cache.Active) {
-            auto& record = cache.Records[index];
-            const auto revision = scene.GetDrawRevision(record.Id);
-            if (!revision) {
-                record = {};
-                continue;
-            }
-            if (record.Geometry != revision->Geometry || record.Materials != revision->Materials) record.Items.reset();
-            cache.Active[live++] = index;
-        }
-        cache.Active.resize(live);
-        cache.Revision = scene.GetStructureRevision();
-    }
-    const auto object = scene.GetStaticMesh(id);
-    const auto revision = scene.GetDrawRevision(id);
-    if (!object || !revision) return {};
-    if (id.Index >= cache.Records.size()) cache.Records.resize(size_t{id.Index} + 1);
-    auto& record = cache.Records[id.Index];
-    if (!record.Id.IsValid()) cache.Active.push_back(id.Index);
-    if (!record.Items || record.Id != id || record.Geometry != revision->Geometry || record.Materials != revision->Materials) {
-        const TemplateKey key{object->Mesh.RenderData.Get(), object->Materials.data(), object->Materials.size()};
-        auto item = cache.Templates.find(key);
-        if (item == cache.Templates.end()) {
-            auto items = make_shared<vector<PrimitiveRecord>>();
-            const auto mesh = object->Mesh.GetRenderMesh();
-            if (mesh)
-                for (const auto& section : object->Mesh.GetSections()) {
-                    if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
-                    items->push_back({&mesh->Draws[section.PrimitiveIndex], &section,
-                                      section.MaterialSlot < object->Materials.size() ? object->Materials[section.MaterialSlot] : MaterialBinding{{}, nullptr}});
-                }
-            item = cache.Templates.emplace(key, std::move(items)).first;
-        }
-        record = {id, revision->Geometry, revision->Materials, item->second};
-    }
-    return *record.Items;
-}
-
 std::optional<PreparedSceneDraw> SceneDraw::Prepare(
     PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
-    render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
+    const RenderOutputInfo& output, std::string_view passName,
     Nullable<const MaterialRenderData*> fallback, bool depthTest, Nullable<MaterialGpuState*> fallbackGpu) {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Prepare");
-    context.Renderer.GetPersistentConstants().Trim();
     const auto resolved = ResolveSceneView(view, output.Width, output.Height, context.Resources.GetDevice()->GetBackend());
     const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
     if (!resolved || !scene) return std::nullopt;
-    PruneScenes(*context.Scenes.Get());
     PreparedSceneDraw result{*resolved, {}, {}, {}};
     struct MaterialInfo {
         const MaterialRenderData* Data;
@@ -145,7 +84,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                 ++result.Stats.BoundsCulled;
                 continue;
             }
-            for (const auto& primitive : GetObjectRecords(view.Scene, *scene.Get(), id)) {
+            for (const auto& primitive : scene->GetDrawPrimitives(id)) {
                 const auto data = primitive.Binding.Data ? primitive.Binding.Data : fallback;
                 if (!data) {
                     ++result.Stats.MissingMaterial;
@@ -153,7 +92,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                 }
                 auto material = materialIndices.find(data.Get());
                 if (material == materialIndices.end()) {
-                    const auto selected = std::find_if(data->Passes.begin(), data->Passes.end(), [&](const auto& p) { return p.Name == passName; });
+                    const auto selected = std::find_if(data->Passes.begin(), data->Passes.end(), [&](const auto& p) { return p.GetDefinition().Name == passName; });
                     if (selected == data->Passes.end()) {
                         materialIndices.emplace(data.Get(), SIZE_MAX);
                         ++result.Stats.MissingPass;
@@ -161,11 +100,11 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                     }
                     const auto plan = _draw.ResolveMaterial(context.Renderer, *selected);
                     if (!plan || (plan->Push.IsValid() && !plan->SceneIndexOffset)) return std::nullopt;
-                    MaterialInfo info{data.Get(), primitive.Binding.Data ? primitive.Binding.Gpu : fallbackGpu, &*selected, plan.Get(), {}};
-                    for (const auto& binding : selected->Inputs) {
+                    MaterialInfo info{data.Get(), primitive.Binding.Data ? primitive.Binding.Gpu : fallbackGpu, &selected->GetDefinition(), plan.Get(), {}};
+                    for (const auto& binding : selected->GetDefinition().Inputs) {
                         if (binding.Source != MaterialInputSource::InstanceParameters) continue;
-                        if (binding.ValueIndex >= selected->ParameterLayouts.size()) return std::nullopt;
-                        const auto& layout = selected->ParameterLayouts[binding.ValueIndex];
+                        if (binding.ValueIndex >= selected->GetDefinition().ParameterLayouts.size()) return std::nullopt;
+                        const auto& layout = selected->GetDefinition().ParameterLayouts[binding.ValueIndex];
                         const auto stream = scene->GetParameterStreams().find(layout.Name);
                         if (stream == scene->GetParameterStreams().end() || stream->second.Layout != layout) return std::nullopt;
                         info.Streams.push_back(&stream->second);
@@ -302,7 +241,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                     state.DepthStencil->DepthTestEnable = depthTest;
                     state.DepthStencil->DepthWriteEnable = depthTest;
                 }
-                const auto prepared = _draw.PreparePipeline(context, *info.Plan, state, draw.Layout, draw.Topology, pass, output, batch.Key.Reverse);
+                const auto prepared = _draw.PreparePipeline(context, *info.Plan, state, draw.Layout, draw.Topology, output, batch.Key.Reverse);
                 if (!prepared) return std::nullopt;
                 pipeline = prepared.Get();
             }
@@ -336,8 +275,6 @@ void PreparedSceneDraw::Record(render::GraphicsCommandEncoder* encoder) const {
 UnlitRenderPipeline::UnlitRenderPipeline(ScenePipelineDescriptor descriptor) : _descriptor(std::move(descriptor)) {}
 PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const RenderPipelineRequest& request) {
     PipelineRecordResult result;
-    context.Renderer.GetPersistentConstants().Trim();
-    if (context.Scenes) _draw.PruneScenes(*context.Scenes.Get());
     if (!request.Output) return result;
     const auto info = ValidateRenderOutput(*request.Output, *context.Resources.GetDevice());
     if (!info) {
@@ -345,40 +282,19 @@ PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const
         return result;
     }
     result.OutputState = InitialRenderOutputState(*request.Output);
-    vector<render::RenderPassColorAttachmentDescriptor> colors;
-    vector<render::TextureView*> views;
-    vector<render::ColorClearValue> clear;
-    for (size_t i = 0; i < info->Colors.size(); ++i) {
-        colors.push_back({info->Colors[i], info->Samples, render::LoadAction::Clear, render::StoreAction::Store});
-        views.push_back(request.Output->Colors[i].View);
-        clear.push_back(_descriptor.ClearColor);
-    }
-    std::optional<render::RenderPassDepthStencilAttachmentDescriptor> depth;
-    std::optional<render::DepthStencilClearValue> clearDepth;
-    if (info->Depth) {
-        depth = render::RenderPassDepthStencilAttachmentDescriptor{*info->Depth, info->Samples, render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::Clear, render::StoreAction::Store};
-        clearDepth = render::DepthStencilClearValue{1, 0};
-    }
-    auto* registry = context.Renderer.GetRenderPassRegistry();
-    auto pass = registry->GetOrCreateRenderPass({colors, depth});
-    if (!pass) {
-        result.Status = PipelineRecordStatus::RecoverableFailure;
-        return result;
-    }
-    auto framebuffer = registry->GetOrCreateFramebuffer({pass.Get(), views, request.Output->Depth ? request.Output->Depth->View : nullptr, info->Width, info->Height, 1});
-    if (!framebuffer) {
-        result.Status = PipelineRecordStatus::RecoverableFailure;
-        return result;
-    }
+    vector<render::RenderPassColorAttachment> colors;
+    for (const auto& color : request.Output->Colors) colors.push_back({color.View, render::LoadAction::Clear, render::StoreAction::Store, _descriptor.ClearColor});
+    std::optional<render::RenderPassDepthStencilAttachment> depth;
+    if (request.Output->Depth) depth = render::RenderPassDepthStencilAttachment{request.Output->Depth->View, render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::Clear, render::StoreAction::Store, false, {1, 0}};
     vector<PreparedSceneDraw> prepared;
     for (const auto& view : request.Views) {
-        const auto objects = context.Scenes ? context.Scenes->PrepareSceneGpuRT(view.Scene, context, result.Commands) : std::nullopt;
+        const auto objects = context.Scenes ? context.Scenes->PrepareSceneGpuRT(view.Scene, context) : std::nullopt;
         if (!objects) {
             const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
             if (scene && !scene->GetStaticMeshes().empty()) result.Status = PipelineRecordStatus::RecoverableFailure;
             continue;
         }
-        auto draw = _draw.Prepare(context, view, *objects, pass.Get(), *info, _descriptor.PassName,
+        auto draw = _draw.Prepare(context, view, *objects, *info, _descriptor.PassName,
                                   _descriptor.Fallback ? Nullable<const MaterialRenderData*>{&*_descriptor.Fallback} : nullptr, _descriptor.DepthTest, &_fallbackGpu);
         if (!draw) {
             result.Status = PipelineRecordStatus::RecoverableFailure;
@@ -391,8 +307,15 @@ PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const
         prepared.push_back(std::move(*draw));
     }
     auto* command = context.Commands.Allocate();
+    const auto token = command->PrepareRenderPass({colors, depth, info->Width, info->Height, 1, {}, "Scene pipeline"});
+    if (!token) {
+        context.Commands.Return(std::span{&command, 1});
+        result.Commands.push_back(command);
+        result.Status = PipelineRecordStatus::RecoverableFailure;
+        return result;
+    }
     TransitionRenderOutput(command, *request.Output, *result.OutputState, false);
-    auto encoder = command->BeginRenderPass({pass.Get(), framebuffer.Get(), clear, clearDepth, "Scene pipeline"});
+    auto encoder = command->BeginRenderPass(*token);
     if (encoder) {
         for (const auto& draw : prepared) draw.Record(encoder.Get());
         command->EndRenderPass(encoder.Release());

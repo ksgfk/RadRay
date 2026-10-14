@@ -48,19 +48,20 @@ protected:
             primitive.VertexBuffers.push_back({"TEXCOORD", 1, 2, VertexDataType::FLOAT, 2, 0, 8});
             auto storage = device->CreateCommandAllocator(GetGpuSystem()->GetMainQueue()).Unwrap();
             auto command = device->CreateCommandBuffer(storage.get()).Unwrap();
-            ResourceUploader uploader{device, 1};
+            StagingBufferPool staging{device};
+            ResourceUploader uploader{device, staging};
             HostWriteBatch writes;
-            uploader.BeginFlight(0, writes);
+            staging.BeginEpoch(writes);
             command->Begin();
             auto geometry = uploader.UploadMeshResource(command.get(), cpu);
             command->End();
-            uploader.EndFlight(0);
+            staging.SealEpoch();
             ASSERT_TRUE(geometry);
             writes.Flush(*device);
             auto* ptr = command.get();
             GetGpuSystem()->GetMainQueue()->Submit({.CmdBuffers = std::span{&ptr, 1}});
             GetGpuSystem()->GetMainQueue()->Wait();
-            uploader.CollectFlight(0);
+            staging.CompleteEpoch();
             cube = make_unique<StaticMesh>(std::move(cpu), vector<StaticMeshSection>{}, Eigen::Vector3f{-0.5f, -0.5f, -0.5f}, Eigen::Vector3f{0.5f, 0.5f, 0.5f}, std::move(*geometry));
         }
         _mesh = GetAssetManager()->AddReady<StaticMesh>(AssetId{19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(cube));
@@ -88,16 +89,15 @@ protected:
             auto srv = device->CreateTextureView(srvDesc).Unwrap();
             auto storage = device->CreateCommandAllocator(GetGpuSystem()->GetMainQueue()).Unwrap();
             auto command = device->CreateCommandBuffer(storage.get()).Unwrap();
-            const render::RenderPassColorAttachmentDescriptor color{render::TextureFormat::RGBA8_UNORM, 1, render::LoadAction::Clear, render::StoreAction::Store};
-            auto pass = device->CreateRenderPass({std::span{&color, 1}, {}}).Unwrap();
+
             auto* view = image->View.get();
-            auto framebuffer = device->CreateFramebuffer({pass.get(), std::span{&view, 1}, nullptr, 1, 1, 1}).Unwrap();
+
             command->Begin();
             RenderOutput output{{{view, render::TextureState::Undefined, render::TextureState::ShaderRead}}, {}};
             auto state = InitialRenderOutputState(output);
             TransitionRenderOutput(command.get(), output, state, false);
             const render::ColorClearValue white{{1, 1, 1, 1}};
-            auto encoder = command->BeginRenderPass({pass.get(), framebuffer.get(), std::span{&white, 1}, {}, {}});
+            auto encoder = command->BeginRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, white}}, {}, 1, 1, 1});
             ASSERT_TRUE(encoder);
             command->EndRenderPass(encoder.Release());
             TransitionRenderOutput(command.get(), output, state, true);
@@ -309,9 +309,8 @@ protected:
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
         auto& frame = _frames[completion.FlightIndex];
         if (frame.Serial != completion.FrameSerial) return;
-        if (!completion.GpuWorkCompleted) {
+        if (!completion.OutputsExecuted) {
             ++Dropped;
-            return;
         }
         frame.Executed = true;
         ScopedBufferMap map{frame.Readback.get(), {0, _pitch * 96}};
@@ -343,7 +342,6 @@ protected:
     }
     void OnShutdown() override {
         _draw.reset();
-        for (const auto& frame : _frames) GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(frame.Image.View.get());
         _frames.clear();
         _mesh.Reset();
         _materials.clear();

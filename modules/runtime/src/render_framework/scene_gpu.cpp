@@ -45,44 +45,19 @@ void SceneGpuData::ApplyChanges(const SceneApplyChanges& changes) {
         for (const auto& change : changes.Parameters) flight.Parameters[change.Stream].Pending.Add(change.Id);
     }
 }
-void SceneGpuData::Complete(uint32_t flightIndex, uint64_t serial, bool executed, const RenderScene& scene) {
-    auto& flight = _flights.at(flightIndex);
-    for (auto& [name, parameters] : flight.Parameters) {
-        if (parameters.AttemptSerial != serial) continue;
-        if (executed)
-            parameters.Initialized = true;
-        else {
-            const auto stream = scene.GetParameterStreams().find(name);
-            if (stream != scene.GetParameterStreams().end())
-                for (auto id : parameters.Attempt)
-                    if (id.Index < stream->second.Rows.size() && stream->second.Rows[id.Index] && stream->second.Rows[id.Index]->Id == id) parameters.Pending.Add(id);
-        }
-        parameters.Attempt.clear();
-        parameters.AttemptSerial = 0;
-    }
-    if (flight.AttemptSerial != serial || flight.AttemptGeneration != flight.Generation) return;
-    if (executed) {
-        flight.Initialized = true;
-    } else {
-        for (auto id : flight.Attempt) {
-            if (scene.GetStaticMesh(id)) flight.Pending.Add(id);
-        }
-    }
-    flight.Attempt.clear();
-    flight.AttemptSerial = 0;
-}
 std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, AppFrameContext& frame) {
-    vector<render::CommandBuffer*> commands;
-    auto result = Prepare(scene, frame.FlightIndex(), frame.FrameSerial(), frame.GetCmdAllocator(), frame.GetUploader(), commands);
-    if (!commands.empty()) frame.RegisterClosedCommandBuffers({.CmdBuffers = commands});
-    return result;
+    return Prepare(scene, frame.FlightIndex(), frame.FrameSerial(), frame.GetCmdAllocator(), frame.GetUploader(), frame);
 }
 
-std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, PipelineContext& context, vector<render::CommandBuffer*>& outCommands) {
-    return Prepare(scene, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Commands, context.Resources.GetUploader(), outCommands);
+std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, PipelineContext& context) {
+    if (!context.RequiredWork) {
+        RADRAY_ERR_LOG("Scene preparation requires a required-work registrar");
+        return std::nullopt;
+    }
+    return Prepare(scene, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Commands, context.Resources.GetUploader(), *context.RequiredWork);
 }
 
-std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands) {
+std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, IRequiredGpuWork& requiredWork) {
     RADRAY_PROFILE_SCOPE_N("SceneGpuData::Prepare");
     auto& flight = _flights.at(flightIndex);
     const auto view = [&]() -> std::optional<SceneGpuView> {
@@ -90,7 +65,6 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
         return SceneGpuView{{flight.Buffer.get(), {0, flight.Buffer->GetDesc().Size}, sizeof(SceneObjectGpuData)}, flight.Generation, flight.ParameterViews};
     };
     if (flight.PreparedSerial == frameSerial) return view();
-    if (flight.AttemptSerial != 0) RADRAY_ABORT("Object buffer reused before completion feedback");
     flight.PreparedSerial = frameSerial;
     flight.PreparedValid = false;
     flight.ParameterViews.clear();
@@ -126,9 +100,9 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
             size_t end = begin + 1;
             while (end < _sorted.size() && _sorted[end].Index == _sorted[end - 1].Index + 1) ++end;
             for (size_t i = begin; i < end; ++i) {
-                const auto object = scene.GetStaticMesh(_sorted[i]);
-                if (!object) RADRAY_ABORT("Stale object in upload set");
-                std::memcpy(_packed[i].LocalToWorld.data(), object->LocalToWorld.data(), sizeof(SceneObjectGpuData));
+                const auto transform = scene.GetStaticMeshTransform(_sorted[i]);
+                if (!transform) RADRAY_ABORT("Stale object in upload set");
+                std::memcpy(_packed[i].LocalToWorld.data(), transform->data(), sizeof(SceneObjectGpuData));
             }
             _uploads.push_back({.SrcData = std::as_bytes(std::span{_packed}.subspan(begin, end - begin)), .DstBuffer = flight.Buffer.get(), .DstOffset = uint64_t{_sorted[begin].Index} * sizeof(SceneObjectGpuData), .Before = state, .After = render::BufferState::ShaderRead});
             begin = end;
@@ -137,16 +111,13 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
         RADRAY_PROFILE_PLOT("SceneGpu/UploadRanges", static_cast<int64_t>(_uploads.size()));
         const bool recorded = uploader.TryUploadBufferRanges(commands, _uploads);
         allocator.Return(std::span{&commands, 1});
-        outCommands.push_back(commands);
+        requiredWork.RegisterRequired(std::span{&commands, 1});
         if (!recorded) return std::nullopt;
-        flight.Attempt.assign(_sorted.begin(), _sorted.end());
-        flight.AttemptSerial = frameSerial;
-        flight.AttemptGeneration = flight.Generation;
+        flight.Initialized = true;
         flight.Pending.Clear();
     }
     for (const auto& [name, stream] : scene.GetParameterStreams()) {
         auto& parameters = flight.Parameters[name];
-        if (parameters.AttemptSerial) RADRAY_ABORT("Instance buffer reused before completion feedback");
         const uint64_t bytes = uint64_t{stream.Rows.size()} * stream.Layout.Stride;
         if (bytes > 64 * 1024 * 1024) {
             RADRAY_ERR_LOG("Scene parameter stream {} exceeds the 64 MiB global-slot buffer limit", name);
@@ -190,15 +161,14 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
             auto* command = allocator.Allocate();
             const bool recorded = uploader.TryUploadBufferRanges(command, uploads);
             allocator.Return(std::span{&command, 1});
-            outCommands.push_back(command);
+            requiredWork.RegisterRequired(std::span{&command, 1});
             if (!recorded) return std::nullopt;
-            parameters.Attempt.assign(dirty.begin(), dirty.end());
-            parameters.AttemptSerial = frameSerial;
+            parameters.Initialized = true;
             parameters.Pending.Clear();
         }
         flight.ParameterViews.push_back({&stream.Layout, {parameters.Buffer.get(), {0, parameters.Buffer->GetDesc().Size}, stream.Layout.Stride}});
     }
-    flight.PreparedValid = flight.Initialized || !flight.Attempt.empty();
+    flight.PreparedValid = flight.Initialized;
     return view();
 }
 

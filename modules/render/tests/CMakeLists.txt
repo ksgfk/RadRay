@@ -1,9 +1,7 @@
-# RenderPassCacheKey / FramebufferCacheKey 的纯 CPU 行为 (相等性、哈希、descriptor 回读),
-# 不需要 device。RenderPassRegistry 本身要真设备, 由 runtime 侧的集成测试覆盖。
 # D3D12 device loss 用 EXPECT_EXIT，RemoveDevice 发生在子进程，可以和其它 render 用例链在一起。
 set(radray_render_test_sources
     test_command_allocator.cpp
-    test_render_pass_registry.cpp
+    test_render_scope.cpp
     test_pipeline_layout_cache.cpp
     test_device_capabilities.cpp
     test_gpu_test_fixture.cpp

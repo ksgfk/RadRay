@@ -8,6 +8,7 @@ namespace radray {
 
 class AppFrameContext;
 class IGpuCmdAllocator;
+class IRequiredGpuWork;
 struct PipelineContext;
 
 struct SceneObjectGpuData {
@@ -22,17 +23,16 @@ struct SceneGpuView {
     vector<InstanceParameterBuffer> Parameters;
 };
 
-/// RT-owned mirror; each physical flight buffer commits state only after completion feedback.
+/// RT-owned per-flight mirrors; dirty state commits only after required work is accepted.
 class SceneGpuData {
 public:
     SceneGpuData(render::Device* device, uint32_t flightCount);
     void ApplyChanges(const SceneApplyChanges& changes);
-    void Complete(uint32_t flightIndex, uint64_t serial, bool executed, const RenderScene& scene);
     std::optional<SceneGpuView> Prepare(const RenderScene& scene, AppFrameContext& frame);
-    std::optional<SceneGpuView> Prepare(const RenderScene& scene, PipelineContext& context, vector<render::CommandBuffer*>& outCommands);
+    std::optional<SceneGpuView> Prepare(const RenderScene& scene, PipelineContext& context);
 
 private:
-    std::optional<SceneGpuView> Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands);
+    std::optional<SceneGpuView> Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, IRequiredGpuWork& requiredWork);
     struct ObjectSet {
         vector<ShapeId> Ids;
         vector<uint32_t> Positions;
@@ -44,18 +44,14 @@ private:
         unique_ptr<render::Buffer> Buffer;
         uint64_t Generation{0};
         uint64_t PreparedSerial{0};
-        uint64_t AttemptSerial{0};
-        uint64_t AttemptGeneration{0};
         bool Initialized{false};
         bool PreparedValid{false};
         ObjectSet Pending;
-        vector<ShapeId> Attempt;
         struct ParameterFlight {
             unique_ptr<render::Buffer> Buffer;
-            uint64_t Generation{0}, AttemptSerial{0};
+            uint64_t Generation{0};
             bool Initialized{false};
             ObjectSet Pending;
-            vector<ShapeId> Attempt;
             vector<ShapeId> Sorted;
             vector<byte> Packed;
             vector<BufferUploadRequest> Uploads;

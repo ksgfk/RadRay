@@ -40,7 +40,7 @@ inline void ConsumeFrame(SceneManager& renderer, uint32_t flight) {
 }
 
 inline void CompleteFrame(SceneManager& renderer, uint32_t flight, bool workCompleted = true) {
-    renderer.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = workCompleted, .FrameSerial = renderer.GetFrameSerial(flight)});
+    renderer.OnFlightCompletedGT({.FlightIndex = flight, .OutputsExecuted = workCompleted, .FrameSerial = renderer.GetFrameSerial(flight)});
 }
 
 inline const SceneUpdateBatch& SceneBatch(const SceneManager& renderer, SceneId id, uint32_t flight) {

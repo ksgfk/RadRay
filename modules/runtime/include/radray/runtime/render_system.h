@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <radray/render/render_pass_registry.h>
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/graphics_pipeline_cache.h>
 #include <radray/runtime_type.h>
@@ -13,7 +12,7 @@ struct RenderServiceGeneration {
     bool Alive{true};
 };
 
-/// Device-scoped shader, graphics pipeline and render-pass services.
+/// Device-scoped shader and graphics pipeline services.
 class RenderSystem {
 public:
     explicit RenderSystem(render::Device* device, std::filesystem::path shaderSourceRoot = {}, vector<std::filesystem::path> shaderIncludePaths = {});
@@ -26,7 +25,6 @@ public:
     [[nodiscard]] bool OnInitialize();
     /// All consumers stopped and GPU idle; accepts partial initialization.
     void OnShutdown() noexcept;
-    render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(
@@ -44,7 +42,6 @@ private:
     render::Device* _device;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
-    unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
     unique_ptr<GraphicsPipelineCache> _graphicsPipelines;
     shared_ptr<RenderServiceGeneration> _generation;

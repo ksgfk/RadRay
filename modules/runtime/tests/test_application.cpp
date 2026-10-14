@@ -35,7 +35,7 @@ protected:
         WorldAvailable = GetWorldManager()->GetWorld(worldId)->GetActors().size() == 1;
         auto deferred = make_shared<int>(1);
         _deferredLifetime = deferred;
-        GetAssetManager()->DeferDestroy(std::move(deferred));
+        GetGpuSystem()->RetainForFrameGT(0, std::move(deferred));
         EXPECT_FALSE(_deferredLifetime.expired());
     }
     void OnUpdate(const AppUpdateContext&) override {
@@ -50,25 +50,18 @@ protected:
         auto* prefix = ctx.AllocateCommandBuffer();
         ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&prefix, 1}});
         auto* windows = GetWindowManager().Get();
-        auto* registry = GetRenderSystem()->GetRenderPassRegistry();
-        ASSERT_NE(registry, nullptr);
         for (size_t index = 0; index < windows->GetWindowCount(); ++index) {
             auto* window = windows->GetWindow(index);
             auto target = ctx.AcquireWindow(window);
             if (!target) continue;
             const auto desc = target->BackBuffer->GetDesc();
-            const render::RenderPassColorAttachmentDescriptor attachment{desc.Format, desc.SampleCount, render::LoadAction::Clear, render::StoreAction::Store};
-            auto pass = registry->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
-            ASSERT_TRUE(pass);
             auto* view = target->BackBufferView;
-            auto framebuffer = registry->GetOrCreateFramebuffer({pass.Get(), std::span{&view, 1}, nullptr, desc.Width, desc.Height, 1});
-            ASSERT_TRUE(framebuffer);
             auto* commands = ctx.AllocateCommandBuffer();
             const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{
                 .Target = target->BackBuffer, .Before = window->GetBackBufferState(target->BackBufferIndex), .After = render::TextureState::RenderTarget};
             commands->ResourceBarrier(std::span{&before, 1});
             const render::ColorClearValue clear{{.1f, .2f, .3f, 1}};
-            auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "Runtime foundation"});
+            auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, desc.Width, desc.Height, 1, {}, "Runtime foundation"});
             ASSERT_TRUE(encoder);
             commands->EndRenderPass(encoder.Release());
             const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{
@@ -87,7 +80,7 @@ protected:
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
         EXPECT_EQ(std::this_thread::get_id(), _gameThread);
         EXPECT_TRUE(_completedSerials.insert(completion.FrameSerial).second);
-        if (completion.GpuWorkCompleted) ++CompletedFrames;
+        if (completion.OutputsExecuted) ++CompletedFrames;
         if (!_callbackWaitStarted) {
             _callbackWaitStarted = true;
             _callbackWaitFrame = GetFrameTimeline().GetFrameIndex();
@@ -314,17 +307,17 @@ protected:
     }
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
         if (completion.FrameSerial == _droppedSerial) {
-            EXPECT_FALSE(completion.GpuWorkCompleted);
+            EXPECT_FALSE(completion.OutputsExecuted);
             ScopedBufferMap map{_readback.get(), {0, 4}};
             ASSERT_TRUE(map);
             _readback->InvalidateMappedRange({0, 4});
             uint32_t value{0};
             std::memcpy(&value, map.Data(), sizeof(value));
-            EXPECT_EQ(value, 7u);
+            EXPECT_EQ(value, 99u);
             Dropped = true;
         }
         if (completion.FrameSerial == _recoveredSerial) {
-            EXPECT_TRUE(completion.GpuWorkCompleted);
+            EXPECT_TRUE(completion.OutputsExecuted);
             Recovered = true;
         }
     }
@@ -531,7 +524,8 @@ TEST(RuntimeFoundation, VulkanThreadedCompletionInputBeforeUpdate) { RunFrameBou
 
 class StalledGpuInputApp final : public Application {
 public:
-    explicit StalledGpuInputApp(render::RenderBackend backend, bool mutateWindow = false) : _backend(backend), _mutateWindow(mutateWindow) {}
+    explicit StalledGpuInputApp(render::RenderBackend backend, bool mutateWindow = false, bool sendMessage = false)
+        : _backend(backend), _mutateWindow(mutateWindow), _sendMessage(sendMessage) {}
 
     ~StalledGpuInputApp() noexcept override {
         if (_inputThread.joinable()) _inputThread.join();
@@ -618,7 +612,13 @@ protected:
                 EXPECT_TRUE(ReleaseGpu());
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            if (_sendMessage) {
+                DWORD_PTR result{};
+                EXPECT_NE(::SendMessageTimeoutW(_hwnd, WM_NULL, 0, 0, SMTO_BLOCK, 5000, &result), 0);
+                EXPECT_EQ(_completedFence->GetCompletedValue(), 0u);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
             for (uint32_t i = 0; i < 3; ++i) {
                 EXPECT_EQ(_updates.load(), 1u);
                 EXPECT_EQ(_completedFence->GetCompletedValue(), 0u);
@@ -629,7 +629,7 @@ protected:
                 EXPECT_NE(::PostMessageW(_hwnd, WM_LBUTTONUP, 0, MAKELPARAM(11, 13)), 0);
                 const int delta = i == 1 ? -WHEEL_DELTA : WHEEL_DELTA;
                 EXPECT_NE(::PostMessageW(_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(delta)), 0), 0);
-                std::this_thread::sleep_for(std::chrono::milliseconds{10});
+                if (!_sendMessage) std::this_thread::sleep_for(std::chrono::milliseconds{10});
             }
             EXPECT_EQ(_updates.load(), 1u);
             EXPECT_EQ(_completedFence->GetCompletedValue(), 0u);
@@ -692,6 +692,7 @@ private:
 
     render::RenderBackend _backend;
     bool _mutateWindow;
+    bool _sendMessage;
     std::atomic_bool _mutationRequested{false}, _mutationCompleted{false};
     TaskScope _mutationTasks;
     unique_ptr<render::Fence> _gate, _completedFence;
@@ -708,9 +709,9 @@ private:
     std::thread _inputThread;
 };
 
-void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutateWindow = false) {
+void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutateWindow = false, bool sendMessage = false) {
     test::RuntimeLogCapture logs;
-    StalledGpuInputApp app{backend, mutateWindow};
+    StalledGpuInputApp app{backend, mutateWindow, sendMessage};
     // Host-signaled queue waits run without validation-layer semaphore tracking.
     auto run = test::RunApplication(app, {
                                              .FlightDataCount = mutateWindow ? 2u : 1u,
@@ -736,6 +737,11 @@ TEST(RuntimeFoundation, D3D12SingleThreadInputDuringGpuStall) { RunStalledGpuInp
 TEST(RuntimeFoundation, D3D12ThreadedInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::D3D12, true); }
 TEST(RuntimeFoundation, VulkanSingleThreadInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, false); }
 TEST(RuntimeFoundation, VulkanThreadedInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, true); }
+
+TEST(RuntimeFoundation, D3D12SingleThreadSentMessageDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::D3D12, false, false, true); }
+TEST(RuntimeFoundation, D3D12ThreadedSentMessageDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::D3D12, true, false, true); }
+TEST(RuntimeFoundation, VulkanSingleThreadSentMessageDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, false, false, true); }
+TEST(RuntimeFoundation, VulkanThreadedSentMessageDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, true, false, true); }
 
 TEST(RuntimeFoundation, D3D12SingleThreadWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::D3D12, false, true); }
 TEST(RuntimeFoundation, D3D12ThreadedWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::D3D12, true, true); }

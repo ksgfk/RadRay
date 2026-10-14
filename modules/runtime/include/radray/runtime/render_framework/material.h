@@ -6,6 +6,7 @@
 
 namespace radray {
 class RenderSystem;
+struct RasterMaterialPlan;
 enum class MaterialInputSource : uint8_t { SceneObjects,
                                            ViewConstants,
                                            MaterialConstants,
@@ -23,6 +24,10 @@ struct MaterialInput {
     friend bool operator==(const MaterialInput&, const MaterialInput&) = default;
 };
 struct MaterialPass {
+    MaterialPass() = default;
+    /// A published pass shares one immutable definition; defaults remain per Material.
+    explicit MaterialPass(shared_ptr<const MaterialPass> definition);
+    const MaterialPass& GetDefinition() const noexcept;
     string Name;
     ShaderProgramRequest Program;
     vector<MaterialInput> Inputs;
@@ -46,6 +51,11 @@ struct MaterialPass {
     /// Preserve scene order even when the pass has no blending (for example an order-sensitive stencil pass).
     bool PreserveOrder{false};
     Nullable<ShaderProgram*> ResolveProgram(RenderSystem& renderer) const;
+
+private:
+    friend class RasterDraw;
+    shared_ptr<const MaterialPass> _definition;
+    mutable shared_ptr<RasterMaterialPlan> _nativePlan;
 };
 struct MaterialRenderData {
     vector<MaterialPass> Passes;

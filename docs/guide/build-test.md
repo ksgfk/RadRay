@@ -131,7 +131,7 @@ GT/RT 分别发出 warmup complete 消息，`Stress/Warmup` plot 为 0 的渲染
 | `churn` | 每帧请求销毁并创建 `--changes=N` 个对象，保持存活总数；新对象仍使用同一 Ready 资产 |
 
 `--changes` 上限为 objects，允许 0；`--objects=0 --workload=idle` 是空场景参照，仍含一个 World 和相机。
-其他配置包括 `--d3d12`/`--vulkan`、`--single-thread`/`--multithread`、`--flights=1|2|3`、`--views=N`（正整数）。
+其他配置包括 `--d3d12`/`--vulkan`、`--single-thread`/`--multithread`、`--flights=1|2|3|4`、`--views=N`（正整数）。
 `--window` 增加窗口与 Immediate 呈现；world/sync/upload 档仅清屏，draw 档显示对象，窗口维护和呈现成本也会进入捕获。
 `--validation` 仅用于正确性排查，正式抓取默认关闭；`--no-gpu-profiler` 可关闭帧 GPU 时间戳，CPU zones 保留。
 完整参数见 `--help`。启动日志记录实际配置，热路径不逐帧打印，也不做逐对象校验或逐对象 Tracy 插桩。
@@ -202,7 +202,7 @@ GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profile
 | `test_multi_window.cpp` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_asset_database.cpp` | `AssetDatabaseTest` |
 | `test_component_rtti.cpp` | `ComponentRttiTest` |
-| `test_render_pass_registry.cpp` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
+| `test_render_scope.cpp` | `RenderScopeKeys`, `Backends/RenderScopeTest` |
 | `test_device_capabilities.cpp` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
 | `test_gpu_test_fixture.cpp` | `GpuTestFixture`, `GpuValidationProbe` |
 | `test_spot_light.cpp` | `SpotLight` |
@@ -255,7 +255,7 @@ Application/GpuSystem 测试直接读取启动状态，仅在后端未编译、�
 不再为测试先创建探测 device。CPU 用例只启用所需系统；需要 GPU 但不检查 GPU 耗时的用例关闭帧计时器。
 
 `RuntimeMultiWindow` 在一个 Application 内运行主窗口与两个副窗口，覆盖 D3D12/Vulkan 的
-单线程和双线程模式（Vulkan 四例目前暂时注释，见下方已知问题）。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，
+单线程和双线程模式。Vulkan 四例要求含同步验证修复的 VVL 1.4.364+，见下方版本说明。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，
 并通过逐批 fence、纯同步批次和 GPU buffer 读回检查提交顺序及完成通知。
 生命周期用例覆盖副窗口 resize、隐藏创建后的延迟挂接与显示、detach/reattach、release/reattach、
 销毁及重新创建，期间验证其他窗口仍可呈现和提交；最后关闭主窗口，检查 flight 完成消息已排空。
@@ -264,7 +264,7 @@ CTest 设置串行执行及每例 90 秒超时。
 
 同一目标的 `RuntimeVulkanSwapChain` 覆盖 image 枚举失败、native 创建已退休旧链后失败的恢复，
 以及 CPU 等待提交后 Present、反复立即重建和销毁、等待已完成的旧 timeline 值；三交换链
-串联 timeline 提交后统一 Present 的用例目前暂时注释；`RuntimeVulkanSwapChainLimits` 检查无上限
+串联 timeline 提交后统一 Present 的用例也检查 VVL 1.4.364+；`RuntimeVulkanSwapChainLimits` 检查无上限
 surface 的 buffer 数量。故障注入用例只允许精确匹配的预期错误，其他原生验证错误仍失败。
 设置 `RADRAY_TEST_WSI_TRACE=1` 可记录多窗口 phase、serial、flight、窗口、chain、image 和两个
 semaphore，结合验证层中的原生对象名称定位偶发同步错误。
@@ -281,8 +281,12 @@ ctest --test-dir build_debug -C Debug -R 'RuntimeMultiWindow|RuntimeVulkanSwapCh
 
 ### Vulkan 多交换链同步验证已知问题
 
-截至 2026-09-17，上游 [Vulkan-ValidationLayers #13117](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/13117)
-仍为 Open，问题按疑似同步验证误报跟踪，尚不能将根因视为上游已确认。
+2026-10-13 复核：上游 [Vulkan-ValidationLayers #13117](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/13117)
+已由 [修复 PR #13248](https://github.com/KhronosGroup/Vulkan-ValidationLayers/pull/13248) 于 2026-09-29 合并关闭。
+本机 SDK 1.4.357.0 不含该修复。本轮独立构建合并提交 `da7669a` 的校验层（manifest API 1.4.364），
+原生默认三窗口程序在 Debug/Release 各 5 次均为 LOOP/TOTAL errors=0，随后恢复下列用例。
+校验层只通过当前进程的 `VK_LAYER_PATH` 选择，不覆盖 SDK 或系统注册。
+以下 SDK 1.4.357.0 的观察保留为旧校验层的复现依据。
 issue 使用 SDK 1.4.357.0，在三交换链、同队列 timeline 串联提交并在 Present 前执行 CPU wait
 时报告 `SYNC-HAZARD-WRITE-AFTER-PRESENT`；完整环境与观察结果以上游 issue 为准。
 
@@ -291,8 +295,9 @@ issue 使用 SDK 1.4.357.0，在三交换链、同队列 timeline 串联提交�
 同步验证仍开启，验证错误仍使测试失败。交换链重建失败恢复、无上限 image count 处理、
 原生对象命名和 fence reset 错误检查保留。
 
-以下五例在 `modules/runtime/tests/test_multi_window.cpp` 中暂时注释，不编译、不进入 GTest/CTest
-发现，因此通过的常规回归不包含 Vulkan 多窗口覆盖：
+以下五例在 `modules/runtime/tests/test_multi_window.cpp` 中正常编译并进入 GTest/CTest discovery；
+运行前记录 validation layer specVersion，旧于 1.4.364 的已知问题层明确 skip。缺失校验层或初始化
+失败仍按 native fixture 合同报错。此版本门槛只用于这些测试，renderer 的执行 API 仍是 Vulkan 1.2：
 
 - `RuntimeMultiWindow.VulkanSingleThreadOrderedSubmissions`
 - `RuntimeMultiWindow.VulkanThreadedOrderedSubmissions`
@@ -304,8 +309,9 @@ D3D12 多窗口四例与其余 Vulkan 单交换链、故障恢复和 image count
 `2389c3af` 添加的独立原生复现程序及其 `--empty-predecessor` 对照选项保留；该选项只用于
 诊断，不是运行时兼容逻辑，也不加入常规回归。
 
-上游明确修复版本或同步要求后，先用下方原生程序在对应校验层版本上验证默认路径，
-再取消上述五例的注释，重新构建 `test_radray_runtime` 以刷新 POST_BUILD discovery。
+更换校验层时，先用下方原生程序在对应版本上验证默认路径，
+再运行已恢复的五例。使用独立 layer 目录时，在调用原生程序和 CTest 的进程环境中设置
+`VK_LAYER_PATH` 指向只含有效 layer manifest 和对应 DLL 的目录。
 设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，在 Debug/Release 下分别执行上述
 `RuntimeMultiWindow|RuntimeVulkanSwapChain` 重复回归；不能以关闭验证或过滤该错误作为恢复条件。
 
@@ -313,7 +319,7 @@ D3D12 多窗口四例与其余 Vulkan 单交换链、故障恢复和 image count
 [`modules/render/tests/vulkan_present_repro/`](../../modules/render/tests/vulkan_present_repro/)。
 它是可单独分发的 C 程序，只链接系统 Vulkan loader 与 Win32，不依赖 RadRay、GLFW、GTest、
 shader 或第三方容器。为保留仅 Vulkan API 的复现环境，使用该目录的独立 CMake 工程，
-不加入仓库的常规 GTest discovery；默认路径是预期报错的诊断程序，不作为绿色回归用例。
+不加入仓库的常规 GTest discovery；默认路径在 SDK 1.4.357.0 中复现错误，在已修复层中应返回 0。
 
 ```powershell
 pwsh -File modules/render/tests/vulkan_present_repro/reproduce.ps1 -Sdk C:/VulkanSDK/1.4.357.0
@@ -349,10 +355,11 @@ CPU `vkWaitSemaphores` → 按提交顺序逐个 Present。每个绘制批次等
 [Khronos WSI 说明](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)；本例报错发生在
 `phase=present`，先于清理，不以清理无报错作为资源生命周期正确性的证明。
 
-原生复现排除了 RadRay 封装作为必要触发条件，但单凭空批次消除报错不能证明校验层根因。
-进一步验证应保持此程序与驱动不变，对比同一 VVL 基线的原版和仅补充
-`ResolveSubmitSemaphoreWait` 普通信号量分支中 `last_synchronized_present` 传播的版本，
-同时运行 VVL 的正、负同步测试，排除补丁只是不再检测错误。本仓库尚未完成该校验层补丁实验。
+原生复现排除了 RadRay 封装作为必要触发条件。上游修复补充同步 present 访问的传播并带有
+回归测试；本轮使用其合并版本，校验源没有修改。ClangCL 构建时只从 gpu_av_spirv 静态目标
+移除重复编译的 spirv_grammar_helper.cpp，该生成文件仍由 vvl 共享目标编译一次。构建调整、
+DLL 哈希、原生日志与实际加载路径保存在 `build_release/gpu-lifecycle-vvl-*`。
+当前复现结果与上游修复一致，runtime 没有加入空批次或关闭同步验证的兼容分支。
 
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
 再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
@@ -404,7 +411,7 @@ GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟
 
 同一负载均运行单线程和 GT/RT 双线程，flight 数分别为 1/2/3。双线程按顺序消费有界 flight，GT 只在
 复用占用的槽位时等待，F=2/3 允许 GT/RT 重叠。CPU 测试在 Consume 和读者结束后回传
-`GpuWorkCompleted=false` 的完成通知；不把这个通知当作真实 GPU fence。
+`OutputsExecuted=false` 的完成通知；不把这个通知当作真实 GPU fence。
 
 | 负载 | 参数 |
 |---|---|
@@ -621,9 +628,32 @@ python tools/run_material_scene_benchmark.py --exe build_release/_build/Release/
 变换与参数压力固定更新所选实例，并交替写入不同值，保持长采样中的实际脏比例；Manual/ManualTint 使用一个共享材质的显式集合。
 每个 fixture 先预热八帧；PrepareRecord 排除 GT/Apply/等待/Submit，包含 SceneGpu、SceneDraw 准备和真实 record；
 FullFrame 包含各阶段及 flight 等待，256×256 离屏 GPU 时间另用 timestamp 统计。GPU/CPU 时间不能相加为 FPS。
-Tracy trace 包含初始化，统计时使用 warmup complete message 排除预热事件；不使用整段 capture 平均值替代稳态。
+Tracy trace 包含初始化，统计时使用 warmup complete message 排除预热事件；不使用整段 capture 平均值替代稳态。默认采两后端，专项 trace 可用 `--backend d3d12` 或 `--backend vulkan` 限定后端。
 三种 churn 分别发生在 capture 前、capture 后未 Seal、Seal 后；UniqueAssetChurn 每轮新建 mesh/material，不能与静态独立材质分布混同。
 独立材质压力受后端 descriptor 容量约束；D3D12 默认 shader-visible resource heap 为 65,536 个，
 benchmark 初始化前检查所需容量，超预算样例报告不支持，不输出成功计时。
 用 --memory-case 保存独立进程 working set/private bytes 曲线；它是进程内存观测，不等于原生显存或 descriptor pool 字节。
 程序、测试与其他 GPU 负载串行运行。实例用法和本轮验收见[实例绘制](instancing.md)与[性能报告](../temp/material-instancing-performance-2026-10-13.md)。
+
+## GPU 生命周期回归
+
+必要更新、owner 与完成账本的修改使用实际 GPU 回归：
+
+```powershell
+cmake --build build_debug --config Debug --parallel 12
+ctest --test-dir build_debug -C Debug --output-on-failure -R 'RenderScope|FrameTimeline|FrameResources|GpuSystem|GpuRetainedResult|SceneGpu|SceneDraw|RasterDraw|Application'
+```
+
+FrameTimeline 与 SceneGpu 覆盖 F=1/2/3/4；GpuRetainedResult 使用原生 gate 验证 CPU 取消和延迟消费，测试不用等待时长猜测完成。完整回归仍执行无 -R 的 ctest。旧 owner factories、registry、Scene Attempt、资产 GPU deferred 与 uploader flight 路由已移除。
+
+MaterialScene 的 F2 基准名称保持兼容；F1/F3/F4 在同名末尾追加 /F1、/F3、/F4。场景矩阵包含 dirty=0/1/10/100、N=1k/10k/100k、V=1/3，以及 Direct/Manual/ManualTint 和 churn。共享 pass 定义只创建一次，默认参数仍按 Material 独立。性能运行与构建、测试和其他 GPU 负载串行进行。
+
+`bench_command_allocator` 还注册 `RenderScope/`（稳定、clear、load/store、尺寸版本、重建、预算）、`FlightSubmission/`（单批、多批、后续 gate）与 `WindowSubmission/`（F1–F4、1/3 个真实窗口、稳定、连续 resize、输出跳过）。窗口基准保留单独必要 copy，并在 drain 后回读核对；其输出跳过由真实 acquire 后的 presentability 谓词控制。RenderScope 只测 CPU 原生准备/编码，未提交；后两类分别报告 submit CPU、GPU 与完成延迟，gate 时间包含显式依赖间隔。窗口性能测量关闭 validation；上节已恢复的 Vulkan 多窗口正确性用例使用修复后的 validation/sync validation，结果分别报告。
+
+```powershell
+python tools/run_gpu_lifecycle_benchmark.py --baseline-bin build_release/gpu-lifecycle-baseline-build/_build/Release --output build_release/gpu-lifecycle-perf --repetitions 3
+python tools/run_gpu_lifecycle_benchmark.py --mode coverage --output build_release/gpu-lifecycle-coverage --repetitions 1
+python tools/run_material_scene_benchmark.py --exe build_release/_build/Release/bench_material_scene.exe --output build_release/gpu-lifecycle-traces/final --traces-only
+```
+
+comparison 交错启动三对独立进程，coverage 的 1x 只证明完整压力矩阵可运行；SceneSync/Lifecycle Frame 注册的固定 256 次迭代仍生效。SceneGpu 冷启动／扩容和 Lifecycle 删除固定采样五次，场景重建在计时区间外；针对性删除复验可用固定 50x 与更多独立配对。不要用自适应 min-time 在这些场景上反复重建来估计稳态。原始 log、JSON、命令、二进制 SHA256 与配对区间留在输出目录，Tracy 以最后一条 warmup message 截断冷区间。默认 trace filter 用首尾锚点限定 F2，避免与追加 /F1、/F3、/F4 的用例混采；其他 F 对照也须使用同一 flight 数与完整名称。静态材质的分配和 Set/FlushWrites 零增量由已有 fixture probe 正确性测试验证。

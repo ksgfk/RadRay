@@ -132,14 +132,6 @@ void SceneManager::ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSeri
     RADRAY_PROFILE_SCOPE_N("SceneManager::ConsumeRenderUpdates");
     auto& frame = GetFrameUpdates(flightIndex);
     if (frame.Phase != SceneFlightPhase::Published || frame.UpdateSequence != _lastConsumedSequence + 1 || frameSerial == 0 || frameSerial <= _lastFrameSerial) RADRAY_ABORT("Duplicate or out-of-order scene consumption");
-    for (auto id : frame.PreparedScenes) {
-        if (id.Index >= _scenesRT.size()) continue;
-        auto& slot = _scenesRT[id.Index];
-        if (slot.Generation == id.Generation && slot.Scene && slot.Gpu)
-            slot.Gpu->Complete(flightIndex, frame.CompletedSerial, frame.CompletedExecuted, *slot.Scene);
-    }
-    frame.PreparedScenes.clear();
-    frame.CompletedSerial = 0;
     for (const auto& entry : GetFrameUpdatesRT(flightIndex)) {
         const auto id = entry.Id;
         if (entry.Create) {
@@ -178,9 +170,9 @@ std::optional<SceneGpuView> SceneManager::PrepareSceneGpuRT(SceneId id, AppFrame
     return slot ? slot->Gpu->Prepare(*slot->Scene, frame) : std::nullopt;
 }
 
-std::optional<SceneGpuView> SceneManager::PrepareSceneGpuRT(SceneId id, PipelineContext& context, vector<render::CommandBuffer*>& outCommands) {
+std::optional<SceneGpuView> SceneManager::PrepareSceneGpuRT(SceneId id, PipelineContext& context) {
     auto slot = PrepareSceneSlotRT(id, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Resources.GetDevice());
-    return slot ? slot->Gpu->Prepare(*slot->Scene, context, outCommands) : std::nullopt;
+    return slot ? slot->Gpu->Prepare(*slot->Scene, context) : std::nullopt;
 }
 
 Nullable<SceneManager::SceneSlotRT*> SceneManager::PrepareSceneSlotRT(SceneId id, uint32_t flightIndex, uint64_t frameSerial, render::Device* device) {
@@ -189,7 +181,6 @@ Nullable<SceneManager::SceneSlotRT*> SceneManager::PrepareSceneSlotRT(SceneId id
     if (!GetSceneRT(id)) return nullptr;
     auto& slot = _scenesRT[id.Index];
     if (!slot.Gpu) slot.Gpu = make_unique<SceneGpuData>(device, static_cast<uint32_t>(_frameUpdates.size()));
-    if (std::find(frame.PreparedScenes.begin(), frame.PreparedScenes.end(), id) == frame.PreparedScenes.end()) frame.PreparedScenes.push_back(id);
     return &slot;
 }
 
@@ -197,8 +188,6 @@ void SceneManager::OnFlightCompletedGT(const FlightCompletion& completion) {
     CheckCanModifyGT();
     auto& frame = GetFrameUpdates(completion.FlightIndex);
     if (frame.Phase != SceneFlightPhase::Consumed || frame.FrameSerial != completion.FrameSerial) RADRAY_ABORT("Stale or unconsumed scene completion");
-    frame.CompletedSerial = completion.FrameSerial;
-    frame.CompletedExecuted = completion.GpuWorkCompleted;
     frame.RetiredGpu.clear();
     frame.Views.clear();
     for (size_t i = 0; i < frame.Count; ++i) {

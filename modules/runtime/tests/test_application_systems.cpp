@@ -52,7 +52,7 @@ protected:
     }
     void OnRender(AppFrameContext&) override { ADD_FAILURE() << "GPU callback in CPU loop"; }
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
-        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_FALSE(completion.OutputsExecuted);
         EXPECT_EQ(completion.FrameSerial, ++Completions);
     }
     void OnShutdown() override { ++Shutdowns; }
@@ -133,7 +133,7 @@ protected:
         EXPECT_FALSE(GetGpuSystem());
         auto payload = make_shared<int>(42);
         Deferred = payload;
-        GetAssetManager()->DeferDestroy(std::move(payload));
+        _payloadScope.Spawn(HoldPayload(std::move(payload)));
     }
     void OnUpdate(const AppUpdateContext& ctx) override {
         if (_updates == 0) {
@@ -151,12 +151,17 @@ protected:
     }
     void OnRender(AppFrameContext&) override { ADD_FAILURE() << "GPU callback in CPU loop"; }
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
-        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_FALSE(completion.OutputsExecuted);
         EXPECT_EQ(completion.FlightIndex, 0u);
         EXPECT_EQ(completion.FrameSerial, ++_completions);
     }
 
 private:
+    task<void> HoldPayload(shared_ptr<int> payload) {
+        co_await GetFrameTimeline().Wait();
+        payload.reset();
+    }
+    TaskScope _payloadScope;
     uint32_t _updates{0};
     uint64_t _completions{0};
 };

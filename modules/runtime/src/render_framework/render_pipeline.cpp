@@ -4,7 +4,7 @@
 
 namespace radray {
 PipelineContext MakePipelineContext(RenderSystem& renderer, AppFrameContext& frame, Nullable<SceneManager*> scenes) {
-    return {renderer, {frame.FlightIndex(), frame.FrameSerial(), frame.DeltaTime()}, frame.GetCmdAllocator(), frame.GetGpuFrameResources(), scenes};
+    return {renderer, {frame.FlightIndex(), frame.FrameSerial(), frame.DeltaTime()}, frame.GetCmdAllocator(), frame.GetGpuFrameResources(), scenes, &frame};
 }
 PipelineRecordResult RecordRenderPipeline(RenderPipeline& pipeline, PipelineContext& context, const RenderPipelineRequest& request) {
     if (request.Output && !ValidateRenderOutput(*request.Output, *context.Resources.GetDevice())) return {.Status = PipelineRecordStatus::RecoverableFailure, .Commands = {}, .OutputState = {}};

@@ -23,10 +23,12 @@
 #include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
+#if defined(RADRAY_PLATFORM_WINDOWS)
+#include <radray/platform/win32_headers.h>
+#endif
+
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
 #define RADRAY_APP_IMPL_ENABLE_VBLANK_TICK
-
-#include <radray/platform/win32_headers.h>
 
 #include <dxgi1_6.h>
 #include <wrl.h>
@@ -45,6 +47,38 @@ vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters() {
     importers.push_back(make_unique<TextureImporter>());
     importers.push_back(make_unique<MeshImporter>());
     return importers;
+}
+
+#if defined(RADRAY_PLATFORM_WINDOWS)
+void DispatchWindowWaitMessages() noexcept {
+    // PeekMessage dispatches cross-thread sent messages. Posted input stays at the frame boundary.
+    MSG message{};
+    ::PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+}
+#endif
+
+bool CompleteRunnerFlight(Application* app, uint32_t flightIndex, bool wait) {
+    auto* gpu = app->GetGpuSystem().Get();
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    if (wait && app->GetWindowManager()) {
+        RADRAY_PROFILE_SCOPE_N("Application::WaitWindowFlight");
+        const auto signal = gpu->GetFlightGpuSignal(flightIndex);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+        while (!gpu->CompleteFlightIfReady(flightIndex, false)) {
+            DispatchWindowWaitMessages();
+            if (!signal.Fence->WaitFor(signal.Value, 1) && std::chrono::steady_clock::now() >= deadline)
+                RADRAY_ABORT("Window flight fence value {} did not complete within 30 seconds", signal.Value);
+        }
+        return true;
+    }
+#endif
+    return gpu->CompleteFlightIfReady(flightIndex, wait);
+}
+
+void RetireRunnerFlights(Application* app) {
+    auto* gpu = app->GetGpuSystem().Get();
+    for (uint32_t i = 0; i < gpu->GetFlightDataCount(); ++i) CompleteRunnerFlight(app, i, true);
+    gpu->WaitAndRetireFlights();
 }
 
 }  // namespace
@@ -460,7 +494,7 @@ public:
         if (windows == nullptr) return;
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
-        _app->GetGpuSystem()->WaitAndRetireFlights();
+        RetireRunnerFlights(_app);
         windows->ProcessOperations(boundary);
         if (windows->ShouldExit()) _reqExit = true;
     }
@@ -475,7 +509,7 @@ public:
         MaintainWindows();
         if (_reqExit) return false;
         const uint32_t flightIndex = _app->GetFrameTimeline().GetCurrentFlightIndex();
-        if (!gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop)) return false;
+        if (!CompleteRunnerFlight(_app, flightIndex, !isInModalLoop)) return false;
         _app->ServiceFrameBoundaryGT(flightIndex);
         const auto now = gpuSystem->BeginFrameTiming(flightIndex);
         _deltaTime = now - _lastFrameTime;
@@ -684,7 +718,7 @@ public:
         const uint64_t boundary = windows->GetOperationBoundary();
         const uint64_t published = _app->GetFrameTimeline().GetFrameIndex();
         WaitRenderFrameComplete(published);
-        _app->GetGpuSystem()->WaitAndRetireFlights();
+        RetireRunnerFlights(_app);
         _retireFrameIndex = published;
         windows->ProcessOperations(boundary);
         if (windows->ShouldExit()) _reqExit = true;
@@ -754,9 +788,17 @@ public:
     }
 
     void WaitRenderFrameComplete(uint64_t renderedFrameCount) {
+        const bool wasTicking = std::exchange(_ticking, true);
+        auto scope = MakeScopeGuard([this, wasTicking]() noexcept { _ticking = wasTicking; });
         uint64_t completed = _renderedFrameCount.load(std::memory_order_acquire);
         while (completed < renderedFrameCount) {
-            _renderedFrameCount.wait(completed, std::memory_order_acquire);
+#if defined(RADRAY_PLATFORM_WINDOWS)
+            if (_app->GetWindowManager()) {
+                DispatchWindowWaitMessages();
+                ::MsgWaitForMultipleObjectsEx(0, nullptr, 1, QS_SENDMESSAGE, MWMO_INPUTAVAILABLE);
+            } else
+#endif
+                _renderedFrameCount.wait(completed, std::memory_order_acquire);
             completed = _renderedFrameCount.load(std::memory_order_acquire);
         }
     }
@@ -770,7 +812,7 @@ public:
         // Wait only for the oldest slot's submission, never for the newest recording.
         WaitRenderFrameComplete(_retireFrameIndex + 1);
         const auto flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
-        gpuSystem->CompleteFlightIfReady(flightIndex, true);
+        CompleteRunnerFlight(_app, flightIndex, true);
         ++_retireFrameIndex;
         return true;
     }
@@ -821,9 +863,6 @@ public:
         auto& timeline = _app->GetFrameTimeline();
         auto lastFrameTime = std::chrono::steady_clock::now();
         while (!_app->ShouldExit()) {
-            for (uint32_t flight = 0; flight < timeline.GetFlightDataCount(); ++flight) {
-                timeline.MarkCompletedWaitFrames(flight);
-            }
             auto* windows = _app->GetWindowManager().Get();
             if (windows != nullptr && windows->NeedsMaintenance()) {
                 const uint64_t boundary = windows->GetOperationBoundary();
@@ -839,7 +878,7 @@ public:
             lastFrameTime = now;
             const auto result = _app->Update(AppUpdateContext{flightIndex, deltaTime, timeline.GetLastFrameLatency()});
             if (result.ShouldExit) break;
-            const uint64_t serial = timeline.AllocateFrameSerial();
+            const uint64_t serial = timeline.GetFrameSerial(flightIndex);
             if (auto scenes = _app->GetSceneManager()) {
                 scenes->PublishFrameGT(flightIndex);
                 scenes->ConsumeRenderUpdates(flightIndex, serial);
@@ -874,7 +913,7 @@ void Application::ApplySceneUpdatesRT(AppFrameContext& ctx) {
 }
 
 void Application::WaitAndCleanupCompletedFlights() {
-    if (_gpuSystem != nullptr) _gpuSystem->WaitAndRetireFlights();
+    if (_gpuSystem != nullptr) RetireRunnerFlights(this);
     PumpFlightCompletions(std::nullopt);
 }
 
@@ -984,7 +1023,7 @@ void Application::DestroyRuntime() noexcept {
     _worldManager.reset();
     _sceneManager.reset();
     if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
-    // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
+    // Disconnect borrowed render services before destroying them.
     if (_windowManager != nullptr) {
         _windowManager->SetRenderSystem(nullptr);
     }
@@ -1107,7 +1146,6 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     }
     if (_gpuSystem != nullptr) _gpuSystem->SetWindowManager(_windowManager.get());
     if (_assetManager != nullptr) {
-        _assetManager->SetWaitFrameProcessor(_frameTimeline.get());
         _assetManager->SetAssetSource(_assetDatabase.get());
     }
 

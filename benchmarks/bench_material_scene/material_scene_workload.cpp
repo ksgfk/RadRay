@@ -1,20 +1,27 @@
 #include "material_scene_workload.h"
 #include "scene_draw.h"
 #include <radray/profiler.h>
+#if defined(RADRAY_ENABLE_D3D12)
+#include <radray/render/backend/d3d12_impl.h>
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+#include <radray/render/backend/vulkan_impl.h>
+#endif
 #include <radray/runtime/game_framework/actor.h>
 #include <cstring>
 #include <fmt/format.h>
 
 namespace radray::benchmarking {
-MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint32_t count, uint32_t materials, uint32_t views, uint32_t percent, uint32_t churn, uint32_t mode, bool uniqueAssets)
-    : _uniqueAssets(uniqueAssets), _count(count), _changes(count * percent / 100), _churn(churn), _mode(mode) {
-    const uint64_t requiredDescriptors = uint64_t{materials} + views * (mode == 0 ? 4u : mode == 3 ? 8u : 6u);
+MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint32_t count, uint32_t materials, uint32_t views, uint32_t percent, uint32_t churn, uint32_t mode, bool uniqueAssets, uint32_t flights)
+    : _timeline(flights), _uniqueAssets(uniqueAssets), _serials(flights), _colors(flights), _colorViews(flights), _initialized(flights), _count(count), _changes(count * percent / 100), _churn(churn), _mode(mode) {
+    const uint64_t requiredDescriptors = uint64_t{materials} + uint64_t{flights} * views * (mode == 0 ? 4u : mode == 3 ? 8u
+                                                                                                                       : 6u);
     if (backend == render::RenderBackend::D3D12 && requiredDescriptors > (1u << 16)) {
         _error = fmt::format("D3D12 pressure requires {} descriptors; renderer heap capacity is 65536", requiredDescriptors);
         return;
     }
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
-    GpuSystemDescriptor descriptor{.FlightDataCount = 2, .EnableFrameProfiler = true};
+    GpuSystemDescriptor descriptor{.FlightDataCount = flights, .EnableFrameProfiler = true};
     if (backend == render::RenderBackend::Vulkan) {
         render::VulkanDeviceDescriptor vk;
         vk.Queues = std::span{&queue, 1};
@@ -69,13 +76,14 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         pass.ParameterLayouts = {*layout};
         pass.Inputs.push_back({"InstanceTint", MaterialInputSource::InstanceParameters});
     }
+    const auto definition = make_shared<const MaterialPass>(std::move(pass));
     for (uint32_t i = 0; i < materials; ++i) {
         const array<float, 4> tint{0.5f + float(i % 7) / 14, 0.8f, 0.6f, 1};
         const auto bytes = std::as_bytes(std::span{tint});
-        auto asset = make_unique<Material>(vector{pass}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())});
+        auto asset = make_unique<Material>(vector{MaterialPass{definition}}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())});
         _materials.push_back(_assets.AddReady<Material>({i + 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(asset)));
     }
-    _scenes = make_unique<SceneManager>(2);
+    _scenes = make_unique<SceneManager>(flights);
     _world = make_unique<World>();
     _world->RequestRenderConnection(_scenes.get());
     _world->FinalizeWorldGT();
@@ -117,7 +125,7 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         view.View(0, 3) = float(i) * 0.1f;
         _views.push_back(view);
     }
-    for (uint32_t i = 0; i < 2; ++i) {
+    for (uint32_t i = 0; i < flights; ++i) {
         auto color = device->CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 256, .Height = 256, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Usage = render::TextureUse::RenderTarget});
         if (!color) {
             _error = "Target allocation failed";
@@ -141,7 +149,7 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
     Drain();
     Frames = Draws = UploadBytes = 0;
     GpuMs = 0;
-    RADRAY_PROFILE_MESSAGE("MaterialScene warmup complete; F2 single-thread validation off");
+    RADRAY_PROFILE_MESSAGE("MaterialScene warmup complete; single-thread");
 }
 StaticMeshComponent* MaterialSceneWorkload::AddObject(uint32_t index) {
     auto* component = _world->SpawnActor()->AddComponent<StaticMeshComponent>();
@@ -170,16 +178,21 @@ StaticMeshComponent* MaterialSceneWorkload::AddObject(uint32_t index) {
 void MaterialSceneWorkload::Complete(uint32_t flight) {
     if (!_serials[flight]) return;
     _gpu->CompleteFlightIfReady(flight, true);
-    const FlightCompletion completion{flight, true, _serials[flight]};
-    _scenes->OnFlightCompletedGT(completion);
-    _gpu->ReleaseFrameResourcesGT(completion);
+    FlightCompletion completion;
+    while (_timeline.TryReadCompletion(completion)) {
+        _scenes->OnFlightCompletedGT(completion);
+        _gpu->ReleaseFrameResourcesGT(completion);
+        _serials[completion.FlightIndex] = 0;
+    }
     GpuMs += _gpu->GetLastGpuTimeMs();
-    _serials[flight] = 0;
+    RADRAY_PROFILE_PLOT("MaterialScene/CompletedGpuMs", double(_gpu->GetLastGpuTimeMs()));
+    RADRAY_PROFILE_PLOT("MaterialScene/CompletedLatencyMs", double(_timeline.GetLastFrameLatency().count()) * 1000.0);
 }
 uint32_t MaterialSceneWorkload::BeginUpdate() {
-    const auto flight = _step++ % 2;
+    const auto flight = _step++ % _timeline.GetFlightDataCount();
     Complete(flight);
     _gpu->BeginUpdateForFlight(flight);
+    _gpu->BeginFrameTiming(flight);
     _uploadMeshes.clear();
     return flight;
 }
@@ -243,7 +256,6 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
     RADRAY_PROFILE_SCOPE_N("MaterialScene::PrepareAndRecord");
     const auto flight = frame.FlightIndex();
     auto context = MakePipelineContext(*_renderer, frame, _scenes.get());
-    vector<render::CommandBuffer*> uploads;
     if (!_uploadMeshes.empty()) {
         auto* command = context.Commands.Allocate();
         for (const auto* mesh : _uploadMeshes)
@@ -252,24 +264,24 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
                 break;
             }
         context.Commands.Return(std::span{&command, 1});
-        uploads.push_back(command);
+        frame.RegisterRequired(std::span{&command, 1});
+        if (!_error.empty()) return;
     }
     const auto before = frame.GetHostWrites().GetStats().CommittedBytes;
-    const auto objects = _scenes->PrepareSceneGpuRT(*_world->GetRenderSceneId(), context, uploads);
+    const auto objects = _scenes->PrepareSceneGpuRT(*_world->GetRenderSceneId(), context);
     if (!objects) {
         _error = "Scene GPU prepare failed";
         return;
     }
-    const render::RenderPassColorAttachmentDescriptor color{render::TextureFormat::RGBA8_UNORM, 1, render::LoadAction::Clear, render::StoreAction::Store};
-    auto* registry = _renderer->GetRenderPassRegistry();
-    auto pass = registry->GetOrCreateRenderPass({std::span{&color, 1}, {}});
+
     auto* view = _colorViews[flight].get();
-    auto framebuffer = registry->GetOrCreateFramebuffer({pass.Get(), std::span{&view, 1}, nullptr, 256, 256, 1});
+    _sceneBytes[frame.FlightIndex()] = objects->Objects.Target->GetDesc().Size;
+    for (const auto& parameter : objects->Parameters) _sceneBytes[frame.FlightIndex()] += parameter.Values.Target->GetDesc().Size;
     const RenderOutput output{{{view, _initialized[flight] ? render::TextureState::RenderTarget : render::TextureState::Undefined, render::TextureState::RenderTarget}}, {}};
     const auto info = ValidateRenderOutput(output, *frame.GetDevice());
     vector<PreparedSceneDraw> prepared;
     for (const auto& request : _views) {
-        auto item = _draw.Prepare(context, request, *objects, pass.Get(), *info, "Unlit", nullptr, false);
+        auto item = _draw.Prepare(context, request, *objects, *info, "Unlit", nullptr, false);
         if (!item) {
             _error = "Scene draw prepare failed";
             return;
@@ -278,19 +290,28 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
         prepared.push_back(std::move(*item));
     }
     auto* commands = context.Commands.Allocate();
+    const render::ColorClearValue clear{{0, 0, 0, 1}};
+    const auto ready = commands->PrepareRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, 256, 256, 1, {}, "MaterialSceneGPU"});
+    if (!ready) {
+        context.Commands.Discard(std::span{&commands, 1});
+        _error = "Render scope preparation failed";
+        return;
+    }
+    commands->PushDebugGroup("MaterialSceneGPU");
     auto state = InitialRenderOutputState(output);
     TransitionRenderOutput(commands, output, state, false);
-    const render::ColorClearValue clear{{0, 0, 0, 1}};
-    auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "MaterialSceneGPU"});
+    auto encoder = commands->BeginRenderPass(*ready);
     if (!encoder) {
+        commands->PopDebugGroup();
+        context.Commands.Discard(std::span{&commands, 1});
         _error = "Render encoder failed";
         return;
     }
     for (const auto& item : prepared) item.Record(encoder.Get());
     commands->EndRenderPass(encoder.Release());
+    commands->PopDebugGroup();
     context.Commands.Return(std::span{&commands, 1});
-    uploads.push_back(commands);
-    frame.RegisterClosedCommandBuffers({.CmdBuffers = uploads});
+    frame.RegisterClosedCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
     _initialized[flight] = true;
     UploadBytes += frame.GetHostWrites().GetStats().CommittedBytes - before;
     ++Frames;
@@ -298,8 +319,14 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
 }
 void MaterialSceneWorkload::Submit(AppFrameContext& frame) { _gpu->EndFrameRecordAndSubmit(frame.FlightIndex()); }
 void MaterialSceneWorkload::Drain() {
-    if (_scenes)
-        for (uint32_t i = 0; i < 2; ++i) Complete(i);
+    // Consume in submission order so the last-time profiler getter counts every result.
+    for (;;) {
+        std::optional<uint32_t> oldest;
+        for (uint32_t flight = 0; flight < _serials.size(); ++flight)
+            if (_serials[flight] && (!oldest || _serials[flight] < _serials[*oldest])) oldest = flight;
+        if (!oldest) break;
+        Complete(*oldest);
+    }
 }
 MaterialSceneWorkload::~MaterialSceneWorkload() {
     if (!_gpu) return;
@@ -319,4 +346,32 @@ MaterialSceneWorkload::~MaterialSceneWorkload() {
     _assets.Pump();
     if (_renderer) _renderer->OnShutdown();
 }
+uint64_t MaterialSceneWorkload::GetSceneAllocatedBytes() const noexcept {
+    uint64_t bytes = 0;
+    for (const auto size : _sceneBytes) bytes += size;
+    return bytes;
+}
+
+array<uint64_t, 4> MaterialSceneWorkload::GetNativeAllocatorUsage() const noexcept {
+    if (!_gpu) return {};
+    auto* device = _gpu->GetDevice();
+#if defined(RADRAY_ENABLE_D3D12)
+    if (device->GetBackend() == render::RenderBackend::D3D12) {
+        D3D12MA::TotalStatistics stats{};
+        static_cast<render::d3d12::DeviceD3D12*>(device)->_mainAlloc->CalculateStatistics(&stats);
+        const auto& total = stats.Total.Stats;
+        return {total.BlockBytes, total.AllocationBytes, total.BlockCount, total.AllocationCount};
+    }
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+    if (device->GetBackend() == render::RenderBackend::Vulkan) {
+        VmaTotalStatistics stats{};
+        vmaCalculateStatistics(static_cast<render::vulkan::DeviceVulkan*>(device)->_vma->_vma, &stats);
+        const auto& total = stats.total.statistics;
+        return {total.blockBytes, total.allocationBytes, total.blockCount, total.allocationCount};
+    }
+#endif
+    return {};
+}
+
 }  // namespace radray::benchmarking

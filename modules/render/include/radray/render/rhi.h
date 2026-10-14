@@ -514,8 +514,6 @@ class TextureView;
 class Shader;
 class PipelineLayout;
 class ShaderParameterSet;
-class RenderPass;
-class Framebuffer;
 class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
@@ -829,49 +827,50 @@ struct BarrierUavDescriptor {
 
 using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>;
 
-struct RenderPassColorAttachmentDescriptor {
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    uint32_t SampleCount{1};
+struct RenderPassColorAttachment {
+    TextureView* View;
     LoadAction Load{LoadAction::DontCare};
     StoreAction Store{StoreAction::Store};
-
-    friend bool operator==(const RenderPassColorAttachmentDescriptor&, const RenderPassColorAttachmentDescriptor&) noexcept = default;
+    ColorClearValue Clear{};
 };
-
-struct RenderPassDepthStencilAttachmentDescriptor {
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    uint32_t SampleCount{1};
-    LoadAction DepthLoad{};
-    StoreAction DepthStore{};
-    LoadAction StencilLoad{};
-    StoreAction StencilStore{};
-    // Read-only depth/stencil requires Load/Store and a DepthRead framebuffer view.
+struct RenderPassDepthStencilAttachment {
+    TextureView* View;
+    LoadAction DepthLoad{LoadAction::DontCare};
+    StoreAction DepthStore{StoreAction::Store};
+    LoadAction StencilLoad{LoadAction::DontCare};
+    StoreAction StencilStore{StoreAction::Store};
     bool ReadOnly{false};
-
-    friend bool operator==(const RenderPassDepthStencilAttachmentDescriptor&, const RenderPassDepthStencilAttachmentDescriptor&) noexcept = default;
+    DepthStencilClearValue Clear{};
 };
-
-struct RenderPassDescriptor {
-    std::span<const RenderPassColorAttachmentDescriptor> ColorAttachments{};
-    std::optional<RenderPassDepthStencilAttachmentDescriptor> DepthStencilAttachment{};
-};
-
-struct FramebufferDescriptor {
-    RenderPass* Pass{nullptr};
-    std::span<TextureView* const> ColorAttachments{};
-    TextureView* DepthStencilAttachment{nullptr};
-    uint32_t Width{0};
-    uint32_t Height{0};
-    uint32_t Layers{1};
-};
-
+/// Views and operations borrowed during preparation; their owners survive the command epoch.
 struct RenderPassBeginDescriptor {
-    RenderPass* Pass{nullptr};
-    Framebuffer* Target{nullptr};
-    std::span<const ColorClearValue> ColorClearValues{};
-    std::optional<DepthStencilClearValue> DepthStencilClearValue{};
+    std::span<const RenderPassColorAttachment> Colors{};
+    std::optional<RenderPassDepthStencilAttachment> DepthStencil{};
+    uint32_t Width{0}, Height{0}, Layers{1};
+    std::optional<Rect> RenderArea{};
     std::string_view Name{};
     bool AllowUavWrites{false};
+};
+/// Single subpass, ordered color mapping, no input/resolve attachments or multiview.
+struct AttachmentSignature {
+    vector<TextureFormat> Colors;
+    std::optional<TextureFormat> DepthStencil;
+    uint32_t Samples{1};
+    friend bool operator==(const AttachmentSignature&, const AttachmentSignature&) noexcept = default;
+};
+std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept;
+
+class RenderPassToken {
+public:
+    RenderPassToken() noexcept = default;
+    bool IsFrom(const CommandBuffer* command, uint64_t epoch) const noexcept { return _command.Get() == command && _epoch == epoch; }
+    uint32_t Index() const noexcept { return _index; }
+
+private:
+    friend class CommandBuffer;
+    Nullable<const CommandBuffer*> _command{nullptr};
+    uint64_t _epoch{0};
+    uint32_t _index{0};
 };
 
 struct TextureDescriptor {
@@ -1174,8 +1173,8 @@ struct GraphicsPipelineStateDescriptor {
     std::optional<DepthStencilState> DepthStencil{};
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
-    RenderPass* CompatibleRenderPass{nullptr};
 };
+AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
 
 struct ComputePipelineStateDescriptor {
     PipelineLayout* PipelineLayout{nullptr};
@@ -1321,10 +1320,6 @@ public:
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept = 0;
-
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept = 0;
@@ -1386,8 +1381,20 @@ public:
 
     virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
 
-    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
+    virtual std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept = 0;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept;
 
+protected:
+    RenderPassToken MakeRenderPassToken(uint64_t epoch, uint32_t index) const noexcept {
+        RenderPassToken token;
+        token._command = this;
+        token._epoch = epoch;
+        token._index = index;
+        return token;
+    }
+
+public:
     virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
@@ -1581,6 +1588,8 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
 
     virtual TextureDescriptor GetDesc() const noexcept = 0;
+
+    virtual Device* GetDevice() const noexcept = 0;
 };
 
 class TextureView : public ResourceView {
@@ -1590,24 +1599,6 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 
     virtual TextureViewDescriptor GetDesc() const noexcept = 0;
-};
-
-class RenderPass : public RenderBase, public IDebugName {
-public:
-    virtual ~RenderPass() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RenderPass; }
-
-    virtual RenderPassDescriptor GetDesc() const noexcept = 0;
-};
-
-class Framebuffer : public RenderBase, public IDebugName {
-public:
-    virtual ~Framebuffer() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Framebuffer; }
-
-    virtual FramebufferDescriptor GetDesc() const noexcept = 0;
 };
 
 class Shader : public RenderBase {
@@ -1637,6 +1628,17 @@ public:
     virtual bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
 
     virtual bool FlushWrites() noexcept = 0;
+    /// Binding publishes an immutable descriptor version until its recorded epoch is safe.
+    void SealBindings() noexcept;
+    bool AreBindingsSealed() const noexcept { return _bindingsSealed; }
+    /// Caller must have ended every command epoch using this set before reuse.
+    void ResetBindingsForReuse() noexcept;
+
+protected:
+    virtual void ClearBindings() noexcept {}
+
+private:
+    bool _bindingsSealed{false};
 };
 
 class PipelineState : public RenderBase, public IDebugName {

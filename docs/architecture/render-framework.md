@@ -38,7 +38,7 @@ runtime 按职责区分底层服务、通用资产与可选渲染框架，框架
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
 GPU 的单线程和双线程 runner 共用这些协议；ready 交接、CPU 提交完成计数与主队列 fence 是实际同步权威。
-不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 SceneManager 则在 Update 后同步发布并消费场景包，再发布 `GpuWorkCompleted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
+不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 SceneManager 则在 Update 后同步发布并消费场景包，再发布 `OutputsExecuted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
 普通组件不得自行驱动这些入口或调用 WaitIdle；未使用 Application runner 的 CPU 测试显式调用 World 的
 `Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
 托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
@@ -81,7 +81,8 @@ Pending 不可取消或复活，且不能向 Pending/Destroying/Stopping owner �
 
 S1 先冻结所有 World 的本批销毁、层级和连接请求，再处理父覆盖子、身份失效与受影响 owner 数组的稳定压缩，
 最后派发注销/销毁通知。幸存对象顺序保持；没有请求时不扫描 Actor 寻找 pending。有删除时成本包含受影响容器
-的线性压缩及请求排序，不能当成 O(删除数)。OnUnregister 时 owner/world 上下文仍有效；清理后才释放内存。
+的线性压缩及请求排序，不能当成 O(删除数)。单 Actor 请求只遍历 owner 指针定位并稳定移除，不读取其他 Actor 的生命周期。
+OnUnregister 时 owner/world 上下文仍有效；清理后才释放内存。
 WorldManager 在任何回调前移交本批 World owner、失效身份并清空销毁请求，后续回调只追加下一批请求，
 无需另存执行中的 WorldId 列表。Actor/Component 的 Destroying 标记在准备阶段写一次，通知阶段不重复遍历标记。
 
@@ -160,7 +161,7 @@ WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状�
 | SceneWriter | Scene 唯一 GT producer、Shape/Light/Transform 身份、局部变换与几何增量、光源参数快照、资产 owner |
 | RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
 | SceneManager | GT/RT 分离的登记表、flight 交付协议、场景 GPU 数据及退休 |
-| RenderSystem | 独立于场景的 shader/PSO/render-pass 服务 |
+| RenderSystem | 独立于场景的 shader/program/PSO 服务 |
 
 RenderComponent 分类 State/Transform/DynamicData dirty；同来源只排队一次。bridge 维护来源上的登记下标、
 dirty 队列下标与 dirty 位，连接身份从 World 查询；普通 SceneComponent 不保存这些字段。
@@ -254,7 +255,7 @@ StaticMeshTable 拥有身份、几何绑定、TransformRows、bounds 四个稠�
 `GetStaticMeshColumns().Transforms` 是整个变换行池，必须以 `TransformRows[meshRow]` 索引，不能用 meshRow
 直接索引，也不保证长度等于 Shape 数；`Columns::Get` 已做此映射。剔除仍可只顺序读取稠密 Bounds 列。
 GetStaticMeshes 保留身份枚举，包含资产未就绪的已登记 mesh。行号不表示身份，所有列与单项借用在下次 Apply
-或销毁时失效，跨线程 CPU 读取需要相同的 reader lease。CPU 列布局不等同于 GPU buffer packing。
+或销毁时失效，跨线程 CPU 读取需要相同的 reader lease。GetStaticMeshTransform 只借用已登记 mesh 的世界矩阵，GPU packing 不必构造包含几何、bounds 和材质的完整 view；借用合同相同。CPU 列布局不等同于 GPU buffer packing。
 LightSceneData 直接拥有四种类型的 LightTable，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局。
 每张表是 Ids 与 Data 两列，Ids[row] 拥有 Data[row]，两列长度始终相等：
 
@@ -301,7 +302,7 @@ Updated 是求值和 bounds 更新后最终受影响的完整 ShapeId：祖先�
 空槽不清零、不绘制。buffer 只按最高所需槽位几何扩容，不缩容；当帧准备后不会更换，多个 view 复用相同绑定。
 device-local buffer 分配失败返回空并保留变化，本帧跳过该 Scene；下一 flight 轮次可以重试。
 返回绑定借用截至该 flight 完成，消费者必须将资源留在 ShaderRead 状态。
-Pending、Attempt、执行状态与退休协议见[帧与 GPU](frame-and-gpu.md#对象参数上传与完成反馈)。
+Pending、必要工作接纳与退休协议见[帧与 GPU](frame-and-gpu.md#对象参数上传与必要工作)。
 
 `Application::OnCollectRenderViews(SceneViewCollector&)` 在 World S1 与场景收集后、Seal 前运行。
 该阶段禁止修改 World/WorldManager 或 Pump scheduler/asset；CameraComponent 的投影 setter 同样检查。
@@ -317,16 +318,16 @@ RasterGraph 的 Raster/Fullscreen/Copy/Clear 节点声明 whole-texture Read/Wri
 Compile 只排序 RAW/WAR/WAW 与显式 After 依赖，拒绝 cycle、同节点反馈、同 texture 重复资源和未初始化读取，不分配或录制 GPU 命令。
 CompiledRasterGraph::Record 使用调用方已经分配的 command，执行每节点状态转换、body 和最终 Exit。
 节点 body 不管理图内 texture 状态；RenderOutput 只用于图外入口/出口，不能对同附件再次负责内部转换。
-暂不支持 alias、自动裁剪和跨队列。中间 target 由每 flight 的调用方拥有，直到最终 GPU fence；其 view 退出前先从 RenderPassRegistry 同步清退 framebuffer。
+暂不支持 alias、自动裁剪和跨队列。中间 target 由每 flight 的调用方拥有，直到最终 GPU fence；可借用 GpuFrameResources 的 typed texture/view pool，view 退出由 Vulkan 原生缓存同步清退其闲置 framebuffer。
 
 ## Pipeline、材质与绘制
 
-`PipelineContext` 提供底层 RenderSystem、按值 frame 信息、`IGpuCmdAllocator`、当前 flight 的 `GpuFrameResources` 和可空的 SceneManager。
+`PipelineContext` 提供底层 RenderSystem、按值 frame 信息、`IGpuCmdAllocator`、`IRequiredGpuWork`、当前 flight 的 `GpuFrameResources` 和可空的 SceneManager。
 `MakePipelineContext(renderer, frame, scenes)` 显式接入场景服务；省略 scenes 可用于无场景的自定义 pipeline。
 GpuFrameResources 由 GpuSystem 按 flight 持有，提供通用常量与参数分配，不认识框架类型。
 它没有预先分配的 cmd，也没有 Submit/Present/WaitIdle 入口。pipeline 自行分段录制，Return 后把普通指针数组
-按依赖顺序放进 `PipelineRecordResult`。Scene GPU 上传使用相同 allocator，显式追加到该数组；旧 frame 重载保留适配。
-共享 Scene 的多个 view 在同一 FrameSerial 内只准备一次，Pending/Attempt/completion 规则不变。
+按依赖顺序放进 `PipelineRecordResult`。Scene GPU 上传使用相同 allocator，通过 RequiredWork 直接登记必要 batch，独立于输出结果数组；旧 frame 重载保留适配。
+共享 Scene 的多个 view 在同一 FrameSerial 内只准备一次，必要工作接纳后清理 Pending，真实完成结束资源借用。
 
 `RenderOutput` 是有序 color views、可选 depth view 和每个 attachment 的 Enter/Exit 状态。
 尺寸、格式、采样从真实 view 的单 mip/layer 推导；当前要求尺寸和采样一致，拒绝同子资源别名、空附件及未知状态。
@@ -343,6 +344,8 @@ SceneWriter 为 Ready 材质登记资产 use，替换、删除和断连沿原 Re
 RT 只读不可变数据。组件等待未完成材质，完成时核验当前 Scene/Shape generation 和绑定，置 materials dirty 后再标记 DynamicData。
 材质拥有其纹理依赖，不能因 GT 提前释放引用而使在途 draw 悬空。
 
+MaterialPass 发布后为不可变共享定义：用 shared_ptr<const MaterialPass> 建立一次定义，再将 MaterialPass{definition} 交给不同 Material；各材质的默认常量、纹理与 MaterialGpuState 独立。Material 构造会发布未共享的 builder；GetDefinition 返回规范定义。共同 request、输入映射、固定状态和惰性 RasterMaterialPlan 只保留一份，warm Resolve 直接按 RenderSystem generation 取计划。计划初始化与 MaterialGpuState 修改由所属 RT 串行执行；不能并发初始化同一定义。跨活跃 service/device 要建立新的表示，generation 标记不持有 native program。RasterDraw 仅保留准备/编码算法，无长期反射计划表。
+
 `RasterDraw::ResolveMaterial` 在冷路径解析 program 的绑定结构，支持 SceneObjects、任意长度 View/Frame/Material 常量、texture 与 sampler
 处于不同或混合 physical groups。所有 active 非 immutable bindings 必须由契约覆盖。数组按 ValueIndex 连续取值。
 准备阶段核对反射的常量长度并填满实际 group。冷路径按输入来源分类，组号不表示生命周期。
@@ -350,10 +353,10 @@ Material 拥有 `MaterialGpuState`；独立 producer 通过 `MaterialBindingView
 纯材质常量、默认纹理与默认 sampler 组持久准备一次，后续不 Set/FlushWrites。默认常量从 RenderSystem 的
 `PersistentCBufferArena` 分配对齐、只初始化一次的 host-visible 页切片，并立即 flush，不依赖帧 copy 的执行。
 allocation owner 随材质按 RenderAssetLifetime 的真实完成边界释放；同页回收与 RT 分配用页锁同步。
-arena 在 RT Prepare/Allocate 时释放没有 allocation owner 的页，保留至多一页 64 KiB 的闲置容量；live allocation 不移动。
+arena 在 RT Allocate 边界释放没有 allocation owner 的页，保留至多一页 64 KiB 的闲置容量；live allocation 不移动。
 场景/视图/帧组及混合生命周期组使用 flight 版本；混合组引用持久常量。override 只使受影响组准备临时版本，不改默认缓存。
 同一次 SceneDraw Prepare 中，纯场景/视图/帧 buffer 组按共享 plan 与实际 buffer 切片复用；混合材质组不参与此复用。
-每个 view 的矩阵只复制一次。GPU state 按 CPU pass 地址区分 pass/layout，同一不可变 pass 的 program 变化要求新的材质版本。
+每个 view 的矩阵只复制一次。GPU state 按共享定义的 pass 身份直接查表区分 pass/layout，同一不可变 pass 的 program 变化要求新的材质版本。
 RasterMaterialValues 可提供 ConstantBuffers/ViewBuffers/FrameBuffers 覆盖对应 CPU bytes；这些已提交切片须满足反射大小并存活至当前 flight 完成。调用方可复用相同 view/style 的 arena 切片，避免每 draw 重复常量 copy，不另建上传 cache。
 RasterDraw 不再拥有 sampler 参数集长期缓存；Device 的 sampler 对象复用保留。
 帧参数池在安全 flight reset 时移除已失效 service generation，并在连续 60 次低使用量复用后裁剪闲置容量。
@@ -469,7 +472,7 @@ Window 单独启用时只有原生主窗口，Window 与 Gpu 同时启用时再�
 提供可选资产来源；未配置资产根或数据库打开失败时，资产来源为空。
 WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 
-启用 Render 时调用 `RenderSystem::OnInitialize()` 创建 shader/program、graphics pipeline 与 render-pass caches。
+启用 Render 时调用 `RenderSystem::OnInitialize()` 创建 shader/program、graphics pipeline cache。
 SceneManager 只接收 flight 数量，不依赖 Device、RenderSystem 或 Application 的存在。
 `GpuSystem::TryCreate` 是唯一创建路径，借用已有的 FrameTimeline，并逐步检查后端、adapter、验证层、device、队列及 profiler。
 `GetStartupResult()` 报告启动状态，未编译后端、无 adapter、缺验证层与真实初始化失败可区分。`FlightDataCount` 为 0 在构造前失败；
@@ -488,9 +491,7 @@ SceneWriter::SetInstanceParameters 与 StaticMeshComponent::SetInstanceParameter
 writer 在所属 scene generation 内只登记一次 schema；pending batch 共用 packed bytes，重复更新覆盖原位置，Flush 后字节冻结。
 更新按 ShapeId+流 coalesce，删除取消尚未发布的值。RenderScene 每流保存一份 schema、含 generation 的 slot 元数据及按需 16 KiB CPU 字节页；空页可回收，不为每行创建 vector。
 值变化走 SceneApplyChanges::Parameters，不进入矩阵 Updated。SceneGpuData 复用排序/打包 scratch，将相邻 global slot 合并为上传范围。
-SceneGpuData 使用已有 ResourceUploader，按每 flight、每流跟踪 Pending/Attempt。上传录制成功后暂存 attempt；真实 completion executed 后才 commit，跳帧重新加入当前 generation 的 pending。容量增长重新补全活跃行，稀疏 slot 不假定连续；未初始化或未声明的行不能供材质读取。warm-up 后静止矩阵与参数零上传，多 view 同 FrameSerial 复用同一 SceneGpuView。
-GPU 参数容量仍按最高 global slot 和 stride 分配；每流请求上限为 64 MiB，超限诊断并返回失败，实际分配还受 device 限制。
-CPU 分页没有压缩 GPU 寻址。可见列表总长度上限为 UINT32_MAX，超限明确失败。
+SceneGpuData 使用 frame resources 的 ResourceUploader，每 flight/每流跟踪 Pending；关闭的上传通过 RequiredWork 接纳后清 Pending、推进初始化。输出跳过不撤销必要更新。容量增长重新填充活跃行，稀疏 slot 不假定连续；首次或扩容未初始化版本不能供材质读取。暖机后静止矩阵和参数零上传，多 view 同 FrameSerial 复用相同 SceneGpuView。
 
 ## 批量生产者与手动实例集合
 
@@ -519,6 +520,7 @@ SceneDraw 从 ResolveSceneView 已归一化的完整 world-to-clip 矩阵提取�
 独立 double/camera-relative RasterBoundsVisible 重载先减 camera，调用方须提供相应 view rotation；不能在完整 view 矩阵路径重复减 camera。
 SplitRasterPosition 生成独立 high/low float4 流，应用 shader 在每 view 减对应 camera high/low 后再加局部几何；矩阵主路径仍是 float，不能把接入 Scene 当成自动的大坐标支持。
 ShapeDrawState 独立交付 view visibility mask、sort group 与 order，不进入 GPU 矩阵 dirty。RenderScene 为 geometry/material/transform/parameter/order 分别保存 revision。
-SceneDraw::GetObjectRecords 的派生 primitive 记录以 SceneId、ShapeId generation 与 geometry/material revision 刷新，先验证当前身份再使用旧资产地址；transform、参数、order 与每 view 可见性独立读取。shader/pass/output/布局的 PSO 仍由公共 cache 按完整内容和 program generation 解析，不把 texture、常量或 view 写死在持久记录。MC 与原生 SceneDraw 都消费这个记录服务及同一 RasterDraw。
-每个 SceneId 有独立缓存；section/material template 按不可变 mesh 与共享 binding 复用。结构 revision 变化时只校验已缓存活跃记录，稳定帧不做全容量清扫。
-PruneScenes 在 pipeline Record（包括零 view）清退已销毁场景；场景切换不清空其他存活场景缓存。
+RenderScene::Apply 局部维护 view 无关的 DrawPrimitive 模板，按不可变 mesh version 与 MaterialBindings version 共享。mesh/material/remove 只更新受影响 Shape 的模板引用，同轮反复编辑读取最终绑定；transform、参数、order 及 view 可见性独立读取。Shape 索引列直接借用共享表节点，和变换更新频繁访问的 ShapeSlot 分开放置；rehash 不移动节点，热路径无需再次查键。删除 Shape 时先清该列引用，最后一个使用者退出时移除节点，身份复用不继承旧引用。GetDrawPrimitives 的 span 借用到下一次 Apply，遵守已有 CPU read 隔离。
+无 native draw 或 section 的几何不建立空模板；Shape 模板索引在首次出现可绘制几何时分配，纯 CPU Scene 不承担该列存储。绑定变为空几何时清除旧模板，后续恢复及 Shape 身份复用仍按相同局部规则处理。
+
+SceneDraw 只消费这些稳定模板，再进行当前 view 的 mask/frustum、顺序、batching、visible slots 与参数准备；它没有 Scene 旁路缓存、结构 revision 全表修复或场景清扫接口。PSO 继续按完整固定状态、附件签名及 program generation 解析。

@@ -51,6 +51,8 @@ public:
     void Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChanges*> changes = nullptr) noexcept;
     bool ContainsShape(ShapeId id) const noexcept;
     std::optional<StaticMeshSceneView> GetStaticMesh(ShapeId id) const noexcept;
+    /// Registered mesh matrix only, borrowed until the next Apply under the same reader contract.
+    Nullable<const Eigen::Matrix4f*> GetStaticMeshTransform(ShapeId id) const noexcept;
     bool ContainsLight(LightId id) const noexcept { return static_cast<bool>(_lights.GetLight(id)); }
     /// Common parameters; type-specific borrows are available through GetLights().
     Nullable<const LightCommonData*> GetLight(LightId id) const noexcept { return _lights.GetLight(id); }
@@ -60,6 +62,13 @@ public:
     /// Dense column access for culling and drawing without identity lookups. Same borrow lifetime as GetStaticMesh.
     StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(_transforms.GetWorldMatrices()); }
     const unordered_map<string, SceneParameterStream>& GetParameterStreams() const noexcept { return _parameters; }
+    struct DrawPrimitive {
+        const GpuMesh::DrawData* Draw;
+        const StaticMeshSection* Section;
+        MaterialBinding Binding;
+    };
+    /// Shared stable geometry/bindings, borrowed until the next Apply.
+    std::span<const DrawPrimitive> GetDrawPrimitives(ShapeId id) const noexcept;
     std::optional<ShapeDrawRevision> GetDrawRevision(ShapeId id) const noexcept;
     std::optional<ShapeDrawState> GetDrawState(ShapeId id) const noexcept;
     uint64_t GetStructureRevision() const noexcept { return _structureRevision; }
@@ -67,6 +76,22 @@ public:
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
 
+    struct TemplateKey {
+        const StaticMeshRenderData* Mesh;
+        const MaterialBinding* Materials;
+        size_t Count;
+        friend bool operator==(const TemplateKey&, const TemplateKey&) = default;
+    };
+    struct TemplateHash {
+        size_t operator()(const TemplateKey& key) const noexcept;
+    };
+    struct DrawTemplate {
+        Nullable<const TemplateKey*> Key{nullptr};
+        vector<DrawPrimitive> Primitives;
+        uint32_t Uses{0};
+    };
+    void ReleaseDrawTemplate(uint32_t index);
+    void UpdateDrawTemplate(ShapeId id);
     /// Identity and routing only; geometry lives in the dense arrays below. Randomly accessed by
     /// every transform update, so keep it small.
     struct ShapeSlot {
@@ -92,6 +117,9 @@ private:
     mutable std::mutex _readers;
     mutable std::condition_variable _readersDone;
     mutable size_t _activeReaders{0};
+    unordered_map<TemplateKey, DrawTemplate, TemplateHash> _drawTemplates;
+    /// Allocated for drawable geometry; pointers into stable nodes are cleared before identity reuse.
+    vector<Nullable<DrawTemplate*>> _shapeTemplates;
 };
 
 }  // namespace radray

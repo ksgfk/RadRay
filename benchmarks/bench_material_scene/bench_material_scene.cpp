@@ -55,77 +55,97 @@ void radray::benchmarking::RegisterMaterialSceneBenchmarks() {
             for (const uint32_t count : {1000u, 10000u, 100000u})
                 for (const uint32_t views : {1u, 3u})
                     for (const uint32_t percent : {0u, 1u, 10u, 100u})
-                        for (const bool complete : {false, true}) {
-                            const auto name = fmt::format("MaterialScene/{}/{}/{}/N{}/M1/V{}/dirty{}", mode == 0 ? "Direct" : mode == 2 ? "Manual"
-                                                                                                                                        : "ManualTint",
-                                                          backend == render::RenderBackend::D3D12 ? "d3d12" : "vulkan", complete ? "FullFrame" : "PrepareRecord", count, views, percent);
-                            benchmark::RegisterBenchmark(name.c_str(), [=](benchmark::State& state) {
-                                MaterialSceneWorkload workload{backend, count, 1, views, percent, 0, mode};
-                                if (!workload.Error().empty()) {
-                                    state.SkipWithError(workload.Error().c_str());
-                                    return;
-                                }
-                                for (auto _ : state) {
-                                    if (!complete) state.PauseTiming();
-                                    auto flight = workload.BeginUpdate();
-                                    workload.Sync(flight);
-                                    auto frame = workload.BeginRecord(flight);
-                                    if (!complete) state.ResumeTiming();
-                                    workload.PrepareAndRecord(frame);
-                                    if (!complete) state.PauseTiming();
-                                    workload.Submit(frame);
-                                    if (!complete) state.ResumeTiming();
+                        for (const bool complete : {false, true})
+                            for (const uint32_t flights : {1u, 2u, 3u, 4u}) {
+                                const auto name = fmt::format("MaterialScene/{}/{}/{}/N{}/M1/V{}/dirty{}", mode == 0 ? "Direct" : mode == 2 ? "Manual"
+                                                                                                                                            : "ManualTint",
+                                                              backend == render::RenderBackend::D3D12 ? "d3d12" : "vulkan", complete ? "FullFrame" : "PrepareRecord", count, views, percent);
+                                const auto flightName = flights == 2 ? name : fmt::format("{}/F{}", name, flights);
+                                benchmark::RegisterBenchmark(flightName.c_str(), [=](benchmark::State& state) {
+                                    MaterialSceneWorkload workload{backend, count, 1, views, percent, 0, mode, false, flights};
                                     if (!workload.Error().empty()) {
                                         state.SkipWithError(workload.Error().c_str());
-                                        break;
+                                        return;
                                     }
-                                }
-                                workload.Drain();
-                                const auto frames = double(workload.Frames);
-                                state.counters["draws/frame"] = frames ? workload.Draws / frames : 0;
-                                state.counters["host_bytes/frame"] = frames ? workload.UploadBytes / frames : 0;
-                                state.counters["gpu_ms/frame"] = frames ? workload.GpuMs / frames : 0;
-                                state.counters["actors"] = static_cast<double>(workload.ActorCount());
-                            })->UseRealTime()
-                                ->Unit(benchmark::kMicrosecond);
-                        }
+                                    for (auto _ : state) {
+                                        if (!complete) state.PauseTiming();
+                                        auto flight = workload.BeginUpdate();
+                                        workload.Sync(flight);
+                                        auto frame = workload.BeginRecord(flight);
+                                        if (!complete) state.ResumeTiming();
+                                        workload.PrepareAndRecord(frame);
+                                        if (!complete) state.PauseTiming();
+                                        workload.Submit(frame);
+                                        if (!complete) state.ResumeTiming();
+                                        if (!workload.Error().empty()) {
+                                            state.SkipWithError(workload.Error().c_str());
+                                            break;
+                                        }
+                                    }
+                                    const auto pendingUsage = workload.GetNativeAllocatorUsage();
+                                    workload.Drain();
+                                    const auto idleUsage = workload.GetNativeAllocatorUsage();
+                                    state.counters["native_block_bytes"] = double(idleUsage[0]);
+                                    state.counters["native_allocation_bytes"] = double(idleUsage[1]);
+                                    state.counters["native_block_count"] = double(idleUsage[2]);
+                                    state.counters["native_allocation_count"] = double(idleUsage[3]);
+                                    state.counters["native_allocation_bytes_pending"] = double(pendingUsage[1]);
+                                    const auto frames = double(workload.Frames);
+                                    state.counters["draws/frame"] = frames ? workload.Draws / frames : 0;
+                                    state.counters["host_bytes/frame"] = frames ? workload.UploadBytes / frames : 0;
+                                    state.counters["gpu_ms/frame"] = frames ? workload.GpuMs / frames : 0;
+                                    state.counters["scene_buffer_bytes"] = double(workload.GetSceneAllocatedBytes());
+                                    state.counters["actors"] = static_cast<double>(workload.ActorCount());
+                                })->UseRealTime()
+                                    ->Unit(benchmark::kMicrosecond);
+                            }
     for (const auto backend : {render::RenderBackend::D3D12, render::RenderBackend::Vulkan})
         for (const uint32_t count : {1000u, 10000u, 100000u})
             for (const uint32_t materials : {1u, 100u, count})
                 for (const uint32_t views : {1u, 3u})
                     for (const uint32_t percent : {0u, 1u, 10u, 100u})
-                        for (const bool complete : {false, true}) {
-                            const auto name = fmt::format("MaterialScene/{}/{}/N{}/M{}/V{}/dirty{}", backend == render::RenderBackend::D3D12 ? "d3d12" : "vulkan", complete ? "FullFrame" : "PrepareRecord", count, materials, views, percent);
-                            benchmark::RegisterBenchmark(name.c_str(), [=](benchmark::State& state) {
-                                MaterialSceneWorkload workload{backend, count, materials, views, percent};
-                                if (!workload.Error().empty()) {
-                                    state.SkipWithError(workload.Error().c_str());
-                                    return;
-                                }
-                                for (auto _ : state) {
-                                    if (!complete) state.PauseTiming();
-                                    const auto flight = workload.BeginUpdate();
-                                    workload.Sync(flight);
-                                    auto frame = workload.BeginRecord(flight);
-                                    if (!complete) state.ResumeTiming();
-                                    workload.PrepareAndRecord(frame);
-                                    if (!complete) state.PauseTiming();
-                                    workload.Submit(frame);
-                                    if (!complete) state.ResumeTiming();
+                        for (const bool complete : {false, true})
+                            for (const uint32_t flights : {1u, 2u, 3u, 4u}) {
+                                const auto name = fmt::format("MaterialScene/{}/{}/N{}/M{}/V{}/dirty{}", backend == render::RenderBackend::D3D12 ? "d3d12" : "vulkan", complete ? "FullFrame" : "PrepareRecord", count, materials, views, percent);
+                                const auto flightName = flights == 2 ? name : fmt::format("{}/F{}", name, flights);
+                                benchmark::RegisterBenchmark(flightName.c_str(), [=](benchmark::State& state) {
+                                    MaterialSceneWorkload workload{backend, count, materials, views, percent, 0, 1, false, flights};
                                     if (!workload.Error().empty()) {
                                         state.SkipWithError(workload.Error().c_str());
-                                        break;
+                                        return;
                                     }
-                                }
-                                workload.Drain();
-                                const auto frames = double(workload.Frames);
-                                state.counters["draws/frame"] = frames ? workload.Draws / frames : 0;
-                                state.counters["host_bytes/frame"] = frames ? workload.UploadBytes / frames : 0;
-                                state.counters["gpu_ms/frame"] = frames ? workload.GpuMs / frames : 0;
-                                state.SetItemsProcessed(state.iterations());
-                            })->UseRealTime()
-                                ->Unit(benchmark::kMicrosecond);
-                        }
+                                    for (auto _ : state) {
+                                        if (!complete) state.PauseTiming();
+                                        const auto flight = workload.BeginUpdate();
+                                        workload.Sync(flight);
+                                        auto frame = workload.BeginRecord(flight);
+                                        if (!complete) state.ResumeTiming();
+                                        workload.PrepareAndRecord(frame);
+                                        if (!complete) state.PauseTiming();
+                                        workload.Submit(frame);
+                                        if (!complete) state.ResumeTiming();
+                                        if (!workload.Error().empty()) {
+                                            state.SkipWithError(workload.Error().c_str());
+                                            break;
+                                        }
+                                    }
+                                    const auto pendingUsage = workload.GetNativeAllocatorUsage();
+                                    workload.Drain();
+                                    const auto idleUsage = workload.GetNativeAllocatorUsage();
+                                    state.counters["native_block_bytes"] = double(idleUsage[0]);
+                                    state.counters["native_allocation_bytes"] = double(idleUsage[1]);
+                                    state.counters["native_block_count"] = double(idleUsage[2]);
+                                    state.counters["native_allocation_count"] = double(idleUsage[3]);
+                                    state.counters["native_allocation_bytes_pending"] = double(pendingUsage[1]);
+                                    const auto frames = double(workload.Frames);
+                                    state.counters["draws/frame"] = frames ? workload.Draws / frames : 0;
+                                    state.counters["host_bytes/frame"] = frames ? workload.UploadBytes / frames : 0;
+                                    state.counters["gpu_ms/frame"] = frames ? workload.GpuMs / frames : 0;
+                                    state.counters["scene_buffer_bytes"] = double(workload.GetSceneAllocatedBytes());
+                                    state.SetItemsProcessed(state.iterations());
+                                })->UseRealTime()
+                                    ->Unit(benchmark::kMicrosecond);
+                            }
 }
 int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);

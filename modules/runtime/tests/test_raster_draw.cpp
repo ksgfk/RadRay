@@ -269,7 +269,7 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
             commands->ResourceBarrier(std::span{&barrier, 1});
         }
     }
-    void Complete() {
+    void Complete(bool outputsExpected = true) {
         const auto flight = Frame->FlightIndex();
         Frame->SubmitFrame();
         const auto signal = Gpu->GetFlightGpuSignal(flight);
@@ -277,26 +277,22 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
         ASSERT_TRUE(Gpu->CompleteFlightIfReady(flight, false));
         FlightCompletion completion;
         ASSERT_TRUE(Timeline.TryReadCompletion(completion));
-        EXPECT_TRUE(completion.GpuWorkCompleted);
+        EXPECT_EQ(completion.OutputsExecuted, outputsExpected);
         Gpu->ReleaseFrameResourcesGT(completion);
         Timeline.CleanupCompletedFlights();
         Frame.reset();
     }
-    render::RenderPass* Pass(bool depth) {
-        const render::RenderPassColorAttachmentDescriptor color{render::TextureFormat::RGBA8_UNORM, 1, render::LoadAction::Clear, render::StoreAction::Store};
-        std::optional<render::RenderPassDepthStencilAttachmentDescriptor> d;
-        if (depth) d = {render::TextureFormat::D32_FLOAT, 1, render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::DontCare, render::StoreAction::Discard};
-        return Renderer->GetRenderPassRegistry()->GetOrCreateRenderPass({std::span{&color, 1}, d}).Unwrap();
-    }
-    render::GraphicsCommandEncoder* Start(render::CommandBuffer* commands, render::RenderPass* pass, bool depth, float clearDepth = 1) {
-        render::TextureView* colors[]{ColorView.get()};
-        auto framebuffer = Renderer->GetRenderPassRegistry()->GetOrCreateFramebuffer({pass, colors, depth ? DepthView.get() : nullptr, 16, 16, 1}).Unwrap();
+    render::GraphicsCommandEncoder* Start(render::CommandBuffer* commands, bool depth, float clearDepth = 1) {
+        const render::RenderPassColorAttachment color{ColorView.get(), render::LoadAction::Clear, render::StoreAction::Store, {{0, 0, 0, 1}}};
+        std::optional<render::RenderPassDepthStencilAttachment> d;
+        if (depth) d = {DepthView.get(), render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::DontCare, render::StoreAction::Discard, false, {clearDepth, 0}};
+        const auto token = commands->PrepareRenderPass({std::span{&color, 1}, d, 16, 16, 1});
+        if (!token) RADRAY_ABORT("raster test scope preparation failed");
         const render::ResourceBarrierDescriptor barriers[]{
             render::BarrierTextureDescriptor{.Target = Color.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::RenderTarget},
             render::BarrierTextureDescriptor{.Target = Depth.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::DepthWrite}};
         commands->ResourceBarrier(std::span{barriers, depth ? 2u : 1u});
-        const render::ColorClearValue clear{{0, 0, 0, 1}};
-        return commands->BeginRenderPass({pass, framebuffer, std::span{&clear, 1}, depth ? std::optional{render::DepthStencilClearValue{clearDepth, 0}} : std::nullopt}).Unwrap().release();
+        return commands->BeginRenderPass(*token).Unwrap().release();
     }
     vector<uint8_t> Read(render::CommandBuffer* commands, render::GraphicsCommandEncoder* encoder) {
         commands->EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>{encoder});
@@ -348,12 +344,11 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
         const std::span<const byte> views[]{std::as_bytes(std::span{view})}, constants[]{std::as_bytes(std::span{tint})};
         auto parameters = Core.PrepareMaterial(context, *plan.Get(), material, {.Constants = constants, .Views = views});
         ASSERT_TRUE(parameters);
-        auto pass = Pass(false);
-        auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, pass,
+        auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList,
                                              {16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}});
         ASSERT_TRUE(pipeline);
         auto* commands = Frame->AllocateCommandBuffer();
-        auto* encoder = Start(commands, pass, false);
+        auto* encoder = Start(commands, false);
         Draw(pipeline.Get()).Record(encoder, *parameters);
         commands->EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>{encoder});
         const render::ResourceBarrierDescriptor source = render::BarrierTextureDescriptor{.Target = Color.get(), .Before = render::TextureState::RenderTarget, .After = render::TextureState::CopySource};
@@ -365,6 +360,8 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
         uint32_t presents = 0;
         render::SwapChainStatus status = render::SwapChainStatus::Error;
         auto target = Frame->AdoptSwapChainFrame(chain.get(), std::move(*acquired.Frame), [this] { return IsWindowVisible(Window) != 0; }, [&](render::SwapChainPresentResult result) { ++presents; status = result.Status; });
+        bool outputSubmitted = !hide;
+        target.OnOutput = [&](const AppFrameOutputResult& result) { outputSubmitted = result.CommandsSubmitted; };
         auto* output = Frame->AllocateCommandBuffer();
         const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{.Target = target.BackBuffer, .Before = render::TextureState::Present, .After = render::TextureState::CopyDestination};
         output->ResourceBarrier(std::span{&before, 1});
@@ -373,7 +370,8 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
         output->ResourceBarrier(std::span{&after, 1});
         Frame->ReturnCommandBuffers({.CmdBuffers = std::span{&output, 1}}, std::move(target));
         if (hide) ShowWindow(Window, SW_HIDE);
-        Complete();
+        Complete(!hide);
+        EXPECT_EQ(outputSubmitted, !hide);
         EXPECT_EQ(presents, 1u);
         EXPECT_EQ(status, hide ? render::SwapChainStatus::RetryLater : render::SwapChainStatus::Success);
         auto* pixels = static_cast<const uint8_t*>(Readback->Map(0, 4096));
@@ -434,18 +432,17 @@ void RasterDraw::Mixed(bool arrays) {
     EXPECT_FALSE(Core.PrepareMaterial(context, *badPlan.Get(), material, values));
     auto parameters = Core.PrepareMaterial(context, *plan.Get(), material, values);
     ASSERT_TRUE(parameters);
-    auto nativePass = Pass(false);
     const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
-    auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, nativePass, output);
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, output);
     ASSERT_TRUE(pipeline);
-    auto* encoder = Start(commands, nativePass, false);
+    auto* encoder = Start(commands, false);
     auto draw = Draw(pipeline.Get());
     draw.Record(encoder, *parameters);
     tint[0] = 0.25f;
     auto second = Core.PrepareMaterial(context, *plan.Get(), material, values);
     ASSERT_TRUE(second);
     EXPECT_NE(second->Groups.back().Parameters, parameters->Groups.back().Parameters);
-    EXPECT_EQ(Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, nativePass, output).Get(), pipeline.Get());
+    EXPECT_EQ(Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, output).Get(), pipeline.Get());
     EXPECT_EQ(Renderer->GetGraphicsPipelineCache().GetSize(), 1u);
     auto indices = Gpu->GetDevice()->CreateBuffer({12, render::MemoryType::Upload, render::BufferUse::Index | render::BufferUse::MapWrite}).Unwrap();
     const uint32_t triangle[]{0, 1, 2};
@@ -489,7 +486,7 @@ void RasterDraw::Mixed(bool arrays) {
     EXPECT_EQ(original->Groups.back().Parameters, restored->Groups.back().Parameters);
     EXPECT_NE(original->Groups.back().Parameters, samplerOverride->Groups.back().Parameters);
     commands = Frame->AllocateCommandBuffer();
-    encoder = Start(commands, nativePass, false);
+    encoder = Start(commands, false);
     draw.Indices.reset();
     draw.Scissor = {0, 0, 5, 16};
     draw.Record(encoder, *textureOverride);
@@ -519,9 +516,8 @@ void RasterDraw::DepthStates(bool reverse) {
     ASSERT_TRUE(plan);
     Begin();
     auto context = MakePipelineContext(*Renderer, *Frame);
-    auto nativePass = Pass(true);
     auto* commands = Frame->AllocateCommandBuffer();
-    auto* encoder = Start(commands, nativePass, true, reverse ? 0.0f : 1.0f);
+    auto* encoder = Start(commands, true, reverse ? 0.0f : 1.0f);
     const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, render::TextureFormat::D32_FLOAT};
     for (uint32_t i = 0; i < 4; ++i) {
         pass.DepthStencil->DepthWriteEnable = i >= 2;
@@ -529,7 +525,7 @@ void RasterDraw::DepthStates(bool reverse) {
         const std::span<const byte> views[]{std::as_bytes(std::span{view})}, constants[]{std::as_bytes(std::span{tint})};
         auto parameters = Core.PrepareMaterial(context, *plan.Get(), material, {.Constants = constants, .Views = views});
         ASSERT_TRUE(parameters);
-        auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, nativePass, output);
+        auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, output);
         ASSERT_TRUE(pipeline);
         Draw(pipeline.Get()).Record(encoder, *parameters);
     }
@@ -612,17 +608,14 @@ void RasterDraw::Instances() {
     wrong = objects->Parameters;
     wrong[0].Values.StructureByteStride = 32;
     EXPECT_FALSE(Core.PrepareMaterial(context, *plan.Get(), material, {.Views = views, .Parameters = wrong}));
-    auto* pass = Pass(false);
     RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
-    auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, pass, output);
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, output);
     ASSERT_TRUE(pipeline);
     auto* command = Frame->AllocateCommandBuffer();
-    auto* encoder = Start(command, pass, false);
+    auto* encoder = Start(command, false);
     auto draw = Draw(pipeline.Get());
     draw.Record(encoder, *prepared);
-    const auto serial = Frame->FrameSerial();
     auto pixels = Read(command, encoder);
-    mirror.Complete(0, serial, true, scene);
     EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4], 255);
     EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4 + 1], 0);
 }
@@ -678,11 +671,10 @@ void RasterDraw::PersistentDefaults(bool pure) {
                 auto restored = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu}, {.Views = views});
                 ASSERT_TRUE(restored);
                 const auto output = RenderOutputInfo{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
-                auto* pass = Pass(false);
-                auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, pass, output);
+                auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, output);
                 ASSERT_TRUE(pipeline);
                 auto* commands = Frame->AllocateCommandBuffer();
-                auto* encoder = Start(commands, pass, false);
+                auto* encoder = Start(commands, false);
                 auto draw = Draw(pipeline.Get());
                 draw.Scissor.Width = 8;
                 draw.Record(encoder, *changed);
@@ -721,7 +713,8 @@ void RasterDraw::ProbePersistentGroups() {
     ASSERT_TRUE(plan);
     for (uint32_t frame = 0; frame < 100; ++frame) {
         Begin(frame % 3);
-        GpuFrameResources resources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+        GpuFrameResources resources{&device};
+        resources.BeginEpoch();
         auto native = MakePipelineContext(renderer, *Frame);
         PipelineContext context{renderer, native.Frame, native.Commands, resources};
         for (uint32_t view = 0; view < 3; ++view) {
@@ -729,7 +722,9 @@ void RasterDraw::ProbePersistentGroups() {
             const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
             ASSERT_TRUE(core.PrepareMaterial(context, *plan.Get(), data, {.Views = views}, owner.get()));
         }
+        resources.SealEpoch();
         Complete();
+        resources.CompleteEpoch();
         EXPECT_EQ(counts.Groups[1].Created, 1u);
         EXPECT_EQ(counts.Groups[1].Set, 1u);
         EXPECT_EQ(counts.Groups[1].Flush, 1u);
@@ -753,7 +748,8 @@ void RasterDraw::ProbePersistentGroups() {
         ASSERT_TRUE(mixedPlan);
         Begin();
         auto nativeContext = MakePipelineContext(renderer, *Frame);
-        GpuFrameResources multiResources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+        GpuFrameResources multiResources{&device};
+        multiResources.BeginEpoch();
         PipelineContext multiContext{renderer, nativeContext.Frame, nativeContext.Commands, multiResources};
         const array<float, 4> camera{.5f, 0, 0, 0};
         const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
@@ -764,7 +760,9 @@ void RasterDraw::ProbePersistentGroups() {
         EXPECT_EQ(pureBinding->Groups.size(), 2u);
         EXPECT_EQ(mixedBinding->Groups.size(), 1u);
         EXPECT_NE(purePlan->Program->GetPipelineLayout(), mixedPlan->Program->GetPipelineLayout());
+        multiResources.SealEpoch();
         Complete();
+        multiResources.CompleteEpoch();
     }
     const auto createdBeforeReplacement = counts.Groups[1].Created;
     RenderSystem other{&device};
@@ -773,7 +771,8 @@ void RasterDraw::ProbePersistentGroups() {
     auto foreign = otherCore.ResolveMaterial(other, data.Passes[0]);
     ASSERT_TRUE(foreign);
     Begin();
-    GpuFrameResources resources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+    GpuFrameResources resources{&device};
+    resources.BeginEpoch();
     auto native = MakePipelineContext(other, *Frame);
     PipelineContext context{other, native.Frame, native.Commands, resources};
     const array<float, 4> camera{.5f, 0, 0, 0};
@@ -788,16 +787,21 @@ void RasterDraw::ProbePersistentGroups() {
     ASSERT_EQ(counts.Groups[0].Created, frameSetsCreated);
     ASSERT_EQ(counts.Groups[0].Live, frameSetsLive);
     EXPECT_TRUE(preserved->Groups[0].Parameters->FlushWrites());
+    resources.SealEpoch();
     Complete();
+    resources.CompleteEpoch();
     renderer.OnShutdown();
     Begin();
     auto nextNative = MakePipelineContext(other, *Frame);
-    GpuFrameResources nextResources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+    GpuFrameResources nextResources{&device};
+    nextResources.BeginEpoch();
     PipelineContext nextContext{other, nextNative.Frame, nextNative.Commands, nextResources};
     ASSERT_TRUE(otherCore.PrepareMaterial(nextContext, *foreign.Get(), data, {.Views = views}, owner.get()));
     EXPECT_EQ(counts.Groups[1].Created, createdBeforeReplacement + 1);
     EXPECT_EQ(counts.Groups[1].Live, 1u);
+    nextResources.SealEpoch();
     Complete();
+    nextResources.CompleteEpoch();
     owner.reset();
     EXPECT_EQ(counts.Groups[1].Live, 0u);
 }
@@ -823,8 +827,7 @@ void RasterDraw::RetainedMaterial() {
     const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
     auto binding = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material->GetRenderData(), material->GetGpuState()}, {.Views = views});
     ASSERT_TRUE(binding);
-    auto* pass = Pass(false);
-    auto pipeline = Core.PreparePipeline(context, *plan.Get(), material->GetRenderData().Passes[0], {}, render::PrimitiveTopology::TriangleList, pass,
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), material->GetRenderData().Passes[0], {}, render::PrimitiveTopology::TriangleList,
                                          {16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}});
     ASSERT_TRUE(pipeline);
     material.Reset();
@@ -835,7 +838,7 @@ void RasterDraw::RetainedMaterial() {
         const render::ResourceBarrierDescriptor before = render::BarrierBufferDescriptor{.Target = Readback.get(), .Before = render::BufferState::Undefined, .After = render::BufferState::CopyDestination};
         commands->ResourceBarrier(std::span{&before, 1});
     }
-    auto* encoder = Start(commands, pass, false);
+    auto* encoder = Start(commands, false);
     Draw(pipeline.Get()).Record(encoder, *binding);
     const auto pixels = Read(commands, encoder);
     EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4], 255);
@@ -939,12 +942,11 @@ void RasterDraw::VisibleInstances() {
     auto prepared = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu},
                                          {.Views = views, .Objects = data.Data->Objects, .VisibleSlots = data.Data->VisibleSlots, .Parameters = data.Data->Parameters});
     ASSERT_TRUE(prepared);
-    auto* renderPass = Pass(false);
     const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
-    auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, renderPass, output);
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, output);
     ASSERT_TRUE(pipeline);
     auto* commands = Frame->AllocateCommandBuffer();
-    auto* encoder = Start(commands, renderPass, false);
+    auto* encoder = Start(commands, false);
     auto draw = Draw(pipeline.Get());
     draw.Push = pass.ScenePushValues;
     const uint32_t base = 1;
@@ -1036,7 +1038,7 @@ void RasterDraw::Batching() {
         const auto flight = Frame->FlightIndex();
         const auto serial = Frame->FrameSerial();
         Complete();
-        scenes.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = true, .FrameSerial = serial});
+        scenes.OnFlightCompletedGT({.FlightIndex = flight, .OutputsExecuted = true, .FrameSerial = serial});
     };
     SceneViewRequest view;
     view.Scene = sceneId;
@@ -1046,28 +1048,27 @@ void RasterDraw::Batching() {
     auto objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto context = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto* nativePass = Pass(false);
-    auto first = builder.Prepare(context, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    auto first = builder.Prepare(context, view, *objects, output, "Raster", &material, false, &gpuState);
     ASSERT_TRUE(first);
     ASSERT_EQ(first->Draws.size(), 1u);
     EXPECT_EQ(first->Draws[0].Draw.Instances, 10000u);
     EXPECT_EQ(first->Draws[0].Draw.FirstInstance, 0u);
-    const auto* templateAddress = builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[0]).data();
+    const auto* templateAddress = scenes.GetSceneRT(sceneId)->GetDrawPrimitives(ids[0]).data();
     for (uint32_t i = 1; i < 3; ++i) {
         auto other = view;
         other.View(0, 3) = float(i) * .05f;
-        const auto next = builder.Prepare(context, other, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+        const auto next = builder.Prepare(context, other, *objects, output, "Raster", &material, false, &gpuState);
         ASSERT_TRUE(next);
         EXPECT_EQ(next->Draws.size(), 1u);
         EXPECT_NE(next->Materials[0].Groups[0].Parameters, first->Materials[0].Groups[0].Parameters);
     }
-    const auto serial = Frame->FrameSerial();
     auto* commands = Frame->AllocateCommandBuffer();
-    auto* encoder = Start(commands, nativePass, false);
+    auto* encoder = Start(commands, false);
     first->Record(encoder);
+    const auto serial = Frame->FrameSerial();
     const auto pixels = Read(commands, encoder);
     EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4], 255);
-    scenes.OnFlightCompletedGT({.FlightIndex = 0, .GpuWorkCompleted = true, .FrameSerial = serial});
+    scenes.OnFlightCompletedGT({.FlightIndex = 0, .OutputsExecuted = true, .FrameSerial = serial});
     vector<ShapeTransformUpdate> updates;
     for (size_t i = 0; i < 5000; ++i) {
         transforms[i](0, 0) *= -1;
@@ -1078,8 +1079,8 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto splitContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    EXPECT_EQ(builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[0]).data(), templateAddress);
-    auto split = builder.Prepare(splitContext, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    EXPECT_EQ(scenes.GetSceneRT(sceneId)->GetDrawPrimitives(ids[0]).data(), templateAddress);
+    auto split = builder.Prepare(splitContext, view, *objects, output, "Raster", &material, false, &gpuState);
     ASSERT_TRUE(split);
     ASSERT_EQ(split->Draws.size(), 2u);
     EXPECT_EQ(split->Draws[0].Draw.Instances, 5000u);
@@ -1096,7 +1097,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto unmergedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto unmerged = builder.Prepare(unmergedContext, view, *objects, nativePass, output, "Raster", &disabled, false, &disabledGpu);
+    auto unmerged = builder.Prepare(unmergedContext, view, *objects, output, "Raster", &disabled, false, &disabledGpu);
     ASSERT_TRUE(unmerged);
     EXPECT_EQ(unmerged->Draws.size(), 9998u);
     EXPECT_EQ(unmerged->Stats.MaskCulled, 1u);
@@ -1109,7 +1110,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto rangedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto ranged = builder.Prepare(rangedContext, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    auto ranged = builder.Prepare(rangedContext, view, *objects, output, "Raster", &material, false, &gpuState);
     ASSERT_TRUE(ranged);
     EXPECT_EQ(ranged->Draws.size(), 6u);
     finish();
@@ -1120,7 +1121,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto explicitContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto explicitBatches = builder.Prepare(explicitContext, view, *objects, nativePass, output, "Raster", &disabled, false, &disabledGpu);
+    auto explicitBatches = builder.Prepare(explicitContext, view, *objects, output, "Raster", &disabled, false, &disabledGpu);
     ASSERT_TRUE(explicitBatches);
     EXPECT_EQ(explicitBatches->Draws.size(), 12u);
     EXPECT_EQ(explicitBatches->Stats.AutomaticDisabled, 0u);
@@ -1133,7 +1134,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto directContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto unsupported = builder.Prepare(directContext, view, *objects, nativePass, output, "Raster", &direct, false, &directGpu);
+    auto unsupported = builder.Prepare(directContext, view, *objects, output, "Raster", &direct, false, &directGpu);
     ASSERT_TRUE(unsupported);
     EXPECT_TRUE(unsupported->Draws.empty());
     EXPECT_EQ(unsupported->Stats.ExplicitUnsupported, 29994u);
@@ -1148,21 +1149,20 @@ void RasterDraw::Batching() {
     otherWriter->SetStaticMesh(otherId, mesh, transforms[2]);
     ASSERT_TRUE(otherWriter->SetInstanceParameters(otherId, *layout, whiteBytes));
     start(0);
-    const auto* originalTemplate = builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[2]).data();
+    const auto* originalTemplate = scenes.GetSceneRT(sceneId)->GetDrawPrimitives(ids[2]).data();
     auto alternateView = view;
     alternateView.Scene = otherScene;
     auto alternateObjects = scenes.PrepareSceneGpuRT(otherScene, *Frame);
     ASSERT_TRUE(alternateObjects);
     auto alternateContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto alternate = builder.Prepare(alternateContext, alternateView, *alternateObjects, nativePass, output, "Raster", &material, false, &gpuState);
+    auto alternate = builder.Prepare(alternateContext, alternateView, *alternateObjects, output, "Raster", &material, false, &gpuState);
     ASSERT_TRUE(alternate);
     ASSERT_EQ(alternate->Draws.size(), 1u);
     EXPECT_EQ(alternate->Draws[0].Draw.Instances, 1u);
-    EXPECT_EQ(builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[2]).data(), originalTemplate);
+    EXPECT_EQ(scenes.GetSceneRT(sceneId)->GetDrawPrimitives(ids[2]).data(), originalTemplate);
     finish();
     scenes.DestroySceneGT(otherScene);
     start(1);
-    builder.PruneScenes(scenes);
     EXPECT_FALSE(scenes.GetSceneRT(otherScene));
     auto emptyContext = MakePipelineContext(*Renderer, *Frame, &scenes);
     UnlitRenderPipeline emptyPipeline;
@@ -1180,7 +1180,7 @@ void RasterDraw::Batching() {
     alternateObjects = scenes.PrepareSceneGpuRT(reconnected, *Frame);
     ASSERT_TRUE(alternateObjects);
     auto replacedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto replaced = builder.Prepare(replacedContext, alternateView, *alternateObjects, nativePass, output, "Raster", &material, false, &gpuState);
+    auto replaced = builder.Prepare(replacedContext, alternateView, *alternateObjects, output, "Raster", &material, false, &gpuState);
     ASSERT_TRUE(replaced);
     EXPECT_EQ(replaced->Draws.size(), 3u);
     finish();
@@ -1200,7 +1200,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto transparentContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto transparent = builder.Prepare(transparentContext, view, *objects, nativePass, output, "Raster", nullptr, false);
+    auto transparent = builder.Prepare(transparentContext, view, *objects, output, "Raster", nullptr, false);
     ASSERT_TRUE(transparent);
     ASSERT_EQ(transparent->Draws.size(), 3u);
     EXPECT_EQ(transparent->Draws[0].Material, transparent->Draws[2].Material);
@@ -1214,7 +1214,7 @@ void RasterDraw::Batching() {
     objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
     ASSERT_TRUE(objects);
     auto sortedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
-    auto sorted = builder.Prepare(sortedContext, view, *objects, nativePass, output, "Raster", nullptr, false);
+    auto sorted = builder.Prepare(sortedContext, view, *objects, output, "Raster", nullptr, false);
     ASSERT_TRUE(sorted);
     ASSERT_EQ(sorted->Draws.size(), 3u);
     EXPECT_EQ(sorted->Draws[0].Material, transparent->Draws[1].Material);

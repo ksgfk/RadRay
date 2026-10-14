@@ -117,11 +117,6 @@ render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChai
     if (view != nullptr && backBufferView.BackBuffer == backBuffer) {
         return view;
     }
-    RenderSystem* renderSystem = _manager->GetRenderSystem();
-    render::RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
-    if (view != nullptr && registry != nullptr) {
-        registry->RemoveFramebuffersUsing(view);
-    }
     render::TextureDescriptor texDesc = backBuffer->GetDesc();
     render::TextureViewDescriptor viewDesc{
         .Target = backBuffer,
@@ -291,13 +286,6 @@ WindowOperationStatus AppWindow::UpdateSwapChain(std::optional<render::PresentMo
 }
 
 void AppWindow::ReleaseBackBufferViews() noexcept {
-    RenderSystem* renderSystem = _manager != nullptr ? _manager->GetRenderSystem() : nullptr;
-    render::RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
-    if (registry != nullptr) {
-        for (const BackBufferView& backBuffer : _backBufferViews) {
-            registry->RemoveFramebuffersUsing(backBuffer.View.get());
-        }
-    }
     _backBufferViews.clear();
 }
 

@@ -9,7 +9,7 @@ namespace radray::example {
 /// Example-owned fixed unlit pass. All bindings and pipelines survive frame recording.
 class SceneDraw {
 public:
-    bool Initialize(RenderSystem& renderer, render::Device* device, render::RenderPass* pass, render::TextureFormat format, uint32_t flights);
+    bool Initialize(RenderSystem& renderer, render::Device* device, render::TextureFormat format, uint32_t flights);
     bool Draw(SceneManager& scenes, AppFrameContext& frame, render::GraphicsCommandEncoder* encoder,
               const SceneViewRequest& request, const SceneGpuView& objects, uint32_t viewIndex, uint32_t width, uint32_t height);
 

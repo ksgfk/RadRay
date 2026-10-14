@@ -14,14 +14,12 @@ void RenderSystem::OnShutdown() noexcept {
     _persistentConstants.reset();
     _graphicsPipelines.reset();
     _shaderCache.reset();
-    _renderPassRegistry.reset();
 }
 bool RenderSystem::OnInitialize() {
     if (_generation && _generation->Alive) return false;
     _generation = make_shared<RenderServiceGeneration>();
     _persistentConstants = make_unique<PersistentCBufferArena>(_device);
     _graphicsPipelines = make_unique<GraphicsPipelineCache>(_device);
-    _renderPassRegistry = make_unique<render::RenderPassRegistry>(_device);
     _shaderCache = make_unique<ShaderProgramCache>(*_device, _shaderSourceRoot, _shaderIncludePaths);
     return true;
 }

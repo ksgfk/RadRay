@@ -287,6 +287,56 @@ TEST(WorldLifecycle, ParentDestructionCoversQueuedChildrenAndRejectsStaleIdentit
     EXPECT_EQ(world.DestroyActor(actorId), LifecycleRequestResult::Invalid);
 }
 
+TEST(WorldLifecycle, SingleActorDestructionPreservesOrderBeforeCallbacksAndReusesOnlyTheGeneration) {
+    for (size_t removedIndex : {0u, 2u, 4u}) {
+        SCOPED_TRACE(removedIndex);
+        LifecycleTrace deleted, survivors, components;
+        test::ScopedWorld world;
+        vector<ActorId> expected;
+        LifecycleActor* removed = nullptr;
+        for (size_t i = 0; i < 5; ++i) {
+            auto* actor = world.SpawnActor<LifecycleActor>(i == removedIndex ? deleted : survivors);
+            if (i == removedIndex)
+                removed = actor;
+            else
+                expected.push_back(actor->GetId());
+        }
+        ASSERT_NE(removed, nullptr);
+        const auto oldId = removed->GetId();
+        auto* component = removed->AddComponent<LifecycleProbe>(components);
+        const auto componentId = component->GetId();
+        const auto checkSurvivors = [&] {
+            ASSERT_EQ(world.GetActors().size(), expected.size());
+            for (size_t i = 0; i < expected.size(); ++i) EXPECT_EQ(world.GetActors()[i]->GetId(), expected[i]);
+            EXPECT_FALSE(world.FindLive(oldId));
+            EXPECT_FALSE(world.FindLive(componentId));
+        };
+        component->Unregister = [&](auto&) { checkSurvivors(); };
+        ActorId replacement;
+        removed->Destroy = [&](auto&) {
+            checkSurvivors();
+            replacement = world.SpawnActor<LifecycleActor>(survivors)->GetId();
+        };
+        ASSERT_EQ(world.DestroyActor(oldId), LifecycleRequestResult::Accepted);
+        world.FinalizeWorldGT();
+        EXPECT_EQ(deleted.Destroyed, 1u);
+        EXPECT_EQ(deleted.Freed, 1u);
+        EXPECT_EQ(components.Unregistered, 1u);
+        EXPECT_EQ(components.Freed, 1u);
+        EXPECT_EQ(replacement.Index, oldId.Index);
+        EXPECT_GT(replacement.Generation, oldId.Generation);
+        EXPECT_EQ(world.DestroyActor(oldId), LifecycleRequestResult::Invalid);
+        expected.push_back(replacement);
+        checkSurvivors();
+        world.Tick(0);
+        EXPECT_EQ(deleted.Ticks, 0u);
+        EXPECT_EQ(survivors.Ticks, 5u);
+        world.FinalizeWorldGT();
+        EXPECT_EQ(deleted.Destroyed, 1u);
+        EXPECT_EQ(deleted.Freed, 1u);
+    }
+}
+
 TEST(WorldLifecycle, DestructionCallbacksSeeCompactedSurvivorsAndMaySpawnDrops) {
     LifecycleTrace deleted, survivors, drops;
     test::ScopedWorld world;
@@ -612,21 +662,6 @@ TEST(WorldLifecycle, SchedulerFreezesItsBatchAndRevalidatesCanceledWaiters) {
     scheduler.BeginStopping();
     added.Spawn(addedTask());
     EXPECT_EQ(addedRuns, 1u);
-}
-
-TEST(WorldLifecycle, MissingCompletionFacilityKeepsDeferredOwnerUntilTerminalCleanup) {
-    uint32_t destroyed = 0;
-    struct Payload {
-        uint32_t* Count;
-        ~Payload() noexcept { ++*Count; }
-    };
-    {
-        AssetManager assets;
-        assets.DeferDestroy(make_unique<Payload>(&destroyed));
-        assets.Pump();
-        EXPECT_EQ(destroyed, 0u);
-    }
-    EXPECT_EQ(destroyed, 1u);
 }
 
 TEST(WorldLifecycleDeathTest, StoppingRejectsAssetProduction) {

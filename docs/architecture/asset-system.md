@@ -71,7 +71,7 @@ GUID 为身份（一次分配、永不改变），散文件继续走这里的路
 的单 slot 表，互不迁移。本地资产位于被忽略的顶层 `assets/`，通过源码仓库外的渠道分发；
 shaderlib 与显式测试资源可使用路径哈希轨。
 
-## GPU 使用者保活与保守迁移
+## GPU 使用者保活
 
 零引用只在 S0 的候选批次卸载，Release 不就地调用任意 OnUnload。
 StaticMesh 的合法 GPU 使用由 SceneWriter 绑定/退休 owner 或 GpuSystem::RetainForFrameGT 覆盖；
@@ -82,11 +82,9 @@ StaticMesh 的合法 GPU 使用由 SceneWriter 绑定/退休 owner 或 GpuSystem
 用户 Wait 只提供完成通知，取消不代表 GPU 完成。原始 RHI 资源可以直接作为 RetainForFrameGT payload，
 不必包装为 Asset。终止前必须 drain 已发布使用，未发布 owner 只能 terminal abandon。
 
-TextureAsset 的外部 SRV 使用目前没有完整 producer 契约，保留 DeferDestroy 的保守等待作为明确迁移项。
-新 GPU 资产应优先建立全部使用者 owner；未完成审计的旧类型继续整包 DeferDestroy，不用 AlreadySafe 标志跳过等待。
-DeferDestroy 缺少 IWaitFrameProcessor 时保存 payload，等设施安装并 Pump 后再调度，绝不 log 后立即释放。
-Application 始终把 FrameTimeline 接到 AssetManager。等待何时恢复见[帧边界等待](frame-and-gpu.md#帧边界等待)。
-该保守路径只有 AssetManager 终止时才能取消内部等待，调用者必须事先完成 GPU drain。
+TextureAsset 的所有使用者遵守同一协议：Material 默认纹理由材质 asset 版本及 Scene 的 RenderAssetLifetime 保活；override、手工 draw 与 cached SRV 在 GT writable 域以 RetainForFrameGT 保留资产，RT 只读封存数据；原生 producer 与外部 immutable texture 持有明确 RHI owner 到实际完成。多个 attached host 分别登记自己的使用，任一宿主的 fence/serial 不替代另一宿主。
+
+TextureAsset::OnUnload 直接按子 views → 默认 SRV → shared texture 的顺序释放，没有额外 GPU 等待。AssetManager 不拥有 GPU retirement scope、pending payload 或 frame waiter 注入，加载与真正的 CPU/通知等待仍保留。框架完成已接纳使用后，最后资产引用归零才进入卸载候选；取消通知不能使在途 owner 归零。
 
 ## 现有资产
 
@@ -103,23 +101,21 @@ StaticMeshComponent 保存 mesh ref，SceneManager 中每个 SceneWriter 在 GT 
 render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
 回收沿用零引用队列，不引入另一套资产引用计数。
 
-`TextureAsset` 与 `StaticMesh` 均由构造方提供完整数据；两者的退休差异见上文。
+`TextureAsset` 与 `StaticMesh` 均由构造方提供完整数据；两者的使用者协议见上文。
 TextureAsset 支持接管 unique texture，也支持共享外部 immutable GPU texture；后一种方式仍由本资产
 独立拥有默认 SRV 与子 view 缓存。IsValid 核对 SRV 指向所持 texture，外部设备及 factory/environment
 须覆盖全部 shared owner 的寿命。共享实际 GPU 存储不复制像素，也不使 StreamingAssetRef 可跨线程。
-OnUnload 将 texture、默认 SRV 与缓存组成具有明确成员销毁顺序的延期 payload，先释放所有 views，
-再放开本资产的 texture shared owner；原外部 owner 可以独立释放或继续使用同一不可变资源。
+OnUnload 直接先释放全部 views，再放开本资产的 texture shared owner；原外部 owner 可以独立释放或继续使用同一不可变资源。
 内置网格/纹理 GPU 加载暂时移除，importer 返回明确失败，后续设计范围见
 [资产 GPU 上传待设计](frame-and-gpu.md#资产-gpu-上传待设计)。
 
 ## 关停顺序
 
 ```text
-WorldManager（全部 World）→ SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
+WorldManager（全部 World）→ SceneManager → GPU 帧参数资源 → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem
 ```
 
-WorldManager 先销毁各 World，拆除组件与 asset ref，SceneManager 释放常驻及退休资产引用；GpuSystem 清理借用 shader layout 的帧参数资源后，RenderSystem 释放 shader/program 与 RHI 缓存，AssetManager 再处理
-剩余 slot 和延迟 payload。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
+WorldManager 先销毁各 World，拆除组件与 asset ref，SceneManager 释放常驻及退休资产引用；GpuSystem 清理借用 shader layout 的帧参数资源后，AssetManager 释放借用 layout 的持久 MaterialGpuState，再由 RenderSystem 释放 shader/program 与 RHI 缓存。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
 完整时序见[关停顺序](frame-and-gpu.md#关停顺序)。
 关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。
 
@@ -129,7 +125,7 @@ WorldManager 先销毁各 World，拆除组件与 asset ref，SceneManager 释�
 2. 只有其他协议确实需要独立稳定类型标识时，才为 `RuntimeTypeTrait<T>` 生成新 GUID；对象查询
    不需要 GUID，也不声明基类图。
 3. 散文件写独占 namespace 的 `Make...AssetId`；入库类型实现 `AssetImporter` 并使用 manifest GUID。
-4. 为每个 GPU 使用者建立完整 owner/fence 覆盖；未迁移的保守路径整包 `DeferDestroy`；纯 CPU 数据留给析构。
+4. 为每个 GPU 使用者建立完整 owner/fence 覆盖；已接纳的使用结束后在 OnUnload 直接释放，views 必须先于底层存储。
 5. 在 `modules/runtime/tests/` 增加生命周期和 RTTI 视图测试，能不用 GPU 就不要创建 GPU。
 
 ## 测试

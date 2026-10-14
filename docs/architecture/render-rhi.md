@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明 schema 8 当前 RHI layout 契约、所有权与两个后端映射。上层使用方式见帧与 GPU 文档
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_render_pass_cache.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -404,18 +404,22 @@ ShaderProgramCache 仍持有旧 program，因此 source invalidation 本身不�
 ## 命令录制
 
 ```
-Device::CreateCommandBuffer(queue) → CommandBuffer
+Device::CreateCommandAllocator(queue) → CommandAllocator
+Device::CreateCommandBuffer(allocator) → CommandBuffer
   Begin() / End()
   ResourceBarrier(span<ResourceBarrierDescriptor>)
-  BeginRenderPass(...) → unique_ptr<GraphicsCommandEncoder>
-  EndRenderPass(unique_ptr<...>)          // 收回并销毁
+  PrepareRenderPass(附件描述) → 可空 token
+  BeginRenderPass(token) → unique_ptr<GraphicsCommandEncoder>
+  EndRenderPass(unique_ptr<...>)          // 结束，epoch 仍保留引用
   拷贝 / resolve / query
+CommandAllocator::Reset()                // 真实完成后结束旧 epoch
 ```
 
-D3D12 每个 `CommandBuffer` 自带一个 `ID3D12CommandAllocator`，`Begin()` 里 reset。
-Vulkan 每个 `CommandBufferVulkan` 独占一个 `CommandPoolVulkan`，`Begin()` reset 池并以
-`ONE_TIME_SUBMIT` 开始，且**把已结束的编码器存到 `_endedEncoders` 直到下次 `Begin`**——
-让编码器及它引用的 framebuffer 活到命令缓冲被重录。
+D3D12 的逻辑 `CommandAllocator` 保存可扩展的 native allocator 集合，命令在 Begin 借出一项；
+Vulkan 逻辑 allocator 拥有共享 command pool。Begin 不结束旧 epoch，重复借出命令前必须 Reset。
+两个后端的 allocator Reset 都要求全部录制关闭、GPU 使用结束；Vulkan 先 reset native pool，
+再清理 prepare token、已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时调用一次 Reset，
+下一次 BeginFrameRecord 不再次重置。
 
 graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
 带 `BufferUse::Indirect` 的参数；固定 count 和 count=0 的行为由 RHI 保持，RHI 不提供 GPU count
@@ -426,7 +430,7 @@ buffer。`CommandBuffer::ResolveTexture` 一次处理一个 mip 和连续 array 
 `RenderPassBeginDescriptor::AllowUavWrites` 是执行期开关，不属于 render pass/graphics PSO compatibility
 事实。D3D12 将它映射到
 [`D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES`](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_render_pass_flags)；
-Vulkan dynamic render-pass 路径不需要对应 begin flag，写阶段是否合法由 device capabilities 与 barrier
+Vulkan 传统 render-pass 路径不需要对应 begin flag，写阶段是否合法由 device capabilities 与 barrier
 契约控制。
 
 ## 资源状态：显式 barrier，无自动推导
@@ -448,6 +452,9 @@ aspects。采样 depth/stencil 默认只选 Depth，可显式选择 Stencil；DS
 D3D12 transition 按选中 plane 展开 mip/layer；stencil SRV 使用对应 plane 与 X24/X32 类型映射。
 Vulkan 当前采用 coupled depth/stencil layout，转换会扩大至两个 aspects；不启用独立 DS layouts 时
 这是 [Vulkan barrier 规范](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageMemoryBarrier.html) 的要求。
+DepthRead 的 Vulkan access mask 同时覆盖 attachment read/write：传统只读附件的 Store 操作仍使用
+depth/stencil write access，离开只读 pass 的 barrier 必须等待该操作；这不会允许 PSO 写入只读附件。
+该要求见 [VkAttachmentStoreOp](https://docs.vulkan.org/refpages/latest/refpages/source/VkAttachmentStoreOp.html)。
 `NormalizeSubresourceRange` 同时拒绝格式不具备的 aspect、零 count、越界和加法溢出。
 
 `BarrierTextureDescriptor::Range` 是纹理 barrier 范围的唯一来源，默认 `SubresourceRange::AllSub()`
@@ -512,6 +519,11 @@ Stage A 的 graph view 限制同 format；RHI 原有的格式 view 能力没有�
 `CommandQueueSubmitDescriptor` 一次表达三类同步：fence + value 对、`WaitToExecute`
 （acquire 信号量）、`ReadyToPresent`（present 信号量）。
 
+Vulkan 的 acquire wait 使用 `ALL_COMMANDS`。RHI 不限制 acquired image 的首次访问阶段，
+布局转换、transfer readback 与颜色附件访问都必须在 acquire 完成之后；不能只等待颜色/计算阶段。
+`RuntimeVulkanSwapChain.TransferFirstAcquirePreservesPresentedPixels` 先复制前次呈现的像素，
+再重新清除和呈现，验证这条传统同步路径。
+
 **两个后端在这里不对称，这是现状而非设计意图**：Vulkan 完整实现三类；D3D12 的 `Submit`
 只处理 fence，忽略两个 swapchain 同步槽，`AcquireNext` 也对它们传 `nullptr`——D3D12 靠
 DXGI 的 frame-latency waitable object 达到同一效果。
@@ -534,7 +546,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 已退休的 `oldSwapchain`。surface 的 `maxImageCount == 0` 表示没有上限，只应用最小值限制。
 
 `QueueVulkan::Submit` 始终提交单个 `VkSubmitInfo`，不再为同步验证插入前置空批次。
-多交换链与同队列 timeline 串联的疑似校验层问题、暂时注释的用例和恢复条件见
+多交换链与同队列 timeline 串联的旧校验层问题、已恢复用例和校验层版本门槛见
 [构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
 
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
@@ -571,33 +583,23 @@ front-face winding 的影响不同。相机侧因此保持后端无关（见
 新增一套 capability 检测或用户提示；扩展缺失时沿用现有 device-extension 校验和设备创建
 结果。
 
-## RenderPassRegistry：一个刻意不归一化的缓存
+## 直接附件与 Vulkan 原生缓存
 
-按 descriptor 内容去重 `RenderPass` 与 `Framebuffer`。属 render 层是因为它只依赖 `rhi.h`，
-同层已有 `SamplerCache` 做同一件事。
+公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
-**这里不做归一化。** `ColorAttachments` 的下标**就是**渲染目标槽位
-（D3D12 的 RTV 序号 / Vulkan 的 `pAttachments` 下标），交换两个附件得到的是一个不同的
-render pass。所以 key 保持原序，哈希也按顺序喂入。这是最容易被后来者"顺手排个序"改坏的
-地方，`RenderPassRegistryTest` 专门盯它。
+PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；只读 scope 仍要求 PSO 关闭写入。
 
-**不做引用计数**：RenderPass 与 Framebuffer 没有跨资产共享的持有者，只有帧内正在录制的
-命令缓冲在用。故缓存独占所有权，析构即销毁。
+CommandBuffer::PrepareRenderPass 在 recording 且无 encoder 时准备原生对象，失败返回空，不录制半个 pass。返回 token 绑定 command 地址、record epoch 与准备索引，不能跨 command 或 Reset 使用。BeginRenderPass(token) 只使用已准备对象；直接 desc 重载是一次 Prepare/Begin 的便利路径。D3D12 在首次准备附件时分配该命令的 native attachment 状态，纯 copy 命令不分配或重置它；局部 area 的 clear 先用带 rect 的 Clear 再进入 preserve 的 native pass。Vulkan 使用 renderArea。
 
-**唯一需要调用方配合的约定**：`Framebuffer` 存的是 `TextureView` 裸指针，所以 view 销毁前
-必须调 `RemoveFramebuffersUsing(view)` 把引用它的 framebuffer 摘掉。交换链尺寸变化时重建
-后备缓冲 view 就走这条路。它返回摘除条目数，便于确认真的清到了东西。
+VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、depth read-only；depth-only 格式规范化无 stencil 的操作。framebuffer key 包含有序稳定 view ID、兼容签名及 extent/layers，不依赖某个 load/store 版本的 pass 指针。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
 
-其余约定：`Clear()` 先清 framebuffer 再清 pass（反序会留下"pass 已死而 framebuffer 还在"的
-窗口）；`ClearFramebuffers()` 只清 framebuffer，因为 pass 不引用 view，尺寸变化无需重建；
-`Clear()` 不置空 `_device`，清完可继续用；`GetOrCreateFramebuffer` 的 `desc.Pass` 必须来自
-同一个 registry。
+每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、Return、CPU Submit 和取消通知都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶明确准备失败。缓存清理不等待 GPU idle。
 
-`RenderPassDepthStencilAttachmentDescriptor::ReadOnly` 表示整个 depth/stencil attachment 只读，要求
-已有 aspect 使用 Load/Store，framebuffer view 的 usage 必须对应 DepthRead；可写 pass 使用 DepthWrite。
-完整 render pass key 包含此标志。D3D12 BeginRenderPass 设置只读 depth/stencil flags；Vulkan attachment
-reference 与 initial/final layout 使用与 DepthRead barrier 一致的只读 layout。PSO 的 attachment 兼容 key
-仍只包含格式和 sample count；调用方必须同时关闭 PSO 的 depth/stencil 写入。
+view ID 在该 device 内单调且不复用。view 析构按局部 reverse index 先检查所有相关 FB 没有 command use，再同步移除闲置 FB，最后调用 vkDestroyImageView。mutex 串行化 acquire/release/invalidate/trim，允许同 device 的多个独立宿主共同计数；缓存不持有业务 texture/view 或 device shared owner。
+
+运行基线为 Vulkan 1.2 与 timelineSemaphore，不启用 dynamic rendering、imagelessFramebuffer、separateDepthStencilLayouts 或 synchronization2。depth-only 也使用 core depth/stencil layout，VMA 和 instance 使用 1.2；shader 编译策略的默认 SPIR-V target environment 同样为 Vulkan1_2。
+
+ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。generation 是有效性标记，不能替代 layout/provider 的 native 寿命。
 
 ## 两个后端实现文件的分区
 
@@ -609,7 +611,7 @@ Grep "^// == " modules/render/src/d3d12/d3d12_impl.cpp
 ```
 
 两份实现的大致顺序一致：辅助函数与适配器/物理设备选择 → 描述符堆与分配器 → 环境对象与
-device 创建 → 各 `CreateXxx`（buffer/texture/view → renderpass/framebuffer/shader →
+device 创建 → 各 `CreateXxx`（buffer/texture/view → shader →
 pipeline layout → parameter set → PSO/sampler）→ queue 与 fence → command buffer 与
 barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
@@ -635,8 +637,7 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
 | 套件 | 覆盖 |
 |---|---|
-| `RenderPassCacheKeyTest` | key 顺序语义、`unordered_map` 契约、descriptor 回读 |
-| `FramebufferCacheKeyTest` | 同上，外加 `References` 反查 |
-| `RenderPassRegistryTest` | 去重命中、计数、`RemoveFramebuffersUsing` 摘除 |
+| `RenderScopeKeys` | clear/load、attachment 顺序、兼容签名、无 stencil 规范化 |
+| `Backends/RenderScopeTest` | prepare token、GPU readback、局部 area、Vulkan 引用/预算/view 清理 |
 
 无可用 device 时测试 SKIP 而非 FAIL。

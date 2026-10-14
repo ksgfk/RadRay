@@ -37,8 +37,6 @@ class BufferD3D12;
 class QueryPoolD3D12;
 class TextureD3D12;
 class TextureViewD3D12;
-class RenderPassD3D12;
-class FramebufferD3D12;
 class RootSigD3D12;
 class ShaderParameterSetD3D12;
 class GraphicsPsoD3D12;
@@ -355,10 +353,6 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept override;
-
-    Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept override;
-
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
@@ -528,7 +522,9 @@ public:
 
     void PopDebugGroup() noexcept override;
 
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
+    using CommandBuffer::BeginRenderPass;
+    std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -568,6 +564,21 @@ public:
     ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
+    struct ReadyScope {
+        AttachmentSignature Signature;
+        vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> Colors;
+        std::optional<D3D12_RENDER_PASS_DEPTH_STENCIL_DESC> Depth;
+        D3D12_RENDER_PASS_FLAGS Flags{D3D12_RENDER_PASS_FLAG_NONE};
+        std::optional<D3D12_RECT> Area;
+        vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> RectClears;
+        D3D12_CLEAR_FLAGS DepthClearFlags{};
+        D3D12_CLEAR_VALUE DepthClear{};
+    };
+    struct RenderPassState {
+        ComPtr<ID3D12GraphicsCommandList4> List;
+        uint64_t Epoch{1};
+        vector<ReadyScope> ReadyScopes;
+    };
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
     // zones open only outside one, and pops issued while a render pass is recording are deferred to
@@ -578,6 +589,7 @@ public:
     uint32_t _deferredZonePops{0};
     uint32_t _suppressedZonePushes{0};
 #endif
+    unique_ptr<RenderPassState> _renderPass;
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
@@ -622,6 +634,9 @@ public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
+
+public:
+    AttachmentSignature _attachmentSignature;
 };
 
 class CmdComputePassD3D12 final : public ComputeCommandEncoder {
@@ -785,6 +800,8 @@ public:
 
     TextureDescriptor GetDesc() const noexcept override;
 
+    Device* GetDevice() const noexcept override { return _device; }
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _tex;
@@ -820,44 +837,6 @@ public:
     CpuDescriptorHeapViewRAII _heapView;
     TextureViewDescriptor _desc;
     DXGI_FORMAT _rawFormat;
-};
-
-class RenderPassD3D12 final : public RenderPass {
-public:
-    explicit RenderPassD3D12(const RenderPassDescriptor& desc);
-    ~RenderPassD3D12() noexcept override = default;
-
-    bool IsValid() const noexcept override;
-    void Destroy() noexcept override;
-    void SetDebugName(std::string_view name) noexcept override;
-    RenderPassDescriptor GetDesc() const noexcept override;
-
-public:
-    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
-    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
-    string _name;
-    bool _valid{true};
-};
-
-class FramebufferD3D12 final : public Framebuffer {
-public:
-    explicit FramebufferD3D12(const FramebufferDescriptor& desc);
-    ~FramebufferD3D12() noexcept override = default;
-
-    bool IsValid() const noexcept override;
-    void Destroy() noexcept override;
-    void SetDebugName(std::string_view name) noexcept override;
-    FramebufferDescriptor GetDesc() const noexcept override;
-
-public:
-    RenderPass* _pass{nullptr};
-    vector<TextureView*> _colorAttachments;
-    TextureView* _depthStencilAttachment{nullptr};
-    uint32_t _width{0};
-    uint32_t _height{0};
-    uint32_t _layers{1};
-    string _name;
-    bool _valid{true};
 };
 
 class Dxil final : public Shader {
@@ -1091,6 +1070,7 @@ public:
     ComPtr<ID3D12PipelineState> _pso;
     std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _vertexStrides{};
     D3D12_PRIMITIVE_TOPOLOGY _topo;
+    AttachmentSignature _attachmentSignature;
 };
 
 class ComputePsoD3D12 final : public ComputePipelineState {
@@ -1142,8 +1122,6 @@ constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3
 constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
 constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
-constexpr auto CastD3D12Object(RenderPass* v) noexcept { return static_cast<RenderPassD3D12*>(v); }
-constexpr auto CastD3D12Object(Framebuffer* v) noexcept { return static_cast<FramebufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandAllocator* v) noexcept { return static_cast<CommandAllocatorD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }

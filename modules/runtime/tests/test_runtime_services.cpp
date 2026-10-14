@@ -68,7 +68,7 @@ protected:
 
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
         if (completion.FrameSerial != 1 || !_readback) return;
-        ASSERT_TRUE(completion.GpuWorkCompleted);
+        ASSERT_TRUE(completion.OutputsExecuted);
         ScopedBufferMap map{_readback.get(), {0, sizeof(uint32_t)}};
         ASSERT_TRUE(map);
         _readback->InvalidateMappedRange({0, sizeof(uint32_t)});

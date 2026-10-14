@@ -5,7 +5,7 @@
 
 namespace radray::example {
 
-bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, render::RenderPass* pass, render::TextureFormat format, uint32_t flights) {
+bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, render::TextureFormat format, uint32_t flights) {
     auto program = renderer.GetOrCreateShaderProgram({.SourceName = "scene_sync.hlsl"});
     if (!program) return false;
     auto* layout = program->GetPipelineLayout();
@@ -31,8 +31,7 @@ bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, rende
                                                              .Primitive = primitive,
                                                              .DepthStencil = std::nullopt,
                                                              .MultiSample = render::MultiSampleState::Default(),
-                                                             .ColorTargets = std::span{&color, 1},
-                                                             .CompatibleRenderPass = pass});
+                                                             .ColorTargets = std::span{&color, 1}});
         if (!pipeline) return false;
         _pipelines[reverse] = pipeline.Release();
     }
@@ -107,13 +106,14 @@ unique_ptr<StaticMesh> CreateCube(GpuSystem& gpu) {
     auto commands = device->CreateCommandBuffer(commandsStorage.Get());
     auto fence = device->CreateFence();
     if (!commands || !fence) return nullptr;
-    ResourceUploader uploader{device, 1};
+    StagingBufferPool staging{device};
+    ResourceUploader uploader{device, staging};
     HostWriteBatch writes;
-    uploader.BeginFlight(0, writes);
+    staging.BeginEpoch(writes);
     commands->Begin();
     auto geometry = uploader.UploadMeshResource(commands.Get(), cpu);
     commands->End();
-    uploader.EndFlight(0);
+    staging.SealEpoch();
     if (!geometry) return nullptr;
     writes.Flush(*device);
     auto* commandPtr = commands.Get();
@@ -121,7 +121,7 @@ unique_ptr<StaticMesh> CreateCube(GpuSystem& gpu) {
     uint64_t signal = 1;
     gpu.GetMainQueue()->Submit({.CmdBuffers = std::span{&commandPtr, 1}, .SignalFences = std::span{&fencePtr, 1}, .SignalValues = std::span{&signal, 1}});
     fence->Wait(signal);
-    uploader.CollectFlight(0);
+    staging.CompleteEpoch();
     return make_unique<StaticMesh>(std::move(cpu), vector<StaticMeshSection>{}, Eigen::Vector3f{-0.5f, -0.5f, -0.5f}, Eigen::Vector3f{0.5f, 0.5f, 0.5f}, std::move(*geometry));
 }
 

@@ -10,9 +10,9 @@ void radray::benchmarking::RegisterSceneGpuBenchmarks() {
         uint32_t Changes;
         Load Kind;
     };
-    const radray::array<Scenario, 8> scenarios{{{"changed:0", 0, Load::Transforms}, {"changed:1", 1, Load::Transforms}, {"changed:100", 100, Load::Transforms}, {"changed:10000", 10000, Load::Transforms}, {"parent", 1, Load::Parent}, {"churn", 10, Load::Churn}, {"first_use", 0, Load::FirstUse}, {"growth", 0, Load::Growth}}};
+    const radray::array<Scenario, 9> scenarios{{{"changed:0", 0, Load::Transforms}, {"changed:1", 1, Load::Transforms}, {"changed:100", 100, Load::Transforms}, {"changed:10000", 10000, Load::Transforms}, {"parent", 1, Load::Parent}, {"churn", 10, Load::Churn}, {"first_use", 0, Load::FirstUse}, {"growth", 0, Load::Growth}, {"once", 1, Load::Once}}};
     for (auto backend : {radray::render::RenderBackend::D3D12, radray::render::RenderBackend::Vulkan})
-        for (uint32_t flights : {1u, 2u, 3u})
+        for (uint32_t flights : {1u, 2u, 3u, 4u})
             for (const auto scenario : scenarios)
                 for (uint32_t views : {1u, 3u})
                     for (uint32_t phase = 0; phase < 3; ++phase) {
@@ -51,11 +51,19 @@ void radray::benchmarking::RegisterSceneGpuBenchmarks() {
                                 workload.Submit(frame);
                                 if (phase == 1) state.ResumeTiming();
                             }
+                            const auto pendingUsage = workload.GetNativeAllocatorUsage();
                             workload.Drain();
+                            const auto idleUsage = workload.GetNativeAllocatorUsage();
+                            state.counters["native_block_bytes"] = double(idleUsage[0]);
+                            state.counters["native_allocation_bytes"] = double(idleUsage[1]);
+                            state.counters["native_block_count"] = double(idleUsage[2]);
+                            state.counters["native_allocation_count"] = double(idleUsage[3]);
+                            state.counters["native_allocation_bytes_pending"] = double(pendingUsage[1]);
                             if (!workload.Error().empty()) state.SkipWithError(workload.Error());
                             state.counters["upload_bytes/frame"] = double(workload.UploadedBytes) / state.iterations();
                             state.counters["upload_ranges/frame"] = double(workload.UploadRanges) / state.iterations();
                             state.counters["gpu_ms/frame"] = workload.GpuMilliseconds / state.iterations();
+                            state.counters["scene_buffer_bytes"] = double(workload.GetSceneAllocatedBytes());
                             state.SetItemsProcessed(state.iterations());
                         })->UseRealTime()
                             ->Unit(benchmark::kMicrosecond);

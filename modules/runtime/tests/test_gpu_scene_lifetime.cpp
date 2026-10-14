@@ -92,7 +92,7 @@ void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, b
     GpuSystem& gpu = *gpuOwner;
     FrameWaitProbe assetWaits{timeline};
     AssetManager assets;
-    assets.SetWaitFrameProcessor(&assetWaits);
+
     Application app;
     SceneManager renderer{2};
     test::ScopedWorld world;
@@ -120,17 +120,16 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
     auto program = ShaderProgram::Create(device, std::move(*artifact)).Unwrap();
     auto image = render::test::MakeRenderTarget(device, format, width, height, render::TextureUse::RenderTarget | render::TextureUse::CopySource);
     ASSERT_TRUE(image);
-    const render::RenderPassColorAttachmentDescriptor attachment{.Format = format, .SampleCount = 1, .Load = render::LoadAction::Clear, .Store = render::StoreAction::Store};
-    auto pass = device->CreateRenderPass({.ColorAttachments = std::span{&attachment, 1}}).Unwrap();
+
     render::TextureView* views[]{image->View.get()};
-    auto framebuffer = device->CreateFramebuffer({.Pass = pass.get(), .ColorAttachments = views, .Width = width, .Height = height, .Layers = 1}).Unwrap();
+
     const render::VertexBufferLayout vertexLayout{.Binding = 0, .ArrayStride = 12, .StepMode = render::VertexStepMode::Vertex};
     const render::VertexAttribute attribute{.BufferBinding = 0, .Semantic = "POSITION", .Format = render::VertexFormat::FLOAT32X3, .Location = 0};
     const render::VertexInputState input{.Buffers = std::span{&vertexLayout, 1}, .Attributes = std::span{&attribute, 1}};
     const auto color = render::ColorTargetState::Default(format);
     auto primitive = render::PrimitiveState::Default();
     primitive.Cull = render::CullMode::None;
-    auto pso = device->CreateGraphicsPipelineState({.PipelineLayout = program->GetPipelineLayout(), .VS = program->GetStage(shader::ShaderStage::Vertex), .PS = program->GetStage(shader::ShaderStage::Pixel), .VertexInput = input, .Primitive = primitive, .DepthStencil = std::nullopt, .MultiSample = render::MultiSampleState::Default(), .ColorTargets = std::span{&color, 1}, .CompatibleRenderPass = pass.get()}).Unwrap();
+    auto pso = device->CreateGraphicsPipelineState({.PipelineLayout = program->GetPipelineLayout(), .VS = program->GetStage(shader::ShaderStage::Vertex), .PS = program->GetStage(shader::ShaderStage::Pixel), .VertexInput = input, .Primitive = primitive, .DepthStencil = std::nullopt, .MultiSample = render::MultiSampleState::Default(), .ColorTargets = std::span{&color, 1}}).Unwrap();
     const array<float, 9> vertices{0, 0.8f, 0, -0.8f, -0.8f, 0, 0.8f, -0.8f, 0};
     const array<uint32_t, 3> indices{0, 1, 2};
     MeshResource cpu;
@@ -179,7 +178,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
         const render::ResourceBarrierDescriptor toTarget = render::BarrierTextureDescriptor{.Target = image->Tex.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::RenderTarget};
         commands->ResourceBarrier(std::span{&toTarget, 1});
         const render::ColorClearValue clear{{0, 0, 0, 1}};
-        auto encoder = commands->BeginRenderPass({.Pass = pass.get(), .Target = framebuffer.get(), .ColorClearValues = std::span{&clear, 1}}).Unwrap();
+        auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{views[0], render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, width, height, 1}).Unwrap();
         encoder->SetViewport({0, 0, float(width), float(height), 0, 1});
         encoder->SetScissor({0, 0, width, height});
         encoder->BindGraphicsPipelineState(pso.get());
@@ -224,12 +223,22 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
         ASSERT_TRUE(released);
     }
     ASSERT_TRUE(gpu.CompleteFlightIfReady(0, true));
-    const FlightCompletion drawn{.FlightIndex = 0, .GpuWorkCompleted = true, .FrameSerial = drawSerial};
+    const FlightCompletion drawn{.FlightIndex = 0, .OutputsExecuted = true, .FrameSerial = drawSerial};
     renderer.OnFlightCompletedGT(drawn);
+    {
+        FlightCompletion notification;
+        while (timeline.TryReadCompletion(notification)) {
+        }
+    }
     gpu.ReleaseFrameResourcesGT(drawn);
     ASSERT_TRUE(gpu.CompleteFlightIfReady(1, true));
-    const FlightCompletion removed{.FlightIndex = 1, .GpuWorkCompleted = false, .FrameSerial = removal.FrameSerial()};
+    const FlightCompletion removed{.FlightIndex = 1, .OutputsExecuted = false, .FrameSerial = removal.FrameSerial()};
     renderer.OnFlightCompletedGT(removed);
+    {
+        FlightCompletion notification;
+        while (timeline.TryReadCompletion(notification)) {
+        }
+    }
     gpu.ReleaseFrameResourcesGT(removed);
     assets.Pump();
     EXPECT_EQ(lifetime.AssetsDestroyed, 1u);
@@ -320,6 +329,11 @@ void RunUploadCancellation(render::RenderBackend backend) {
         EXPECT_FALSE(gpu.CompleteFlightIfReady(0, false));
         EXPECT_TRUE(SignalGate(*gate, backend));
         EXPECT_TRUE(gpu.CompleteFlightIfReady(0, true));
+        {
+            FlightCompletion notification;
+            while (timeline.TryReadCompletion(notification)) {
+            }
+        }
         gpu.ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = frame.FrameSerial()});
         EXPECT_EQ(destroyed, 1u);
         ScopedBufferMap map{readback.get(), {0, 4}};

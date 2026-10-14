@@ -206,7 +206,8 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
         access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::DepthRead)) {
-        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        // Traditional read-only attachments still perform store operations with write access.
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::DepthWrite)) {
         access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;

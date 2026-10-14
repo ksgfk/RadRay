@@ -137,15 +137,25 @@ void World::PrepareLifecycle() {
             if (auto actor = ResolveIncludingPending(id)) actor->_lifecycle = ObjectLifecycle::Destroying;
         }
     }
-    if (!_executing.Actors.empty() || _lifecycle == ObjectLifecycle::Destroying) {
-        std::erase_if(_actors, [this](auto& owner) {
+    const auto retire = [this](auto& owner) {
+        RemoveTicking(*owner);
+        const auto id = owner->GetId();
+        if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Actor generation exhausted");
+        _actorIds.Destroy({id.Index, id.Generation});
+        owner->PrepareComponentTeardown();
+        _retiredActors.push_back(std::move(owner));
+    };
+    if (_lifecycle != ObjectLifecycle::Destroying && _executing.Actors.size() == 1) {
+        if (const auto actor = ResolveIncludingPending(_executing.Actors.front())) {
+            const auto owner = std::find_if(_actors.begin(), _actors.end(), [&](const auto& entry) { return entry.get() == actor.Get(); });
+            if (owner == _actors.end()) RADRAY_ABORT("Registered Actor is missing its owner");
+            retire(*owner);
+            _actors.erase(owner);
+        }
+    } else if (!_executing.Actors.empty() || _lifecycle == ObjectLifecycle::Destroying) {
+        std::erase_if(_actors, [&](auto& owner) {
             if (owner->_lifecycle != ObjectLifecycle::Destroying) return false;
-            RemoveTicking(*owner);
-            const auto id = owner->GetId();
-            if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Actor generation exhausted");
-            _actorIds.Destroy({id.Index, id.Generation});
-            owner->PrepareComponentTeardown();
-            _retiredActors.push_back(std::move(owner));
+            retire(owner);
             return true;
         });
     }

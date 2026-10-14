@@ -16,7 +16,6 @@ namespace radray {
 
 class AssetManager;
 class AssetWaitAwaitable;
-class IWaitFrameProcessor;
 class StreamingAssetRefAny;
 
 template <class T>
@@ -305,23 +304,6 @@ public:
     /// 提交加载协程写入的 pending result, 并销毁引用已归零的资产。
     void Pump();
 
-    /// 资产内部数据的延迟销毁入口。由 Asset::OnUnload 调用。
-    ///
-    /// 【整包交出, 不逐个交】payload 是一个可移动的 owner，在等待器确认实际完成后销毁。
-    /// 销毁顺序由 payload 内部的捕获/成员声明顺序
-    /// 显式表达, 不要依赖多次调用的先后。
-    ///
-    /// 同一次 Pump 内的全部 payload 攒成一批共用一个协程帧。
-    /// wait processor 未装配时保存 payload，直至装配后提交等待或终止清理。
-    template <class F>
-    void DeferDestroy(F&& payload) {
-        EnqueueDeferred(make_unique<DeferredPayloadImpl<std::decay_t<F>>>(std::forward<F>(payload)));
-    }
-
-    /// 注入帧边界等待器 (非拥有)。【必须装配】Application 在启动阶段连接。
-    /// 调用方保证它活得比本 AssetManager 更久 (关停顺序里 AssetManager 先于 GpuSystem 死)。
-    void SetWaitFrameProcessor(Nullable<IWaitFrameProcessor*> processor) noexcept { _waitFrame = processor.Get(); }
-
     /// 注入可选资产来源（非拥有）。来源必须活过本对象及其全部在飞加载。
     void SetAssetSource(Nullable<IAssetSource*> source) noexcept { _assetSource = source; }
 
@@ -335,26 +317,12 @@ private:
 
     using Slot = AssetSlot;
 
-    /// 延迟销毁 payload 的类型擦除包装。析构即销毁被捕获的数据。
-    struct DeferredPayload {
-        virtual ~DeferredPayload() noexcept = default;
-    };
-
-    template <class F>
-    struct DeferredPayloadImpl final : DeferredPayload {
-        explicit DeferredPayloadImpl(F&& f) noexcept(std::is_nothrow_move_constructible_v<F>)
-            : Value(std::move(f)) {}
-        explicit DeferredPayloadImpl(const F& f) : Value(f) {}
-        F Value;
-    };
-
     Slot* FindSlot(const AssetId& id) const noexcept;
     Slot* EmplaceLoadingSlot(const AssetId& id);
     StreamingAssetRefAny MakeRef(Slot* slot) noexcept;
     StreamingAssetRefAny LoadSourcePath(std::string_view relPath);
 
     void PumpLoadResults();
-    void FlushDeferredBatch();
 
     task<void> RunLoad(StreamingAssetRefAny ref, task<AssetLoadResult> loadTask);
     void StoreLoadResult(Slot* slot, AssetLoadResult result) noexcept;
@@ -366,16 +334,11 @@ private:
 
     AssetWaitRecord* RegisterWait(Slot* slot, stop_token stop, std::coroutine_handle<> continuation);
 
-    void EnqueueDeferred(unique_ptr<DeferredPayload> payload);
-    task<void> RunDeferredDestroy(vector<unique_ptr<DeferredPayload>> batch);
-
     static void AddRef(Slot* slot) noexcept;
     static void Release(Slot* slot) noexcept;
 
-    IWaitFrameProcessor* _waitFrame{nullptr};
     Nullable<IAssetSource*> _assetSource{nullptr};
     TaskScope _loadScope;
-    TaskScope _retirementScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     bool _pumping{false};
     bool _operationsBlocked{false};
@@ -385,8 +348,6 @@ private:
     /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要
     /// 活到协程跑完。
     vector<StreamingAssetRefAny> _activeLoads;
-    /// 本帧待延迟销毁的 payload。Pump 时整批交给一个协程。
-    vector<unique_ptr<DeferredPayload>> _pendingDeferred;
     /// 递归保护: CollectZeroRefSlots 里销毁资产会放开它持有的引用, 从而令更多 slot 归零。
     bool _collecting{false};
 };

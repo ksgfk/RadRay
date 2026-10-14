@@ -84,15 +84,10 @@ TextureAsset::TextureAsset(
 
 TextureAsset::~TextureAsset() noexcept = default;
 
-void TextureAsset::OnUnload(AssetManager& manager) {
-    // Explicit member order keeps all views ahead of their final texture owner on destruction.
-    struct TextureRetirement {
-        shared_ptr<render::Texture> Texture;
-        unique_ptr<render::TextureView> Srv;
-        unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>> Views;
-    };
-    manager.DeferDestroy(TextureRetirement{std::move(_texture), std::move(_srv), std::move(_viewCache)});
+void TextureAsset::OnUnload(AssetManager&) {
     _viewCache.clear();
+    _srv.reset();
+    _texture.reset();
     _name.clear();
 }
 

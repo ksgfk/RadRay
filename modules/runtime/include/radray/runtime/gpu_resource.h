@@ -76,7 +76,9 @@ public:
     std::span<const render::MappedBufferRange> GetRanges() const noexcept { return _ranges; }
     const UploadMemoryStats& GetStats() const noexcept { return _stats; }
 
-    void Seal() noexcept { _sealed = true; }
+    void Seal() noexcept;
+    void BeginReservation() noexcept;
+    void EndReservation() noexcept;
     void Reset() noexcept;
     void RecordPageAllocation(uint64_t capacity) noexcept;
 
@@ -84,6 +86,7 @@ private:
     vector<render::MappedBufferRange> _ranges;
     UploadMemoryStats _stats{};
     bool _sealed{false};
+    uint32_t _reservations{0};
 };
 
 /// 在作用域内映射缓冲区范围，并自动完成相应的主机访问操作。
@@ -221,24 +224,24 @@ public:
         uint32_t MaxCachedPages{8};
     };
 
-    StagingBufferPool(render::Device* device, uint32_t flightCount, const Descriptor& desc) noexcept;
-    explicit StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept;
+    StagingBufferPool(render::Device* device, const Descriptor& desc) noexcept;
+    explicit StagingBufferPool(render::Device* device) noexcept;
     ~StagingBufferPool() noexcept;
     StagingBufferPool(const StagingBufferPool&) = delete;
     StagingBufferPool& operator=(const StagingBufferPool&) = delete;
 
-    void BeginFlight(HostWriteBatch& hostWrites);
+    void BeginEpoch(HostWriteBatch& hostWrites);
 
     /// 从上传页中预留暂存内存；大于标准页的请求会使用一次性缓冲区。
     Reservation Reserve(uint64_t size, uint64_t alignment = 1);
     /// Returns an invalid reservation on allocation failure; existing active pages remain owned.
     Reservation TryReserve(uint64_t size, uint64_t alignment = 1);
 
-    /// 将所有活跃暂存页移入指定 flight 的待回收列表。
-    void RetireToFlight(uint32_t flightIndex);
+    /// 封口本 epoch，活跃页保留至真实完成。
+    void SealEpoch();
 
-    /// 回收已完成 flight 的标准页，并释放其一次性缓冲区。
-    void CollectFlight(uint32_t flightIndex);
+    /// 真实完成后回收标准页，并释放一次性缓冲区。
+    void CompleteEpoch();
 
 private:
     struct Page {
@@ -253,7 +256,7 @@ private:
     render::Device* _device;
     Descriptor _desc;
     vector<Page> _active;
-    vector<vector<Page>> _pending;
+    bool _sealed{false};
     vector<Page> _freeList;
     uint64_t _nextPageId{0};
     HostWriteBatch* _hostWrites{nullptr};
@@ -262,12 +265,11 @@ private:
 /// 向外部命令缓冲区记录资源复制命令，并管理所需的暂存页。
 class ResourceUploader {
 public:
-    ResourceUploader(render::Device* device, uint32_t flightCount);
+    ResourceUploader(render::Device* device, StagingBufferPool& stagingPool);
     ~ResourceUploader() noexcept;
     ResourceUploader(const ResourceUploader&) = delete;
     ResourceUploader& operator=(const ResourceUploader&) = delete;
 
-    void BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites);
     void UploadBuffer(render::CommandBuffer* cmdBuffer, const BufferUploadRequest& request);
     /// Stages every range before recording any command. Failure leaves destination resources untouched.
     /// Ranges must be ordered, non-overlapping and share one destination and Before/After states.
@@ -279,18 +281,14 @@ public:
     std::optional<GpuMesh> UploadMeshResource(
         render::CommandBuffer* cmdBuffer,
         const MeshResource& meshResource);
-    void EndFlight(uint32_t flightIndex);
-    void CollectFlight(uint32_t flightIndex);
 
     render::Device* GetDevice() const noexcept { return _device; }
 
 private:
     render::Device* _device;
-    StagingBufferPool _stagingPool;
+    StagingBufferPool& _stagingPool;
     vector<StagingBufferPool::Allocation> _bufferUploads;
     vector<render::ResourceBarrierDescriptor> _bufferUploadBarriers;
-    uint32_t _flightCount{0};
-    uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
 };
 
 /// 从上传块中分配满足对齐要求的帧内常量缓冲区切片。

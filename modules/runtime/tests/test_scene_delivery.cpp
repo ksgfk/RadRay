@@ -201,7 +201,7 @@ protected:
 
     void OnRender(AppFrameContext&) override { ADD_FAILURE() << "CPU frame loop must not record GPU work"; }
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
-        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_FALSE(completion.OutputsExecuted);
         EXPECT_GT(completion.FrameSerial, 0u);
     }
     void OnShutdown() override {
@@ -287,7 +287,7 @@ protected:
 
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
         EXPECT_EQ(completion.FrameSerial, ++Completed);
-        if (!completion.GpuWorkCompleted) ++Dropped;
+        if (!completion.OutputsExecuted) ++Dropped;
     }
 
     void OnShutdown() override {

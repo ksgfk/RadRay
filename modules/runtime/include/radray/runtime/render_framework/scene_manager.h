@@ -49,7 +49,7 @@ public:
     /// RT only, or after RT stops. Borrow ends at the next Apply or scene destruction.
     Nullable<const RenderScene*> GetSceneRT(SceneId id) const noexcept;
     std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, AppFrameContext& frame);
-    std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, PipelineContext& context, vector<render::CommandBuffer*>& outCommands);
+    std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, PipelineContext& context);
     std::span<const SceneViewRequest> GetFrameViewsRT(uint32_t flightIndex) const;
     /// RT only, or inspection after RT stops. Borrow expires at flight completion.
     std::span<const SceneFrameUpdate> GetFrameUpdatesRT(uint32_t flightIndex) const;
@@ -84,11 +84,8 @@ private:
         SceneFlightPhase Phase{SceneFlightPhase::Writable};
         uint64_t UpdateSequence{0};
         uint64_t FrameSerial{0};
-        vector<SceneId> PreparedScenes;
         vector<SceneViewRequest> Views;
         vector<unique_ptr<SceneGpuData>> RetiredGpu;
-        uint64_t CompletedSerial{0};
-        bool CompletedExecuted{false};
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
     Nullable<SceneSlotRT*> PrepareSceneSlotRT(SceneId id, uint32_t flightIndex, uint64_t frameSerial, render::Device* device);

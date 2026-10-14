@@ -3,6 +3,9 @@
 #include <radray/basic_math.h>
 #include <radray/dynamic_library.h>
 #include <radray/render/backend_shader_artifact.h>
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_render_pass_cache.h>
+#endif
 #include <radray/shader_compiler/client.h>
 #include <radray/utility.h>
 
@@ -269,28 +272,6 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     // untestable in the only configuration these tests run in.
     EXPECT_FALSE(parameterSet->Set(secondBindingHandle, 0, resourceView.Get()));
 
-    const RenderPassColorAttachmentDescriptor colorAttachment{
-        .Format = kFormat,
-        .SampleCount = 1,
-        .Load = LoadAction::Clear,
-        .Store = StoreAction::Store};
-    auto renderPassResult = device.CreateRenderPass(
-        RenderPassDescriptor{.ColorAttachments = std::span{&colorAttachment, 1}});
-    ASSERT_TRUE(renderPassResult.HasValue()) << "CreateRenderPass failed";
-    unique_ptr<RenderPass> renderPass = renderPassResult.Release();
-
-    TextureView* const colorViews[]{renderTarget->View.get()};
-    const FramebufferDescriptor framebufferDesc{
-        .Pass = renderPass.get(),
-        .ColorAttachments = colorViews,
-        .DepthStencilAttachment = nullptr,
-        .Width = kWidth,
-        .Height = kHeight,
-        .Layers = 1};
-    auto framebufferResult = device.CreateFramebuffer(framebufferDesc);
-    ASSERT_TRUE(framebufferResult.HasValue()) << "CreateFramebuffer failed";
-    unique_ptr<Framebuffer> framebuffer = framebufferResult.Release();
-
     const VertexBufferLayout vertexBufferLayout{
         .Binding = 0,
         .ArrayStride = sizeof(float) * 3,
@@ -317,8 +298,7 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
         .Primitive = primitive,
         .DepthStencil = std::nullopt,
         .MultiSample = MultiSampleState::Default(),
-        .ColorTargets = std::span{&colorTarget, 1},
-        .CompatibleRenderPass = renderPass.get()};
+        .ColorTargets = std::span{&colorTarget, 1}};
 
     VertexAttribute missingSemantic = vertexAttribute;
     missingSemantic.Semantic = {};
@@ -403,11 +383,11 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     command->ResourceBarrier(std::span{&toRenderTarget, 1});
 
     const ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+    const array scopeColors{RenderPassColorAttachment{renderTarget->View.get(), LoadAction::Clear, StoreAction::Store, clearValue}};
     const RenderPassBeginDescriptor beginDesc{
-        .Pass = renderPass.get(),
-        .Target = framebuffer.get(),
-        .ColorClearValues = std::span{&clearValue, 1},
-        .DepthStencilClearValue = std::nullopt,
+        .Colors = scopeColors,
+        .Width = kWidth,
+        .Height = kHeight,
         .Name = "radray_render_pso_smoke"};
     auto encoderResult = command->BeginRenderPass(beginDesc);
     ASSERT_TRUE(encoderResult.HasValue()) << "BeginRenderPass failed";
@@ -572,12 +552,9 @@ float4 PSMain() : SV_Target0 { return P.Data + Shared.Data; }
         }
         auto target = test::MakeRenderTarget(device, kFormat, kWidth, kHeight, TextureUse::RenderTarget | TextureUse::CopySource);
         ASSERT_TRUE(target.has_value());
-        const RenderPassColorAttachmentDescriptor attachment{kFormat, 1, LoadAction::Clear, StoreAction::Store};
-        auto pass = device->CreateRenderPass({.ColorAttachments = std::span{&attachment, 1}});
-        ASSERT_TRUE(pass.HasValue());
+
         TextureView* targetView = target->View.get();
-        auto framebuffer = device->CreateFramebuffer({pass.Get(), std::span{&targetView, 1}, nullptr, kWidth, kHeight, 1});
-        ASSERT_TRUE(framebuffer.HasValue());
+
         const auto color = ColorTargetState::Default(kFormat);
         auto primitive = PrimitiveState::Default();
         primitive.Cull = CullMode::None;
@@ -586,8 +563,7 @@ float4 PSMain() : SV_Target0 { return P.Data + Shared.Data; }
                                                         .PS = ShaderEntry{pixel.Get(), "PSMain"},
                                                         .Primitive = primitive,
                                                         .MultiSample = MultiSampleState::Default(),
-                                                        .ColorTargets = std::span{&color, 1},
-                                                        .CompatibleRenderPass = pass.Get()});
+                                                        .ColorTargets = std::span{&color, 1}});
         ASSERT_TRUE(pso.HasValue());
         const auto pitch = Align(uint64_t{kWidth * 4}, device->GetDetail().TextureDataPitchAlignment);
         auto readback = device->CreateBuffer({pitch * kHeight, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
@@ -599,7 +575,7 @@ float4 PSMain() : SV_Target0 { return P.Data + Shared.Data; }
         const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{target->Tex.get(), TextureState::Undefined, TextureState::RenderTarget};
         command->ResourceBarrier(std::span{&toTarget, 1});
         const ColorClearValue clear{{0, 0, 0, 1}};
-        auto encoder = command->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}});
+        auto encoder = command->BeginRenderPass({array{RenderPassColorAttachment{targetView, LoadAction::Clear, StoreAction::Store, clear}}, {}, kWidth, kHeight, 1});
         ASSERT_TRUE(encoder.HasValue());
         encoder->SetViewport({0, 0, float(kWidth), float(kHeight), 0, 1});
         encoder->SetScissor({0, 0, kWidth, kHeight});
@@ -686,17 +662,15 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     auto sampler = device->CreateSampler({});
     ASSERT_TRUE(view.HasValue());
     ASSERT_TRUE(sampler.HasValue());
-    const RenderPassColorAttachmentDescriptor attachment{kFormat, 1, LoadAction::Clear, StoreAction::Store};
-    auto pass = device->CreateRenderPass({.ColorAttachments = std::span{&attachment, 1}});
-    ASSERT_TRUE(pass.HasValue());
+
     TextureView* renderView = texture->View.get();
-    auto framebuffer = device->CreateFramebuffer({pass.Get(), std::span{&renderView, 1}, nullptr, 1, 1, 1});
-    ASSERT_TRUE(framebuffer.HasValue());
+
     ASSERT_TRUE(set->Set(layout->FindBinding("Texture"), 0, view.Get()));
     ASSERT_TRUE(set->Set(layout->FindBinding("Sampler"), 0, sampler.Get()));
     ASSERT_TRUE(set->Set(layout->FindBinding("Output"), 0, ShaderBufferBinding{output.Get(), {0, 16}, 4}));
     uint32_t expected[4]{0, 1, 2, 3};
     for (uint32_t round = 0; round < 5; ++round) {
+        if (round) set->ResetBindingsForReuse();
         if (round == 1) {
             expected[0] = 4;
             expected[3] = 7;
@@ -729,7 +703,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{texture->Tex.get(), TextureState::Undefined, TextureState::RenderTarget};
             command->ResourceBarrier(std::span{&toTarget, 1});
             const ColorClearValue clear{{1, 0, 0, 1}};
-            auto encoder = command->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}});
+            auto encoder = command->BeginRenderPass({array{RenderPassColorAttachment{renderView, LoadAction::Clear, StoreAction::Store, clear}}, {}, 1, 1, 1});
             ASSERT_TRUE(encoder.HasValue());
             command->EndRenderPass(encoder.Release());
             const ResourceBarrierDescriptor toRead = BarrierTextureDescriptor{texture->Tex.get(), TextureState::RenderTarget, TextureState::ShaderRead};
@@ -843,12 +817,9 @@ void CSMain() {
     auto sampler = device->CreateSampler({});
     ASSERT_TRUE(view.HasValue());
     ASSERT_TRUE(sampler.HasValue());
-    const RenderPassColorAttachmentDescriptor attachment{kFormat, 1, LoadAction::Clear, StoreAction::Store};
-    auto pass = device->CreateRenderPass({.ColorAttachments = std::span{&attachment, 1}});
-    ASSERT_TRUE(pass.HasValue());
+
     TextureView* renderView = texture->View.get();
-    auto framebuffer = device->CreateFramebuffer({pass.Get(), std::span{&renderView, 1}, nullptr, 1, 1, 1});
-    ASSERT_TRUE(framebuffer.HasValue());
+
     ASSERT_TRUE(set->Set(layout->FindBinding("Texture"), 0, view.Get()));
     ASSERT_TRUE(set->Set(layout->FindBinding("Sampler"), 0, sampler.Get()));
     ASSERT_TRUE(set->Set(layout->FindBinding("Output"), 0, ShaderBufferBinding{output.Get(), {0, 16}, 4}));
@@ -860,6 +831,10 @@ void CSMain() {
         {compatibleLayout->FindBinding("DynamicItems"), 768}, {compatibleLayout->FindBinding("DynamicView"), 512}};
     uint32_t expected[4]{0, 1, 2, 3};
     for (uint32_t round = 0; round < 3; ++round) {
+        if (round) {
+            set->ResetBindingsForReuse();
+            ASSERT_TRUE(set->Set(layout->FindBinding("TypedOutput"), 0, ShaderTexelBufferBinding{output.Get(), {256, 4}, TextureFormat::R32_UINT}));
+        }
         if (round == 1) {
             expected[0] = 4;
             expected[3] = 7;
@@ -903,7 +878,7 @@ void CSMain() {
             const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{texture->Tex.get(), TextureState::Undefined, TextureState::RenderTarget};
             command->ResourceBarrier(std::span{&toTarget, 1});
             const ColorClearValue clear{{1, 0, 0, 1}};
-            auto encoder = command->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}});
+            auto encoder = command->BeginRenderPass({array{RenderPassColorAttachment{renderView, LoadAction::Clear, StoreAction::Store, clear}}, {}, 1, 1, 1});
             ASSERT_TRUE(encoder.HasValue());
             command->EndRenderPass(encoder.Release());
             const ResourceBarrierDescriptor toRead = BarrierTextureDescriptor{texture->Tex.get(), TextureState::RenderTarget, TextureState::ShaderRead};
@@ -1231,19 +1206,9 @@ float4 PSMain() : SV_Target0 { return float4(1,0,0,1); }
         ASSERT_TRUE(depth);
         auto depthView = device.CreateTextureView({depth.Get(), TextureDimension::Dim2D, TextureFormat::D32_FLOAT, {0, 1, 0, 1}, TextureViewUsage::DepthWrite});
         ASSERT_TRUE(depthView);
-        const RenderPassColorAttachmentDescriptor clearColor{TextureFormat::RGBA32_FLOAT, 1, LoadAction::Clear, StoreAction::Store};
-        const RenderPassColorAttachmentDescriptor loadColor{TextureFormat::RGBA32_FLOAT, 1, LoadAction::Load, StoreAction::Store};
-        const RenderPassDepthStencilAttachmentDescriptor clearDepth{TextureFormat::D32_FLOAT, 1, LoadAction::Clear, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false};
-        const RenderPassDepthStencilAttachmentDescriptor loadDepth{TextureFormat::D32_FLOAT, 1, LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false};
-        auto clearPass = device.CreateRenderPass({std::span{&clearColor, 1}, clearDepth});
-        auto loadPass = device.CreateRenderPass({std::span{&loadColor, 1}, loadDepth});
-        ASSERT_TRUE(clearPass);
-        ASSERT_TRUE(loadPass);
+
         TextureView* colorView = color->View.get();
-        auto clearFramebuffer = device.CreateFramebuffer({clearPass.Get(), std::span{&colorView, 1}, depthView.Get(), 8, 6, 1});
-        auto loadFramebuffer = device.CreateFramebuffer({loadPass.Get(), std::span{&colorView, 1}, depthView.Get(), 8, 6, 1});
-        ASSERT_TRUE(clearFramebuffer);
-        ASSERT_TRUE(loadFramebuffer);
+
         auto primitive = PrimitiveState::Default();
         primitive.Cull = CullMode::None;
         auto colorState = ColorTargetState::Default(TextureFormat::RGBA32_FLOAT);
@@ -1252,7 +1217,7 @@ float4 PSMain() : SV_Target0 { return float4(1,0,0,1); }
         depthState.DepthCompare = CompareFunction::Always;
         depthState.DepthWriteEnable = true;
         const auto create = [&](Shader* pixel, std::string_view entry) {
-            return device.CreateGraphicsPipelineState({.PipelineLayout = layout.Get(), .VS = ShaderEntry{vertex.Get(), "VSMain"}, .PS = ShaderEntry{pixel, entry}, .Primitive = primitive, .DepthStencil = depthState, .MultiSample = MultiSampleState::Default(), .ColorTargets = std::span{&colorState, 1}, .CompatibleRenderPass = clearPass.Get()});
+            return device.CreateGraphicsPipelineState({.PipelineLayout = layout.Get(), .VS = ShaderEntry{vertex.Get(), "VSMain"}, .PS = ShaderEntry{pixel, entry}, .Primitive = primitive, .DepthStencil = depthState, .MultiSample = MultiSampleState::Default(), .ColorTargets = std::span{&colorState, 1}});
         };
         auto zero = create(pixelDepth.Get(), "PSDepth");
         ASSERT_TRUE(zero);
@@ -1279,9 +1244,9 @@ float4 PSMain() : SV_Target0 { return float4(1,0,0,1); }
         command->ResourceBarrier(initial);
         const ColorClearValue oldColor{{.125f, .375f, .625f, .875f}};
         for (uint32_t step = 0; step < 3; ++step) {
-            const ColorClearValue placeholder{};
-            auto encoder = command->BeginRenderPass({step == 0 ? clearPass.Get() : loadPass.Get(), step == 0 ? clearFramebuffer.Get() : loadFramebuffer.Get(),
-                                                     step == 0 ? std::span{&oldColor, 1} : std::span{&placeholder, 1}, DepthStencilClearValue{.75f, 0}});
+            const auto load = step == 0 ? LoadAction::Clear : LoadAction::Load;
+            auto encoder = command->BeginRenderPass({array{RenderPassColorAttachment{colorView, load, StoreAction::Store, oldColor}},
+                                                     RenderPassDepthStencilAttachment{depthView.Get(), load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false, {.75f, 0}}, 8, 6, 1});
             ASSERT_TRUE(encoder);
             encoder->SetViewport({0, 0, 8, 6, 0, 1});
             encoder->SetScissor({0, 0, 8, 6});
@@ -1327,6 +1292,8 @@ TEST(RadRayRenderPsoSmoke, Vulkan) {
     if (!test::TryCreateDevice(RenderBackend::Vulkan, context)) {
         GTEST_SKIP() << "Vulkan is unavailable on this machine";
     }
+    // Destroy the temporary PSO representative pass; recording must acquire its own pin.
+    static_cast<vulkan::DeviceVulkan*>(context.Device.get())->_renderPassCache->SetBudget({256, 1024, 0, 256});
     RunPsoSmoke(context, RenderBackend::Vulkan);
 #else
     GTEST_SKIP() << "Vulkan is disabled";

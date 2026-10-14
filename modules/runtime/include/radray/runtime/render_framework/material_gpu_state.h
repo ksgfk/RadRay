@@ -22,13 +22,12 @@ private:
         vector<render::ShaderParameterDynamicOffset> Offsets;
     };
     struct Pass {
-        Nullable<const MaterialPass*> Source;
         shared_ptr<const RasterMaterialPlan> Plan;
         vector<Group> Groups;
     };
     shared_ptr<RenderServiceGeneration> _generation;
     Nullable<const MaterialRenderData*> _data{nullptr};
     vector<std::optional<PersistentCBufferArena::Allocation>> _constants;
-    vector<Pass> _passes;
+    unordered_map<const MaterialPass*, Pass> _passes;
 };
 }  // namespace radray

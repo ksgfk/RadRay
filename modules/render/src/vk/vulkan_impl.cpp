@@ -1,4 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
+#include <radray/profiler.h>
 #include "pipeline_layout_cache_vulkan.h"
 #include "../texture_support_cache.h"
 
@@ -385,8 +386,9 @@ static std::optional<size_t> _SelectHighPerformancePhysicalDeviceArrayIndex(std:
     vector<size_t> indices;
     indices.reserve(physicalDevices.size());
     for (size_t i = 0; i < physicalDevices.size(); ++i) {
-        indices.emplace_back(i);
+        if (physicalDevices[i].properties.apiVersion >= VK_API_VERSION_1_2) indices.emplace_back(i);
     }
+    if (indices.empty()) return std::nullopt;
 
     std::stable_sort(indices.begin(), indices.end(), [&physicalDevices](size_t lhsIndex, size_t rhsIndex) noexcept {
         const auto& lhs = physicalDevices[lhsIndex];
@@ -894,6 +896,7 @@ DeviceVulkan::DeviceVulkan(
     : _instance(instance),
       _physicalDevice(physicalDevice),
       _device(device),
+      _renderPassCache(make_unique<VulkanRenderPassCache>(this)),
       _descriptorSetLayoutCache(this),
       _pipelineLayoutCache(make_unique<PipelineLayoutCacheVulkan>(this)),
       _descriptorSetAllocator(this) {}
@@ -2185,10 +2188,18 @@ void ShaderParameterSetVulkan::DestroyImpl() noexcept {
     _device = nullptr;
 }
 
+void ShaderParameterSetVulkan::ClearBindings() noexcept {
+    for (auto& view : _texelBufferViews) view.reset();
+}
+
 bool ShaderParameterSetVulkan::Set(
     BindingHandle binding,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
+    if (AreBindingsSealed()) {
+        RADRAY_ERR_LOG("Cannot modify a shader parameter version after command binding");
+        return false;
+    }
     if (!IsValid() || !binding.IsValid()) {
         RADRAY_ERR_LOG("vk shader parameter set write has an invalid binding handle");
         return false;
@@ -2533,11 +2544,9 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     dynStateInfo.flags = 0;
     dynStateInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
     dynStateInfo.pDynamicStates = dynStates.empty() ? nullptr : dynStates.data();
-    if (desc.CompatibleRenderPass == nullptr) {
-        RADRAY_ERR_LOG("vk graphics pipeline requires an explicit render pass");
-        return nullptr;
-    }
-    auto* renderPass = CastVkObject(desc.CompatibleRenderPass);
+    const auto signature = GetAttachmentSignature(desc);
+    auto renderPass = _renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Representative(signature));
+    if (!renderPass) return nullptr;
     auto rs = CastVkObject(desc.PipelineLayout);
     VkGraphicsPipelineCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -2555,7 +2564,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.pColorBlendState = &blendInfo;
     createInfo.pDynamicState = &dynStateInfo;
     createInfo.layout = rs->GetNative();
-    createInfo.renderPass = renderPass->_renderPass;
+    createInfo.renderPass = renderPass->Native;
     createInfo.subpass = 0;
     createInfo.basePipelineHandle = VK_NULL_HANDLE;
     createInfo.basePipelineIndex = 0;
@@ -2565,7 +2574,9 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
         return nullptr;
     }
-    return make_unique<GraphicsPipelineVulkan>(this, rs, pipeline);
+    auto result = make_unique<GraphicsPipelineVulkan>(this, rs, pipeline);
+    result->_attachmentSignature = signature;
+    return result;
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
@@ -2732,144 +2743,6 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
 
 // == Device: render pass / framebuffer / 杂项 ==
 
-Nullable<unique_ptr<RenderPass>> DeviceVulkan::CreateRenderPass(const RenderPassDescriptor& desc) noexcept {
-    if (desc.ColorAttachments.empty() && !desc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("vk render pass must have at least one attachment");
-        return nullptr;
-    }
-
-    vector<VkAttachmentDescription> attachments;
-    vector<VkAttachmentReference> colorReferences;
-    attachments.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment.has_value() ? 1u : 0u));
-    colorReferences.reserve(desc.ColorAttachments.size());
-    for (const RenderPassColorAttachmentDescriptor& color : desc.ColorAttachments) {
-        if (color.Format == TextureFormat::UNKNOWN || color.SampleCount == 0) {
-            RADRAY_ERR_LOG("vk render pass has invalid color attachment format or sample count");
-            return nullptr;
-        }
-        attachments.push_back(VkAttachmentDescription{
-            .flags = 0,
-            .format = MapType(color.Format),
-            .samples = MapSampleCount(color.SampleCount),
-            .loadOp = MapType(color.Load),
-            .storeOp = MapType(color.Store),
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-        colorReferences.push_back(VkAttachmentReference{
-            .attachment = static_cast<uint32_t>(attachments.size() - 1),
-            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-    }
-
-    VkAttachmentReference depthReference{};
-    if (desc.DepthStencilAttachment.has_value()) {
-        const RenderPassDepthStencilAttachmentDescriptor& depth = desc.DepthStencilAttachment.value();
-        if (!IsDepthStencilFormat(depth.Format) || depth.SampleCount == 0) {
-            RADRAY_ERR_LOG("vk render pass has invalid depth attachment format or sample count");
-            return nullptr;
-        }
-        const bool hasStencil = depth.Format == TextureFormat::D24_UNORM_S8_UINT ||
-                                depth.Format == TextureFormat::D32_FLOAT_S8_UINT;
-        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
-                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
-            RADRAY_ERR_LOG("vk read-only depth/stencil attachment must preserve its contents");
-            return nullptr;
-        }
-        const VkImageLayout layout = depth.ReadOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : hasStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                                                                                                                   : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        attachments.push_back(VkAttachmentDescription{
-            .flags = 0,
-            .format = MapType(depth.Format),
-            .samples = MapSampleCount(depth.SampleCount),
-            .loadOp = MapType(depth.DepthLoad),
-            .storeOp = MapType(depth.DepthStore),
-            .stencilLoadOp = hasStencil ? MapType(depth.StencilLoad) : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = hasStencil ? MapType(depth.StencilStore) : VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = layout,
-            .finalLayout = layout});
-        depthReference = VkAttachmentReference{
-            .attachment = static_cast<uint32_t>(attachments.size() - 1),
-            .layout = layout};
-    }
-
-    VkSubpassDescription subpass{};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
-    subpass.pColorAttachments = colorReferences.empty() ? nullptr : colorReferences.data();
-    subpass.pDepthStencilAttachment = desc.DepthStencilAttachment.has_value() ? &depthReference : nullptr;
-
-    VkRenderPassCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    info.attachmentCount = static_cast<uint32_t>(attachments.size());
-    info.pAttachments = attachments.data();
-    info.subpassCount = 1;
-    info.pSubpasses = &subpass;
-
-    VkRenderPass pass = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateRenderPass(_device, &info, this->GetAllocationCallbacks(), &pass);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateRenderPass failed: {}", vr);
-        return nullptr;
-    }
-    return make_unique<RenderPassVulkan>(this, pass, desc);
-}
-
-Nullable<unique_ptr<Framebuffer>> DeviceVulkan::CreateFramebuffer(const FramebufferDescriptor& desc) noexcept {
-    if (desc.Pass == nullptr || desc.Width == 0 || desc.Height == 0 || desc.Layers == 0) {
-        RADRAY_ERR_LOG("vk framebuffer has invalid pass or dimensions");
-        return nullptr;
-    }
-    const RenderPassDescriptor passDesc = desc.Pass->GetDesc();
-    if (desc.ColorAttachments.size() != passDesc.ColorAttachments.size() ||
-        (desc.DepthStencilAttachment != nullptr) != passDesc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("vk framebuffer attachment count does not match render pass");
-        return nullptr;
-    }
-
-    vector<VkImageView> attachments;
-    attachments.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment != nullptr ? 1u : 0u));
-    for (size_t i = 0; i < desc.ColorAttachments.size(); ++i) {
-        auto* view = CastVkObject(desc.ColorAttachments[i]);
-        if (view == nullptr || !view->IsValid() || view->_mdesc.Format != passDesc.ColorAttachments[i].Format ||
-            view->_image->_sampleCount != passDesc.ColorAttachments[i].SampleCount ||
-            view->_image->_width < desc.Width || view->_image->_height < desc.Height) {
-            RADRAY_ERR_LOG("vk framebuffer color attachment {} is incompatible", i);
-            return nullptr;
-        }
-        attachments.push_back(view->_imageView);
-    }
-    if (desc.DepthStencilAttachment != nullptr) {
-        auto* view = CastVkObject(desc.DepthStencilAttachment);
-        const auto& depth = passDesc.DepthStencilAttachment.value();
-        if (!view->IsValid() || view->_mdesc.Format != depth.Format ||
-            view->_mdesc.Usage != (depth.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite) ||
-            view->_image->_sampleCount != depth.SampleCount ||
-            view->_image->_width < desc.Width || view->_image->_height < desc.Height) {
-            RADRAY_ERR_LOG("vk framebuffer depth attachment is incompatible");
-            return nullptr;
-        }
-        attachments.push_back(view->_imageView);
-    }
-
-    auto* pass = CastVkObject(desc.Pass);
-    VkFramebufferCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    info.renderPass = pass->_renderPass;
-    info.attachmentCount = static_cast<uint32_t>(attachments.size());
-    info.pAttachments = attachments.data();
-    info.width = desc.Width;
-    info.height = desc.Height;
-    info.layers = desc.Layers;
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateFramebuffer(_device, &info, GetAllocationCallbacks(), &framebuffer);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateFramebuffer failed: {}", vr);
-        return nullptr;
-    }
-    return make_unique<FrameBufferVulkan>(this, framebuffer, desc);
-}
-
 const VkAllocationCallbacks* DeviceVulkan::GetAllocationCallbacks() const noexcept {
     return _instance->GetAllocationCallbacks();
 }
@@ -2901,6 +2774,7 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 // == 环境初始化与 CreateDeviceVulkan ==
 
 void DeviceVulkan::DestroyImpl() noexcept {
+    _renderPassCache.reset();
     _descriptorSetAllocator.Clear();
     _pipelineLayoutCache.reset();
     _descriptorSetLayoutCache.Destroy();
@@ -2927,8 +2801,8 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         return nullptr;
     }
     uint32_t version = 0;
-    if (vkEnumerateInstanceVersion(&version) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkEnumerateInstanceVersion failed");
+    if (!vkEnumerateInstanceVersion || vkEnumerateInstanceVersion(&version) != VK_SUCCESS || version < VK_API_VERSION_1_2) {
+        RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
         return nullptr;
     }
     RADRAY_INFO_LOG("vk instance version: {}.{}.{}", VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
@@ -3092,11 +2966,11 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     } else if (hasDebugUtilsExt) {
         createInfo.pNext = &debugCreateInfo;
     }
-    uint32_t apiVersionsToTry[] = {
-        VK_API_VERSION_1_3,
-        VK_API_VERSION_1_2,
-        VK_API_VERSION_1_1,
-        VK_API_VERSION_1_0};
+    if (version < VK_API_VERSION_1_2) {
+        RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
+        return nullptr;
+    }
+    uint32_t apiVersionsToTry[] = {VK_API_VERSION_1_2};
     VkInstance instance = VK_NULL_HANDLE;
     VkResult lastResult = VK_ERROR_UNKNOWN;
     uint32_t lastExceptionCode = 0;
@@ -3195,6 +3069,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
     const auto& selectPhyDevice = physicalDevices.value()[selectPhysicalDeviceIndex];
     RADRAY_INFO_LOG("vk select physical device: {}", selectPhyDevice.properties.deviceName);
+    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_2) {
+        RADRAY_ERR_LOG("Vulkan 1.2 physical device is required");
+        return nullptr;
+    }
 
     struct QueueRequest {
         QueueType rawType;
@@ -3346,14 +3224,14 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature12);
         }
 
-        extFeatures->feature13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-        extFeatures->feature13.pNext = nullptr;
-        if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_3) {
-            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature13);
-        }
-
         vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
 
+        if (!extFeatures->feature12.timelineSemaphore) {
+            RADRAY_ERR_LOG("Vulkan timelineSemaphore feature is required");
+            return nullptr;
+        }
+        extFeatures->feature12.imagelessFramebuffer = VK_FALSE;
+        extFeatures->feature12.separateDepthStencilLayouts = VK_FALSE;
         deviceInfo.pNext = &deviceFeatures2;
         deviceInfo.pEnabledFeatures = nullptr;
     }
@@ -3391,7 +3269,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     vmaCreateInfo.pHeapSizeLimit = nullptr;
     vmaCreateInfo.pVulkanFunctions = &vmaFunctions;
     vmaCreateInfo.instance = deviceR->_instance->_instance;
-    vmaCreateInfo.vulkanApiVersion = selectPhyDevice.properties.apiVersion;
+    vmaCreateInfo.vulkanApiVersion = VK_API_VERSION_1_2;
 #if VMA_EXTERNAL_MEMORY
     vmaCreateInfo.pTypeExternalMemoryHandleTypes = nullptr;
 #endif
@@ -3610,6 +3488,7 @@ void QueueVulkan::Destroy() noexcept {
 }
 
 void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    RADRAY_PROFILE_SCOPE_N("QueueVulkan::Submit");
     vector<VkCommandBuffer> cmdBufs;
     cmdBufs.reserve(desc.CmdBuffers.size());
     for (auto i : desc.CmdBuffers) {
@@ -3632,17 +3511,8 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (auto* syncObj : desc.WaitToExecute) {
         auto* waitSync = CastVkObject(syncObj);
         waitSemaphores.emplace_back(waitSync->_semaphore->_semaphore);
-        VkPipelineStageFlags waitStageMask = 0;
-        if ((_queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
-            waitStageMask |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        }
-        if ((_queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
-            waitStageMask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        }
-        if (waitStageMask == 0) {
-            waitStageMask = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        }
-        waitStages.emplace_back(waitStageMask);
+        // The acquired image's first use can be a transfer or a layout transition.
+        waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
         waitValues.emplace_back(0);
     }
 
@@ -3765,6 +3635,7 @@ void CommandAllocatorVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void CommandAllocatorVulkan::Reset() noexcept {
+    RADRAY_PROFILE_SCOPE_N("CommandAllocatorVulkan::Reset");
     if (!IsValid()) RADRAY_ABORT("invalid command allocator");
     for (auto* child : _children)
         if (child->_recording) RADRAY_ABORT("cannot reset command allocator while recording");
@@ -3777,6 +3648,17 @@ void CommandAllocatorVulkan::Reset() noexcept {
         child->_endedEncoders.clear();
         child->_used = false;
         child->_executable = false;
+    }
+    if (_hasRenderScopes) {
+        for (auto* child : _children) {
+            if (!child->_readyScopes.empty()) {
+                child->_readyScopes.clear();
+                child->_framebufferPins.clear();
+                child->_passPins.clear();
+                if (++child->_renderPassEpoch == 0) RADRAY_ABORT("render pass epoch exhausted");
+            }
+        }
+        _hasRenderScopes = false;
     }
 }
 
@@ -3839,6 +3721,9 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
         _cmdBuffer = VK_NULL_HANDLE;
     }
+    _readyScopes.clear();
+    _framebufferPins.clear();
+    _passPins.clear();
 }
 
 void CommandBufferVulkan::Begin() noexcept {
@@ -3992,61 +3877,71 @@ void CommandBufferVulkan::PopDebugGroup() noexcept {
 
 // == 编码器 / RenderPass / Framebuffer ==
 
-Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
-    if (desc.Pass == nullptr || desc.Target == nullptr) {
-        RADRAY_ERR_LOG("vk BeginRenderPass requires an explicit render pass and framebuffer");
-        return nullptr;
-    }
-    auto* pass = CastVkObject(desc.Pass);
-    auto* framebuffer = CastVkObject(desc.Target);
-    const FramebufferDescriptor framebufferDesc = desc.Target->GetDesc();
-    const RenderPassDescriptor passDesc = desc.Pass->GetDesc();
-    if (framebufferDesc.Pass != desc.Pass || desc.ColorClearValues.size() != passDesc.ColorAttachments.size() ||
-        desc.DepthStencilClearValue.has_value() != passDesc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("vk BeginRenderPass descriptor does not match the framebuffer/render pass");
-        return nullptr;
-    }
-
-    vector<VkClearValue> clearValues;
-    clearValues.reserve(desc.ColorClearValues.size() + (desc.DepthStencilClearValue.has_value() ? 1u : 0u));
-    for (size_t index = 0; index < desc.ColorClearValues.size(); ++index) {
-        const ColorClearValue& value = desc.ColorClearValues[index];
-        auto& clear = clearValues.emplace_back();
-        if (IsUintFormat(passDesc.ColorAttachments[index].Format)) {
-            for (uint32_t component = 0; component < 4; ++component) {
-                clear.color.uint32[component] = static_cast<uint32_t>(value.Value[component]);
-            }
-        } else if (IsSintFormat(passDesc.ColorAttachments[index].Format)) {
-            for (uint32_t component = 0; component < 4; ++component) {
-                clear.color.int32[component] = static_cast<int32_t>(value.Value[component]);
-            }
-        } else {
-            for (uint32_t component = 0; component < 4; ++component) {
-                clear.color.float32[component] = value.Value[component];
-            }
+std::optional<RenderPassToken> CommandBufferVulkan::PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("prepare pass requires recording outside an encoder");
+    const auto signature = ValidateRenderScope(desc, *_device);
+    if (!signature) return std::nullopt;
+    FramebufferKeyVulkan key{*signature, {}, desc.Width, desc.Height, desc.Layers};
+    vector<VkImageView> views;
+    const auto addView = [&](TextureView* raw) {
+        auto* view = dynamic_cast<ImageViewVulkan*>(raw);
+        if (!view || view->_device != _device) return false;
+        views.push_back(view->_imageView);
+        key.Views.push_back(view->_viewId);
+        return true;
+    };
+    for (const auto& color : desc.Colors)
+        if (!addView(color.View)) return std::nullopt;
+    if (desc.DepthStencil && !addView(desc.DepthStencil->View)) return std::nullopt;
+    auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, *signature), desc.Name);
+    if (!pass) return std::nullopt;
+    auto framebuffer = _device->_renderPassCache->Acquire(key, pass->Native, views, desc.Name);
+    if (!framebuffer) return std::nullopt;
+    ReadyScope ready{pass.Get(), framebuffer.Get(), *signature, {}, {}};
+    for (size_t i = 0; i < desc.Colors.size(); ++i) {
+        const auto& value = desc.Colors[i].Clear;
+        VkClearValue clear{};
+        for (uint32_t c = 0; c < 4; ++c) {
+            if (IsUintFormat(signature->Colors[i]))
+                clear.color.uint32[c] = static_cast<uint32_t>(value.Value[c]);
+            else if (IsSintFormat(signature->Colors[i]))
+                clear.color.int32[c] = static_cast<int32_t>(value.Value[c]);
+            else
+                clear.color.float32[c] = value.Value[c];
         }
+        ready.Clears.push_back(clear);
     }
-    if (desc.DepthStencilClearValue.has_value()) {
-        auto& clear = clearValues.emplace_back();
-        clear.depthStencil.depth = desc.DepthStencilClearValue->Depth;
-        clear.depthStencil.stencil = desc.DepthStencilClearValue->Stencil;
+    if (desc.DepthStencil) {
+        VkClearValue clear{};
+        clear.depthStencil = {desc.DepthStencil->Clear.Depth, desc.DepthStencil->Clear.Stencil};
+        ready.Clears.push_back(clear);
     }
-    if (!desc.Name.empty()) {
-        pass->SetDebugName(desc.Name);
-        framebuffer->SetDebugName(desc.Name);
+    const auto area = desc.RenderArea.value_or(Rect{0, 0, desc.Width, desc.Height});
+    ready.Area = {{area.X, area.Y}, {area.Width, area.Height}};
+    if (std::none_of(_passPins.begin(), _passPins.end(), [&](const auto& pin) { return pin.Get() == pass.Get(); })) _passPins.push_back(std::move(pass));
+    if (std::none_of(_framebufferPins.begin(), _framebufferPins.end(), [&](const auto& pin) { return pin.Get() == framebuffer.Get(); })) _framebufferPins.push_back(std::move(framebuffer));
+    const auto index = static_cast<uint32_t>(_readyScopes.size());
+    _readyScopes.push_back(std::move(ready));
+    _cmdPool->_hasRenderScopes = true;
+    return MakeRenderPassToken(_renderPassEpoch, index);
+}
+Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(RenderPassToken token) noexcept {
+    if (!_recording || _activeEncoder || !token.IsFrom(this, _renderPassEpoch) || token.Index() >= _readyScopes.size()) {
+        RADRAY_ERR_LOG("invalid Vulkan render pass prepare token");
+        return nullptr;
     }
-
-    VkRenderPassBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    beginInfo.renderPass = pass->_renderPass;
-    beginInfo.framebuffer = framebuffer->_framebuffer;
-    beginInfo.renderArea = {{0, 0}, {framebufferDesc.Width, framebufferDesc.Height}};
-    beginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
-    beginInfo.pClearValues = clearValues.empty() ? nullptr : clearValues.data();
-    _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    const auto& ready = _readyScopes[token.Index()];
+    VkRenderPassBeginInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    info.renderPass = ready.Pass->Native;
+    info.framebuffer = ready.Framebuffer->Native;
+    info.renderArea = ready.Area;
+    info.clearValueCount = static_cast<uint32_t>(ready.Clears.size());
+    info.pClearValues = ready.Clears.data();
+    _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
     auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
-    encoder->_framebuffer = framebuffer;
+    encoder->_framebuffer = ready.Framebuffer;
+    encoder->_attachmentSignature = ready.Signature;
     _activeEncoder = encoder.get();
     return encoder;
 }
@@ -4594,6 +4489,7 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto p = CastVkObject(pso);
+    if (p->_attachmentSignature != _attachmentSignature) RADRAY_ABORT("pipeline attachment signature does not match render scope");
     if (_boundPso == p) {
         return;
     }
@@ -4661,6 +4557,7 @@ static bool BindShaderParameterSetVulkan(
         &set->_allocation.Set,
         static_cast<uint32_t>(dynamicEntryOrder.size()),
         dynamicEntryOrder.empty() ? nullptr : packedDynamicOffsets);
+    set->SealBindings();
     return true;
 }
 
@@ -4897,90 +4794,6 @@ void SimulateComputeEncoderVulkan::DispatchIndirect(Buffer* argumentBuffer, uint
         _cmdBuffer->_cmdBuffer,
         buffer.Get()->_buffer,
         argumentOffset);
-}
-
-RenderPassVulkan::RenderPassVulkan(
-    DeviceVulkan* device,
-    VkRenderPass renderPass,
-    const RenderPassDescriptor& desc)
-    : _device(device),
-      _renderPass(renderPass),
-      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment) {}
-
-RenderPassVulkan::~RenderPassVulkan() noexcept {
-    this->DestroyImpl();
-}
-
-RenderPassDescriptor RenderPassVulkan::GetDesc() const noexcept {
-    return RenderPassDescriptor{
-        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment};
-}
-
-bool RenderPassVulkan::IsValid() const noexcept {
-    return _renderPass != VK_NULL_HANDLE;
-}
-
-void RenderPassVulkan::Destroy() noexcept {
-    this->DestroyImpl();
-}
-
-void RenderPassVulkan::SetDebugName(std::string_view name) noexcept {
-    _device->SetObjectName(name, _renderPass);
-}
-
-void RenderPassVulkan::DestroyImpl() noexcept {
-    if (_renderPass != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroyRenderPass(_device->_device, _renderPass, _device->GetAllocationCallbacks());
-        _renderPass = VK_NULL_HANDLE;
-    }
-}
-
-FrameBufferVulkan::FrameBufferVulkan(
-    DeviceVulkan* device,
-    VkFramebuffer framebuffer,
-    const FramebufferDescriptor& desc)
-    : _device(device),
-      _framebuffer(framebuffer),
-      _pass(desc.Pass),
-      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment),
-      _width(desc.Width),
-      _height(desc.Height),
-      _layers(desc.Layers) {}
-
-FramebufferDescriptor FrameBufferVulkan::GetDesc() const noexcept {
-    return FramebufferDescriptor{
-        .Pass = _pass,
-        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment,
-        .Width = _width,
-        .Height = _height,
-        .Layers = _layers};
-}
-
-FrameBufferVulkan::~FrameBufferVulkan() noexcept {
-    this->DestroyImpl();
-}
-
-bool FrameBufferVulkan::IsValid() const noexcept {
-    return _framebuffer != VK_NULL_HANDLE;
-}
-
-void FrameBufferVulkan::Destroy() noexcept {
-    this->DestroyImpl();
-}
-
-void FrameBufferVulkan::SetDebugName(std::string_view name) noexcept {
-    _device->SetObjectName(name, _framebuffer);
-}
-
-void FrameBufferVulkan::DestroyImpl() noexcept {
-    if (_framebuffer != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroyFramebuffer(_device->_device, _framebuffer, _device->GetAllocationCallbacks());
-        _framebuffer = VK_NULL_HANDLE;
-    }
 }
 
 // == 同步原语与 Surface ==
@@ -5726,7 +5539,8 @@ ImageViewVulkan::ImageViewVulkan(
     VkImageView view) noexcept
     : _device(device),
       _image(image),
-      _imageView(view) {}
+      _imageView(view),
+      _viewId(device->_renderPassCache->AllocateViewId()) {}
 
 ImageViewVulkan::~ImageViewVulkan() noexcept {
     this->DestroyImpl();
@@ -5746,6 +5560,7 @@ void ImageViewVulkan::SetDebugName(std::string_view name) noexcept {
 
 void ImageViewVulkan::DestroyImpl() noexcept {
     if (_imageView != VK_NULL_HANDLE) {
+        _device->_renderPassCache->InvalidateView(_viewId);
         _device->_ftb.vkDestroyImageView(_device->_device, _imageView, _device->GetAllocationCallbacks());
         _imageView = VK_NULL_HANDLE;
     }

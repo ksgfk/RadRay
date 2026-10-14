@@ -165,24 +165,6 @@ void RunGraphicsJitSmoke(
         kHeight,
         render::TextureUse::RenderTarget | render::TextureUse::CopySource);
     ASSERT_TRUE(targetTexture.has_value());
-    const render::RenderPassColorAttachmentDescriptor colorAttachment{
-        .Format = kFormat,
-        .SampleCount = 1,
-        .Load = render::LoadAction::Clear,
-        .Store = render::StoreAction::Store};
-    auto renderPassResult = device.CreateRenderPass(
-        render::RenderPassDescriptor{.ColorAttachments = std::span{&colorAttachment, 1}});
-    ASSERT_TRUE(renderPassResult.HasValue());
-    unique_ptr<render::RenderPass> renderPass = renderPassResult.Release();
-    render::TextureView* colorViews[]{targetTexture->View.get()};
-    auto framebufferResult = device.CreateFramebuffer(render::FramebufferDescriptor{
-        .Pass = renderPass.get(),
-        .ColorAttachments = colorViews,
-        .Width = kWidth,
-        .Height = kHeight,
-        .Layers = 1});
-    ASSERT_TRUE(framebufferResult.HasValue());
-    unique_ptr<render::Framebuffer> framebuffer = framebufferResult.Release();
 
     const render::VertexBufferLayout vertexBufferLayout{
         .Binding = 0,
@@ -207,8 +189,7 @@ void RunGraphicsJitSmoke(
         .Primitive = primitive,
         .DepthStencil = std::nullopt,
         .MultiSample = render::MultiSampleState::Default(),
-        .ColorTargets = std::span{&colorTarget, 1},
-        .CompatibleRenderPass = renderPass.get()});
+        .ColorTargets = std::span{&colorTarget, 1}});
     ASSERT_TRUE(psoResult.HasValue());
     unique_ptr<render::GraphicsPipelineState> pso = psoResult.Release();
 
@@ -245,9 +226,10 @@ void RunGraphicsJitSmoke(
     command->ResourceBarrier(std::span{&toTarget, 1});
     const render::ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
     auto encoderResult = command->BeginRenderPass(render::RenderPassBeginDescriptor{
-        .Pass = renderPass.get(),
-        .Target = framebuffer.get(),
-        .ColorClearValues = std::span{&clearValue, 1}});
+        .Colors = array{render::RenderPassColorAttachment{targetTexture->View.get(), render::LoadAction::Clear, render::StoreAction::Store, clearValue}},
+        .Width = kWidth,
+        .Height = kHeight,
+        .Name = "Runtime shader JIT"});
     ASSERT_TRUE(encoderResult.HasValue());
     unique_ptr<render::GraphicsCommandEncoder> encoder = encoderResult.Release();
     encoder->SetViewport(Viewport{0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0, 1});

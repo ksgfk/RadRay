@@ -176,8 +176,6 @@ void AssetManager::BeginStopping() noexcept {
 AssetManager::~AssetManager() noexcept {
     BeginStopping();
     _loadScope.WaitUntilEmpty();
-    _retirementScope.RequestStop();
-    _retirementScope.WaitUntilEmpty();
 
     // 2. 提交残留结果, 再放开 _activeLoads 里那些引用, 然后回收已归零的资产。
     //
@@ -210,7 +208,6 @@ AssetManager::~AssetManager() noexcept {
     // 4. 刚才 OnUnload 交出的 payload 已无从等待帧边界 (_loadScope 已停)。就地销毁。
     //    【为何安全】: 关停路径在此之前已经 device wait-idle 过 (Application::Shutdown 先
     //    由 Application 等待 GPU 并消费最后一批完成消息), 故 GPU 上没有仍在读这些对象的 work。
-    _pendingDeferred.clear();
 }
 
 Slot* AssetManager::FindSlot(const AssetId& id) const noexcept {
@@ -430,20 +427,6 @@ void AssetManager::CollectZeroRefSlots() {
     _collecting = false;
 }
 
-void AssetManager::EnqueueDeferred(unique_ptr<DeferredPayload> payload) {
-    if (payload == nullptr) {
-        return;
-    }
-    _pendingDeferred.push_back(std::move(payload));
-}
-
-task<void> AssetManager::RunDeferredDestroy(vector<unique_ptr<DeferredPayload>> batch) {
-    co_await _waitFrame->Wait();
-    // 恢复点在主线程 (见 IWaitFrameProcessor 的恢复线程约定), 故这里析构 GPU 对象是安全的。
-    // 取消时协程帧连同 batch 一起销毁, 效果相同 —— 不需要额外的兜底分支。
-    batch.clear();
-}
-
 void AssetManager::PumpLoadResults() {
     vector<StreamingAssetRefAny> ready;
     const auto count = _activeLoads.size();
@@ -469,16 +452,6 @@ void AssetManager::PumpLoadResults() {
     }
 }
 
-void AssetManager::FlushDeferredBatch() {
-    // 【一帧一个协程帧】: 本帧攒下的 payload 整批交给一个等待协程, 而不是每个 payload 一个。
-    if (_pendingDeferred.empty() || _waitFrame == nullptr) {
-        return;
-    }
-    vector<unique_ptr<DeferredPayload>> batch = std::move(_pendingDeferred);
-    _pendingDeferred.clear();
-    _retirementScope.Spawn(RunDeferredDestroy(std::move(batch)));
-}
-
 void AssetManager::Pump() {
     RADRAY_PROFILE_SCOPE_N("AssetManager::Pump");
     if (_pumping || _operationsBlocked) RADRAY_ABORT("Cannot pump assets during dispatch or collection");
@@ -486,7 +459,6 @@ void AssetManager::Pump() {
     auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
     PumpLoadResults();
     CollectZeroRefSlots();
-    FlushDeferredBatch();
 }
 
 uint32_t AssetManager::GetAssetCount() const noexcept {

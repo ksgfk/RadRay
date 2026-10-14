@@ -16,6 +16,66 @@
 
 namespace radray::render {
 
+AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc) {
+    AttachmentSignature result{{}, {}, desc.MultiSample.Count};
+    for (const auto& color : desc.ColorTargets) result.Colors.push_back(color.Format);
+    if (desc.DepthStencil) result.DepthStencil = desc.DepthStencil->Format;
+    return result;
+}
+
+std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept {
+    if ((!desc.Colors.size() && !desc.DepthStencil) || !desc.Width || !desc.Height || !desc.Layers ||
+        desc.Colors.size() > device.GetCapabilities().Limits.MaxColorAttachments) return std::nullopt;
+    const auto area = desc.RenderArea.value_or(Rect{0, 0, desc.Width, desc.Height});
+    if (area.X < 0 || area.Y < 0 || !area.Width || !area.Height || uint64_t(area.X) + area.Width > desc.Width || uint64_t(area.Y) + area.Height > desc.Height) return std::nullopt;
+    const auto validLoad = [](LoadAction value) { return value == LoadAction::DontCare || value == LoadAction::Load || value == LoadAction::Clear; };
+    const auto validStore = [](StoreAction value) { return value == StoreAction::Store || value == StoreAction::Discard; };
+    AttachmentSignature signature;
+    uint32_t samples = 0;
+    size_t validatedColors = 0;
+    const auto validate = [&](TextureView* view, TextureViewUsage usage, bool depth) {
+        if (!view || !view->IsValid()) return false;
+        const auto v = view->GetDesc();
+        if (!v.Target || !v.Target->IsValid() || v.Target->GetDevice() != &device || v.Usage != usage || IsDepthStencilFormat(v.Format) != depth || v.Format == TextureFormat::UNKNOWN) return false;
+        const auto t = v.Target->GetDesc();
+        if (v.Range.BaseMipLevel >= 32 || v.Range.BaseMipLevel >= t.MipLevels || v.Range.MipLevelCount != 1 || v.Range.ArrayLayerCount < desc.Layers ||
+            v.Range.BaseArrayLayer >= t.DepthOrArraySize || v.Range.ArrayLayerCount > t.DepthOrArraySize - v.Range.BaseArrayLayer ||
+            std::max(1u, t.Width >> v.Range.BaseMipLevel) < desc.Width || std::max(1u, t.Height >> v.Range.BaseMipLevel) < desc.Height || !t.SampleCount) return false;
+        if ((t.SampleCount & (t.SampleCount - 1)) || t.SampleCount > 64 || (samples && samples != t.SampleCount)) return false;
+        samples = t.SampleCount;
+        for (size_t index = 0; index < validatedColors; ++index) {
+            const auto old = desc.Colors[index].View->GetDesc();
+            if (old.Target == v.Target && old.Range.BaseMipLevel == v.Range.BaseMipLevel &&
+                old.Range.BaseArrayLayer < v.Range.BaseArrayLayer + v.Range.ArrayLayerCount && v.Range.BaseArrayLayer < old.Range.BaseArrayLayer + old.Range.ArrayLayerCount) return false;
+        }
+        return true;
+    };
+    for (const auto& color : desc.Colors) {
+        if (!validLoad(color.Load) || !validStore(color.Store)) return std::nullopt;
+        if (!validate(color.View, TextureViewUsage::RenderTarget, false)) return std::nullopt;
+        signature.Colors.push_back(color.View->GetDesc().Format);
+        ++validatedColors;
+    }
+    if (desc.DepthStencil) {
+        const auto& d = *desc.DepthStencil;
+        if (!validLoad(d.DepthLoad) || !validStore(d.DepthStore)) return std::nullopt;
+        if (!validate(d.View, d.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite, true)) return std::nullopt;
+        const auto format = d.View->GetDesc().Format;
+        const bool stencil = format == TextureFormat::D24_UNORM_S8_UINT || format == TextureFormat::D32_FLOAT_S8_UINT;
+        if (stencil && (!validLoad(d.StencilLoad) || !validStore(d.StencilStore))) return std::nullopt;
+        if (d.ReadOnly && (d.DepthLoad != LoadAction::Load || d.DepthStore != StoreAction::Store ||
+                           (stencil && (d.StencilLoad != LoadAction::Load || d.StencilStore != StoreAction::Store)))) return std::nullopt;
+        signature.DepthStencil = format;
+    }
+    signature.Samples = samples;
+    return signature;
+}
+
+Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBuffer::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    const auto ready = PrepareRenderPass(desc);
+    return ready ? BeginRenderPass(*ready) : nullptr;
+}
+
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     switch (format) {
         case VertexFormat::UINT8X2:
@@ -576,6 +636,12 @@ std::string_view format_as(PresentMode v) noexcept {
 
 std::string_view format_as(SwapChainStatus v) noexcept {
     return EnumNameOr(v);
+}
+
+void ShaderParameterSet::SealBindings() noexcept { _bindingsSealed = true; }
+void ShaderParameterSet::ResetBindingsForReuse() noexcept {
+    ClearBindings();
+    _bindingsSealed = false;
 }
 
 }  // namespace radray::render

@@ -1,4 +1,11 @@
 #include "scene_gpu_workload.h"
+#include <radray/profiler.h>
+#if defined(RADRAY_ENABLE_D3D12)
+#include <radray/render/backend/d3d12_impl.h>
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+#include <radray/render/backend/vulkan_impl.h>
+#endif
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/components/static_mesh_component.h>
@@ -89,11 +96,15 @@ SceneGpuWorkload::~SceneGpuWorkload() {
 void SceneGpuWorkload::Complete(uint32_t flight) {
     if (!_serials[flight]) return;
     _gpu->CompleteFlightIfReady(flight, true);
-    const FlightCompletion completion{flight, true, _serials[flight]};
-    _renderer->OnFlightCompletedGT(completion);
-    _gpu->ReleaseFrameResourcesGT(completion);
+    FlightCompletion completion;
+    while (_timeline.TryReadCompletion(completion)) {
+        _renderer->OnFlightCompletedGT(completion);
+        _gpu->ReleaseFrameResourcesGT(completion);
+        _serials[completion.FlightIndex] = 0;
+    }
     GpuMilliseconds += _gpu->GetLastGpuTimeMs();
-    _serials[flight] = 0;
+    RADRAY_PROFILE_PLOT("SceneGpu/CompletedGpuMs", double(_gpu->GetLastGpuTimeMs()));
+    RADRAY_PROFILE_PLOT("SceneGpu/CompletedLatencyMs", double(_timeline.GetLastFrameLatency().count()) * 1000.0);
 }
 AppFrameContext SceneGpuWorkload::Begin() {
     const auto flight = BeginUpdate();
@@ -106,6 +117,7 @@ uint32_t SceneGpuWorkload::BeginUpdate() {
     const auto flight = _step % static_cast<uint32_t>(_serials.size());
     Complete(flight);
     _gpu->BeginUpdateForFlight(flight);
+    _gpu->BeginFrameTiming(flight);
     return flight;
 }
 void SceneGpuWorkload::SealScene(uint32_t flight) {
@@ -117,7 +129,8 @@ void SceneGpuWorkload::SealScene(uint32_t flight) {
         _world->CollectRenderUpdates();
     } else if (_load != SceneGpuLoad::FirstUse && _load != SceneGpuLoad::Growth) {
         auto* writer = _renderer->GetSceneWriterGT(_scene).Get();
-        for (uint32_t i = 0; i < _changes; ++i) {
+        const auto changes = _load == SceneGpuLoad::Once && _step != _serials.size() * 2 + 1 ? 0u : _changes;
+        for (uint32_t i = 0; i < changes; ++i) {
             const auto index = i * (_objects.size() / _changes);
             if (_load == SceneGpuLoad::Churn) {
                 writer->RemoveShape(_objects[index]);
@@ -142,7 +155,15 @@ void SceneGpuWorkload::Consume(const AppFrameContext& frame) {
 void SceneGpuWorkload::Prepare(AppFrameContext& frame) {
     const auto before = frame.GetHostWrites().GetStats();
     for (uint32_t i = 0; i < _views; ++i) {
-        if (!_renderer->PrepareSceneGpuRT(_scene, frame)) _error = "Object buffer preparation failed";
+        const auto objects = _renderer->PrepareSceneGpuRT(_scene, frame);
+        if (!objects) {
+            _error = "Object buffer preparation failed";
+            continue;
+        }
+        if (i == 0) {
+            _sceneBytes[frame.FlightIndex()] = objects->Objects.Target->GetDesc().Size;
+            for (const auto& parameter : objects->Parameters) _sceneBytes[frame.FlightIndex()] += parameter.Values.Target->GetDesc().Size;
+        }
     }
     const auto after = frame.GetHostWrites().GetStats();
     UploadedBytes += after.CommittedBytes - before.CommittedBytes;
@@ -150,7 +171,42 @@ void SceneGpuWorkload::Prepare(AppFrameContext& frame) {
 }
 void SceneGpuWorkload::Submit(AppFrameContext& frame) { _gpu->EndFrameRecordAndSubmit(frame.FlightIndex()); }
 void SceneGpuWorkload::Drain() {
-    for (uint32_t i = 0; i < _serials.size(); ++i) Complete(i);
+    // Consume in submission order so the last-time profiler getter counts every result.
+    for (;;) {
+        std::optional<uint32_t> oldest;
+        for (uint32_t flight = 0; flight < _serials.size(); ++flight)
+            if (_serials[flight] && (!oldest || _serials[flight] < _serials[*oldest])) oldest = flight;
+        if (!oldest) break;
+        Complete(*oldest);
+    }
+}
+
+uint64_t SceneGpuWorkload::GetSceneAllocatedBytes() const noexcept {
+    uint64_t bytes = 0;
+    for (const auto size : _sceneBytes) bytes += size;
+    return bytes;
+}
+
+array<uint64_t, 4> SceneGpuWorkload::GetNativeAllocatorUsage() const noexcept {
+    if (!_gpu) return {};
+    auto* device = _gpu->GetDevice();
+#if defined(RADRAY_ENABLE_D3D12)
+    if (device->GetBackend() == render::RenderBackend::D3D12) {
+        D3D12MA::TotalStatistics stats{};
+        static_cast<render::d3d12::DeviceD3D12*>(device)->_mainAlloc->CalculateStatistics(&stats);
+        const auto& total = stats.Total.Stats;
+        return {total.BlockBytes, total.AllocationBytes, total.BlockCount, total.AllocationCount};
+    }
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+    if (device->GetBackend() == render::RenderBackend::Vulkan) {
+        VmaTotalStatistics stats{};
+        vmaCalculateStatistics(static_cast<render::vulkan::DeviceVulkan*>(device)->_vma->_vma, &stats);
+        const auto& total = stats.total.statistics;
+        return {total.blockBytes, total.allocationBytes, total.blockCount, total.allocationCount};
+    }
+#endif
+    return {};
 }
 
 }  // namespace radray::benchmarking

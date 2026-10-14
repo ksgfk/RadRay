@@ -76,7 +76,6 @@ TEST(RasterScene, DoubleBoundsSplitPositionAndIndivisibleDomainsAreIndependentOf
 }
 TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhileParametersAndOrderStayIndependent) {
     RenderScene scene;
-    SceneDraw draw;
     SceneUpdateBatch update;
     StaticMeshRenderData first, second;
     first.Mesh.Draws.resize(1);
@@ -89,14 +88,14 @@ TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhilePara
     update.MeshStates = {{.Id = id, .Mesh = {{}, &first}}};
     update.Materials = {{id, {{{}, &red}}}};
     scene.Apply(update);
-    auto records = draw.GetObjectRecords({0, 0}, scene, id);
+    auto records = scene.GetDrawPrimitives(id);
     ASSERT_EQ(records.size(), 1u);
     EXPECT_EQ(records[0].Binding.Data.Get(), &red);
     const auto before = *scene.GetDrawRevision(id);
     update.Clear();
     update.Materials = {{id, {{{}, &blue}}}};
     scene.Apply(update);
-    records = draw.GetObjectRecords({0, 0}, scene, id);
+    records = scene.GetDrawPrimitives(id);
     ASSERT_EQ(records.size(), 1u);
     EXPECT_EQ(records[0].Binding.Data.Get(), &blue);
     EXPECT_EQ(scene.GetDrawRevision(id)->Geometry, before.Geometry);
@@ -107,11 +106,11 @@ TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhilePara
     scene.Apply(update);
     EXPECT_EQ(scene.GetDrawRevision(id)->Geometry, before.Geometry);
     EXPECT_EQ(scene.GetDrawState(id)->Order, 7u);
-    EXPECT_EQ(draw.GetObjectRecords({0, 0}, scene, id)[0].Section, &first.Sections[0]);
+    EXPECT_EQ(scene.GetDrawPrimitives(id)[0].Section, &first.Sections[0]);
     update.Clear();
     update.MeshStates = {{.Id = id, .Mesh = {{}, &second}}};
     scene.Apply(update);
-    records = draw.GetObjectRecords({0, 0}, scene, id);
+    records = scene.GetDrawPrimitives(id);
     ASSERT_EQ(records.size(), 1u);
     EXPECT_EQ(records[0].Draw, &second.Mesh.Draws[1]);
     update.Clear();
@@ -121,7 +120,7 @@ TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhilePara
     update.CreateShapes = {replacement};
     update.MeshStates = {{.Id = replacement, .Mesh = {{}, &first}}};
     scene.Apply(update);
-    EXPECT_TRUE(draw.GetObjectRecords({0, 0}, scene, id).empty());
-    EXPECT_EQ(draw.GetObjectRecords({0, 0}, scene, replacement)[0].Section, &first.Sections[0]);
+    EXPECT_TRUE(scene.GetDrawPrimitives(id).empty());
+    EXPECT_EQ(scene.GetDrawPrimitives(replacement)[0].Section, &first.Sections[0]);
 }
 }  // namespace radray::test

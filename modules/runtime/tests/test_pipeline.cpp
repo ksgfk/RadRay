@@ -278,7 +278,7 @@ TEST(PipelineMaterial, SharedMaterialRetainsTextureUntilBothScenesRetire) {
         assets.Pump();
         assets.Pump();
         EXPECT_EQ(assets.GetAssetCount(), 0u);
-    }  // TextureAsset uses the existing deferred-destruction service.
+    }
     EXPECT_EQ(device.LiveTextures, 0);
     EXPECT_EQ(device.LiveTextureViews, 0);
 }
@@ -306,6 +306,7 @@ TEST(PipelineMaterialDeathTest, StaleMaterialGenerationCannotOverwriteReusedShap
 
 class PipelineTestAllocator final : public IGpuCmdAllocator {
 public:
+    void Discard(std::span<render::CommandBuffer*> commands) override { Return(commands); }
     vector<unique_ptr<UploadTestCommand>> Commands;
     vector<render::CommandBuffer*> Returned;
     render::CommandBuffer* Allocate() override {
@@ -344,10 +345,8 @@ TEST(PipelineOutput, EmptyFailureAndNoScenePreserveRecordingOrderAndFinishAttach
     Application app;
     UploadTestDevice device;
     RenderSystem renderer{&device};
-    HostWriteBatch writes;
-    ResourceUploader uploader{&device, 1};
-    uploader.BeginFlight(0, writes);
-    GpuFrameResources resources{&device, uploader, writes};
+    GpuFrameResources resources{&device};
+    resources.BeginEpoch();
     PipelineTestAllocator allocator;
     PipelineContext context{renderer, {0, 1, {}}, allocator, resources};
     PipelineTestRecorder pipeline;
@@ -372,13 +371,13 @@ TEST(PipelineOutput, EmptyFailureAndNoScenePreserveRecordingOrderAndFinishAttach
     auto alias = device.CreateTextureView(view->GetDesc()).Unwrap();
     output.Colors.push_back({alias.get(), render::TextureState::Undefined, render::TextureState::ShaderRead});
     EXPECT_FALSE(ValidateRenderOutput(output, device));
-    uploader.EndFlight(0);
+    resources.SealEpoch();
+    resources.CompleteEpoch();
 }
 TEST(FrameResources, ConstantSlicesStayDistinctAndAlignedAcrossPageGrowth) {
     UploadTestDevice device;
-    HostWriteBatch writes;
-    ResourceUploader uploader{&device, 1};
-    GpuFrameResources resources{&device, uploader, writes};
+    GpuFrameResources resources{&device};
+    resources.BeginEpoch();
     vector<MappedUploadPage::Allocation> slices;
     for (uint32_t i = 0; i < 300; ++i) {
         auto reservation = resources.AllocateConstants(4096);
@@ -398,6 +397,198 @@ TEST(FrameResources, ConstantSlicesStayDistinctAndAlignedAcrossPageGrowth) {
         EXPECT_EQ(data[0], i % 251);
         EXPECT_EQ(data[4095], i % 251);
     }
+}
+
+TEST(PipelineMaterial, PublishedMaterialsShareOnePassDefinitionAndKeepIndependentDefaults) {
+    auto definition = make_shared<const MaterialPass>(TestMaterialPass());
+    Material a{{MaterialPass{definition}}, {{byte{1}}}};
+    Material b{{MaterialPass{definition}}, {{byte{2}}}};
+    ASSERT_TRUE(a.IsValid());
+    ASSERT_TRUE(b.IsValid());
+    EXPECT_EQ(&a.GetRenderData().Passes[0].GetDefinition(), definition.get());
+    EXPECT_EQ(&b.GetRenderData().Passes[0].GetDefinition(), definition.get());
+    EXPECT_EQ(a.GetRenderData().Constants[0][0], byte{1});
+    EXPECT_EQ(b.GetRenderData().Constants[0][0], byte{2});
+}
+TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings) {
+    StaticMeshRenderData mesh;
+    mesh.Mesh.Draws.resize(1);
+    mesh.Sections.emplace_back(0, 0, 3, 0, 2);
+    Material first{vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}};
+    Material second{vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}};
+    const MaterialBindings firstBindings{vector<MaterialBinding>{{{}, &first.GetRenderData(), &first.GetGpuState()}}};
+    const MaterialBindings secondBindings{vector<MaterialBinding>{{{}, &second.GetRenderData(), &second.GetGpuState()}}};
+    RenderScene scene;
+    SceneUpdateBatch batch;
+    const ShapeId a{0, 0}, b{1, 0};
+    batch.CreateShapes = {a, b};
+    batch.MeshStates = {{.Id = a}, {.Id = b}};
+    scene.Apply(batch);
+    EXPECT_TRUE(scene.GetDrawPrimitives(a).empty());
+    EXPECT_TRUE(scene.GetDrawPrimitives(b).empty());
+    batch.Clear();
+    batch.MeshStates = {{.Id = a, .Mesh = {{}, &mesh}}, {.Id = b, .Mesh = {{}, &mesh}}};
+    batch.Materials = {{a, firstBindings}, {b, firstBindings}};
+    scene.Apply(batch);
+    const auto original = scene.GetDrawPrimitives(a);
+    ASSERT_EQ(original.size(), 1u);
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
+    batch.Clear();
+    Eigen::Matrix4f moved = Eigen::Matrix4f::Identity();
+    moved(0, 3) = 1;
+    batch.Transforms = {{a, moved}};
+    scene.Apply(batch);
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(a).data());
+    batch.Clear();
+    batch.Materials = {{a, secondBindings}, {a, firstBindings}};
+    scene.Apply(batch);
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(a).data());
+    batch.Materials = {{a, secondBindings}};
+    scene.Apply(batch);
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
+    EXPECT_NE(original.data(), scene.GetDrawPrimitives(a).data());
+    EXPECT_EQ(scene.GetDrawPrimitives(a)[0].Binding.Data.Get(), &second.GetRenderData());
+    batch.Clear();
+    batch.MeshStates = {{.Id = a}};
+    scene.Apply(batch);
+    EXPECT_TRUE(scene.GetDrawPrimitives(a).empty());
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
+    batch.Clear();
+    batch.RemoveShapes = {a};
+    batch.CreateShapes = {{a.Index, 1}};
+    batch.MeshStates = {{.Id = {a.Index, 1}, .Mesh = {{}, &mesh}}};
+    batch.Materials = {{{a.Index, 1}, firstBindings}};
+    scene.Apply(batch);
+    EXPECT_TRUE(scene.GetDrawPrimitives(a).empty());
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives({a.Index, 1}).data());
+    batch.Clear();
+    for (uint32_t index = 2; index < 300; ++index) {
+        const ShapeId extra{index, 0};
+        batch.CreateShapes.push_back(extra);
+        batch.MeshStates.push_back({.Id = extra, .Mesh = {{}, &mesh}});
+        batch.Materials.push_back({extra, MaterialBindings{vector<MaterialBinding>{{{}, &first.GetRenderData(), &first.GetGpuState()}}}});
+    }
+    scene.Apply(batch);
+    // Unrelated shared-node insertion/rehash must not invalidate a borrowed primitive template.
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives({a.Index, 1}).data());
+    batch.Clear();
+    for (uint32_t index = 2; index < 300; ++index) batch.RemoveShapes.push_back({index, 0});
+    scene.Apply(batch);
+    EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
+}
+TEST(FrameResources, TextureBudgetEpochReuseAndLogicalValidity) {
+    UploadTestDevice device;
+    GpuFrameResources resources{&device};
+    resources.SetTextureBudget({2, 1, 64 * 64 * 4 * 2});
+    const render::TextureDescriptor desc{render::TextureDimension::Dim2D, 64, 64, 1, 1, 1,
+                                         render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget};
+    resources.BeginEpoch();
+    auto a = resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget);
+    auto b = resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget);
+    ASSERT_TRUE(a && b);
+    EXPECT_NE(a->Target, b->Target);
+    EXPECT_FALSE(a->Initialized);
+    EXPECT_TRUE(resources.IsCurrent(*a));
+    EXPECT_FALSE(resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget));
+    resources.SetTextureFinalState(*a, render::TextureState::CopySource);
+    auto* physical = a->Target;
+    resources.SealEpoch();
+    EXPECT_FALSE(resources.IsCurrent(*a));
+    EXPECT_FALSE(resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget));
+    resources.CompleteEpoch();
+    resources.BeginEpoch();
+    auto next = resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget);
+    ASSERT_TRUE(next);
+    EXPECT_EQ(next->Target, physical);
+    EXPECT_EQ(next->InitialState, render::TextureState::CopySource);
+    EXPECT_FALSE(next->Initialized);
+    EXPECT_FALSE(resources.IsCurrent(*a));
+    auto incompatible = desc;
+    incompatible.Width = 128;
+    EXPECT_FALSE(resources.BorrowTexture(incompatible, render::TextureViewUsage::RenderTarget));
+    incompatible = desc;
+    incompatible.Hints = render::ResourceHint::External;
+    EXPECT_FALSE(resources.BorrowTexture(incompatible, render::TextureViewUsage::RenderTarget));
+    resources.SealEpoch();
+    resources.CompleteEpoch();
+    resources.SetTextureBudget({0, 0, 0});
+    EXPECT_EQ(device.LiveTextures, 0);
+    EXPECT_EQ(device.LiveTextureViews, 0);
+}
+TEST(FrameTimeline, IdentityWaitersAndBoundedCompletionAcrossFlightCounts) {
+    for (uint32_t count : {1u, 2u, 3u, 4u}) {
+        FrameTimeline timeline{count};
+        vector<uint64_t> identities;
+        for (uint32_t flight = 0; flight < count; ++flight) identities.push_back(timeline.OpenFrameDomain(flight));
+        for (uint32_t flight = 0; flight < count; ++flight) {
+            EXPECT_EQ(timeline.OpenFrameDomain(flight), identities[flight]);
+            std::thread producer{[&timeline, flight, &identities] { timeline.PublishCompletion({flight, false, identities[flight]}); }};
+            producer.join();
+        }
+        for (uint32_t flight = 0; flight < count; ++flight) {
+            FlightCompletion event;
+            ASSERT_TRUE(timeline.TryReadCompletion(event));
+            EXPECT_EQ(event.FlightIndex, flight);
+            EXPECT_EQ(event.FrameSerial, identities[flight]);
+            EXPECT_TRUE(timeline.IsCompleted(flight, identities[flight]));
+            EXPECT_FALSE(timeline.IsCompleted(flight, identities[flight] + 1));
+        }
+        FlightCompletion empty;
+        EXPECT_FALSE(timeline.TryReadCompletion(empty));
+        uint32_t resumed = 0;
+        TaskScope scope;
+        auto waitTwice = [&]() -> task<void> {
+            co_await timeline.Wait();
+            ++resumed;
+            co_await timeline.Wait();
+            ++resumed;
+        };
+        scope.Spawn(waitTwice());
+        timeline.PumpWaitFrame(0);
+        EXPECT_EQ(resumed, 0u);
+        const auto first = timeline.GetFrameSerial(0);
+        EXPECT_GT(first, identities.back());
+        timeline.PublishCompletion({0, false, first});
+        ASSERT_TRUE(timeline.TryReadCompletion(empty));
+        timeline.PumpWaitFrame(0);
+        EXPECT_EQ(resumed, 1u);
+        timeline.PumpWaitFrame(0);
+        EXPECT_EQ(resumed, 1u);
+        const auto second = timeline.GetFrameSerial(0);
+        EXPECT_GT(second, first);
+        timeline.PublishCompletion({0, false, second});
+        ASSERT_TRUE(timeline.TryReadCompletion(empty));
+        timeline.CleanupCompletedFlights();
+        EXPECT_EQ(resumed, 2u);
+    }
+}
+TEST(FrameTimelineDeathTest, RejectsDuplicateForeignAndUnconsumedSlotCompletion) {
+    FrameTimeline timeline{1};
+    const auto first = timeline.OpenFrameDomain(0);
+    EXPECT_DEATH(timeline.PublishCompletion({0, false, first + 1}), "");
+    timeline.PublishCompletion({0, false, first});
+    EXPECT_DEATH(timeline.PublishCompletion({0, false, first}), "");
+    const auto next = timeline.OpenFrameDomain(0);
+    EXPECT_DEATH(timeline.PublishCompletion({0, false, next}), "");
+    FlightCompletion event;
+    ASSERT_TRUE(timeline.TryReadCompletion(event));
+    timeline.PublishCompletion({0, false, next});
+    ASSERT_TRUE(timeline.TryReadCompletion(event));
+    EXPECT_EQ(event.FrameSerial, next);
+}
+TEST(FrameTimeline, CancellationAndTerminalStopAreNotCompletionEvidence) {
+    FrameTimeline timeline{1};
+    TaskScope scope;
+    bool resumed = false;
+    auto waiting = [&]() -> task<void> { co_await timeline.Wait(); resumed = true; };
+    scope.Spawn(waiting());
+    scope.RequestStop();
+    timeline.CleanupCompletedFlights();
+    EXPECT_FALSE(resumed);
+    timeline.BeginStopping();
+    scope.Spawn(waiting());
+    EXPECT_FALSE(resumed);
 }
 }  // namespace
 }  // namespace radray::test

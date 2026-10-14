@@ -10,13 +10,12 @@ struct GraphicsPipelineKey {
     std::optional<render::DepthStencilState> Depth;
     render::MultiSampleState Samples;
     vector<render::ColorTargetState> Colors;
-    render::RenderPass* Pass;
     friend bool operator==(const GraphicsPipelineKey&, const GraphicsPipelineKey&) = default;
 };
 struct GraphicsPipelineKeyHash {
     size_t operator()(const GraphicsPipelineKey& key) const noexcept;
 };
-/// RT owned. Program/pass identities must survive until idle cache destruction.
+/// RT owned. Program identities must survive until idle cache destruction.
 class GraphicsPipelineCache {
 public:
     explicit GraphicsPipelineCache(render::Device* device) noexcept;

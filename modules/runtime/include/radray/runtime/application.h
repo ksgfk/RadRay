@@ -211,7 +211,7 @@ protected:
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
-    /// 主线程在 flight 重用或销毁时调用。GPU 模式含跳过帧；CPU 模式的 GpuWorkCompleted 为 false。
+    /// 主线程在 flight 重用或销毁时调用。GPU 模式含跳过帧；CPU 模式的 OutputsExecuted 为 false。
     virtual void OnRenderFrameComplete(const FlightCompletion& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。

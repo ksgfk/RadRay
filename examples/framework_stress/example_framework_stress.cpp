@@ -23,7 +23,7 @@ void PrintUsage() {
         "  --mode=world|sync|upload|draw  [upload]\n"
         "  --workload=idle|move|parent|tick|churn  [move]\n"
         "  --objects=N  [10000]  --changes=N  [100, clamped to objects]\n"
-        "  --flights=1|2|3  [2]  --views=N  [1]\n"
+        "  --flights=1|2|3|4  [2]  --views=N  [1]\n"
         "  --warmup=N  [120 frames]  --seconds=N  [60; 0 = unlimited]\n"
         "  --frames=N  [0; nonzero overrides seconds, excludes warmup]\n"
         "  --d3d12 | --vulkan  [d3d12]\n"
@@ -99,7 +99,7 @@ bool ParseArguments(int argc, char** argv, FrameworkStressOptions& options) {
                     options.Frames = number;
                 else if (name == "--seconds")
                     options.Seconds = number;
-                else if (name == "--flights" && number >= 1 && number <= 3)
+                else if (name == "--flights" && number >= 1 && number <= 4)
                     options.Flights = number;
                 else if (name == "--views" && number > 0)
                     options.Views = number;
@@ -186,10 +186,7 @@ StaticMeshComponent* FrameworkStressApp::SpawnObject(uint32_t index) {
 
 bool FrameworkStressApp::InitializeDrawing() {
     auto* device = GetGpuSystem()->GetDevice();
-    const render::RenderPassColorAttachmentDescriptor attachment{render::TextureFormat::BGRA8_UNORM, 1, render::LoadAction::Clear, render::StoreAction::Store};
-    auto pass = GetRenderSystem()->GetRenderPassRegistry()->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
-    if (!pass) return false;
-    _pass = pass;
+
     if (_options.Mode == StressMode::Draw && !_options.LegacyDraw) {
         MaterialPass material;
         material.Name = "Unlit";
@@ -205,20 +202,16 @@ bool FrameworkStressApp::InitializeDrawing() {
     }
     if (_options.Mode == StressMode::Draw && _options.LegacyDraw) {
         _draw = make_unique<SceneDraw>();
-        if (!_draw->Initialize(*GetRenderSystem().Get(), device, _pass.Get(), attachment.Format, _options.Flights)) return false;
+        if (!_draw->Initialize(*GetRenderSystem().Get(), device, render::TextureFormat::BGRA8_UNORM, _options.Flights)) return false;
     }
     if (_options.Window) return true;
     for (auto& frame : _frames) {
-        auto image = device->CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 1280, .Height = 720, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = attachment.Format, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget});
+        auto image = device->CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 1280, .Height = 720, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::BGRA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget});
         if (!image) return false;
         frame.Image = image.Release();
-        auto view = device->CreateTextureView({frame.Image.get(), render::TextureDimension::Dim2D, attachment.Format, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
+        auto view = device->CreateTextureView({frame.Image.get(), render::TextureDimension::Dim2D, render::TextureFormat::BGRA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
         if (!view) return false;
         frame.View = view.Release();
-        auto* viewPtr = frame.View.get();
-        auto framebuffer = device->CreateFramebuffer({_pass.Get(), std::span{&viewPtr, 1}, nullptr, 1280, 720, 1});
-        if (!framebuffer) return false;
-        frame.Framebuffer = framebuffer.Release();
     }
     return true;
 }
@@ -328,21 +321,16 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
 
     auto* texture = target ? target->BackBuffer : resources.Image.get();
     const auto desc = texture->GetDesc();
-    Nullable<render::Framebuffer*> framebuffer = resources.Framebuffer.get();
-    if (target) {
-        auto* view = target->BackBufferView;
-        framebuffer = renderer->GetRenderPassRegistry()->GetOrCreateFramebuffer({_pass.Get(), std::span{&view, 1}, nullptr, desc.Width, desc.Height, 1});
-    }
     auto* commands = frame.AllocateCommandBuffer();
     const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{
         .Target = texture,
         .Before = target ? target->Window->GetBackBufferState(target->BackBufferIndex) : resources.State,
         .After = render::TextureState::RenderTarget};
     commands->ResourceBarrier(std::span{&before, 1});
-    if (framebuffer) {
+    {
         RADRAY_PROFILE_SCOPE_N("Stress::RecordPass");
         const render::ColorClearValue clear{{0.025f, 0.035f, 0.055f, 1}};
-        auto encoder = commands->BeginRenderPass({_pass.Get(), framebuffer.Get(), std::span{&clear, 1}});
+        auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{target ? target->BackBufferView : resources.View.get(), render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, desc.Width, desc.Height, 1});
         if (encoder) {
             if (_draw) {
                 RADRAY_PROFILE_SCOPE_N("Stress::DrawObjects");
@@ -353,8 +341,7 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
             commands->EndRenderPass(encoder.Release());
         } else
             Fail("render pass recording failed");
-    } else
-        Fail("framebuffer creation failed");
+    }
     if (target) {
         const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{.Target = texture, .Before = render::TextureState::RenderTarget, .After = render::TextureState::Present};
         commands->ResourceBarrier(std::span{&after, 1});
@@ -368,10 +355,7 @@ void FrameworkStressApp::OnShutdown() {
     RADRAY_INFO_LOG("Framework stress finished: {} workload updates, {} render callbacks, failed={}", _updates, _renderCallbacks, Failed());
     _draw.reset();
     _pipeline.reset();
-    for (const auto& frame : _frames)
-        if (frame.View) GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(frame.View.get());
     _frames.clear();
-    _pass = nullptr;
     _objects.clear();
     _mesh.Reset();
     _parent = nullptr;

@@ -1,4 +1,5 @@
 #include <radray/runtime/render_framework/render_scene.h>
+#include <radray/hash.h>
 
 #include <mutex>
 #include <algorithm>
@@ -51,6 +52,7 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     for (ShapeId id : batch.RemoveShapes) {
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
+        ReleaseDrawTemplate(id.Index);
         for (auto& [name, stream] : _parameters) stream.Remove(id.Index);
         if (changes) changes->Removed.push_back(id);
         UnbindShape(id.Index);
@@ -76,13 +78,16 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     for (const auto& update : batch.LocalTransforms) _transforms.SetLocal(update.Id, update.Local);
     for (ShapeId id : batch.CreateShapes) {
         if (!id.IsValid()) RADRAY_ABORT("Invalid shape creation");
-        if (id.Index >= _shapes.size()) _shapes.resize(static_cast<size_t>(id.Index) + 1);
+        if (id.Index >= _shapes.size()) {
+            _shapes.resize(static_cast<size_t>(id.Index) + 1);
+        }
         auto& slot = _shapes[id.Index];
         if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale shape creation");
         slot.Generation = id.Generation;
         slot.Alive = true;
         slot.Revision = {};
         slot.Draw = {};
+        if (id.Index < _shapeTemplates.size()) _shapeTemplates[id.Index] = nullptr;
     }
     for (const auto& update : batch.MeshStates) {
         if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
@@ -143,6 +148,9 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
             ++slot.Revision.Order;
         }
     }
+    // Repeated edits use the final table value; unchanged keys do not rebuild templates.
+    for (const auto& update : batch.MeshStates) UpdateDrawTemplate(update.Id);
+    for (const auto& update : batch.Materials) UpdateDrawTemplate(update.Id);
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {
         for (auto shape = _transforms.GetFirstShape(row); shape != kNoMesh; shape = _shapes[shape].NextShape) {
@@ -167,6 +175,54 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     if (batch.LightsChanged || !changed.empty()) UpdateLights(batch);
 }
 
+size_t RenderScene::TemplateHash::operator()(const TemplateKey& key) const noexcept {
+    HashCode h;
+    h.Add(key.Mesh);
+    h.Add(key.Materials);
+    h.Add(key.Count);
+    return h.ToHashCode();
+}
+void RenderScene::ReleaseDrawTemplate(uint32_t index) {
+    if (index >= _shapeTemplates.size()) return;
+    auto& pointer = _shapeTemplates[index];
+    if (!pointer) return;
+    auto* entry = pointer.Get();
+    pointer = nullptr;
+    if (--entry->Uses == 0) _drawTemplates.erase(*entry->Key);
+}
+void RenderScene::UpdateDrawTemplate(ShapeId id) {
+    if (!ContainsShape(id) || _shapes[id.Index].MeshIndex == kNoMesh) return;
+    const auto row = _shapes[id.Index].MeshIndex;
+    const auto columns = _staticMeshes.GetColumns();
+    const auto& binding = columns.Bindings[row];
+    const auto mesh = binding.GetRenderMesh();
+    if (!mesh || mesh->Draws.empty() || binding.GetSections().empty()) {
+        ReleaseDrawTemplate(id.Index);
+        return;
+    }
+    if (id.Index >= _shapeTemplates.size()) _shapeTemplates.resize(_shapes.size(), nullptr);
+    auto& pointer = _shapeTemplates[id.Index];
+    const auto materials = std::span<const MaterialBinding>{columns.Materials[row]};
+    const TemplateKey key{binding.RenderData.Get(), materials.data(), materials.size()};
+    if (pointer && *pointer->Key == key) return;
+    ReleaseDrawTemplate(id.Index);
+    auto [it, inserted] = _drawTemplates.try_emplace(key);
+    if (inserted) {
+        it->second.Key = &it->first;
+        for (const auto& section : binding.GetSections()) {
+            if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
+            it->second.Primitives.push_back({&mesh->Draws[section.PrimitiveIndex], &section,
+                                             section.MaterialSlot < materials.size() ? materials[section.MaterialSlot] : MaterialBinding{{}, nullptr}});
+        }
+    }
+    ++it->second.Uses;
+    pointer = &it->second;
+}
+std::span<const RenderScene::DrawPrimitive> RenderScene::GetDrawPrimitives(ShapeId id) const noexcept {
+    if (!ContainsShape(id) || id.Index >= _shapeTemplates.size() || !_shapeTemplates[id.Index]) return {};
+    return _shapeTemplates[id.Index]->Primitives;
+}
+
 bool RenderScene::ContainsShape(ShapeId id) const noexcept {
     return id.IsValid() && id.Index < _shapes.size() &&
            _shapes[id.Index].Alive && _shapes[id.Index].Generation == id.Generation;
@@ -175,6 +231,10 @@ bool RenderScene::ContainsShape(ShapeId id) const noexcept {
 std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(ShapeId id) const noexcept {
     if (!ContainsShape(id) || _shapes[id.Index].MeshIndex == kNoMesh) return std::nullopt;
     return GetStaticMeshColumns().Get(_shapes[id.Index].MeshIndex);
+}
+Nullable<const Eigen::Matrix4f*> RenderScene::GetStaticMeshTransform(ShapeId id) const noexcept {
+    if (!ContainsShape(id) || _shapes[id.Index].MeshIndex == kNoMesh) return nullptr;
+    return &_transforms.GetWorld(_shapes[id.Index].TransformRow);
 }
 std::optional<ShapeDrawRevision> RenderScene::GetDrawRevision(ShapeId id) const noexcept {
     return ContainsShape(id) ? std::optional{_shapes[id.Index].Revision} : std::nullopt;

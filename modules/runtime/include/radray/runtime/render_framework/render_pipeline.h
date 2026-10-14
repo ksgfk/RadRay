@@ -22,6 +22,7 @@ struct PipelineContext {
     IGpuCmdAllocator& Commands;
     GpuFrameResources& Resources;
     Nullable<SceneManager*> Scenes{nullptr};
+    Nullable<IRequiredGpuWork*> RequiredWork{nullptr};
 };
 struct RenderPipelineRequest {
     std::span<const SceneViewRequest> Views;

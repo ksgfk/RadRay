@@ -53,7 +53,6 @@ private:
         uint64_t UpdateIndex{0};
         unique_ptr<render::Texture> Image;
         unique_ptr<render::TextureView> View;
-        unique_ptr<render::Framebuffer> Framebuffer;
         render::TextureStates State{render::TextureState::Undefined};
     };
 
@@ -69,7 +68,6 @@ private:
     Nullable<SceneComponent*> _parent{nullptr};
     StreamingAssetRef<StaticMesh> _mesh;
     vector<StaticMeshComponent*> _objects;
-    Nullable<render::RenderPass*> _pass{nullptr};
     unique_ptr<SceneDraw> _draw;
     unique_ptr<UnlitRenderPipeline> _pipeline;
     vector<FrameResources> _frames;

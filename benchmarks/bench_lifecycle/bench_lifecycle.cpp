@@ -6,6 +6,7 @@
 #include <fmt/format.h>
 #include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
+#include <radray/profiler.h>
 
 namespace radray {
 namespace {
@@ -41,15 +42,32 @@ public:
     }
 
     void Sync() {
-        test::PrepareScene(World, Renderer, 0);
-        test::ConsumeFrame(Renderer, 0);
-        test::CompleteFrame(Renderer, 0, false);
-        Assets.Pump();
+        RADRAY_PROFILE_SCOPE_N("Lifecycle::Sync");
+        {
+            RADRAY_PROFILE_SCOPE_N("Lifecycle::CollectAndSeal");
+            test::PrepareScene(World, Renderer, 0);
+        }
+        {
+            RADRAY_PROFILE_SCOPE_N("Lifecycle::Consume");
+            test::ConsumeFrame(Renderer, 0);
+        }
+        {
+            RADRAY_PROFILE_SCOPE_N("Lifecycle::Complete");
+            test::CompleteFrame(Renderer, 0, false);
+        }
+        {
+            RADRAY_PROFILE_SCOPE_N("Lifecycle::AssetsPump");
+            Assets.Pump();
+        }
     }
 
     void Remove(uint32_t count) {
-        const auto actors = World.GetActors();
-        for (uint32_t i = 0; i < count; ++i) World.DestroyActor(actors[i].get());
+        RADRAY_PROFILE_SCOPE_N("Lifecycle::RemoveAndSync");
+        {
+            RADRAY_PROFILE_SCOPE_N("Lifecycle::DestroyActors");
+            const auto actors = World.GetActors();
+            for (uint32_t i = 0; i < count; ++i) World.DestroyActor(actors[i].get());
+        }
         Sync();
     }
 

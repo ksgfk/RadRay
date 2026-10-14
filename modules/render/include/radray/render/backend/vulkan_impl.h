@@ -9,6 +9,7 @@
 #include <radray/render/backend/vulkan_helper.h>
 #include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
+#include <radray/render/backend/vulkan_render_pass_cache.h>
 
 namespace radray::render::vulkan {
 
@@ -26,8 +27,6 @@ class QueueVulkan;
 class CommandAllocatorVulkan;
 class CommandBufferVulkan;
 class SimulateCommandEncoderVulkan;
-class RenderPassVulkan;
-class FrameBufferVulkan;
 class LegacyFenceVulkan;
 class LegacySemaphoreVulkan;
 class FenceVulkan;
@@ -59,7 +58,6 @@ struct QueueIndexInFamily {
 struct ExtFeaturesVulkan {
     VkPhysicalDeviceVulkan11Features feature11;
     VkPhysicalDeviceVulkan12Features feature12;
-    VkPhysicalDeviceVulkan13Features feature13;
 };
 
 struct ExtPropertiesVulkan {
@@ -297,10 +295,6 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept override;
-
-    Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept override;
-
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
@@ -352,6 +346,7 @@ public:
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
+    unique_ptr<VulkanRenderPassCache> _renderPassCache;
     DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
     unique_ptr<PipelineLayoutCacheVulkan> _pipelineLayoutCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
@@ -425,6 +420,7 @@ public:
     VkCommandPool _cmdPool;
     vector<CommandBufferVulkan*> _children;
     bool _used{false};
+    bool _hasRenderScopes{false};
 };
 
 class CommandBufferVulkan final : public CommandBuffer {
@@ -453,7 +449,9 @@ public:
 
     void PopDebugGroup() noexcept override;
 
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
+    using CommandBuffer::BeginRenderPass;
+    std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -499,6 +497,17 @@ public:
     struct ProfilerZoneStack;
     unique_ptr<ProfilerZoneStack> _profilerZones;
 #endif
+    struct ReadyScope {
+        NativeRenderPassVulkan* Pass;
+        NativeFramebufferVulkan* Framebuffer;
+        AttachmentSignature Signature;
+        vector<VkClearValue> Clears;
+        VkRect2D Area;
+    };
+    uint64_t _renderPassEpoch{1};
+    vector<ReadyScope> _readyScopes;
+    vector<IntrusivePtr<NativeRenderPassVulkan>> _passPins;
+    vector<IntrusivePtr<NativeFramebufferVulkan>> _framebufferPins;
 };
 
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
@@ -547,7 +556,8 @@ public:
 
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
-    FrameBufferVulkan* _framebuffer{nullptr};
+    Nullable<NativeFramebufferVulkan*> _framebuffer{nullptr};
+    AttachmentSignature _attachmentSignature;
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
 };
@@ -583,62 +593,6 @@ public:
     CommandBufferVulkan* _cmdBuffer;
     ComputePipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
-};
-
-class RenderPassVulkan final : public RenderPass {
-public:
-    RenderPassVulkan(
-        DeviceVulkan* device,
-        VkRenderPass renderPass,
-        const RenderPassDescriptor& desc);
-
-    ~RenderPassVulkan() noexcept override;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-    RenderPassDescriptor GetDesc() const noexcept override;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    VkRenderPass _renderPass;
-    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
-    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
-};
-
-class FrameBufferVulkan final : public Framebuffer {
-public:
-    FrameBufferVulkan(
-        DeviceVulkan* device,
-        VkFramebuffer framebuffer,
-        const FramebufferDescriptor& desc);
-
-    ~FrameBufferVulkan() noexcept override;
-
-    bool IsValid() const noexcept override;
-
-    void Destroy() noexcept override;
-
-    void SetDebugName(std::string_view name) noexcept override;
-
-    FramebufferDescriptor GetDesc() const noexcept override;
-
-public:
-    void DestroyImpl() noexcept;
-
-    DeviceVulkan* _device;
-    VkFramebuffer _framebuffer;
-    RenderPass* _pass{nullptr};
-    vector<TextureView*> _colorAttachments;
-    TextureView* _depthStencilAttachment{nullptr};
-    uint32_t _width{0};
-    uint32_t _height{0};
-    uint32_t _layers{1};
 };
 
 class LegacyFenceVulkan final : public RenderBase {
@@ -972,6 +926,8 @@ public:
 
     TextureDescriptor GetDesc() const noexcept override;
 
+    Device* GetDevice() const noexcept override { return _device; }
+
 public:
     void DestroyImpl() noexcept;
 
@@ -1017,6 +973,7 @@ public:
     DeviceVulkan* _device;
     ImageVulkan* _image;
     VkImageView _imageView;
+    uint64_t _viewId{0};
     TextureViewDescriptor _mdesc;
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
@@ -1091,6 +1048,9 @@ public:
 
     bool FlushWrites() noexcept override;
 
+protected:
+    void ClearBindings() noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -1123,6 +1083,7 @@ public:
     DeviceVulkan* _device;
     PipelineLayoutVulkan* _layout;
     VkPipeline _pipeline;
+    AttachmentSignature _attachmentSignature;
 };
 
 class ComputePipelineVulkan final : public ComputePipelineState {
@@ -1205,8 +1166,6 @@ constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*
 constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
-constexpr auto CastVkObject(RenderPass* p) noexcept { return static_cast<RenderPassVulkan*>(p); }
-constexpr auto CastVkObject(Framebuffer* p) noexcept { return static_cast<FrameBufferVulkan*>(p); }
 constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(PipelineLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }

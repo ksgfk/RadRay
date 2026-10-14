@@ -86,8 +86,9 @@ RasterInstancePreparation PrepareRasterInstances(PipelineContext& context, const
     }
     return PrepareRasterInstances(context, plan, render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 64}, slots, bindings);
 }
-Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& renderer, const MaterialPass& pass) {
-    std::erase_if(_plans, [](const auto& plan) { return !plan->Generation->Alive; });
+Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& renderer, const MaterialPass& source) {
+    const auto& pass = source.GetDefinition();
+    if (source._definition && pass._nativePlan && pass._nativePlan->Generation == renderer.GetGeneration() && pass._nativePlan->Generation->Alive) return pass._nativePlan.get();
     auto program = pass.ResolveProgram(renderer);
     if (!program) return nullptr;
     if (!pass.ObjectIndexPushConstant.empty() && !pass.PushConstant.empty()) return nullptr;
@@ -103,10 +104,14 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
     };
     if (pass.Blend && (requiresConstant(pass.Blend->Color) || requiresConstant(pass.Blend->Alpha))) return nullptr;
     if (pass.DepthStencil && pass.DepthStencil->Stencil) return nullptr;
-    for (const auto& plan : _plans)
+    const auto& cached = pass._nativePlan;
+    if (cached) {
+        const auto& plan = cached;
         if (plan->Generation == renderer.GetGeneration() && plan->Program == program.Get() && plan->Inputs == pass.Inputs && plan->PushName == pushName &&
             plan->LegacyObjectIndexPush == !pass.ObjectIndexPushConstant.empty() && plan->ParameterLayouts == pass.ParameterLayouts &&
             plan->InstanceAddressing == pass.InstanceAddressing && plan->SceneIndexField == pass.SceneIndexField) return plan.get();
+        if (source._definition && plan->Generation->Alive && plan->Generation != renderer.GetGeneration()) return nullptr;
+    }
     auto plan = make_shared<RasterMaterialPlan>();
     plan->Generation = renderer.GetGeneration();
     plan->Program = program.Get();
@@ -199,7 +204,7 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
         if (std::none_of(pass.Inputs.begin(), pass.Inputs.end(), [&](const auto& input) { return input.Name == *name; })) return nullptr;
     }
     auto* result = plan.get();
-    _plans.push_back(std::move(plan));
+    pass._nativePlan = std::move(plan);
     return result;
 }
 
@@ -223,21 +228,20 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
         }
         gpu->_constants.resize(material.Constants.size());
         if (!source && material.Passes.size() == 1) source = &material.Passes[0];
-        if (source && std::none_of(material.Passes.begin(), material.Passes.end(), [&](const auto& pass) { return &pass == source.Get(); })) return std::nullopt;
-        for (auto& pass : gpu->_passes)
-            if ((source && pass.Source.Get() == source.Get()) || (!source && pass.Plan.get() == &plan)) {
-                if (pass.Plan->Program != plan.Program) {
-                    RADRAY_ERR_LOG("A changed shader program requires a new immutable material GPU owner");
-                    return std::nullopt;
-                }
-                cachedPass = &pass;
-                break;
+        if (source) source = &source->GetDefinition();
+        if (source && std::none_of(material.Passes.begin(), material.Passes.end(), [&](const auto& pass) { return &pass.GetDefinition() == source.Get(); })) return std::nullopt;
+        if (!source) return std::nullopt;
+        const auto found = gpu->_passes.find(source.Get());
+        if (found != gpu->_passes.end()) {
+            if (found->second.Plan->Program != plan.Program) {
+                RADRAY_ERR_LOG("A changed shader program requires a new immutable material GPU owner");
+                return std::nullopt;
             }
-        if (!cachedPass) {
-            const auto owner = std::find_if(_plans.begin(), _plans.end(), [&](const auto& item) { return item.get() == &plan; });
-            if (owner == _plans.end()) return std::nullopt;
-            gpu->_passes.push_back({source.Get(), *owner, {}});
-            cachedPass = &gpu->_passes.back();
+            cachedPass = &found->second;
+        } else {
+            auto owner = plan.weak_from_this().lock();
+            if (!owner) return std::nullopt;
+            cachedPass = &gpu->_passes.emplace(source.Get(), MaterialGpuState::Pass{std::move(owner), {}}).first->second;
         }
     }
     PreparedRasterMaterial result;
@@ -381,8 +385,9 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
 }
 
 Nullable<render::GraphicsPipelineState*> RasterDraw::PreparePipeline(PipelineContext& context, const RasterMaterialPlan& plan,
-                                                                     const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
-                                                                     render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling) {
+                                                                     const MaterialPass& source, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
+                                                                     const RenderOutputInfo& output, bool reverseCulling) {
+    const auto& material = source.GetDefinition();
     if (!plan.Generation->Alive || plan.Generation != context.Renderer.GetGeneration() ||
         plan.Program->GetDevice() != context.Resources.GetDevice() || (material.DepthStencil && !output.Depth)) return nullptr;
     auto& cache = context.Renderer.GetGraphicsPipelineCache();
@@ -392,12 +397,15 @@ Nullable<render::GraphicsPipelineState*> RasterDraw::PreparePipeline(PipelineCon
     primitive.Topology = topology;
     if (reverseCulling) primitive.FaceClockwise = primitive.FaceClockwise == render::FrontFace::CW ? render::FrontFace::CCW : render::FrontFace::CW;
     auto depth = material.DepthStencil;
-    if (depth) depth->Format = *output.Depth;
+    if (depth)
+        depth->Format = *output.Depth;
+    else if (output.Depth)
+        depth = render::DepthStencilState{.Format = *output.Depth};
     vector<render::ColorTargetState> colors;
     for (const auto format : output.Colors) colors.push_back({format, material.Blend, material.WriteMask});
     auto samples = material.Samples;
     samples.Count = output.Samples;
-    return cache.GetOrCreate({plan.Program, *layout.Get(), primitive, depth, samples, colors, pass});
+    return cache.GetOrCreate({plan.Program, *layout.Get(), primitive, depth, samples, colors});
 }
 
 void PreparedRasterDraw::Record(render::GraphicsCommandEncoder* encoder, const PreparedRasterMaterial& material) const {

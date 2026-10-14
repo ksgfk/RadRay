@@ -150,22 +150,18 @@ TEST_P(DeviceCapabilitiesTest, ReportedAttachmentFormatsAndSamplesCreate) {
             ASSERT_TRUE(texture);
             auto view = Context.Device->CreateTextureView({texture.Get(), desc.Dim, format, {0, 1, 0, 1}, depth ? TextureViewUsage::DepthWrite : TextureViewUsage::RenderTarget});
             ASSERT_TRUE(view);
-            const RenderPassColorAttachmentDescriptor color{format, samples, LoadAction::Clear, StoreAction::Store};
-            RenderPassDescriptor passDesc{};
+            auto allocator = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
+            auto command = Context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
+            command->Begin();
+            const RenderPassColorAttachment color{view.Get(), LoadAction::Clear, StoreAction::Store};
+            RenderPassBeginDescriptor scope{.Width = desc.Width, .Height = desc.Height};
             if (depth)
-                passDesc.DepthStencilAttachment = {format, samples, LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store};
+                scope.DepthStencil = {view.Get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store};
             else
-                passDesc.ColorAttachments = std::span{&color, 1};
-            auto pass = Context.Device->CreateRenderPass(passDesc);
-            ASSERT_TRUE(pass);
-            TextureView* colorView = view.Get();
-            FramebufferDescriptor framebufferDesc{.Pass = pass.Get(), .Width = desc.Width, .Height = desc.Height};
-            if (depth)
-                framebufferDesc.DepthStencilAttachment = view.Get();
-            else
-                framebufferDesc.ColorAttachments = std::span{&colorView, 1};
-            auto framebuffer = Context.Device->CreateFramebuffer(framebufferDesc);
-            ASSERT_TRUE(framebuffer);
+                scope.Colors = std::span{&color, 1};
+            ASSERT_TRUE(command->PrepareRenderPass(scope));
+            command->End();
+            allocator->Reset();
         }
     }
 }
@@ -184,12 +180,6 @@ TEST_P(DeviceCapabilitiesTest, SubresourceRangeClearReadbackAndNestedLabels) {
     ASSERT_TRUE(readback);
     auto view = device.CreateTextureView({texture.Get(), TextureDimension::Dim2DArray, desc.Format, {1, 1, 1, 1}, TextureViewUsage::RenderTarget});
     ASSERT_TRUE(view);
-    const RenderPassColorAttachmentDescriptor color{desc.Format, 1, LoadAction::Clear, StoreAction::Store};
-    auto pass = device.CreateRenderPass({std::span{&color, 1}, {}});
-    ASSERT_TRUE(pass);
-    TextureView* rawView = view.Get();
-    auto framebuffer = device.CreateFramebuffer({pass.Get(), std::span{&rawView, 1}, nullptr, 16, 16, 1});
-    ASSERT_TRUE(framebuffer);
     auto cmdStorage = device.CreateCommandAllocator(Context.Queue).Unwrap();
     auto cmd = device.CreateCommandBuffer(cmdStorage.get());
     ASSERT_TRUE(cmd);
@@ -201,7 +191,7 @@ TEST_P(DeviceCapabilitiesTest, SubresourceRangeClearReadbackAndNestedLabels) {
         .Target = texture.Get(), .Before = TextureState::Undefined, .After = TextureState::RenderTarget, .Range = {0, SubresourceRange::All, 1, SubresourceRange::All}};
     cmd->ResourceBarrier(std::span{&toTarget, 1});
     const ColorClearValue clear{{0.25f, 0.5f, 0.75f, 1.0f}};
-    auto encoder = cmd->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}});
+    auto encoder = cmd->BeginRenderPass({array{RenderPassColorAttachment{view.Get(), LoadAction::Clear, StoreAction::Store, clear}}, {}, 16, 16, 1});
     ASSERT_TRUE(encoder);
     cmd->EndRenderPass(encoder.Release());
     const ResourceBarrierDescriptor toCopy = BarrierTextureDescriptor{

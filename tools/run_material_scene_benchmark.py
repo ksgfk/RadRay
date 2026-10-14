@@ -2,6 +2,7 @@
 import argparse
 import csv
 import ctypes
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -55,18 +56,20 @@ def main():
     parser.add_argument("--min-time", default="0.1s")
     parser.add_argument("--no-traces", action="store_true")
     parser.add_argument("--traces-only", action="store_true")
-    parser.add_argument("--trace-filter", default="MaterialScene/{backend}/FullFrame/N10000/M100/V3/dirty1/")
+    parser.add_argument("--backend", action="append", choices=("d3d12", "vulkan"), help="Limit trace captures to selected backends")
+    parser.add_argument("--trace-filter", default="^MaterialScene/{backend}/FullFrame/N10000/M100/V3/dirty1/real_time$")
     parser.add_argument("--trace-min-time", default="4s")
     parser.add_argument("--memory-only", action="store_true")
     parser.add_argument("--memory-case", action="append", default=[], help="Run each regex in a separate process and save its memory curve")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "executable.json").write_text(json.dumps({"path": str(args.exe.resolve()), "sha256": hashlib.sha256(args.exe.read_bytes()).hexdigest()}, indent=2), encoding="utf-8")
     options = [str(args.exe.resolve()), f"--benchmark_filter={args.filter}", f"--benchmark_min_time={args.min_time}", f"--benchmark_repetitions={args.repetitions}", f"--benchmark_out={args.output.resolve() / 'benchmark.json'}", "--benchmark_out_format=json"]
     (args.output / "invocation.json").write_text(json.dumps(options, indent=2), encoding="utf-8")
     if not args.memory_only and not args.traces_only:
         with (args.output / "benchmark.log").open("w", encoding="utf-8") as log:
             subprocess.run(options, stdout=log, stderr=subprocess.STDOUT, check=True)
-    for backend in (() if args.no_traces or args.memory_only else ("d3d12", "vulkan")):
+    for backend in (() if args.no_traces or args.memory_only else (args.backend or ("d3d12", "vulkan"))):
         trace = args.output.resolve() / f"{backend}.tracy"
         with (args.output / f"{backend}-capture.log").open("w", encoding="utf-8") as log:
             capture = subprocess.Popen([str(args.tracy / "tracy-capture.exe"), "-a", "127.0.0.1", "-o", str(trace), "-f"], stdout=log, stderr=subprocess.STDOUT)
@@ -80,9 +83,11 @@ def main():
                 raise RuntimeError(f"Tracy capture failed for {backend}")
         with (args.output / f"{backend}-zones.csv").open("w", encoding="utf-8") as out:
             subprocess.run([str(args.tracy / "tracy-csvexport.exe"), str(trace)], stdout=out, check=True)
-        for suffix, flag in (("events", "-u"), ("messages", "-m")):
+        for suffix, flag in (("events", "-u"), ("messages", "-m"), ("gpu-events", "-g")):
             with (args.output / f"{backend}-{suffix}.csv").open("w", encoding="utf-8") as out:
                 subprocess.run([str(args.tracy / "tracy-csvexport.exe"), flag, str(trace)], stdout=out, check=True)
+        with (args.output / f"{backend}-plots.csv").open("w", encoding="utf-8") as out:
+            subprocess.run([str(args.tracy / "tracy-csvexport.exe"), "-u", "-p", str(trace)], stdout=out, check=True)
     for index, case in enumerate(args.memory_case):
         memory = args.output.resolve() / f"memory-{index}.csv"
         command = [str(args.exe.resolve()), f"--benchmark_filter={case}", "--benchmark_min_time=2s", f"--benchmark_repetitions={args.repetitions}", f"--benchmark_out={memory.with_suffix('.json')}", "--benchmark_out_format=json"]

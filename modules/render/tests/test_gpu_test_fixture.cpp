@@ -36,8 +36,7 @@ public:
     void FlushMappedRanges(std::span<const MappedBufferRange>) noexcept override {}
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor&) noexcept override { return nullptr; }
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor&) noexcept override { return nullptr; }

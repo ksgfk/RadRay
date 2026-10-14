@@ -67,14 +67,7 @@ public:
         ++NativeCreates;
         return nullptr;
     }
-    Nullable<unique_ptr<render::RenderPass>> CreateRenderPass(const render::RenderPassDescriptor&) noexcept override {
-        ++NativeCreates;
-        return nullptr;
-    }
-    Nullable<unique_ptr<render::Framebuffer>> CreateFramebuffer(const render::FramebufferDescriptor&) noexcept override {
-        ++NativeCreates;
-        return nullptr;
-    }
+
     Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor&) noexcept override {
         ++NativeCreates;
         return nullptr;

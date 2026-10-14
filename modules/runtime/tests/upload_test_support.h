@@ -32,7 +32,8 @@ private:
 };
 class UploadTestTexture final : public render::Texture {
 public:
-    UploadTestTexture(render::TextureDescriptor desc, int& live) : _desc(desc), _live(live) { ++_live; }
+    render::Device* GetDevice() const noexcept override { return _device; }
+    UploadTestTexture(render::Device* device, render::TextureDescriptor desc, int& live) : _device(device), _desc(desc), _live(live) { ++_live; }
     ~UploadTestTexture() override { --_live; }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -40,6 +41,7 @@ public:
     render::TextureDescriptor GetDesc() const noexcept override { return _desc; }
 
 private:
+    render::Device* _device;
     render::TextureDescriptor _desc;
     int& _live;
 };
@@ -67,7 +69,7 @@ public:
         return make_unique<UploadTestBuffer>(this, desc, LiveDeviceBuffers);
     }
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor& desc) noexcept override {
-        return make_unique<UploadTestTexture>(desc, LiveTextures);
+        return make_unique<UploadTestTexture>(this, desc, LiveTextures);
     }
     Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor& desc) noexcept override {
         return make_unique<UploadTestTextureView>(desc, LiveTextureViews);
@@ -85,7 +87,8 @@ public:
     void PushDebugGroup(std::string_view) noexcept override {}
     void PopDebugGroup() noexcept override {}
     void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor>) noexcept override { ++BarrierCalls; }
-    Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return nullptr; }
+    std::optional<render::RenderPassToken> PrepareRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return std::nullopt; }
+    Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(render::RenderPassToken) noexcept override { return nullptr; }
     void EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>) noexcept override {}
     Nullable<unique_ptr<render::ComputeCommandEncoder>> BeginComputePass() noexcept override { return nullptr; }
     void EndComputePass(unique_ptr<render::ComputeCommandEncoder>) noexcept override {}

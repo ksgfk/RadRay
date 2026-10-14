@@ -1,4 +1,5 @@
 #include <radray/render/backend/d3d12_impl.h>
+#include <radray/profiler.h>
 #include "pipeline_layout_cache_d3d12.h"
 #include "../texture_support_cache.h"
 
@@ -1678,75 +1679,6 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
 
 // == Device: render pass / framebuffer / shader ==
 
-Nullable<unique_ptr<RenderPass>> DeviceD3D12::CreateRenderPass(const RenderPassDescriptor& desc) noexcept {
-    if (desc.ColorAttachments.empty() && !desc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("d3d12 render pass must have at least one attachment");
-        return nullptr;
-    }
-    for (const RenderPassColorAttachmentDescriptor& color : desc.ColorAttachments) {
-        if (color.Format == TextureFormat::UNKNOWN || color.SampleCount == 0 ||
-            IsDepthStencilFormat(color.Format)) {
-            RADRAY_ERR_LOG("d3d12 render pass has invalid color attachment");
-            return nullptr;
-        }
-    }
-    if (desc.DepthStencilAttachment.has_value() &&
-        (!IsDepthStencilFormat(desc.DepthStencilAttachment->Format) ||
-         desc.DepthStencilAttachment->SampleCount == 0)) {
-        RADRAY_ERR_LOG("d3d12 render pass has invalid depth attachment");
-        return nullptr;
-    }
-    if (desc.DepthStencilAttachment) {
-        const auto& depth = *desc.DepthStencilAttachment;
-        const bool hasStencil = IsStencilFormatDXGI(MapType(depth.Format));
-        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
-                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
-            RADRAY_ERR_LOG("d3d12 read-only depth/stencil attachment must preserve its contents");
-            return nullptr;
-        }
-    }
-    return make_unique<RenderPassD3D12>(desc);
-}
-
-Nullable<unique_ptr<Framebuffer>> DeviceD3D12::CreateFramebuffer(const FramebufferDescriptor& desc) noexcept {
-    if (desc.Pass == nullptr || desc.Width == 0 || desc.Height == 0 || desc.Layers == 0) {
-        RADRAY_ERR_LOG("d3d12 framebuffer has invalid pass or dimensions");
-        return nullptr;
-    }
-    const RenderPassDescriptor passDesc = desc.Pass->GetDesc();
-    if (desc.ColorAttachments.size() != passDesc.ColorAttachments.size() ||
-        (desc.DepthStencilAttachment != nullptr) != passDesc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("d3d12 framebuffer attachment count does not match render pass");
-        return nullptr;
-    }
-    for (size_t i = 0; i < desc.ColorAttachments.size(); ++i) {
-        auto* view = CastD3D12Object(desc.ColorAttachments[i]);
-        if (view == nullptr || !view->IsValid()) {
-            return nullptr;
-        }
-        const TextureDescriptor texture = view->_texture->GetDesc();
-        if (view->_desc.Format != passDesc.ColorAttachments[i].Format ||
-            texture.SampleCount != passDesc.ColorAttachments[i].SampleCount ||
-            texture.Width < desc.Width || texture.Height < desc.Height) {
-            RADRAY_ERR_LOG("d3d12 framebuffer color attachment {} is incompatible", i);
-            return nullptr;
-        }
-    }
-    if (desc.DepthStencilAttachment != nullptr) {
-        auto* view = CastD3D12Object(desc.DepthStencilAttachment);
-        const TextureDescriptor texture = view->_texture->GetDesc();
-        const auto& depth = passDesc.DepthStencilAttachment.value();
-        if (!view->IsValid() || view->_desc.Format != depth.Format ||
-            view->_desc.Usage != (depth.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite) ||
-            texture.SampleCount != depth.SampleCount ||
-            texture.Width < desc.Width || texture.Height < desc.Height) {
-            RADRAY_ERR_LOG("d3d12 framebuffer depth attachment is incompatible");
-            return nullptr;
-        }
-    }
-    return make_unique<FramebufferD3D12>(desc);
-}
-
 Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& desc) noexcept {
     if (desc.Category != ShaderBlobCategory::DXIL) {
         RADRAY_ERR_LOG("d3d12 only support DXIL shader blobs");
@@ -3201,6 +3133,10 @@ bool ShaderParameterSetD3D12::Set(
     BindingHandle binding,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
+    if (AreBindingsSealed()) {
+        RADRAY_ERR_LOG("Cannot modify a shader parameter version after command binding");
+        return false;
+    }
     if (_layout == nullptr || !binding.IsValid()) {
         RADRAY_ERR_LOG("d3d12 shader parameter set write has an invalid binding handle");
         return false;
@@ -3470,12 +3406,14 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    return make_unique<GraphicsPsoD3D12>(
+    auto result = make_unique<GraphicsPsoD3D12>(
         this,
         CastD3D12Object(desc.PipelineLayout),
         std::move(pso),
         std::move(vertexStrides),
         topo);
+    result->_attachmentSignature = GetAttachmentSignature(desc);
+    return result;
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
@@ -3621,6 +3559,7 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
     _CheckD3D12Result(_device->_device.Get(), S_OK, "CommandQueue::Submit");
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.WaitFences[i]);
@@ -3803,6 +3742,7 @@ std::optional<size_t> CommandAllocatorD3D12::AcquireNative() noexcept {
 }
 
 void CommandAllocatorD3D12::Reset() noexcept {
+    RADRAY_PROFILE_SCOPE_N("CommandAllocatorD3D12::Reset");
     if (!_valid) RADRAY_ABORT("invalid command allocator");
     for (const auto& native : _native)
         if (native.Recording) RADRAY_ABORT("cannot reset command allocator while recording");
@@ -3812,6 +3752,10 @@ void CommandAllocatorD3D12::Reset() noexcept {
     }
     for (auto* child : _children) {
         child->_keepAliveBuffers.clear();
+        if (child->_renderPass) {
+            child->_renderPass->ReadyScopes.clear();
+            if (++child->_renderPass->Epoch == 0) RADRAY_ABORT("render pass epoch exhausted");
+        }
         child->_used = false;
         child->_executable = false;
     }
@@ -3863,6 +3807,7 @@ void CmdListD3D12::Destroy() noexcept {
     _inRenderPass = false;
 #endif
     _keepAliveBuffers.clear();
+    _renderPass.reset();
     _cmdList = nullptr;
     _emptyRootSignature = nullptr;
 }
@@ -4032,87 +3977,94 @@ void CmdListD3D12::PopDebugGroup() noexcept {
 #endif
 }
 
-Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
-    if (desc.Pass == nullptr || desc.Target == nullptr) {
-        RADRAY_ERR_LOG("d3d12 BeginRenderPass requires an explicit render pass and framebuffer");
-        return nullptr;
-    }
-    const RenderPassDescriptor passDesc = desc.Pass->GetDesc();
-    const FramebufferDescriptor framebufferDesc = desc.Target->GetDesc();
-    if (framebufferDesc.Pass != desc.Pass || desc.ColorClearValues.size() != passDesc.ColorAttachments.size() ||
-        desc.DepthStencilClearValue.has_value() != passDesc.DepthStencilAttachment.has_value()) {
-        RADRAY_ERR_LOG("d3d12 BeginRenderPass descriptor does not match the framebuffer/render pass");
-        return nullptr;
-    }
-    if (!desc.Name.empty()) {
-        desc.Pass->SetDebugName(desc.Name);
-        desc.Target->SetDebugName(desc.Name);
-    }
-
-    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
-    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12GraphicsCommandList::QueryInterface failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rtDescs;
-    rtDescs.reserve(passDesc.ColorAttachments.size());
-    for (size_t index = 0; index < passDesc.ColorAttachments.size(); ++index) {
-        const RenderPassColorAttachmentDescriptor& color = passDesc.ColorAttachments[index];
-        auto* v = CastD3D12Object(framebufferDesc.ColorAttachments[index]);
-        D3D12_CLEAR_VALUE clearColor{};
-        clearColor.Format = v->_rawFormat;
-        for (uint32_t component = 0; component < 4; ++component) {
-            clearColor.Color[component] = desc.ColorClearValues[index].Value[component];
+std::optional<RenderPassToken> CmdListD3D12::PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("prepare pass requires recording outside an encoder");
+    const auto signature = ValidateRenderScope(desc, *_device);
+    if (!signature) return std::nullopt;
+    if (!_renderPass) {
+        auto state = make_unique<RenderPassState>();
+        const HRESULT result = _cmdList->QueryInterface(IID_PPV_ARGS(state->List.GetAddressOf()));
+        if (FAILED(result)) {
+            RADRAY_ERR_LOG("D3D12 render pass interface failed: {}", result);
+            return std::nullopt;
         }
-        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE beginningAccess = MapType(color.Load);
-        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
-        auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
-        rtDesc.cpuDescriptor = v->_heapView.HandleCpu();
-        rtDesc.BeginningAccess.Type = beginningAccess;
-        rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
-        rtDesc.EndingAccess.Type = endingAccess;
+        _renderPass = std::move(state);
     }
-    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC dsDesc{};
-    D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDsDesc = nullptr;
-    D3D12_RENDER_PASS_FLAGS passFlags = D3D12_RENDER_PASS_FLAG_NONE;
-    if (desc.AllowUavWrites) {
-        passFlags |= D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES;
+    ReadyScope ready;
+    ready.Signature = *signature;
+    if (desc.RenderArea && (desc.RenderArea->X || desc.RenderArea->Y || desc.RenderArea->Width != desc.Width || desc.RenderArea->Height != desc.Height)) {
+        const auto& area = *desc.RenderArea;
+        ready.Area = {area.X, area.Y, area.X + static_cast<LONG>(area.Width), area.Y + static_cast<LONG>(area.Height)};
     }
-    if (passDesc.DepthStencilAttachment.has_value()) {
-        const RenderPassDepthStencilAttachmentDescriptor& depthStencil = passDesc.DepthStencilAttachment.value();
-        auto* v = CastD3D12Object(framebufferDesc.DepthStencilAttachment);
-        if (depthStencil.ReadOnly) {
-            passFlags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
-            if (IsStencilFormatDXGI(v->_rawFormat)) passFlags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
+    ready.Flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
+    for (const auto& color : desc.Colors) {
+        auto* view = dynamic_cast<TextureViewD3D12*>(color.View);
+        if (!view || view->_device != _device) return std::nullopt;
+        D3D12_RENDER_PASS_RENDER_TARGET_DESC rt{};
+        rt.cpuDescriptor = view->_heapView.HandleCpu();
+        rt.BeginningAccess.Type = MapType(color.Load);
+        rt.EndingAccess.Type = MapType(color.Store);
+        rt.BeginningAccess.Clear.ClearValue.Format = view->_rawFormat;
+        for (uint32_t c = 0; c < 4; ++c) rt.BeginningAccess.Clear.ClearValue.Color[c] = color.Clear.Value[c];
+        if (ready.Area && color.Load == LoadAction::Clear) {
+            ready.RectClears.push_back(rt);
+            rt.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
         }
-        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE depthBeginningAccess = MapType(depthStencil.DepthLoad);
-        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE depthEndingAccess = MapType(depthStencil.DepthStore);
-        D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE stencilBeginningAccess = MapType(depthStencil.StencilLoad);
-        D3D12_RENDER_PASS_ENDING_ACCESS_TYPE stencilEndingAccess = MapType(depthStencil.StencilStore);
-        if (!IsStencilFormatDXGI(v->_rawFormat)) {
-            stencilBeginningAccess = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
-            stencilEndingAccess = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
-        }
+        ready.Colors.push_back(rt);
+    }
+    if (desc.DepthStencil) {
+        const auto& d = *desc.DepthStencil;
+        auto* view = dynamic_cast<TextureViewD3D12*>(d.View);
+        if (!view || view->_device != _device) return std::nullopt;
+        D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
+        ds.cpuDescriptor = view->_heapView.HandleCpu();
+        ds.DepthBeginningAccess.Type = MapType(d.DepthLoad);
+        ds.DepthEndingAccess.Type = MapType(d.DepthStore);
+        ds.StencilBeginningAccess.Type = IsStencilFormatDXGI(view->_rawFormat) ? MapType(d.StencilLoad) : D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+        ds.StencilEndingAccess.Type = IsStencilFormatDXGI(view->_rawFormat) ? MapType(d.StencilStore) : D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
         D3D12_CLEAR_VALUE clear{};
-        clear.Format = v->_rawFormat;
-        clear.DepthStencil.Depth = desc.DepthStencilClearValue->Depth;
-        clear.DepthStencil.Stencil = desc.DepthStencilClearValue->Stencil;
-        dsDesc.cpuDescriptor = v->_heapView.HandleCpu();
-        dsDesc.DepthBeginningAccess.Type = depthBeginningAccess;
-        dsDesc.DepthBeginningAccess.Clear.ClearValue = clear;
-        dsDesc.DepthEndingAccess.Type = depthEndingAccess;
-        dsDesc.StencilBeginningAccess.Type = stencilBeginningAccess;
-        dsDesc.StencilBeginningAccess.Clear.ClearValue = clear;
-        dsDesc.StencilEndingAccess.Type = stencilEndingAccess;
-        pDsDesc = &dsDesc;
+        clear.Format = view->_rawFormat;
+        clear.DepthStencil = {d.Clear.Depth, static_cast<UINT8>(d.Clear.Stencil)};
+        ds.DepthBeginningAccess.Clear.ClearValue = clear;
+        ds.StencilBeginningAccess.Clear.ClearValue = clear;
+        if (d.ReadOnly) {
+            ready.Flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
+            if (IsStencilFormatDXGI(view->_rawFormat)) ready.Flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
+        }
+        if (ready.Area) {
+            ready.DepthClear = clear;
+            if (d.DepthLoad == LoadAction::Clear) {
+                ready.DepthClearFlags |= D3D12_CLEAR_FLAG_DEPTH;
+                ds.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            }
+            if (IsStencilFormatDXGI(view->_rawFormat) && d.StencilLoad == LoadAction::Clear) {
+                ready.DepthClearFlags |= D3D12_CLEAR_FLAG_STENCIL;
+                ds.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            }
+        }
+        ready.Depth = ds;
     }
-    cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, passFlags);
+    const auto index = static_cast<uint32_t>(_renderPass->ReadyScopes.size());
+    _renderPass->ReadyScopes.push_back(std::move(ready));
+    return MakeRenderPassToken(_renderPass->Epoch, index);
+}
+Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(RenderPassToken token) noexcept {
+    if (!_recording || _activeEncoder || !_renderPass || !token.IsFrom(this, _renderPass->Epoch) || token.Index() >= _renderPass->ReadyScopes.size()) {
+        RADRAY_ERR_LOG("invalid D3D12 render pass prepare token");
+        return nullptr;
+    }
+    const auto& ready = _renderPass->ReadyScopes[token.Index()];
+    if (ready.Area) {
+        for (const auto& clear : ready.RectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*ready.Area);
+        if (ready.DepthClearFlags) _cmdList->ClearDepthStencilView(ready.Depth->cpuDescriptor, ready.DepthClearFlags,
+                                                                   ready.DepthClear.DepthStencil.Depth, ready.DepthClear.DepthStencil.Stencil, 1, &*ready.Area);
+    }
+    _renderPass->List->BeginRenderPass(static_cast<UINT>(ready.Colors.size()), ready.Colors.data(), ready.Depth ? &*ready.Depth : nullptr, ready.Flags);
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = true;
 #endif
     auto encoder = make_unique<CmdRenderPassD3D12>(this);
+    encoder->_attachmentSignature = ready.Signature;
     _activeEncoder = encoder.get();
     return encoder;
 }
@@ -4654,6 +4606,7 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto ps = CastD3D12Object(pso);
+    if (ps->_attachmentSignature != _attachmentSignature) RADRAY_ABORT("pipeline attachment signature does not match render scope");
     if (_boundPso == ps) {
         return;
     }
@@ -4740,6 +4693,7 @@ static bool BindShaderParameterSetD3D12(
             }
         }
     }
+    set->SealBindings();
     return true;
 }
 
@@ -5360,58 +5314,6 @@ void TextureViewD3D12::Destroy() noexcept {
 
 void TextureViewD3D12::SetDebugName(std::string_view name) noexcept {
     RADRAY_UNUSED(name);
-}
-
-RenderPassD3D12::RenderPassD3D12(const RenderPassDescriptor& desc)
-    : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment) {}
-
-RenderPassDescriptor RenderPassD3D12::GetDesc() const noexcept {
-    return RenderPassDescriptor{
-        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment};
-}
-
-bool RenderPassD3D12::IsValid() const noexcept {
-    return _valid;
-}
-
-void RenderPassD3D12::Destroy() noexcept {
-    _valid = false;
-}
-
-void RenderPassD3D12::SetDebugName(std::string_view name) noexcept {
-    _name = string{name};
-}
-
-FramebufferD3D12::FramebufferD3D12(const FramebufferDescriptor& desc)
-    : _pass(desc.Pass),
-      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment),
-      _width(desc.Width),
-      _height(desc.Height),
-      _layers(desc.Layers) {}
-
-FramebufferDescriptor FramebufferD3D12::GetDesc() const noexcept {
-    return FramebufferDescriptor{
-        .Pass = _pass,
-        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment,
-        .Width = _width,
-        .Height = _height,
-        .Layers = _layers};
-}
-
-bool FramebufferD3D12::IsValid() const noexcept {
-    return _valid;
-}
-
-void FramebufferD3D12::Destroy() noexcept {
-    _valid = false;
-}
-
-void FramebufferD3D12::SetDebugName(std::string_view name) noexcept {
-    _name = string{name};
 }
 
 bool Dxil::IsValid() const noexcept {

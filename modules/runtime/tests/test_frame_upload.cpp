@@ -8,7 +8,8 @@ namespace {
 class FrameUploadTest : public testing::Test {
 protected:
     test::UploadTestDevice Device;
-    ResourceUploader Uploader{&Device, 2};
+    StagingBufferPool Staging{&Device};
+    ResourceUploader Uploader{&Device, Staging};
     HostWriteBatch Writes;
     test::UploadTestCommand Command;
 };
@@ -17,9 +18,10 @@ TEST_F(FrameUploadTest, AllocationFailureLeavesNoRecordedMeshCopies) {
     for (int failure = 1; failure <= 2; ++failure) {
         Device.DeviceAllocations = 0;
         Device.FailDeviceAllocation = failure;
-        Uploader.BeginFlight(0, Writes);
+        Staging.BeginEpoch(Writes);
         auto mesh = Uploader.UploadMeshResource(&Command, test::MakeUploadTestMesh());
-        Uploader.EndFlight(0);
+        Staging.SealEpoch();
+        Staging.CompleteEpoch();
         EXPECT_FALSE(mesh);
         EXPECT_EQ(Command.Copies, 0u);
         EXPECT_EQ(Device.LiveDeviceBuffers, 0);
@@ -33,20 +35,20 @@ TEST_F(FrameUploadTest, TransactionalBufferUploadDoesNotRecordAPrefixOnStagingFa
     const array<BufferUploadRequest, 2> requests{{{.SrcData = bytes, .DstBuffer = destination.get()},
                                                   {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = bytes.size()}}};
     Device.FailUploadAllocation = 2;
-    Uploader.BeginFlight(0, Writes);
+    Staging.BeginEpoch(Writes);
     EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
     EXPECT_EQ(Command.Copies, 0u);
     EXPECT_EQ(Command.BarrierCalls, 0u);
-    Uploader.EndFlight(0);
-    Uploader.CollectFlight(0);
+    Staging.SealEpoch();
+    Staging.CompleteEpoch();
     Writes.Reset();
     Device.FailUploadAllocation = 0;
-    Uploader.BeginFlight(0, Writes);
+    Staging.BeginEpoch(Writes);
     EXPECT_TRUE(Uploader.TryUploadBufferRanges(&Command, requests));
     EXPECT_EQ(Command.Copies, 2u);
     EXPECT_EQ(Command.BarrierCalls, 2u);
-    Uploader.EndFlight(0);
-    Uploader.CollectFlight(0);
+    Staging.SealEpoch();
+    Staging.CompleteEpoch();
 }
 
 TEST_F(FrameUploadTest, SparseBufferRangesUseOneBarrierPairAndRejectOverlap) {
@@ -57,15 +59,15 @@ TEST_F(FrameUploadTest, SparseBufferRangesUseOneBarrierPairAndRejectOverlap) {
         requests[i] = {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = i * 128u, .Before = render::BufferState::ShaderRead, .After = render::BufferState::ShaderRead};
     }
     for (uint32_t flight = 0; flight < 2; ++flight) {
-        Uploader.BeginFlight(flight, Writes);
+        Staging.BeginEpoch(Writes);
         EXPECT_TRUE(Uploader.TryUploadBufferRanges(&Command, requests));
         EXPECT_EQ(Command.Copies, (flight + 1) * 100u);
         EXPECT_EQ(Command.BarrierCalls, (flight + 1) * 2u);
-        Uploader.EndFlight(flight);
-        Uploader.CollectFlight(flight);
+        Staging.SealEpoch();
+        Staging.CompleteEpoch();
         Writes.Reset();
     }
-    Uploader.BeginFlight(0, Writes);
+    Staging.BeginEpoch(Writes);
     requests[1].DstOffset = 0;
     EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
     requests[1].DstOffset = 128;
@@ -73,8 +75,8 @@ TEST_F(FrameUploadTest, SparseBufferRangesUseOneBarrierPairAndRejectOverlap) {
     EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
     EXPECT_EQ(Command.Copies, 200u);
     EXPECT_EQ(Command.BarrierCalls, 4u);
-    Uploader.EndFlight(0);
-    Uploader.CollectFlight(0);
+    Staging.SealEpoch();
+    Staging.CompleteEpoch();
 }
 
 TEST_F(FrameUploadTest, InvalidMeshAttributesFailBeforeAllocatingOrRecording) {
@@ -96,9 +98,10 @@ TEST_F(FrameUploadTest, InvalidMeshAttributesFailBeforeAllocatingOrRecording) {
                 break;
             case 7: attributes.clear(); break;
         }
-        Uploader.BeginFlight(0, Writes);
+        Staging.BeginEpoch(Writes);
         auto mesh = Uploader.UploadMeshResource(&Command, source);
-        Uploader.EndFlight(0);
+        Staging.SealEpoch();
+        Staging.CompleteEpoch();
         EXPECT_FALSE(mesh);
         EXPECT_EQ(Device.DeviceAllocations, 0);
         EXPECT_EQ(Command.Copies, 0u);
@@ -110,9 +113,9 @@ TEST_F(FrameUploadTest, MeshUploadPreservesVertexBindingAndIndexView) {
     std::swap(source.Bins[0], source.Bins[1]);
     source.Primitives[0].VertexBuffers[0].BufferIndex = 1;
     source.Primitives[0].IndexBuffer.BufferIndex = 0;
-    Uploader.BeginFlight(0, Writes);
+    Staging.BeginEpoch(Writes);
     auto mesh = Uploader.UploadMeshResource(&Command, source);
-    Uploader.EndFlight(0);
+    Staging.SealEpoch();
     ASSERT_TRUE(mesh);
     ASSERT_EQ(mesh->Buffers.size(), 2u);
     ASSERT_EQ(mesh->Draws.size(), 1u);
@@ -133,16 +136,16 @@ TEST_F(FrameUploadTest, MultipleStreamsOwnTheUploadedVertexLayout) {
     auto source = test::MakeUploadTestMesh();
     source.Bins.push_back(source.Bins.front());
     source.Primitives[0].VertexBuffers.push_back({"NORMAL", 0, 2, VertexDataType::FLOAT, 3, 0, 12});
-    Uploader.BeginFlight(0, Writes);
+    Staging.BeginEpoch(Writes);
     auto mesh = Uploader.UploadMeshResource(&Command, source);
-    Uploader.EndFlight(0);
+    Staging.SealEpoch();
     ASSERT_TRUE(mesh);
     ASSERT_EQ(mesh->Draws[0].VertexBuffers.size(), 2u);
     EXPECT_EQ(mesh->Draws[0].VertexBuffers[1].Binding, 1u);
     EXPECT_EQ(mesh->Draws[0].VertexBuffers[1].View.Target, mesh->Buffers[2].get());
     EXPECT_EQ(mesh->Draws[0].Layout.Attributes[1].Binding, 1u);
     EXPECT_TRUE(ValidateGeometryVertexLayout(mesh->Draws[0].Layout));
-    Uploader.CollectFlight(0);
+    Staging.CompleteEpoch();
 }
 
 }  // namespace
