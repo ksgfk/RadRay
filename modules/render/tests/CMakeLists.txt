@@ -10,7 +10,8 @@ set(radray_render_test_sources
     test_radray_render_shader_layout.cpp
     test_radray_render_vulkan_layout.cpp
     test_radray_render_d3d12_layout.cpp
-    test_d3d12_device_loss.cpp)
+    test_d3d12_device_loss.cpp
+    test_d3d12_validation.cpp)
 list(APPEND radray_render_test_sources test_swap_chain_termination.cpp)
 
 radray_add_test(test_radray_render

@@ -40,6 +40,30 @@ depth test/write 按原 depth state 执行。它不等同于没有颜色附件�
 D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，
 诊断同时保留调用 HRESULT 和 `GetDeviceRemovedReason()`；执行提交边界也检查设备状态，
 因为设备移除后部分队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
+
+启用 D3D12 debug layer 时，诊断通道在内部 command signature、descriptor heap 和 queue 创建前
+建立。支持 `ID3D12InfoQueue1` 时使用 callback；否则由 `TryDrainValidationMessages` 轮询
+`ID3D12InfoQueue`。DXGI 消息另从 `IDXGIInfoQueue` 的 `DXGI_DEBUG_DXGI` producer 收集，
+两者进入同一个 `RenderLogCallback`。callback 可能来自其它线程，调用方必须保证日志接收者的
+线程安全与寿命，不在 callback 内调用 D3D12 或再次 Drain。
+
+失败检查在终止前先收集验证消息，再报告 HRESULT 与设备状态。正常诊断边界覆盖原生对象创建、
+view/sampler 创建、descriptor `FlushWrites`、command list Close/Reset、allocator Reset、
+ExecuteCommandLists 和 Submit 收尾，以及 Present/ResizeBuffers。Fence 的新完成值和 `WaitFor`
+返回时收集 GPU 侧消息，因此 runtime 的 flight 完成轮询也能看到 GBV 诊断；收集不增加 GPU 等待。
+[GBV 输出发生在 GPU 执行后](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-d3d12-debug-layer-gpu-based-validation#debug-output)，
+提交时的一次收集不能代替完成后的收集。测试应在真实 GPU 完成并收集消息后断言验证错误数。
+
+轮询按 retrieval filter 的可见消息数量和游标读取，只有消息成功记录后才推进游标；读取失败报告
+诊断并保留消息。活动队列不调用 `ClearStoredMessages`，避免删除 GBV 在读取期间追加的消息。
+调试队列取消固定消息数量上限，原生消息历史随诊断会话保留；游标避免正常重复输出。外部清空队列
+或修改 retrieval filter 会重新建立读取范围，filter 修改可能重放历史消息。应用应在开始验证前配置
+filter，并串行修改 filter/清空队列；外部清空后须在追加新消息前 Drain 一次，以重新建立游标。
+DXGI producer 属于进程级诊断，新 Device 从诊断通道建立时开始收集，避免重放其它 Device 的旧消息。
+实际发生的队列容量丢弃也会报告，不能被当作完整验证。
+销毁 Device 时，内部 queue、缓存、allocator 和 descriptor heap 清理后再次收集，最后才注销 callback
+并释放诊断接口，日志接收者必须存活至这一过程完成。
+
 Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
 `Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
 即使 timeoutMs 为 UINT64_MAX，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。

@@ -5,6 +5,7 @@
 #ifdef RADRAY_ENABLE_D3D12
 
 #include <array>
+#include <atomic>
 #include <limits>
 
 #include <radray/allocator.h>
@@ -318,7 +319,8 @@ public:
         ComPtr<ID3D12Device> device,
         ComPtr<IDXGIFactory4> dxgiFactory,
         ComPtr<IDXGIAdapter1> dxgiAdapter,
-        ComPtr<D3D12MA::Allocator> mainAlloc) noexcept;
+        ComPtr<D3D12MA::Allocator> mainAlloc,
+        const DXGIFactoryDescriptor& diagnostics) noexcept;
 
     ~DeviceD3D12() noexcept override;
 
@@ -382,7 +384,7 @@ public:
     Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
     Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
 
-    void TryDrainValidationMessages();
+    void TryDrainValidationMessages() noexcept;
 
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
@@ -406,7 +408,9 @@ public:
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
 
-    DWORD _infoQueueCallbackCookie{0};
+    struct ValidationMessages;
+    unique_ptr<ValidationMessages> _validationMessages;
+    std::optional<DWORD> _infoQueueCallbackCookie;
     Nullable<RenderLogCallback> _logCallback{};
     Nullable<void*> _logUserData{};
 };
@@ -447,6 +451,7 @@ public:
 class FenceD3D12 final : public Fence {
 public:
     FenceD3D12(
+        DeviceD3D12* device,
         ComPtr<ID3D12Fence> fence,
         Win32Event event) noexcept;
     virtual ~FenceD3D12() noexcept = default;
@@ -468,7 +473,9 @@ public:
     bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
 
 public:
+    DeviceD3D12* _device;
     ComPtr<ID3D12Fence> _fence;
+    mutable std::atomic<uint64_t> _drainedCompletedValue{0};
     uint64_t _fenceValue{0};
     Win32Event _event{};
 };

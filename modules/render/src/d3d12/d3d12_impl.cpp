@@ -6,6 +6,8 @@
 #include <bit>
 #include <algorithm>
 #include <limits>
+#include <mutex>
+#include <dxgidebug.h>
 
 #include <radray/basic_math.h>
 #include <radray/scope_guard.h>
@@ -36,6 +38,9 @@
 
 namespace radray::render::d3d12 {
 
+static void _DrainNativeValidationMessages(ID3D12Device* device) noexcept;
+static void _DrainNativeDxgiValidationMessages() noexcept;
+
 void IntrusivePtrAddRef(CachedPipelineLayoutD3D12* layout) noexcept {
     RADRAY_ASSERT(!layout->_cache->IsClosed());
     layout->AddRef();
@@ -47,24 +52,26 @@ void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept {
     }
 }
 
-static void _CheckD3D12Result(ID3D12Device* device, HRESULT hr, std::string_view operation) noexcept {
-    const HRESULT reason = device->GetDeviceRemovedReason();
+static void _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
+    const HRESULT reason = device->_device->GetDeviceRemovedReason();
     if (FAILED(hr) || FAILED(reason)) {
+        device->TryDrainValidationMessages();
         RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
                      operation, GetErrorName(hr), static_cast<uint32_t>(hr),
                      GetErrorName(reason), static_cast<uint32_t>(reason));
     }
 }
 
-static void _CheckD3D12FenceResult(ID3D12Fence* fence, HRESULT hr, std::string_view operation) noexcept {
+static void _CheckD3D12FenceResult(const FenceD3D12* fence, HRESULT hr, std::string_view operation) noexcept {
     ComPtr<ID3D12Device> device;
-    const HRESULT parentHr = fence->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
+    const HRESULT parentHr = fence->_fence->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
     if (FAILED(parentHr)) {
+        fence->_device->TryDrainValidationMessages();
         RADRAY_ABORT("{} failed: {} {:#x}; fence GetDevice failed: {} {:#x}",
                      operation, GetErrorName(hr), static_cast<uint32_t>(hr),
                      GetErrorName(parentHr), static_cast<uint32_t>(parentHr));
     }
-    _CheckD3D12Result(device.Get(), hr, operation);
+    _CheckD3D12Result(fence->_device, hr, operation);
 }
 
 // == 命令签名与验证消息 ==
@@ -82,6 +89,7 @@ static ComPtr<ID3D12CommandSignature> _CreateIndirectCommandSignature(
     ComPtr<ID3D12CommandSignature> result;
     if (HRESULT hr = device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(result.GetAddressOf()));
         FAILED(hr)) {
+        _DrainNativeValidationMessages(device);
         RADRAY_ERR_LOG("ID3D12Device::CreateCommandSignature failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -99,35 +107,66 @@ static LogLevel _MapD3D12ValidationLogLevel(D3D12_MESSAGE_SEVERITY severity) noe
     }
 }
 
+static void _DispatchValidationMessage(Nullable<DeviceD3D12*> device, LogLevel level, std::string_view message) noexcept {
+    if (device && device.Get()->_logCallback) {
+        device.Get()->_logCallback.Get()(level, message, device.Get()->_logUserData.Get());
+        return;
+    }
+    switch (level) {
+        case LogLevel::Critical:
+        case LogLevel::Err: RADRAY_ERR_LOG("{}", message); break;
+        case LogLevel::Warn: RADRAY_WARN_LOG("{}", message); break;
+        case LogLevel::Info: RADRAY_INFO_LOG("{}", message); break;
+        case LogLevel::Debug: RADRAY_DEBUG_LOG("{}", message); break;
+        default: RADRAY_INFO_LOG("{}", message); break;
+    }
+}
+
 static void _LogD3D12ValidationMessage(
-    DeviceD3D12* device,
+    Nullable<DeviceD3D12*> device,
     D3D12_MESSAGE_CATEGORY category,
     D3D12_MESSAGE_SEVERITY severity,
     D3D12_MESSAGE_ID id,
     const char* description) noexcept {
-    if (device == nullptr) {
-        return;
+    const auto message = fmt::format("d3d12 validation message. category:{} id:{}\n{}",
+                                     category, static_cast<uint32_t>(id), description == nullptr ? "" : description);
+    _DispatchValidationMessage(device, _MapD3D12ValidationLogLevel(severity), message);
+}
+
+static void _LogDxgiValidationMessage(Nullable<DeviceD3D12*> device, const DXGI_INFO_QUEUE_MESSAGE& message) noexcept {
+    const auto text = fmt::format("dxgi validation message. category:{} id:{}\n{}",
+                                  static_cast<uint32_t>(message.Category), message.ID,
+                                  message.pDescription == nullptr ? "" : message.pDescription);
+    const auto severity = static_cast<D3D12_MESSAGE_SEVERITY>(message.Severity);
+    _DispatchValidationMessage(device, _MapD3D12ValidationLogLevel(severity), text);
+}
+
+static void _DrainNativeValidationMessages(ID3D12Device* device) noexcept {
+    ComPtr<ID3D12InfoQueue> queue;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(queue.GetAddressOf())))) return;
+    const auto count = queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    vector<byte> data;
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(queue->GetMessage(i, nullptr, &size)) || size < sizeof(D3D12_MESSAGE)) break;
+        data.resize(size);
+        if (FAILED(queue->GetMessage(i, reinterpret_cast<D3D12_MESSAGE*>(data.data()), &size))) break;
+        const auto* message = reinterpret_cast<const D3D12_MESSAGE*>(data.data());
+        _LogD3D12ValidationMessage(nullptr, message->Category, message->Severity, message->ID, message->pDescription);
     }
-    try {
-        const LogLevel lvl = _MapD3D12ValidationLogLevel(severity);
-        const auto message = fmt::format(
-            "d3d12 validation message. category:{} id:{}\n{}",
-            category,
-            static_cast<uint32_t>(id),
-            description == nullptr ? "" : description);
-        if (device->_logCallback) {
-            device->_logCallback.Get()(lvl, message, device->_logUserData.Get());
-            return;
-        }
-        switch (lvl) {
-            case LogLevel::Critical: RADRAY_ERR_LOG("{}", message); break;
-            case LogLevel::Err: RADRAY_ERR_LOG("{}", message); break;
-            case LogLevel::Warn: RADRAY_WARN_LOG("{}", message); break;
-            case LogLevel::Info: RADRAY_INFO_LOG("{}", message); break;
-            case LogLevel::Debug: RADRAY_DEBUG_LOG("{}", message); break;
-            default: RADRAY_INFO_LOG("{}", message); break;
-        }
-    } catch (...) {
+}
+
+static void _DrainNativeDxgiValidationMessages() noexcept {
+    ComPtr<IDXGIInfoQueue> queue;
+    if (FAILED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(queue.GetAddressOf())))) return;
+    const auto count = queue->GetNumStoredMessagesAllowedByRetrievalFilters(DXGI_DEBUG_DXGI);
+    vector<byte> data;
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(queue->GetMessage(DXGI_DEBUG_DXGI, i, nullptr, &size)) || size < sizeof(DXGI_INFO_QUEUE_MESSAGE)) break;
+        data.resize(size);
+        if (FAILED(queue->GetMessage(DXGI_DEBUG_DXGI, i, reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(data.data()), &size))) break;
+        _LogDxgiValidationMessage(nullptr, *reinterpret_cast<const DXGI_INFO_QUEUE_MESSAGE*>(data.data()));
     }
 }
 
@@ -185,6 +224,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
 
     DXGI_SWAP_CHAIN_DESC1 desc{};
     if (HRESULT hr = swapChain->_swapchain->GetDesc1(&desc); FAILED(hr)) {
+        swapChain->_device->TryDrainValidationMessages();
         RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
         return false;
     }
@@ -196,6 +236,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
         ComPtr<ID3D12Resource> rt;
         if (HRESULT hr = swapChain->_swapchain->GetBuffer(i, IID_PPV_ARGS(rt.GetAddressOf()));
             FAILED(hr)) {
+            swapChain->_device->TryDrainValidationMessages();
             RADRAY_ERR_LOG("IDXGISwapChain1::GetBuffer failed: {} {}", GetErrorName(hr), hr);
             return false;
         }
@@ -320,6 +361,7 @@ DescriptorHeap::DescriptorHeap(
     : _device(device) {
     if (HRESULT hr = _device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf()));
         FAILED(hr)) {
+        _DrainNativeValidationMessages(_device);
         RADRAY_ABORT("ID3D12Device::CreateDescriptorHeap failed: {} {}", GetErrorName(hr), hr);
     }
     _desc = _heap->GetDesc();
@@ -584,6 +626,86 @@ void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocati
 
 // == DXGIFactory 与 DeviceD3D12 生命周期 ==
 
+struct DeviceD3D12::ValidationMessages {
+    struct Cursor {
+        bool Initialized{false};
+        bool SkipExisting{false};
+        UINT64 Next{0};
+        UINT64 Discarded{0};
+        vector<uint32_t> FilterKey{};
+        vector<byte> Scratch{};
+    };
+    ComPtr<ID3D12InfoQueue> D3D12;
+    ComPtr<IDXGIInfoQueue> Dxgi;
+    Cursor D3D12Cursor;
+    Cursor DxgiCursor{.SkipExisting = true};
+    std::mutex Mutex;
+};
+
+template <typename Message, typename Filter, typename Cursor, typename GetFilter, typename GetCount, typename GetMessage, typename GetDiscarded, typename LogMessage>
+static void _DrainValidationQueue(DeviceD3D12* device, std::string_view name, Cursor& cursor,
+                                  GetFilter getFilter, GetCount getCount, GetMessage getMessage,
+                                  GetDiscarded getDiscarded, LogMessage logMessage) noexcept {
+    SIZE_T size = 0;
+    HRESULT hr = getFilter(static_cast<Filter*>(nullptr), &size);
+    if (FAILED(hr)) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation filter query failed: {} {}", name, GetErrorName(hr), hr));
+        return;
+    }
+    cursor.Scratch.resize(std::max(size, sizeof(Filter)));
+    size = cursor.Scratch.size();
+    auto* filter = reinterpret_cast<Filter*>(cursor.Scratch.data());
+    hr = getFilter(filter, &size);
+    if (FAILED(hr)) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation filter retrieval failed: {} {}", name, GetErrorName(hr), hr));
+        return;
+    }
+    vector<uint32_t> key;
+    const auto append = [&key](const auto& list) {
+        key.push_back(list.NumCategories);
+        for (UINT i = 0; i < list.NumCategories; ++i) key.push_back(static_cast<uint32_t>(list.pCategoryList[i]));
+        key.push_back(list.NumSeverities);
+        for (UINT i = 0; i < list.NumSeverities; ++i) key.push_back(static_cast<uint32_t>(list.pSeverityList[i]));
+        key.push_back(list.NumIDs);
+        for (UINT i = 0; i < list.NumIDs; ++i) key.push_back(static_cast<uint32_t>(list.pIDList[i]));
+    };
+    append(filter->AllowList);
+    append(filter->DenyList);
+    const UINT64 count = getCount();
+    const UINT64 discarded = getDiscarded();
+    if (!cursor.Initialized) {
+        cursor.Initialized = true;
+        cursor.FilterKey = std::move(key);
+        if (cursor.SkipExisting) {
+            cursor.Next = count;
+            cursor.Discarded = discarded;
+        }
+    } else if (key != cursor.FilterKey || count < cursor.Next) {
+        cursor.Next = 0;
+        cursor.FilterKey = std::move(key);
+    }
+    if (discarded > cursor.Discarded) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} discarded {} validation messages due to its message count limit", name, discarded - cursor.Discarded));
+    }
+    cursor.Discarded = discarded;
+    for (; cursor.Next < count; ++cursor.Next) {
+        size = 0;
+        hr = getMessage(cursor.Next, static_cast<Message*>(nullptr), &size);
+        if (FAILED(hr) || size < sizeof(Message)) {
+            _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation message {} size query failed: {} {}; message retained", name, cursor.Next, GetErrorName(hr), hr));
+            return;
+        }
+        cursor.Scratch.resize(size);
+        auto* message = reinterpret_cast<Message*>(cursor.Scratch.data());
+        hr = getMessage(cursor.Next, message, &size);
+        if (FAILED(hr)) {
+            _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation message {} retrieval failed: {} {}; message retained", name, cursor.Next, GetErrorName(hr), hr));
+            return;
+        }
+        logMessage(*message);
+    }
+}
+
 DXGIFactoryImpl::DXGIFactoryImpl(
     ComPtr<IDXGIFactory4> factory,
     const DXGIFactoryDescriptor& desc,
@@ -650,6 +772,7 @@ Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor&
     ComPtr<IDXGIFactory4> factory;
     if (HRESULT hr = ::CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(factory.GetAddressOf()));
         FAILED(hr)) {
+        _DrainNativeDxgiValidationMessages();
         RADRAY_ERR_LOG("CreateDXGIFactory2 failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -660,12 +783,37 @@ DeviceD3D12::DeviceD3D12(
     ComPtr<ID3D12Device> device,
     ComPtr<IDXGIFactory4> dxgiFactory,
     ComPtr<IDXGIAdapter1> dxgiAdapter,
-    ComPtr<D3D12MA::Allocator> mainAlloc) noexcept
+    ComPtr<D3D12MA::Allocator> mainAlloc,
+    const DXGIFactoryDescriptor& diagnostics) noexcept
     : _device(std::move(device)),
       _dxgiFactory(std::move(dxgiFactory)),
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)),
       _samplerCache(this) {
+    _isDebugLayerEnabled = diagnostics.IsEnableDebugLayer;
+    _logCallback = diagnostics.LogCallback;
+    _logUserData = diagnostics.LogUserData;
+    if (_isDebugLayerEnabled) {
+        _validationMessages = make_unique<ValidationMessages>();
+        if (SUCCEEDED(_device.As(&_validationMessages->D3D12))) {
+            const HRESULT hr = _validationMessages->D3D12->SetMessageCountLimit(std::numeric_limits<UINT64>::max());
+            if (FAILED(hr)) RADRAY_WARN_LOG("D3D12 validation message count limit setup failed: {} {}", GetErrorName(hr), hr);
+        }
+        if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(_validationMessages->Dxgi.GetAddressOf())))) {
+            const HRESULT hr = _validationMessages->Dxgi->SetMessageCountLimit(DXGI_DEBUG_DXGI, std::numeric_limits<UINT64>::max());
+            if (FAILED(hr)) RADRAY_WARN_LOG("DXGI validation message count limit setup failed: {} {}", GetErrorName(hr), hr);
+        }
+        ComPtr<ID3D12InfoQueue1> queue;
+        if (SUCCEEDED(_device.As(&queue))) {
+            DWORD cookie = 0;
+            const HRESULT hr = queue->RegisterMessageCallback(&_D3D12ValidationMessageCallback, D3D12_MESSAGE_CALLBACK_FLAG_NONE, this, &cookie);
+            if (SUCCEEDED(hr))
+                _infoQueueCallbackCookie = cookie;
+            else
+                RADRAY_WARN_LOG("D3D12 validation callback registration failed: {} {}; using polling", GetErrorName(hr), hr);
+        }
+        TryDrainValidationMessages();
+    }
     _drawIndirectSignature = _CreateIndirectCommandSignature(
         _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(DrawIndirectArguments));
     _drawIndexedIndirectSignature = _CreateIndirectCommandSignature(
@@ -680,6 +828,7 @@ DeviceD3D12::DeviceD3D12(
     _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE);
     _features.Init(_device.Get());
     _pipelineLayoutCache = make_unique<PipelineLayoutCacheD3D12>(this);
+    TryDrainValidationMessages();
 }
 
 DeviceD3D12::~DeviceD3D12() noexcept {
@@ -695,18 +844,9 @@ void DeviceD3D12::Destroy() noexcept {
 }
 
 void DeviceD3D12::DestroyImpl() noexcept {
+    if (!_device) return;
     TryDrainValidationMessages();
-    if (_isDebugLayerEnabled && _infoQueueCallbackCookie != 0) {
-        ComPtr<ID3D12InfoQueue1> infoQueue1;
-        if (SUCCEEDED(_device.As(&infoQueue1)) && infoQueue1 != nullptr) {
-            infoQueue1->UnregisterMessageCallback(_infoQueueCallbackCookie);
-        }
-    }
-    _infoQueueCallbackCookie = 0;
-    _isDebugLayerEnabled = false;
-    _logCallback = nullptr;
-    _logUserData = nullptr;
-
+    for (auto& queues : _queues) queues.clear();
     _pipelineLayoutCache.reset();
     _samplerCache.Clear();
     _gpuResHeap = nullptr;
@@ -719,6 +859,19 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _drawIndexedIndirectSignature = nullptr;
     _dispatchIndirectSignature = nullptr;
     _mainAlloc = nullptr;
+    TryDrainValidationMessages();
+    if (_infoQueueCallbackCookie.has_value()) {
+        ComPtr<ID3D12InfoQueue1> infoQueue1;
+        if (SUCCEEDED(_device.As(&infoQueue1)) && infoQueue1 != nullptr) {
+            infoQueue1->UnregisterMessageCallback(*_infoQueueCallbackCookie);
+        }
+    }
+    _infoQueueCallbackCookie.reset();
+    _validationMessages.reset();
+    _isDebugLayerEnabled = false;
+    _logCallback = nullptr;
+    _logUserData = nullptr;
+
     _device = nullptr;
     _dxgiAdapter = nullptr;
     _dxgiFactory = nullptr;
@@ -766,6 +919,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     ComPtr<ID3D12Device> device;
     if (HRESULT hr = ::D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
         FAILED(hr)) {
+        _DrainNativeDxgiValidationMessages();
         RADRAY_ERR_LOG("D3D12CreateDevice failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -784,33 +938,14 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
         if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
             FAILED(hr)) {
+            _DrainNativeValidationMessages(device.Get());
             RADRAY_ERR_LOG("D3D12MA::CreateAllocator failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
     }
-    auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc);
-    result->_isDebugLayerEnabled = factoryImpl->_desc.IsEnableDebugLayer;
-    result->_logCallback = factoryImpl->_desc.LogCallback;
-    result->_logUserData = factoryImpl->_desc.LogUserData;
-    if (result->_isDebugLayerEnabled) {
-        ComPtr<ID3D12InfoQueue1> infoQueue1;
-        if (HRESULT hr = device.As(&infoQueue1);
-            SUCCEEDED(hr) && infoQueue1 != nullptr) {
-            DWORD callbackCookie = 0;
-            if (HRESULT hr2 = infoQueue1->RegisterMessageCallback(
-                    &_D3D12ValidationMessageCallback,
-                    D3D12_MESSAGE_CALLBACK_FLAG_NONE,
-                    result.get(),
-                    &callbackCookie);
-                SUCCEEDED(hr2)) {
-                result->_infoQueueCallbackCookie = callbackCookie;
-            } else {
-                RADRAY_WARN_LOG("ID3D12InfoQueue1::RegisterMessageCallback failed: {} {}", GetErrorName(hr2), hr2);
-            }
-        } else {
-            RADRAY_WARN_LOG("ID3D12Device::As<ID3D12InfoQueue1> failed: {} {} {}", GetErrorName(hr), hr, "pump validation messages at fixed points");
-        }
-    }
+    auto diagnostics = factoryImpl->_desc;
+    diagnostics.IsEnableDebugLayer = factoryImpl->_validationEnabled;
+    auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc, diagnostics);
     DeviceDetail& detail = result->_capabilities.Detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.BufferCopyOffsetAlignment = 1;
@@ -952,6 +1087,7 @@ bool DeviceD3D12::CreateQueues(const array<uint32_t, static_cast<size_t>(QueueTy
             D3D12_COMMAND_QUEUE_DESC desc{};
             desc.Type = MapType(static_cast<QueueType>(index));
             if (const HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf())); FAILED(hr)) {
+                TryDrainValidationMessages();
                 RADRAY_ERR_LOG("ID3D12Device::CreateCommandQueue failed: {} {}", GetErrorName(hr), hr);
                 return false;
             }
@@ -1032,6 +1168,7 @@ Nullable<unique_ptr<CommandAllocator>> DeviceD3D12::CreateCommandAllocator(Comma
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllocator* allocator_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     Nullable<CommandAllocatorD3D12*> allocator = dynamic_cast<CommandAllocatorD3D12*>(allocator_);
     if (!allocator || allocator->_device != this || !allocator->IsValid()) {
         RADRAY_ERR_LOG("command buffer requires a valid allocator from this device");
@@ -1048,10 +1185,11 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
         if (!index) return nullptr;
         auto& native = allocator->_native[*index];
         hr = _device->CreateCommandList(0, queue->_type, native.Allocator.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
-        if (SUCCEEDED(hr)) _CheckD3D12Result(_device.Get(), list->Close(), "ID3D12GraphicsCommandList::Close");
+        if (SUCCEEDED(hr)) _CheckD3D12Result(this, list->Close(), "ID3D12GraphicsCommandList::Close");
         native.Recording = false;
     }
     if (FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -1063,6 +1201,7 @@ Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
 }
 
 Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     if (desc.Count == 0) {
         RADRAY_ERR_LOG("D3D12 QueryPoolDescriptor Count must be greater than 0");
         return nullptr;
@@ -1080,6 +1219,7 @@ Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDesc
     ComPtr<ID3D12QueryHeap> heap;
     if (HRESULT hr = _device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(heap.GetAddressOf()));
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("ID3D12Device::CreateQueryHeap failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -1092,6 +1232,7 @@ Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDesc
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
     scDesc.Width = desc.Width;
@@ -1124,6 +1265,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     ComPtr<IDXGISwapChain1> temp;
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -1134,6 +1276,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     ComPtr<IDXGISwapChain3> swapchain;
     if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -1151,6 +1294,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
 }
 
 Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     BufferDescriptor desc = desc_;
     const bool wantsMapRead = desc.Usage.HasFlag(BufferUse::MapRead);
     const bool wantsMapWrite = desc.Usage.HasFlag(BufferUse::MapWrite);
@@ -1238,6 +1382,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 nullptr,
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
+            TryDrainValidationMessages();
             RADRAY_ERR_LOG("ID3D12Device::CreateCommittedResource failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
@@ -1250,6 +1395,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 allocRes.GetAddressOf(),
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
+            TryDrainValidationMessages();
             RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
@@ -1267,6 +1413,7 @@ void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange>) noexcept
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     if (const auto [supported, reason] = ValidateTextureDescriptor(desc_, *this); !supported) {
         RADRAY_ERR_LOG("D3D12 texture descriptor rejected: {}", reason);
         return nullptr;
@@ -1320,6 +1467,7 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
             allocRes.GetAddressOf(),
             IID_PPV_ARGS(texture.GetAddressOf()));
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -1398,6 +1546,7 @@ static std::optional<SubresourceRange> _ResolveTextureViewArrayRangeD3D12(
 }
 
 Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
     auto tex = CastD3D12Object(desc.Target);
@@ -3208,6 +3357,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
     if (_device == nullptr) {
         return false;
     }
+    ScopeGuard drain([this] { _device->TryDrainValidationMessages(); });
     for (auto& storage : _tables) {
         if (storage.Dirty.Ranges.empty()) {
             continue;
@@ -3235,6 +3385,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
 // == Device: PSO / sampler / fence ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     if (!ValidateVertexInputState(desc.VertexInput)) {
         RADRAY_ERR_LOG("d3d12 vertex input state is invalid");
         return nullptr;
@@ -3394,6 +3545,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     ComPtr<ID3D12PipelineState> pso;
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -3408,6 +3560,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
     rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
     rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
@@ -3416,6 +3569,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
     ComPtr<ID3D12PipelineState> pso;
     if (HRESULT hr = _device->CreateComputePipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("ID3D12Device::CreateComputePipelineState failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -3426,6 +3580,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
 }
 
 Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     D3D12_SAMPLER_DESC rawDesc{};
     rawDesc.Filter = MapType(desc.MinFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
     rawDesc.AddressU = MapType(desc.AddressS);
@@ -3460,9 +3615,11 @@ Nullable<Sampler*> DeviceD3D12::GetOrCreateSampler(
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
     ComPtr<ID3D12Fence> fence;
     if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
         FAILED(hr)) {
+        TryDrainValidationMessages();
         RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
@@ -3470,36 +3627,22 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
     if (!e.has_value()) {
         return nullptr;
     }
-    auto result = make_unique<FenceD3D12>(std::move(fence), std::move(e.value()));
+    auto result = make_unique<FenceD3D12>(this, std::move(fence), std::move(e.value()));
     result->_fenceValue = initValue + 1;
     return result;
 }
 
-void DeviceD3D12::TryDrainValidationMessages() {
-    if (!_isDebugLayerEnabled || _infoQueueCallbackCookie != 0) {
-        return;
+void DeviceD3D12::TryDrainValidationMessages() noexcept {
+    if (!_validationMessages) return;
+    auto& messages = *_validationMessages;
+    std::lock_guard lock(messages.Mutex);
+    if (messages.D3D12 && !_infoQueueCallbackCookie.has_value()) {
+        auto* queue = messages.D3D12.Get();
+        _DrainValidationQueue<D3D12_MESSAGE, D3D12_INFO_QUEUE_FILTER>(this, "D3D12", messages.D3D12Cursor, [queue](auto* filter, SIZE_T* size) { return queue->GetRetrievalFilter(filter, size); }, [queue] { return queue->GetNumStoredMessagesAllowedByRetrievalFilter(); }, [queue](UINT64 index, auto* message, SIZE_T* size) { return queue->GetMessage(index, message, size); }, [queue] { return queue->GetNumMessagesDiscardedByMessageCountLimit(); }, [this](const D3D12_MESSAGE& message) { _LogD3D12ValidationMessage(this, message.Category, message.Severity, message.ID, message.pDescription); });
     }
-    ComPtr<ID3D12InfoQueue> infoQueue;
-    if (HRESULT hr = _device.As(&infoQueue);
-        FAILED(hr) || infoQueue == nullptr) {
-        return;
-    }
-
-    const UINT64 messageCount = infoQueue->GetNumStoredMessages();
-    for (UINT64 i = 0; i < messageCount; i++) {
-        SIZE_T messageByteLength = 0;
-        if (FAILED(infoQueue->GetMessage(i, nullptr, &messageByteLength)) || messageByteLength == 0) {
-            continue;
-        }
-        vector<byte> data(static_cast<size_t>(messageByteLength));
-        auto* message = reinterpret_cast<D3D12_MESSAGE*>(data.data());
-        if (FAILED(infoQueue->GetMessage(i, message, &messageByteLength))) {
-            continue;
-        }
-        _LogD3D12ValidationMessage(this, message->Category, message->Severity, message->ID, message->pDescription);
-    }
-    if (messageCount != 0) {
-        infoQueue->ClearStoredMessages();
+    if (messages.Dxgi) {
+        auto* queue = messages.Dxgi.Get();
+        _DrainValidationQueue<DXGI_INFO_QUEUE_MESSAGE, DXGI_INFO_QUEUE_FILTER>(this, "DXGI", messages.DxgiCursor, [queue](auto* filter, SIZE_T* size) { return queue->GetRetrievalFilter(DXGI_DEBUG_DXGI, filter, size); }, [queue] { return queue->GetNumStoredMessagesAllowedByRetrievalFilters(DXGI_DEBUG_DXGI); }, [queue](UINT64 index, auto* message, SIZE_T* size) { return queue->GetMessage(DXGI_DEBUG_DXGI, index, message, size); }, [queue] { return queue->GetNumMessagesDiscardedByMessageCountLimit(DXGI_DEBUG_DXGI); }, [this](const DXGI_INFO_QUEUE_MESSAGE& message) { _LogDxgiValidationMessage(this, message); });
     }
 }
 
@@ -3551,11 +3694,11 @@ void CmdQueueD3D12::Destroy() noexcept {
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
-    _CheckD3D12Result(_device->_device.Get(), S_OK, "CommandQueue::Submit");
+    _CheckD3D12Result(_device, S_OK, "CommandQueue::Submit");
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.WaitFences[i]);
         uint64_t waitValue = desc.WaitValues[i];
-        _CheckD3D12Result(_device->_device.Get(), _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait");
+        _CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait");
     }
 
     vector<ID3D12CommandList*> submits;
@@ -3569,7 +3712,8 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
     if (!submits.empty()) {
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
-        _CheckD3D12Result(_device->_device.Get(), S_OK, "ID3D12CommandQueue::ExecuteCommandLists");
+        _device->TryDrainValidationMessages();
+        _CheckD3D12Result(_device, S_OK, "ID3D12CommandQueue::ExecuteCommandLists");
 #ifdef RADRAY_ENABLE_PROFILER
         if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
 #endif
@@ -3578,7 +3722,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.SignalFences[i]);
         uint64_t signalValue = desc.SignalValues[i];
-        _CheckD3D12Result(_device->_device.Get(), _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal");
+        _CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal");
         if (signalValue + 1 > f->_fenceValue) {
             f->_fenceValue = signalValue + 1;
         }
@@ -3588,7 +3732,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 }
 
 void CmdQueueD3D12::Wait() noexcept {
-    _CheckD3D12Result(_device->_device.Get(),
+    _CheckD3D12Result(_device,
                       _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal");
     ++_fence->_fenceValue;
     _fence->Wait();
@@ -3614,12 +3758,18 @@ TimestampClockCalibrationResult CmdQueueD3D12::GetTimestampClockCalibration() co
     if (_queue == nullptr) return {.Status = Status::InvalidQueue};
     uint64_t frequency{}, gpu{}, cpu{};
     const HRESULT frequencyResult = _queue->GetTimestampFrequency(&frequency);
-    if (FAILED(frequencyResult)) return {.Status = Status::ApiFailure, .NativeError = frequencyResult};
+    if (FAILED(frequencyResult)) {
+        _device->TryDrainValidationMessages();
+        return {.Status = Status::ApiFailure, .NativeError = frequencyResult};
+    }
     LARGE_INTEGER cpuFrequency{}, before{}, after{};
     if (!QueryPerformanceFrequency(&cpuFrequency) || !QueryPerformanceCounter(&before))
         return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
     const HRESULT calibrationResult = _queue->GetClockCalibration(&gpu, &cpu);
-    if (FAILED(calibrationResult)) return {.Status = Status::ApiFailure, .NativeError = calibrationResult};
+    if (FAILED(calibrationResult)) {
+        _device->TryDrainValidationMessages();
+        return {.Status = Status::ApiFailure, .NativeError = calibrationResult};
+    }
     if (!QueryPerformanceCounter(&after))
         return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
     if (frequency == 0 || cpuFrequency.QuadPart <= 0 || before.QuadPart < 0 || after.QuadPart < before.QuadPart)
@@ -3635,9 +3785,11 @@ TimestampClockCalibrationResult CmdQueueD3D12::GetTimestampClockCalibration() co
 }
 
 FenceD3D12::FenceD3D12(
+    DeviceD3D12* device,
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept
-    : _fence(std::move(fence)),
+    : _device(device),
+      _fence(std::move(fence)),
       _event(std::move(event)) {}
 
 bool FenceD3D12::IsValid() const noexcept {
@@ -3658,16 +3810,20 @@ void FenceD3D12::Wait() noexcept {
 }
 
 void FenceD3D12::Wait(uint64_t value) noexcept {
-    if (!WaitFor(value, 30000)) RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
+    if (!WaitFor(value, 30000)) {
+        _device->TryDrainValidationMessages();
+        RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
+    }
 }
 
 bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
+    ScopeGuard drain([this] { _device->TryDrainValidationMessages(); });
     if (GetCompletedValue() >= value) return true;
     if (timeoutMs == 0) return false;
     const DWORD duration = static_cast<DWORD>(std::min<uint64_t>(timeoutMs, INFINITE - 1));
     const uint64_t start = ::GetTickCount64();
     const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
-    if (FAILED(hr)) _CheckD3D12FenceResult(_fence.Get(), hr, "ID3D12Fence::SetEventOnCompletion");
+    if (FAILED(hr)) _CheckD3D12FenceResult(this, hr, "ID3D12Fence::SetEventOnCompletion");
     while (GetCompletedValue() < value) {
         const uint64_t elapsed = ::GetTickCount64() - start;
         if (elapsed >= duration) return GetCompletedValue() >= value;
@@ -3675,7 +3831,7 @@ bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
         if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value;
         if (waitResult != WAIT_OBJECT_0) {
             const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
-            _CheckD3D12FenceResult(_fence.Get(), HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
+            _CheckD3D12FenceResult(this, HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
             RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
         }
         // An earlier timed-out registration or device removal can also wake it.
@@ -3686,7 +3842,16 @@ bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     const uint64_t value = _fence->GetCompletedValue();
     if (value == std::numeric_limits<uint64_t>::max()) {
-        _CheckD3D12FenceResult(_fence.Get(), DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+        _CheckD3D12FenceResult(this, DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+    }
+    if (_device->_isDebugLayerEnabled) {
+        auto previous = _drainedCompletedValue.load(std::memory_order_relaxed);
+        while (value > previous) {
+            if (_drainedCompletedValue.compare_exchange_weak(previous, value, std::memory_order_relaxed)) {
+                _device->TryDrainValidationMessages();
+                break;
+            }
+        }
     }
     return value;
 }
@@ -3721,6 +3886,7 @@ std::optional<size_t> CommandAllocatorD3D12::AcquireNative() noexcept {
         ComPtr<ID3D12CommandAllocator> allocator;
         const HRESULT hr = _device->_device->CreateCommandAllocator(_queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
         if (FAILED(hr)) {
+            _device->TryDrainValidationMessages();
             RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
             return std::nullopt;
         }
@@ -3738,9 +3904,10 @@ void CommandAllocatorD3D12::Reset() noexcept {
     for (const auto& native : _native)
         if (native.Recording) RADRAY_ABORT("cannot reset command allocator while recording");
     for (auto& native : _native) {
-        if (native.Used) _CheckD3D12Result(_device->_device.Get(), native.Allocator->Reset(), "ID3D12CommandAllocator::Reset");
+        if (native.Used) _CheckD3D12Result(_device, native.Allocator->Reset(), "ID3D12CommandAllocator::Reset");
         native.Used = false;
     }
+    _device->TryDrainValidationMessages();
     for (auto* child : _children) {
         child->_keepAliveBuffers.clear();
         child->_used = false;
@@ -3805,7 +3972,8 @@ void CmdListD3D12::Begin() noexcept {
     const auto index = _allocator->AcquireNative();
     if (!index) RADRAY_ABORT("cannot allocate command recording storage");
     _nativeIndex = *index;
-    _CheckD3D12Result(_device->_device.Get(), _cmdList->Reset(_allocator->_native[_nativeIndex].Allocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native[_nativeIndex].Allocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    _device->TryDrainValidationMessages();
     _recording = true;
     _used = true;
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
@@ -3827,7 +3995,9 @@ void CmdListD3D12::End() noexcept {
     _deferredZonePops = 0;
     _suppressedZonePushes = 0;
 #endif
-    _CheckD3D12Result(_device->_device.Get(), _cmdList->Close(), "ID3D12GraphicsCommandList::Close");
+    const HRESULT hr = _cmdList->Close();
+    _device->TryDrainValidationMessages();
+    _CheckD3D12Result(_device, hr, "ID3D12GraphicsCommandList::Close");
     _allocator->_native[_nativeIndex].Recording = false;
     _recording = false;
     _executable = true;
@@ -4035,7 +4205,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     if (area) {
         for (const auto& clear : rectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*area);
         if (depthClearFlags) _cmdList->ClearDepthStencilView(depth->cpuDescriptor, depthClearFlags,
-                                                         depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
+                                                             depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
     }
     _renderPassList->BeginRenderPass(static_cast<UINT>(colors.size()), colors.data(), depth ? &*depth : nullptr, flags);
 #ifdef RADRAY_ENABLE_PROFILER
@@ -5032,12 +5202,13 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
         }
     }
     const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+    _device->TryDrainValidationMessages();
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
         result.NativeStatusCode = static_cast<int64_t>(hr);
         result.Status = SwapChainStatus::RetryLater;
         return result;
     }
-    _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::Present");
+    _CheckD3D12Result(_device, hr, "IDXGISwapChain::Present");
     result.NativeStatusCode = static_cast<int64_t>(hr);
     result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
     if (hr != DXGI_STATUS_OCCLUDED) _frameLatencyReady = false;
@@ -5062,6 +5233,7 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
 
     DXGI_SWAP_CHAIN_DESC1 desc{};
     if (HRESULT hr = _swapchain->GetDesc1(&desc); FAILED(hr)) {
+        _device->TryDrainValidationMessages();
         RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
         return false;
     }
@@ -5069,7 +5241,8 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
     const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
-    _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::ResizeBuffers");
+    _device->TryDrainValidationMessages();
+    _CheckD3D12Result(_device, hr, "IDXGISwapChain::ResizeBuffers");
     _reqFormat = format;
     _mode = presentMode;
     if (!_RefreshSwapChainBackBuffers(this)) {
@@ -5140,6 +5313,7 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
         FAILED(hr)) {
+        _device->TryDrainValidationMessages();
         RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
     }
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {

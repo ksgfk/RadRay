@@ -32,9 +32,10 @@ IntrusivePtr<CachedPipelineLayoutD3D12> PipelineLayoutCacheD3D12::GetOrCreate(st
     if (const auto it = _layouts.find(key); it != _layouts.end()) return RetainRef(it->second.get());
 
     ComPtr<ID3D12RootSignature> rootSignature;
-    if (HRESULT hr = _device->_device->CreateRootSignature(
-            0, serialized.data(), serialized.size(), IID_PPV_ARGS(rootSignature.GetAddressOf()));
-        FAILED(hr)) {
+    const HRESULT hr = _device->_device->CreateRootSignature(
+        0, serialized.data(), serialized.size(), IID_PPV_ARGS(rootSignature.GetAddressOf()));
+    _device->TryDrainValidationMessages();
+    if (FAILED(hr)) {
         RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
