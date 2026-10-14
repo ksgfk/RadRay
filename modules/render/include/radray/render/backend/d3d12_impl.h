@@ -337,6 +337,7 @@ public:
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
+
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept override;
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
@@ -502,8 +503,7 @@ public:
         CmdQueueD3D12* queue,
         CommandAllocatorD3D12* allocator,
         ComPtr<ID3D12GraphicsCommandList> cmdList,
-        D3D12_COMMAND_LIST_TYPE type,
-        ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept;
+        D3D12_COMMAND_LIST_TYPE type) noexcept;
     ~CmdListD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -559,7 +559,6 @@ public:
     bool _executable{false};
     Nullable<CommandEncoder*> _activeEncoder{nullptr};
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
-    ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
 #ifdef RADRAY_ENABLE_PROFILER

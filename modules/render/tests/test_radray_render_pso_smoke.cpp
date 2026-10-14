@@ -1007,8 +1007,7 @@ void CSMain() {{
             ASSERT_TRUE(command);
             command->Begin();
             const ResourceBarrierDescriptor initial[]{BarrierBufferDescriptor{uniform.Get(), BufferState::Undefined, BufferState::CopyDestination},
-                                                      BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess},
-                                                      BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+                                                      BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess}};
             command->ResourceBarrier(initial);
             command->CopyBufferToBuffer(uniform.Get(), 0, upload.Get(), 0, 256);
             const ResourceBarrierDescriptor ready = BarrierBufferDescriptor{uniform.Get(), BufferState::CopyDestination, BufferState::CBuffer};
@@ -1133,8 +1132,7 @@ void CSMain() {{
             auto command = context.Device->CreateCommandBuffer(allocator.Get());
             ASSERT_TRUE(command);
             command->Begin();
-            const ResourceBarrierDescriptor initial[]{BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess},
-                                                      BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+            const ResourceBarrierDescriptor initial[]{BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess}};
             command->ResourceBarrier(initial);
             auto encoder = command->BeginComputePass();
             ASSERT_TRUE(encoder);
@@ -1239,8 +1237,7 @@ float4 PSMain() : SV_Target0 { return float4(1,0,0,1); }
         ASSERT_TRUE(command);
         command->Begin();
         const ResourceBarrierDescriptor initial[]{BarrierTextureDescriptor{color->Tex.get(), TextureState::Undefined, TextureState::RenderTarget},
-                                                  BarrierTextureDescriptor{depth.Get(), TextureState::Undefined, TextureState::DepthWrite},
-                                                  BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+                                                  BarrierTextureDescriptor{depth.Get(), TextureState::Undefined, TextureState::DepthWrite}};
         command->ResourceBarrier(initial);
         const ColorClearValue oldColor{{.125f, .375f, .625f, .875f}};
         for (uint32_t step = 0; step < 3; ++step) {

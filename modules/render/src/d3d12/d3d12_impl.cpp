@@ -1038,16 +1038,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
         return nullptr;
     }
     auto* queue = allocator->_queue;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC emptyDesc{};
-    emptyDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
-    ComPtr<ID3DBlob> emptyBlob;
-    ComPtr<ID3D12RootSignature> emptyRoot;
-    HRESULT hr = ::D3D12SerializeVersionedRootSignature(&emptyDesc, emptyBlob.GetAddressOf(), nullptr);
-    if (SUCCEEDED(hr)) hr = _device->CreateRootSignature(0, emptyBlob->GetBufferPointer(), emptyBlob->GetBufferSize(), IID_PPV_ARGS(emptyRoot.GetAddressOf()));
-    if (FAILED(hr)) {
-        RADRAY_ERR_LOG("D3D12 empty pass root signature creation failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
+    HRESULT hr;
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12Device4> device4;
     if (SUCCEEDED(_device.As(&device4))) {
@@ -1064,7 +1055,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
         RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type, std::move(emptyRoot));
+    return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type);
 }
 
 Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
@@ -3762,15 +3753,13 @@ CmdListD3D12::CmdListD3D12(
     [[maybe_unused]] CmdQueueD3D12* queue,
     CommandAllocatorD3D12* allocator,
     ComPtr<ID3D12GraphicsCommandList> cmdList,
-    D3D12_COMMAND_LIST_TYPE type,
-    ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept
+    D3D12_COMMAND_LIST_TYPE type) noexcept
     : _device(device),
 #ifdef RADRAY_ENABLE_PROFILER
       _queue(queue),
 #endif
       _allocator(allocator),
       _cmdList(std::move(cmdList)),
-      _emptyRootSignature(std::move(emptyRootSignature)),
       _type(type)
 #ifdef RADRAY_ENABLE_PROFILER
       ,
@@ -3805,7 +3794,6 @@ void CmdListD3D12::Destroy() noexcept {
     _keepAliveBuffers.clear();
     _renderPassList.Reset();
     _cmdList = nullptr;
-    _emptyRootSignature = nullptr;
 }
 
 void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
@@ -4064,11 +4052,6 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = false;
 #endif
-    // Parameter bindings belong to this encoder. End their static-data lifetime
-    // before later compute/copy passes can write the same resources.
-    // Keep a valid empty root while GBV injects barrier-validation compute work.
-    // A null root crashes the NVIDIA driver during GBV state restoration.
-    _cmdList->SetGraphicsRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
 #ifdef RADRAY_ENABLE_PROFILER
     // Pops deferred while the render pass was recording close their zones now that query resolution is legal.
@@ -4087,7 +4070,6 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noe
 void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
     _activeEncoder = nullptr;
-    _cmdList->SetComputeRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
 }
 

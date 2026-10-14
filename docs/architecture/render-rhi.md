@@ -420,6 +420,12 @@ Vulkan 逻辑 allocator 拥有共享 command pool。Begin 不结束旧 epoch，�
 再清理已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时调用一次 Reset，
 下一次 BeginFrameRecord 不再次重置。
 
+D3D12 不为 command buffer 创建或持有空 root signature；`EndRenderPass` 与 `EndComputePass`
+均不额外重置原生 root signature。后续 encoder 在绑定 pipeline 时设置其 layout 的 root signature，
+参数组由该 encoder 显式绑定。使用 `nullptr` 重置签名仍有 GBV 驱动兼容性限制：在 RTX 3060、
+驱动 `32.0.15.9144` 上，结束 compute encoder 并清空签名后，后续录制可触发 `nvwgf2umx.dll`
+的 `0xC0000005` 访问违例；同一录制关闭 GBV 或保留签名后可通过。
+
 graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
 带 `BufferUse::Indirect` 的参数；固定 count 和 count=0 的行为由 RHI 保持，RHI 不提供 GPU count
 buffer。`CommandBuffer::ResolveTexture` 一次处理一个 mip 和连续 array layers，两个后端都要求同格式、
