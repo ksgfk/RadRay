@@ -38,8 +38,9 @@ depth test/write 按原 depth state 执行。它不等同于没有颜色附件�
 真实 GPU 回归见 `RadRayRenderPsoSmoke.D3D12ZeroColorMaskPreservesColorAndWritesDepth`。
 
 D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，
-诊断同时保留调用 HRESULT 和 `GetDeviceRemovedReason()`；执行提交边界也检查设备状态，
-因为设备移除后部分队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
+HRESULT 检查成功时直接返回，仅失败时查询 `GetDeviceRemovedReason()`，诊断同时保留调用 HRESULT
+和设备移除原因。Submit 入口与 ExecuteCommandLists 返回后独立检查设备状态，因为设备移除后部分
+队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
 
 启用 D3D12 debug layer 时，诊断通道在内部 command signature、descriptor heap 和 queue 创建前
 建立。支持 `ID3D12InfoQueue1` 时使用 callback；否则由 `TryDrainValidationMessages` 轮询

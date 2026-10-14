@@ -77,7 +77,7 @@ TEST_F(D3D12ValidationDrain, CloseFailureReportsTheInvalidReadbackBarrierBeforeE
                     auto allocator = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
                     auto command = Context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
                     command->Begin();
-                    const ResourceBarrierDescriptor invalid = BarrierBufferDescriptor{readback.get(), BufferState::Undefined, BufferState::CopyDestination};
+                    const ResourceBarrierDescriptor invalid = BarrierBufferDescriptor{readback.get(), BufferState::CopyDestination, BufferState::CopySource};
                     command->ResourceBarrier(std::span{&invalid, 1});
                     command->End();
                     std::_Exit(0);

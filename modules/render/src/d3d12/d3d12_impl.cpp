@@ -53,13 +53,20 @@ void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept {
 }
 
 static void _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
+    if (SUCCEEDED(hr)) return;
     const HRESULT reason = device->_device->GetDeviceRemovedReason();
-    if (FAILED(hr) || FAILED(reason)) {
-        device->TryDrainValidationMessages();
-        RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
-                     operation, GetErrorName(hr), static_cast<uint32_t>(hr),
-                     GetErrorName(reason), static_cast<uint32_t>(reason));
-    }
+    device->TryDrainValidationMessages();
+    RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
+                 operation, GetErrorName(hr), static_cast<uint32_t>(hr),
+                 GetErrorName(reason), static_cast<uint32_t>(reason));
+}
+
+static void _CheckD3D12DeviceStatus(DeviceD3D12* device, std::string_view operation) noexcept {
+    const HRESULT reason = device->_device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason)) return;
+    device->TryDrainValidationMessages();
+    RADRAY_ABORT("{} failed: device removed reason: {} {:#x}",
+                 operation, GetErrorName(reason), static_cast<uint32_t>(reason));
 }
 
 static void _CheckD3D12FenceResult(const FenceD3D12* fence, HRESULT hr, std::string_view operation) noexcept {
@@ -3694,7 +3701,7 @@ void CmdQueueD3D12::Destroy() noexcept {
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
-    _CheckD3D12Result(_device, S_OK, "CommandQueue::Submit");
+    _CheckD3D12DeviceStatus(_device, "CommandQueue::Submit");
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.WaitFences[i]);
         uint64_t waitValue = desc.WaitValues[i];
@@ -3713,7 +3720,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (!submits.empty()) {
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
         _device->TryDrainValidationMessages();
-        _CheckD3D12Result(_device, S_OK, "ID3D12CommandQueue::ExecuteCommandLists");
+        _CheckD3D12DeviceStatus(_device, "ID3D12CommandQueue::ExecuteCommandLists");
 #ifdef RADRAY_ENABLE_PROFILER
         if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
 #endif

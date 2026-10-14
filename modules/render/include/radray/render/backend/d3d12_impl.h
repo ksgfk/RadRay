@@ -358,11 +358,9 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
-        const shader::DxilShaderArtifactView& artifact,
-        const D3D12TargetLayoutOptions& options = {}) noexcept;
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
-        const ResolvedD3D12Layout& layout) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::DxilShaderArtifactView& artifact, const D3D12TargetLayoutOptions& options = {}) noexcept;
+
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& layout) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -441,8 +439,10 @@ public:
     ComPtr<ID3D12CommandQueue> _queue;
     unique_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
+#ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU timestamp context for this queue; null when profiling is disabled or unsupported.
     void* _profilerContext{nullptr};
+#endif
 };
 
 /**
@@ -540,6 +540,7 @@ public:
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
+
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
@@ -602,14 +603,9 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
-    void BindShaderParameterSet(
-        uint32_t groupIndex,
-        ShaderParameterSet* set,
-        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+    void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(
-        BindingHandle binding,
-        std::span<const byte> data) noexcept override;
+    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -623,8 +619,6 @@ public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
-
-public:
     AttachmentSignature _attachmentSignature;
 };
 
@@ -641,14 +635,9 @@ public:
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
-    void BindShaderParameterSet(
-        uint32_t groupIndex,
-        ShaderParameterSet* set,
-        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+    void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(
-        BindingHandle binding,
-        std::span<const byte> data) noexcept override;
+    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 

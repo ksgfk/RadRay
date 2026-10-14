@@ -279,6 +279,7 @@ public:
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
+
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept override;
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
@@ -297,11 +298,9 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
-        const shader::SpirvShaderArtifactView& artifact,
-        const VulkanTargetLayoutOptions& options = {}) noexcept;
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
-        const ResolvedVulkanLayout& layout) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::SpirvShaderArtifactView& artifact, const VulkanTargetLayoutOptions& options = {}) noexcept;
+
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -410,6 +409,7 @@ public:
     void Destroy() noexcept override;
 
     void Reset() noexcept override;
+
     void SetDebugName(std::string_view name) noexcept override;
 
 public:
