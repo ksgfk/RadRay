@@ -14,7 +14,6 @@
 
 #include <algorithm>
 #include <span>
-#include <type_traits>
 
 namespace radray {
 

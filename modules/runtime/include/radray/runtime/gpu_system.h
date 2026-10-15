@@ -132,7 +132,7 @@ private:
     struct StorageGroup {
         // Commands are destroyed before their borrowed native storage.
         unique_ptr<render::CommandAllocator> Allocator;
-        vector<Entry> Pool;
+        vector<Entry> Pool{};
         size_t AllocatedCount{0};
         size_t RecordingCount{0};
     };

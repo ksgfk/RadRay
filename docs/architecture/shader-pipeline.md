@@ -13,8 +13,8 @@ buffer 分开；placement 与 logical kind 是两个独立维度；push declarat
 dynamic offset 都走同一条 handle 链。
 
 以下章节既是接受的 schema 8 契约，也是当前实现。cutover 是原子的：schema 8 decoder 拒绝 4/5/6/7，
-RadRay DXC package 升级到 `1.9.2607.radray.7`，extension ABI 为 5，toolchain identity 为
-`0x0000000001090213`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
+RadRay DXC package 为 `1.9.2609.radray.1`（基于 upstream `v1.9.2609`），extension ABI 为 5，
+toolchain identity 为 `0x0000000001090214`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
 
 正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
 `RadRayDXC::Headers` 编译、以 canonical library name 加载 `RadRayDXC::Compiler` 的 runtime，
