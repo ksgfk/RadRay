@@ -66,7 +66,7 @@ struct DescriptorFixture {
         D3D12DeviceDescriptor deviceDesc{};
         deviceDesc.Factory = Factory.get();
         deviceDesc.AdapterIndex = adapter;
-        auto device = Device::Create(DeviceDescriptor{deviceDesc});
+        auto device = Device::Create(DeviceDescriptor{deviceDesc}, {.IsEnabled = false});
         if (!device) return false;
         RenderDevice = device.Release();
         ResolvedD3D12Layout description;

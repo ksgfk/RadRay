@@ -33,6 +33,7 @@ public:
         ++_counts.Set;
         return _native->Set(binding, element, value);
     }
+    void ResetBindingsForReuse() noexcept override { _native->ResetBindingsForReuse(); }
     bool FlushWrites() noexcept override {
         ++_counts.Flush;
         return _native->FlushWrites();
@@ -80,6 +81,7 @@ protected:
     void SetUp() override {
         RuntimeStartupResult startup;
         GpuSystemDescriptor descriptor;
+        descriptor.RhiValidation.IsEnabled = false;
         descriptor.FlightDataCount = 3;
         descriptor.EnableFrameProfiler = false;
         descriptor.DXGIFactory.IsEnableDebugLayer = false;

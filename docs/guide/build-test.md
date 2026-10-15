@@ -593,6 +593,53 @@ build_release/_build/Release/bench_command_allocator.exe --benchmark_min_time=0.
 native storage 字节数由驱动持有，无法直接测得；进程 working set 不能直接等同命令存储占用。
 本次配置、原始数据、结果和未覆盖项见[第一阶段验收记录](../temp/phase1-rhi-command-allocator-validation.md)。
 
+## RHI 校验层验收
+
+开关、失败语义和生命周期边界见 [RHI 校验契约](../architecture/render-rhi.md#可选-rhi-校验)。
+`GpuOptions::RhiValidation` / `GpuSystemDescriptor::RhiValidation` 与原生验证开关独立。
+`RhiValidationTest` 使用 fixture/probe 检查完整解包、全批次预检、拒绝后重试、handle、encoder 所有权、
+frame token 与并发注册表；`RhiValidationDeathTest` 仅检查非法析构及没有失败通道的查询。
+`BackendsAndModes/RhiValidationGpuTest` 覆盖两个后端的校验开/关路径；PSO smoke 同样运行两种模式。
+原生对象检查和手工 signal gate 的测试显式关闭 RHI 包装，普通误用由校验层测试负责。
+
+```powershell
+cmake --build build_debug --config Debug --parallel 12
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
+ctest --test-dir build_debug -C Debug -R 'RhiValidation|CommandAllocator|RenderScope|RadRayRenderPsoSmoke' --output-on-failure
+ctest --test-dir build_debug -C Debug --output-on-failure
+cmake --build build_debug --config Release --target test_radray_render test_radray_runtime bench_command_allocator bench_d3d12_descriptor --parallel 12
+ctest --test-dir build_debug -C Release -R 'RhiValidation|CommandAllocator|RenderScope|RadRayRenderPsoSmoke' --output-on-failure
+```
+
+单后端和无 compiler 组合用独立目录，保持同一 generator，先构建再测试；示例为 D3D12：
+
+```powershell
+cmake -S . -B build_rhi_d3d12 -G "Visual Studio 18 2026" -T ClangCL `
+  -DRADRAY_ENABLE_VULKAN=OFF -DRADRAY_ENABLE_D3D12=ON -DRADRAY_BUILD_SHADER_COMPILER=OFF `
+  -DRADRAY_BUILD_EXAMPLES=OFF -DRADRAY_BUILD_BENCHMARKS=OFF
+cmake --build build_rhi_d3d12 --config Debug --target test_radray_render test_radray_runtime --parallel 12
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12'
+ctest --test-dir build_rhi_d3d12 -C Debug -R 'RhiValidation|CommandAllocator|RenderScope' --output-on-failure
+```
+
+Vulkan 对照交换两个后端选项，使用 `build_rhi_vulkan` 和 required backend `vulkan`。
+完整验收恢复 required backend 为当前构建的集合，未编译后端按既有 startup 规则报告跳过。
+
+性能用 Google Benchmark 串行采样，关闭原生验证并显式选择 RHI 开关。
+`CommandAllocator/` 和 `D3D12Descriptor/` 固定关闭 RHI 校验；前者输出原生 allocator、command、
+graphics encoder、parameter set、graphics PSO 的 `sizeof_*`，仅表示 C++ 对象字节数，不含堆内存或驱动分配。
+`RhiBinding/<backend>/raw|validation` 每次录制 128 次真实参数集绑定，初始化和首次扩容在计时外，
+不提交 GPU；`items_per_second` 是绑定吞吐，Time 是整次录制的 CPU 墙钟耗时。
+该基准读取仓库内 compute artifact，无需运行 shader compiler。
+
+```powershell
+build_debug/_build/Release/bench_command_allocator.exe --benchmark_filter='^(CommandAllocator/(d3d12|vulkan)/shared/M32/K1/manual_time|RhiBinding/.*)$' --benchmark_min_time=0.2s --benchmark_repetitions=3 --benchmark_out=build_debug/rhi-record-bind.json --benchmark_out_format=json
+build_debug/_build/Release/bench_d3d12_descriptor.exe --benchmark_filter='^D3D12Descriptor/Publish/(0|1)$' --benchmark_min_time=0.2s --benchmark_repetitions=3 --benchmark_out=build_debug/rhi-descriptor.json --benchmark_out_format=json
+```
+
+比较前后结果须固定编译器、配置、profiler、机器负载与设备。Debug 前后采样仅作回归线索，
+正式性能结论使用 Release；校验关闭时由工厂直接返回后端，公共 GPU 用例同时核对该对象身份。
+
 ## 编译数据库与文档检查
 
 Ninja 配置已开启 `CMAKE_EXPORT_COMPILE_COMMANDS`，直接让 clangd 指向构建目录，或复制到

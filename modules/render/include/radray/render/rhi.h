@@ -558,6 +558,16 @@ public:
 
 using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
 
+struct RhiValidationOptions {
+#if defined(RADRAY_IS_DEBUG) && !defined(NDEBUG)
+    bool IsEnabled{true};
+#else
+    bool IsEnabled{false};
+#endif
+    RenderLogCallback LogCallback{nullptr};
+    void* LogUserData{nullptr};
+};
+
 struct VulkanInstanceDescriptor {
     std::string_view AppName{};
     uint32_t AppVersion{0};
@@ -1320,7 +1330,7 @@ public:
 
     virtual Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
-    static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
+    static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc, const RhiValidationOptions& validation = {});
 };
 
 class CommandQueue : public RenderBase {
@@ -1372,11 +1382,12 @@ public:
     /// Returns null on invalid recording state, invalid attachments or native acquisition failure, without recording a pass.
     virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
 
-    virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
+    /// Only a successful end consumes encoder; validation rejection preserves ownership.
+    virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
 
-    virtual void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept = 0;
+    virtual void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
@@ -1605,17 +1616,8 @@ public:
     virtual bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
 
     virtual bool FlushWrites() noexcept = 0;
-    /// Binding publishes an immutable descriptor version until its recorded epoch is safe.
-    void SealBindings() noexcept;
-    bool AreBindingsSealed() const noexcept { return _bindingsSealed; }
     /// Caller must have ended every command epoch using this set before reuse.
-    void ResetBindingsForReuse() noexcept;
-
-protected:
-    virtual void ClearBindings() noexcept {}
-
-private:
-    bool _bindingsSealed{false};
+    virtual void ResetBindingsForReuse() noexcept = 0;
 };
 
 class PipelineState : public RenderBase, public IDebugName {
@@ -1682,6 +1684,9 @@ std::pair<bool, string> ValidateTextureDescriptor(const TextureDescriptor& desc,
 std::pair<bool, string> ValidateTextureDescriptor(const TextureDescriptor& desc, const RenderDeviceCapabilities& capabilities, const TextureSupport& support);
 bool ValidateVertexInputState(const VertexInputState& state) noexcept;
 TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept;
+/// Expands All counts and default aspects; the input must already satisfy the texture contract.
+SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
+
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;

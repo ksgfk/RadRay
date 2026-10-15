@@ -1,5 +1,6 @@
 # D3D12 device loss 用 EXPECT_EXIT，RemoveDevice 发生在子进程，可以和其它 render 用例链在一起。
 set(radray_render_test_sources
+    test_rhi_validation.cpp
     test_command_allocator.cpp
     test_render_scope.cpp
     test_pipeline_layout_cache.cpp

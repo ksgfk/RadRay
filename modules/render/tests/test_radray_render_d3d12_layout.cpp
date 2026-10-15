@@ -9,6 +9,7 @@
 #include <radray/shader/shader_artifact.h>
 
 #include "gpu_test_fixture.h"
+#include "rhi_validation.h"
 #include "shader_contract_fixtures.h"
 
 // M4 覆盖: D3D12 native chain 只从 ResolvedD3D12Layout 建立。这些测试要真设备,
@@ -414,6 +415,9 @@ TEST_F(D3D12DeviceFixture, TablesSplitByVisibilityAndPackMixedRanges) {
 
 TEST_F(D3D12DeviceFixture, VisibilityTablesCountAgainstRootBudget) {
     if (!Available) GTEST_SKIP() << "no d3d12 device";
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* factory = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(checked.get());
+    ASSERT_NE(factory, nullptr);
     ResolvedD3D12Layout description;
     for (uint32_t group = 0; group < 32; ++group) {
         description.Bindings.push_back(MakeBinding(fmt::format("V{}", group), shader::ShaderBindingKind::CBuffer, group, 0,
@@ -421,10 +425,10 @@ TEST_F(D3D12DeviceFixture, VisibilityTablesCountAgainstRootBudget) {
         description.Bindings.push_back(MakeBinding(fmt::format("P{}", group), shader::ShaderBindingKind::CBuffer, group, 1,
                                                    shader::ShaderBindingPlacement::Table, ShaderStage::Pixel));
     }
-    auto boundary = Device->CreatePipelineLayout(description);
+    auto boundary = factory->CreatePipelineLayout(description);
     ASSERT_TRUE(boundary.HasValue());
     description.Bindings.push_back(MakeBinding("Overflow", shader::ShaderBindingKind::CBuffer, 32, 0));
-    EXPECT_FALSE(Device->CreatePipelineLayout(description).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(description).HasValue());
 }
 
 TEST_F(D3D12DeviceFixture, SetWritesMirrorAndFlushPublishesSparseRanges) {
@@ -446,8 +450,6 @@ TEST_F(D3D12DeviceFixture, SetWritesMirrorAndFlushPublishesSparseRanges) {
     const ShaderBufferBinding valid{buffer.get(), {0, 256}, 0};
     EXPECT_TRUE(native->_rootBindings.empty());
     EXPECT_TRUE(native->_tables[0].Dirty.Ranges.empty());
-    EXPECT_FALSE(set->Set(handle, 64, valid));
-    EXPECT_FALSE(set->Set(BindingHandle{}, 0, valid));
     ASSERT_TRUE(set->Set(handle, 0, valid));
     EXPECT_EQ(native->_tables[0].InitializedSlots[0], 1);
     ASSERT_EQ(native->_tables[0].Dirty.Ranges.size(), 1u);
@@ -467,8 +469,6 @@ TEST_F(D3D12DeviceFixture, SetWritesMirrorAndFlushPublishesSparseRanges) {
     EXPECT_TRUE(native->_tables[0].Dirty.Ranges.empty());
     ASSERT_TRUE(set->FlushWrites());
     set->Destroy();
-    EXPECT_FALSE(set->Set(handle, 0, valid));
-    EXPECT_FALSE(set->FlushWrites());
     Device->TryDrainValidationMessages();
     EXPECT_EQ(Context.ValidationErrors.load(), 0u);
 }
@@ -669,7 +669,11 @@ TEST_F(D3D12DeviceFixture, PolicyStaticSamplerComesFromTheCarrierAndCannotBeWrit
     auto samplerResult = Device->CreateSampler(SamplerDescriptor{});
     ASSERT_TRUE(samplerResult.HasValue());
     unique_ptr<Sampler> sampler = samplerResult.Release();
-    EXPECT_FALSE(parameterSet->Set(samplerHandle, 0, sampler.get()));
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto checkedLayout = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(checked.get())->CreatePipelineLayout(*layout).Unwrap();
+    auto checkedSet = checked->CreateShaderParameterSet({checkedLayout.get(), 0}).Unwrap();
+    auto checkedSampler = checked->CreateSampler({}).Unwrap();
+    EXPECT_FALSE(checkedSet->Set(checkedLayout->FindBinding("ShadowSampler"), 0, checkedSampler.get()));
 
     auto textureResult = Context.Device->CreateTexture(TextureDescriptor{
         .Dim = TextureDimension::Dim2D,
@@ -721,9 +725,9 @@ TEST_F(D3D12DeviceFixture, EveryAuthoredRootConstantReachesThePushTable) {
     ASSERT_TRUE(materialHandle.IsValid());
     EXPECT_NE(objectHandle, materialHandle);
     const auto objectRecord = FindBackendBindingRecord(
-        rootSig->_bindingNames, rootSig->_bindingGeneration, objectHandle);
+        rootSig->_bindingNames, reinterpret_cast<uintptr_t>(rootSig), objectHandle);
     const auto materialRecord = FindBackendBindingRecord(
-        rootSig->_bindingNames, rootSig->_bindingGeneration, materialHandle);
+        rootSig->_bindingNames, reinterpret_cast<uintptr_t>(rootSig), materialHandle);
     ASSERT_TRUE(objectRecord.HasValue());
     ASSERT_TRUE(materialRecord.HasValue());
     EXPECT_EQ(objectRecord.Get()->Kind, BackendBindingRecordKind::Push);
@@ -746,12 +750,15 @@ TEST_F(D3D12DeviceFixture, EveryAuthoredRootConstantReachesThePushTable) {
     EXPECT_FALSE(Device->CreatePipelineLayout(uncovered).HasValue());
 }
 
-// An illegal placement has to fail native creation rather than fall back to a nearby topology.
-TEST_F(D3D12DeviceFixture, IllegalPlacementFailsNativeCreation) {
+// Validation rejects illegal placement before native root signature creation.
+TEST_F(D3D12DeviceFixture, ValidationRejectsIllegalPlacement) {
     if (!Available) {
         GTEST_SKIP() << "no d3d12 device";
     }
     // A texture cannot be a root descriptor: D3D12 root CBV/SRV/UAV only take buffer addresses.
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* factory = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(checked.get());
+    ASSERT_NE(factory, nullptr);
     ResolvedD3D12Layout rootTexture{};
     rootTexture.Bindings = {MakeBinding(
         "Albedo",
@@ -759,7 +766,7 @@ TEST_F(D3D12DeviceFixture, IllegalPlacementFailsNativeCreation) {
         0,
         0,
         shader::ShaderBindingPlacement::RootDescriptor)};
-    EXPECT_FALSE(Device->CreatePipelineLayout(rootTexture).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(rootTexture).HasValue());
 
     // A root descriptor addresses exactly one resource, so an array cannot be one.
     ResolvedD3D12Layout rootArray{};
@@ -770,7 +777,7 @@ TEST_F(D3D12DeviceFixture, IllegalPlacementFailsNativeCreation) {
         0,
         shader::ShaderBindingPlacement::RootDescriptor)};
     rootArray.Bindings[0].Count = 4;
-    EXPECT_FALSE(Device->CreatePipelineLayout(rootArray).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(rootArray).HasValue());
 
     // A static sampler is authored by a carrier. Without one there is nothing to describe it, so the
     // implicit builder must refuse instead of quietly dropping the binding.
@@ -781,7 +788,7 @@ TEST_F(D3D12DeviceFixture, IllegalPlacementFailsNativeCreation) {
         0,
         0,
         shader::ShaderBindingPlacement::StaticSampler)};
-    EXPECT_FALSE(Device->CreatePipelineLayout(carrierlessStaticSampler).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(carrierlessStaticSampler).HasValue());
 
     // Unordered bindings mean the resolver's own invariant broke; the backend must not paper over it
     // by re-sorting, because then a resolver bug would never surface.
@@ -789,7 +796,7 @@ TEST_F(D3D12DeviceFixture, IllegalPlacementFailsNativeCreation) {
     unordered.Bindings = {
         MakeBinding("Second", shader::ShaderBindingKind::CBuffer, 0, 1),
         MakeBinding("First", shader::ShaderBindingKind::CBuffer, 0, 0)};
-    EXPECT_FALSE(Device->CreatePipelineLayout(unordered).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(unordered).HasValue());
 }
 
 // The checkpoint this milestone is built around: the same arena offset has to land on the same bytes
@@ -866,14 +873,17 @@ TEST_F(D3D12DeviceFixture, PushHandleWritesRootConstantsAndRejectsMisuse) {
     const auto bytecode = artifact.View->Generic().FindStageBytecode(shader::ShaderStage::Compute);
     ASSERT_TRUE(bytecode.has_value());
     // `Device` is the fixture's DeviceD3D12*, so the shared interface comes from the context.
-    ::radray::render::Device* const device = Context.Device.get();
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* const device = checked.get();
+    auto* const queue = device->GetCommandQueue(QueueType::Direct).Get();
+    auto* const factory = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(device);
 
-    auto layoutResult = Device->CreatePipelineLayout(resolved.value());
+    auto layoutResult = factory->CreatePipelineLayout(resolved.value());
     ASSERT_TRUE(layoutResult.HasValue());
     unique_ptr<PipelineLayout> layout = layoutResult.Release();
     // A second layout over the same resolved input: its handles look identical but carry another
     // generation, which is what makes them unusable here.
-    auto otherResult = Device->CreatePipelineLayout(resolved.value());
+    auto otherResult = factory->CreatePipelineLayout(resolved.value());
     ASSERT_TRUE(otherResult.HasValue());
     unique_ptr<PipelineLayout> otherLayout = otherResult.Release();
 
@@ -924,10 +934,11 @@ TEST_F(D3D12DeviceFixture, PushHandleWritesRootConstantsAndRejectsMisuse) {
     // A push handle names a root constant block, which owns no descriptor slot, so a parameter set
     // write through it has nowhere to land and must be refused instead of silently dropped.
     EXPECT_FALSE(parameterSet->Set(push, 0, outputValue));
+    EXPECT_FALSE(parameterSet->Set(otherLayout->FindBinding("Output"), 0, outputValue));
     ASSERT_TRUE(parameterSet->Set(output, 0, outputValue));
     ASSERT_TRUE(parameterSet->FlushWrites());
 
-    auto commandResultStorage = device->CreateCommandAllocator(Context.Queue).Unwrap();
+    auto commandResultStorage = device->CreateCommandAllocator(queue).Unwrap();
 
     auto commandResult = device->CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
@@ -965,8 +976,8 @@ TEST_F(D3D12DeviceFixture, PushHandleWritesRootConstantsAndRejectsMisuse) {
     command->CopyBufferToBuffer(readback.get(), 0, outputBuffer.get(), 0, sizeof(uint32_t));
     command->End();
     CommandBuffer* commands[]{command.get()};
-    Context.Queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commands});
-    Context.Queue->Wait();
+    queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commands});
+    queue->Wait();
 
     // The dispatch still runs with the root constants written, so the extra root parameter did not
     // break the layout the shader was compiled against.
@@ -998,7 +1009,6 @@ TEST_F(D3D12DeviceFixture, NativeLayoutCacheSharesRenamedWrappersAndEvictsLastUs
     auto buffer = Device->CreateBuffer({.Size = 256, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
     ASSERT_TRUE(buffer);
     const ShaderBufferBinding value{.Target = buffer.Get(), .Range = {0, 256}};
-    EXPECT_FALSE(set.Get()->Set(first->FindBinding("First"), 0, value));
     EXPECT_TRUE(set.Get()->Set(second->FindBinding("Second"), 0, value));
     first->Destroy();
     first->Destroy();

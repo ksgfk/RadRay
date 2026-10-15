@@ -718,6 +718,7 @@ void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutat
                                              .Window = WindowOptions{.Title = "Stalled GPU input", .Width = 80, .Height = 60},
                                              .Gpu = GpuOptions{
                                                  .Backend = backend,
+                                                 .RhiValidation = {.IsEnabled = false},
                                                  .Multithreaded = threaded,
                                                  .EnableFrameProfiler = false,
                                                  .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,

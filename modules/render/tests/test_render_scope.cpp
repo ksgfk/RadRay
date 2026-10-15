@@ -54,12 +54,17 @@ class RenderScopeTest : public testing::TestWithParam<RenderBackend> {
 protected:
     DeviceContext Context;
     void SetUp() override {
-        if (!TryCreateDevice(GetParam(), Context, true)) {
+        if (!TryCreateDevice(GetParam(), Context, true, true)) {
             if (SetupMustFail(Context.Status, RequiredBackend(GetParam()))) FAIL() << Context.Reason;
             GTEST_SKIP() << Context.Reason;
         }
     }
     void TearDown() override { EXPECT_EQ(Context.ValidationErrors.load(), 0u); }
+};
+class NativeRenderScopeTest : public RenderScopeTest {
+    void SetUp() override {
+        if (!TryCreateDevice(GetParam(), Context, true, false)) GTEST_SKIP() << Context.Reason;
+    }
 };
 TEST_P(RenderScopeTest, RejectsInvalidAttachmentsAndAreasBeforeNativeBegin) {
     auto texture = Context.Device->CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 16, .Height = 16, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::Resource}).Unwrap();
@@ -234,13 +239,13 @@ TEST_P(RenderScopeTest, MultipleColorsAndReadOnlyDepthPreserveStoredPixels) {
         BarrierTextureDescriptor{depth.get(), TextureState::Undefined, TextureState::DepthWrite}};
     command->ResourceBarrier(initial);
     auto writer = command->BeginRenderPass({attachments, RenderPassDepthStencilAttachment{depthWrite.get(), LoadAction::Clear, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false, {.25f, 0}},
-                                          8, 8, 1});
+                                            8, 8, 1});
     ASSERT_TRUE(writer);
     command->EndRenderPass(writer.Release());
     const ResourceBarrierDescriptor depthToRead = BarrierTextureDescriptor{depth.get(), TextureState::DepthWrite, TextureState::DepthRead};
     command->ResourceBarrier(std::span{&depthToRead, 1});
     auto reader = command->BeginRenderPass({readAttachments, RenderPassDepthStencilAttachment{depthRead.get(), LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, true, {.75f, 0}},
-                                          8, 8, 1});
+                                            8, 8, 1});
     ASSERT_TRUE(reader);
     command->EndRenderPass(reader.Release());
     const array<ResourceBarrierDescriptor, 3> toCopy{
@@ -272,7 +277,7 @@ TEST_P(RenderScopeTest, MultipleColorsAndReadOnlyDepthPreserveStoredPixels) {
     readback->Unmap();
     allocator->Reset();
 }
-TEST_P(RenderScopeTest, ReadOnlyDepthStencilPreservesBothNativePlanes) {
+TEST_P(NativeRenderScopeTest, ReadOnlyDepthStencilPreservesBothNativePlanes) {
     auto& device = *Context.Device;
     const auto usage = TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::CopySource;
     const auto support = device.QueryTextureSupport({TextureDimension::Dim2D, TextureFormat::D32_FLOAT_S8_UINT, usage});
@@ -420,7 +425,7 @@ TEST_P(RenderScopeTest, MultisampleResolvePreservesClearThroughCompatibleReload)
     allocator->Reset();
 }
 #ifdef RADRAY_ENABLE_VULKAN
-TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
+TEST_P(NativeRenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
     if (GetParam() != RenderBackend::Vulkan) GTEST_SKIP() << "Vulkan native cache";
     using namespace vulkan;
     auto* device = static_cast<DeviceVulkan*>(Context.Device.get());
@@ -559,5 +564,6 @@ TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
     a->Reset();
 }
 #endif
+INSTANTIATE_TEST_SUITE_P(Backends, NativeRenderScopeTest, testing::Values(RenderBackend::D3D12, RenderBackend::Vulkan));
 INSTANTIATE_TEST_SUITE_P(Backends, RenderScopeTest, testing::Values(RenderBackend::D3D12, RenderBackend::Vulkan));
 }  // namespace radray::render::test

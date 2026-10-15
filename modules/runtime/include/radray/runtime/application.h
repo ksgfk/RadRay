@@ -107,6 +107,7 @@ struct GpuOptions {
     render::RenderBackend Backend{};
     bool EnableValidation{false};
     bool EnableSynchronizationValidation{false};
+    render::RhiValidationOptions RhiValidation{};
     bool Multithreaded{false};
     bool EnableFrameProfiler{true};
     uint32_t BackBufferCount{3};

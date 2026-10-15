@@ -1106,6 +1106,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
             .VulkanInstance = instanceDesc,
             .DXGIFactory = factoryDesc,
             .Device = deviceDesc,
+            .RhiValidation = gpu.RhiValidation,
             .MainQueueIndex = 0,
             .BackBufferCount = gpu.BackBufferCount,
             .FlightDataCount = desc.FlightDataCount,

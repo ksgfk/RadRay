@@ -261,7 +261,7 @@ bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult
     } else {
         return fail(RuntimeStartupStatus::InvalidDescriptor, "Unsupported render backend");
     }
-    auto device = render::Device::Create(deviceDesc);
+    auto device = render::Device::Create(deviceDesc, desc.RhiValidation);
     if (!device) return fail(RuntimeStartupStatus::InitializationFailed, "GPU device creation failed for an available adapter");
     return InitializeDevice(device.Release(), desc.MainQueueIndex, desc.EnableFrameProfiler, startup);
 }

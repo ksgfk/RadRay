@@ -6,6 +6,8 @@
 #include <cstring>
 #include <radray/runtime/gpu_system.h>
 #include <radray/scope_guard.h>
+#include <radray/file.h>
+#include <radray/render/backend_shader_artifact.h>
 #include <radray/window/native_window.h>
 #if defined(RADRAY_ENABLE_D3D12)
 #include <radray/render/backend/d3d12_impl.h>
@@ -33,6 +35,67 @@ bool SignalBenchmarkGate(radray::render::Fence* fence, radray::render::RenderBac
 
 void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
     for (const auto backend : {render::RenderBackend::D3D12, render::RenderBackend::Vulkan})
+        for (bool validation : {false, true}) {
+            const auto name = fmt::format("RhiBinding/{}/{}", backend == render::RenderBackend::D3D12 ? "d3d12" : "vulkan", validation ? "validation" : "raw");
+            benchmark::RegisterBenchmark(name.c_str(), [=](benchmark::State& state) {
+                FrameTimeline timeline{1};
+                RuntimeStartupResult startup;
+                GpuSystemDescriptor descriptor{.RhiValidation = {.IsEnabled = validation}, .FlightDataCount = 1, .EnableFrameProfiler = false};
+                const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
+                if (backend == render::RenderBackend::Vulkan) descriptor.Device = render::VulkanDeviceDescriptor{.Queues = std::span{&queue, 1}};
+                auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
+                if (!gpu) {
+                    state.SkipWithError(startup.Reason);
+                    return;
+                }
+                auto* device = gpu->GetDevice();
+                const auto target = render::GetShaderTargetForBackend(backend);
+                const auto suffix = backend == render::RenderBackend::D3D12 ? "compute.dxil.bin" : "compute.spirv.bin";
+                auto blob = ReadBinaryFile(std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_artifacts" / suffix);
+                if (!blob || blob->size() < sizeof(shader::WireMetadataEnvelope)) {
+                    state.SkipWithError("compute fixture is unavailable");
+                    return;
+                }
+                shader::WireMetadataEnvelope envelope;
+                std::memcpy(&envelope, blob->data(), sizeof(envelope));
+                auto artifact = render::CreateBackendShaderArtifact(*device, *blob, {.Target = *target, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity});
+                if (!artifact) {
+                    state.SkipWithError("compute artifact creation failed");
+                    return;
+                }
+                auto shader = device->CreateShader({artifact->Generic().Bytecode(), artifact->Category, render::ShaderStage::Compute});
+                if (!shader) {
+                    state.SkipWithError("compute shader creation failed");
+                    return;
+                }
+                auto pipeline = device->CreateComputePipelineState({artifact->Layout.get(), {shader.Get(), "CSMain"}});
+                auto output = device->CreateBuffer({256, render::MemoryType::Device, render::BufferUse::UnorderedAccess});
+                auto set = device->CreateShaderParameterSet({artifact->Layout.get(), 0});
+                if (!pipeline || !output || !set || !set->Set(artifact->Layout->FindBinding("Output"), 0, render::ShaderBufferBinding{output.Get(), {0, 256}, 4}) || !set->FlushWrites()) {
+                    state.SkipWithError("binding fixture creation failed");
+                    return;
+                }
+                auto allocator = device->CreateCommandAllocator(gpu->GetMainQueue()).Unwrap();
+                auto command = device->CreateCommandBuffer(allocator.get()).Unwrap();
+                const auto record = [&] {
+                    command->Begin();
+                    auto encoder = command->BeginComputePass().Unwrap();
+                    encoder->BindComputePipelineState(pipeline.Get());
+                    for (uint32_t i = 0; i < 128; ++i) encoder->BindShaderParameterSet(0, set.Get());
+                    command->EndComputePass(std::move(encoder));
+                    command->End();
+                };
+                record();
+                for (auto _ : state) {
+                    allocator->Reset();
+                    record();
+                }
+                state.counters["bindings/iteration"] = 128;
+                state.SetItemsProcessed(state.iterations() * 128);
+            })->UseRealTime()
+                ->Unit(benchmark::kMicrosecond);
+        }
+    for (const auto backend : {render::RenderBackend::D3D12, render::RenderBackend::Vulkan})
         for (uint32_t count : {1u, 8u, 32u, 128u})
             for (uint32_t overlap : {1u, 2u, 4u}) {
                 if (overlap > count) continue;
@@ -48,6 +111,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                             vk.Queues = std::span{&queue, 1};
                             descriptor.Device = vk;
                         }
+                        descriptor.RhiValidation.IsEnabled = false;
                         auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
                         if (!gpu) {
                             state.SkipWithError(startup.Reason);
@@ -103,6 +167,24 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                             for (const auto& allocator : allocators) nativeCount += static_cast<render::d3d12::CommandAllocatorD3D12*>(allocator.get())->_native.size();
                         }
 #endif
+#if defined(RADRAY_ENABLE_D3D12)
+                        if (backend == render::RenderBackend::D3D12) {
+                            state.counters["sizeof_allocator"] = sizeof(render::d3d12::CommandAllocatorD3D12);
+                            state.counters["sizeof_command"] = sizeof(render::d3d12::CmdListD3D12);
+                            state.counters["sizeof_graphics_encoder"] = sizeof(render::d3d12::CmdRenderPassD3D12);
+                            state.counters["sizeof_parameter_set"] = sizeof(render::d3d12::ShaderParameterSetD3D12);
+                            state.counters["sizeof_graphics_pso"] = sizeof(render::d3d12::GraphicsPsoD3D12);
+                        }
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+                        if (backend == render::RenderBackend::Vulkan) {
+                            state.counters["sizeof_allocator"] = sizeof(render::vulkan::CommandAllocatorVulkan);
+                            state.counters["sizeof_command"] = sizeof(render::vulkan::CommandBufferVulkan);
+                            state.counters["sizeof_graphics_encoder"] = sizeof(render::vulkan::SimulateCommandEncoderVulkan);
+                            state.counters["sizeof_parameter_set"] = sizeof(render::vulkan::ShaderParameterSetVulkan);
+                            state.counters["sizeof_graphics_pso"] = sizeof(render::vulkan::GraphicsPipelineVulkan);
+                        }
+#endif
                         state.counters["native_capacity"] = double(nativeCount);
                         state.counters["rhi_allocators"] = double(allocators.size());
                         state.counters["reset_us"] = resets / state.iterations();
@@ -123,6 +205,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                 GpuSystemDescriptor descriptor{.FlightDataCount = 1, .EnableFrameProfiler = true};
                 const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
                 if (backend == render::RenderBackend::Vulkan) descriptor.Device = render::VulkanDeviceDescriptor{.Queues = std::span{&queue, 1}};
+                descriptor.RhiValidation.IsEnabled = false;
                 auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
                 if (!gpu) {
                     state.SkipWithError(startup.Reason);
@@ -191,6 +274,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                     GpuSystemDescriptor descriptor{.FlightDataCount = 1, .EnableFrameProfiler = false};
                     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
                     if (backend == render::RenderBackend::Vulkan) descriptor.Device = render::VulkanDeviceDescriptor{.Queues = std::span{&queue, 1}};
+                    descriptor.RhiValidation.IsEnabled = false;
                     auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
                     if (!gpu) {
                         state.SkipWithError(startup.Reason);
@@ -270,6 +354,7 @@ void radray::benchmarking::RegisterWindowSubmissionBenchmarks() {
                         GpuSystemDescriptor descriptor{.FlightDataCount = flights, .EnableFrameProfiler = true};
                         const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
                         if (backend == render::RenderBackend::Vulkan) descriptor.Device = render::VulkanDeviceDescriptor{.Queues = std::span{&queue, 1}};
+                        descriptor.RhiValidation.IsEnabled = false;
                         auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
                         if (!gpu) {
                             state.SkipWithError(startup.Reason);

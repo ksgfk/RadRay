@@ -1,5 +1,7 @@
 #include <radray/render/rhi.h>
 
+#include "rhi_validation.h"
+
 #include <algorithm>
 #include <bit>
 
@@ -243,8 +245,8 @@ void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
 }
 
-Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
-    return std::visit(
+Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc, const RhiValidationOptions& validation) {
+    auto device = std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, D3D12DeviceDescriptor>) {
@@ -264,6 +266,8 @@ Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
             }
         },
         desc);
+    if (!device || !validation.IsEnabled) return device;
+    return detail::CreateValidationDevice(device.Release(), validation);
 }
 
 Nullable<InstanceVulkan*> InstanceVulkan::InitEnv(const VulkanInstanceDescriptor& desc) {
@@ -415,6 +419,13 @@ std::pair<bool, string> ValidateTextureDescriptor(const TextureDescriptor& desc,
 TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept {
     if (format == TextureFormat::D24_UNORM_S8_UINT || format == TextureFormat::D32_FLOAT_S8_UINT) return TextureAspect::Depth | TextureAspect::Stencil;
     return IsDepthStencilFormat(format) ? TextureAspects{TextureAspect::Depth} : TextureAspects{TextureAspect::Color};
+}
+
+SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept {
+    if (!range.Aspects) range.Aspects = GetTextureFormatAspects(desc.Format);
+    if (range.ArrayLayerCount == SubresourceRange::All) range.ArrayLayerCount = (desc.Dim == TextureDimension::Dim3D ? 1 : desc.DepthOrArraySize) - range.BaseArrayLayer;
+    if (range.MipLevelCount == SubresourceRange::All) range.MipLevelCount = desc.MipLevels - range.BaseMipLevel;
+    return range;
 }
 
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept {
@@ -631,12 +642,6 @@ std::string_view format_as(PresentMode v) noexcept {
 
 std::string_view format_as(SwapChainStatus v) noexcept {
     return EnumNameOr(v);
-}
-
-void ShaderParameterSet::SealBindings() noexcept { _bindingsSealed = true; }
-void ShaderParameterSet::ResetBindingsForReuse() noexcept {
-    ClearBindings();
-    _bindingsSealed = false;
 }
 
 }  // namespace radray::render

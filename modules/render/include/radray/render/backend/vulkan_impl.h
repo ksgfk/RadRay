@@ -255,7 +255,7 @@ static_assert(
         DescriptorSetAllocatorVulkan::Request>,
     "DescriptorSetAllocatorVulkan is not an allocator");
 
-class DeviceVulkan final : public Device {
+class DeviceVulkan final : public Device, public detail::VulkanPipelineLayoutFactory {
 public:
     DeviceVulkan(
         InstanceVulkanImpl* instance,
@@ -300,7 +300,7 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::SpirvShaderArtifactView& artifact, const VulkanTargetLayoutOptions& options = {}) noexcept;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept override;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -451,11 +451,11 @@ public:
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
-    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept override;
 
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
 
-    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
+    void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
@@ -483,12 +483,7 @@ public:
     QueueVulkan* _queue;
 #endif
     CommandAllocatorVulkan* _cmdPool;
-    bool _recording{false};
-    bool _used{false};
-    bool _executable{false};
-    Nullable<CommandEncoder*> _activeEncoder{nullptr};
     VkCommandBuffer _cmdBuffer;
-    vector<unique_ptr<CommandEncoder>> _endedEncoders;
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup; timestamps are legal inside Vulkan render passes,
     // so every debug group maps to one zone.
@@ -546,7 +541,6 @@ public:
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
     Nullable<NativeFramebufferVulkan*> _framebuffer{nullptr};
-    AttachmentSignature _attachmentSignature;
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
 };
@@ -1016,7 +1010,6 @@ public:
     // `vkCmdBindDescriptorSets` expects is the resolved order by construction.
     vector<vector<uint32_t>> _dynamicEntryOrder;
     vector<BackendBindingName> _bindingNames;
-    uintptr_t _bindingGeneration{0};
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;
 };
@@ -1037,8 +1030,7 @@ public:
 
     bool FlushWrites() noexcept override;
 
-protected:
-    void ClearBindings() noexcept override;
+    void ResetBindingsForReuse() noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1072,7 +1064,6 @@ public:
     DeviceVulkan* _device;
     PipelineLayoutVulkan* _layout;
     VkPipeline _pipeline;
-    AttachmentSignature _attachmentSignature;
 };
 
 class ComputePipelineVulkan final : public ComputePipelineState {

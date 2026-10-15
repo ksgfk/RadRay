@@ -19,6 +19,7 @@ unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profil
     GpuSystemDescriptor desc{
         .VulkanInstance = {.IsEnableDebugLayer = validation, .IsEnableSynchronizationValidation = validation},
         .DXGIFactory = {.IsEnableDebugLayer = validation},
+        .RhiValidation = {.IsEnabled = false},
         .FlightDataCount = timeline.GetFlightDataCount(),
         .EnableFrameProfiler = profiler};
     if (backend == render::RenderBackend::Vulkan) {
@@ -598,7 +599,7 @@ TEST(GpuSystemAttachment, SharedTextureStorageAndDistinctViewsSurviveSourceRelea
 void RunRetainedHistoryAndReadback(render::RenderBackend backend, bool cancelCpu) {
     RuntimeStartupResult startup;
     FrameTimeline timeline{3};
-    GpuSystemDescriptor desc{.FlightDataCount = 3, .EnableFrameProfiler = false};
+    GpuSystemDescriptor desc{.RhiValidation = {.IsEnabled = false}, .FlightDataCount = 3, .EnableFrameProfiler = false};
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     if (backend == render::RenderBackend::Vulkan) desc.Device = render::VulkanDeviceDescriptor{.Queues = std::span{&queue, 1}};
     auto gpu = GpuSystem::TryCreate(desc, timeline, startup);

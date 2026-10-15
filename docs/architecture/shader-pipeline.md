@@ -260,12 +260,12 @@ bytes、expected identity 和 current-backend recipe，不能仅信任调用方�
 command binding 延续薄公共操作，但 identity 来自 resolved layout：
 `ShaderParameterDynamicOffset` 携带 `BindingHandle + Offset`。D3 root destination 提交 base GPU VA +
 offset；Vulkan 按 resolved dynamic order 打包 `pDynamicOffsets`，不依赖 caller 顺序或裸 binding
-number。push 写入为 `SetPushConstants(BindingHandle, bytes)`，只写 `[0,size)` prefix，要求非零、
-不超过 resolved size 且 4-byte aligned，remainder 不变，不提供 destination offset。
+number。push 写入为 `SetPushConstants(BindingHandle, bytes)`，每次提交完整 resolved block，要求非零、
+大小恰等于 resolved size 且 4-byte aligned，不提供 prefix 更新或 destination offset。
 
 ## Native PSO boundary
 
-PSO builder 在调用 D3D12/Vulkan native pipeline API 前校验 `VertexInputState`：semantic、format、
+开启 RHI 校验时，包装层在调用 D3D12/Vulkan native pipeline API 前校验 `VertexInputState`：semantic、format、
 buffer slot、attribute location、offset/stride 和重复声明必须自洽。失败不会把坏输入交给 native
 PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schema。
 调用方直接提供 geometry 的 stride/slot/format/offset 与 shader semantic/location 组成的 RHI VertexInputState。

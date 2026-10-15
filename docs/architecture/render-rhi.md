@@ -1,11 +1,64 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明 schema 8 当前 RHI layout 契约、所有权与两个后端映射。上层使用方式见帧与 GPU 文档
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_render_pass_cache.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_render_pass_cache.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
-`radrayrender` = 一层后端无关的 RHI（`rhi.h`，1.5k 行纯接口与描述符）+ D3D12 与 Vulkan
-两份实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
+`radrayrender` 提供后端无关的 RHI（`rhi.h` 中的接口与描述符）、可选 CPU 校验层，以及 D3D12 / Vulkan
+原生实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
+
+## 可选 RHI 校验
+
+`Device::Create(desc, RhiValidationOptions)` 在创建真实后端后按固定配置决定是否包装。
+`RhiValidationOptions::IsEnabled` 在 Debug（定义 `RADRAY_IS_DEBUG` 且未定义 `NDEBUG`）中默认开启，
+Release、RelWithDebInfo、MinSizeRel 默认关闭；
+调用方可以显式覆盖。`LogCallback` / `LogUserData` 接收 RHI 误用诊断；未提供回调时写项目错误日志。
+回调可能由不同 worker 调用，接收者负责线程安全并存活至 device 和对象销毁；回调不重入同一对象。
+Application 的 `GpuOptions::RhiValidation` 经 `GpuSystemDescriptor::RhiValidation` 透传。
+该开关独立于 D3D12 debug layer、GBV 和 Vulkan validation / synchronization validation。
+
+```cpp
+auto device = Device::Create(descriptor, {.IsEnabled = true});
+// 性能运行显式传 {.IsEnabled = false}。
+```
+
+开启后，device 创建或借出的 queue、allocator、command、encoder、buffer、texture、view、shader、
+layout、parameter set、PSO、sampler、fence、query pool、swapchain 和同步对象都通过同一 device 的包装层。
+嵌套描述符、variant 和 span 先完整校验再解包，返回描述符里的对象指针指向包装对象。
+借用 queue、缓存 sampler、backbuffer 与同步对象在各自 owner 的有效期内具有稳定包装身份；
+swapchain 重建会释放旧 image / sync 包装。`BindingHandle` 使用包装 layout 的身份并映射到后端 handle。
+artifact 桥调用内部 target-typed 纯虚 layout 工厂，仍使用现有 resolved 类型；不公开解包接口。
+
+关闭后直接返回真实后端，不创建校验上下文、包装对象、注册表或校验状态。
+后端将 CPU 参数和调用顺序合法性作为前提，只保留实际执行所需的原生 allocator 复用、PSO 缓存、
+描述符 dirty / initialized 信息、布局映射、原生保活、交换链同步回收与 profiler 数据。
+能力探测、artifact 解码 / carrier 解析、原生创建失败和不可恢复执行错误处理仍在对应实现中。
+依赖具体后端类型的工具或测试须显式关闭包装，公共 RHI 调用方不强转后端类型。
+
+校验层检查 device 归属与有效性、范围与对齐、usage、录制与 allocator epoch、encoder 配对、
+附件 / PSO 兼容、binding 类型和 handle、完整 dynamic offsets，以及 CPU 上可检测的父子销毁顺序。
+批量调用全部预检通过才向后端转发；状态在成功后提交，不自动修正录制顺序或补发同步。
+
+| 非法调用 | 行为 |
+|---|---|
+| 有失败结果的操作 | 记录日志并返回空值、false 或既有错误状态 |
+| 普通 void 操作 | 记录日志并跳过，校验状态不变 |
+| 没有可靠失败值的查询 | 记录日志并 ABORT |
+| 无法撤销的非法析构 | 记录日志并 ABORT |
+
+显式 `Destroy()` 可被拒绝并重试；析构无法保留对象，违反依赖顺序时立即终止。
+原生创建失败、Unsupported、超时和 RetryLater 沿用既有结果。`EndRenderPass` / `EndComputePass`
+通过 `unique_ptr<T>&&` 接收 encoder，拒绝时保留调用方所有权，成功后消费并清空。
+swapchain 包装保存真实 outstanding frame，只有后端实际消费后才清空外层 token；失败时可按原有状态重试。
+原生重建尝试可能在失败时也释放旧 images / sync；包装随之失效，但存活的 swapchain 仍可再次 Recreate，
+AcquireNext 继续透传原生 RequireRecreate 等状态。
+
+上下文与加锁注册表由每个 device 持有，独立 worker 可以并发使用各自对象；同一对象及共享 allocator
+仍由调用方串行访问。本层不跟踪完整 GPU 在途依赖、跨队列同步或资源状态，也不保证检测直接访问
+已释放对象、裸指针 ABA 或未等 GPU 完成就 Reset。调用方仍须满足这些生命周期与同步契约。
+
+Vulkan 的 viewport 可以用负高度表达 Y 翻转；D3D12 要求正高度。公共 shader source 是字节 span，
+不要求指针对齐；Vulkan 创建 shader module 时按需对齐到原生 word 数据。
 
 `QueryPoolDescriptor::DebugName` 是非拥有的 `std::string_view`，调用方须保证其引用的字符串
 在 `CreateQueryPool` 调用期间有效；两个后端均即时设置原生对象名称，不保存该 view。
@@ -14,7 +67,7 @@ D3D12 与 Vulkan 查询池仅平铺保存查询类型与数量，不保存创建
 layout 章节以下以 schema 8 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
 公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable sampler 都已删除。
 `BindingHandle` 的内部 token 是 layout 对象地址加该 layout metadata table 的 record index，
-位布局不是 ABI，只有两个后端可以拆开它。
+位布局不是 ABI，只有后端和内部校验层可以拆开它。
 
 ## Timestamp 时钟关联
 
@@ -123,7 +176,8 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 **两段式析构**：每个实现类都有幂等的 `Destroy()` 和内部的 `DestroyImpl()`，析构函数兜底调
 后者。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
 
-`RenderBase` 是全部对象的根：`GetTag()` / `IsValid()` / `Destroy()` 三个纯虚，禁拷贝禁移动。
+`RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `rhi.h` 中直接返回类型标签外，
+所有实例操作都是纯虚接口；保留构造、虚析构、静态工厂和无状态辅助函数。
 `RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
 （`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），目前只被日志的 `format_as` 消费。
 
@@ -132,12 +186,14 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 `Device::CreateCommandAllocator(queue)` 创建独占的 RHI recording storage，绑定同 device 的实际 queue。
 `CreateCommandBuffer(allocator)` 创建独占 wrapper/native list，借用 allocator；旧 queue 工厂已移除。
 allocator 必须晚于全部 children 销毁。销毁 child 只注销并释放自身，不销毁共享 storage。
-创建时校验 backend、device、有效性与实际 queue；提交校验录制状态及绑定 queue。
+开启 RHI 校验时，创建检查 backend、device、有效性与实际 queue；提交检查录制状态及绑定 queue。
 
 一个 epoch 内每个 child 只 Begin/End 一次。Begin 不重置 storage；End 只关闭当前录制。
+每份关闭的录制最多提交一次；再次提交需要 allocator Reset 后重新录制。
 `CommandAllocator::Reset()` 由调用方在全部 GPU 使用完成、且没有打开的录制后调用，不等待 GPU。
-Reset 使旧录制失效，并清理所有 child 的 keepalive、结束的 encoder 与缓存状态，包括本轮不再使用的 child。
-违反 Begin/End、encoder、Reset、父子销毁顺序或提交已失效录制的契约会立即诊断；创建仍返回可空结果。
+Reset 使旧录制失效，并清理所有 child 的原生 keepalive 与校验 epoch 引用，包括本轮不再使用的 child；
+成功 End 的 encoder 立即销毁。
+开启 RHI 校验时，违反 Begin/End、encoder、Reset、父子销毁顺序或提交已失效录制会被拒绝并诊断；创建仍返回可空结果。
 可检测状态不等于完整 ABA 防护：裸指针重新录制后不能识别调用方保留的旧逻辑引用。
 
 D3D12 storage 持有 native allocator 数组：仅在所有 block 都有 open list 时扩容，按同时录制高水位 K 复用。
@@ -273,16 +329,14 @@ flush 发布最后写入的 descriptor。Buffer view 在第一个 CPU 目标创�
 目标；texture/sampler 从已有 CPU descriptor 复制。root descriptor 只保存 GPU 地址，绑定时加上
 传入的 dynamic offset；static sampler 不允许 Set。
 
-参数热路径信任已创建布局的 destinations，不重复扫描 table 分配与映射边界，也不检查资源的设备归属、
-usage、格式、范围、对齐和有效性。这些是调用方的前置条件；当前尚未新增独立验证层。
-保留 handle 解码、group/数组寻址和跨布局 table 映射所需的检查；`IsValid()` 仍可显式检查存储结构，
-但 Set/Flush/Bind 不调用完整扫描。原生布局创建、分配失败处理不受此简化影响。
+真实后端的参数热路径信任已创建布局的 destinations，只做 handle 解码、group/数组寻址和跨布局 table 映射。
+设备归属、usage、类型、格式、范围、对齐、有效性和 required 元素完整性由可选校验层检查，关闭时成为调用方的
+前置条件。`IsValid()` 仍可显式查询原生对象，Set/Flush/Bind 不调用完整校验扫描；原生创建和分配失败处理保留。
 **Vulkan 的 Set 直接调用 `vkUpdateDescriptorSets` 更新一个数组元素。** 不保存参数值、逻辑 dirty
 或相同值缓存，不构造批量发布 scratch。`FlushWrites()` 仅保留接口兼容，合法 set 上为空操作；Bind
-不执行 descriptor 更新。Set 保留 handle/group/数组寻址、immutable sampler 禁写，以及参数值类型、
-资源非空、有效性和设备归属检查。Bind 检查 set/layout 有效性、设备归属，并通过缓存的原生 set layout
-身份确认兼容性，不逐 binding 重扫结构。资源 usage、view 用途、范围、格式、对齐等详细语义仍由调用方
-保证；不增加 required 元素完整性状态或恢复值缓存。
+不执行 descriptor 更新。原生 Set 只按已验证的 handle/group/数组位置转换参数并写入；immutable sampler
+禁写、资源语义、required 元素和 set-layout 兼容性均在包装层预检。原生 set 不保存逻辑参数值、封存状态
+或 required 元素完整性状态；校验关闭时仍由调用方保证合法输入。
 typed buffer 在 Set 时创建原生 `VkBufferView`，成功更新 descriptor 后替换旧 view；set 只为 typed
 buffer 元素持有这些 view，不为其他参数分配值存储。原生创建失败返回 false，原 descriptor/view
 保持不变。调用方须在 Set 替换或销毁前完成旧 descriptor 和 view 的 GPU 使用；同步边界现在是 Set，
@@ -325,7 +379,7 @@ handle 会被拒绝。`RootSigD3D12` 是一次性对象：构造至析构期间�
 `RootSigD3D12` 只保留原生 root signature 对象与运行时绑定 metadata。原生 root signature
 描述、root parameters、descriptor ranges、static samplers 与 flags 仅在创建阶段使用，不随
 layout 保存。push metadata 保存 root parameter 索引及 `Num32BitValues`；创建时完成参数类型、
-索引及大小一致性校验，提交 push constants 时仅按该 metadata 检查传入大小并写入各目标。
+索引及大小一致性校验；提交时包装层检查完整块大小，真实后端按 metadata 写入各目标。
 
 一个D3 declaration按visibility-disjoint参数fan-out时仍只有一个handle，一次write/offset提交到全部
 destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
@@ -336,14 +390,14 @@ D3D12 完成 table 映射后直接绑定 GPU 区间，再按传入的 dynamic of
 不建立临时 root 写入列表，也不保证无效输入下的整次绑定原子性。
 同 layout/group 直接使用 table 对应关系；跨 layout/group 按 heap 类型、visibility、数量、range 布局与
 flags、active 槽位的 namespace/binding/array element/kind/placement 建立一一对应，忽略 root parameter
-index 与所属 group 的 space 数字。table 顺序可以不同，重复签名按出现顺序配对；不兼容时拒绝绑定，
+index 与所属 group 的 space 数字。table 顺序可以不同，重复签名按出现顺序配对；校验层预检不兼容时拒绝绑定，
 不自动重新排列 descriptors。非所属 group 的 range space 仍按原值比较。
 
 `ShaderParameterDynamicOffset` 使用 `BindingHandle + Offset`，不携带裸 binding number。
 D3D12 按传入顺序解析目标声明并查找源 root 地址；不检查 offset 的重复、缺失、范围、对齐或 root 是否
-已经 Set。调用方必须给每个 root descriptor 恰好一个合法 offset，并在使用前 Set。Vulkan 将传入的 offsets 按
-`DynamicOffsetOrder` 排列后交给原生绑定，同样只保留定位目标槽位的检查；调用方负责完整性、唯一性
-和有效范围。合法输入可用于两个后端。
+已经 Set。Vulkan 将传入的 offsets 按 `DynamicOffsetOrder` 排列后交给原生绑定。
+校验层要求每个 root/dynamic descriptor 恰好一个 offset，并检查已初始化、对齐和有效范围；关闭校验时
+由调用方保证这些前置条件。合法输入可用于两个后端。
 
 D3 root descriptor 的地址是 buffer GPU VA + bound range offset + dynamic offset，authored root CBV
 与 Implicit modifier 生成的 root descriptor 走同一条路径并记同一种 destination，所以同一个
@@ -351,17 +405,17 @@ dynamic-cbuffer arena offset 在两种 topology 上落在同一段字节；offse
 constant buffer 还要求位移后地址保持 256-byte 对齐。visibility-disjoint fan-out 时一次提交写到全部
 destinations。
 
-push提交为`SetPushConstants(BindingHandle, bytes)`，不再传group。每次写`[0,size)`prefix，要求
-`0 < size <= resolved block size`且4-byte aligned；未覆盖remainder不变，不支持destination offset。
-一个Vulkan Variant最多一个active logical push block，D3仍可有多个RootConstants declarations。
+push 提交为 `SetPushConstants(BindingHandle, bytes)`，不再传 group。每次必须提交完整 resolved block，
+要求 `size == resolved block size`、非零且 4-byte aligned；不支持 prefix 更新或 destination offset。
+一个 Vulkan Variant 最多一个 active logical push block，D3 仍可有多个 RootConstants declarations。
 
 ### Vertex input
 
-graphics PSO 创建前会做共享 CPU 校验：semantic、format、location、slot、offset/stride 以及
+开启 RHI 校验时，graphics PSO 创建前做共享 CPU 校验：semantic、format、location、slot、offset/stride 以及
 重复 binding/attribute 必须有效；校验失败时不调用 D3D12/Vulkan native PSO API。
 
 VB 与 PSO 的可移植绑定顺序以 `rhi.h` 的 `GraphicsCommandEncoder::BindVertexBuffers` 契约为准。
-D3D12 不保存 VB 绑定缓存；每次绑定从当前 PSO 取得 stride 并直接下发，未绑定 PSO 时报告错误并返回。
+D3D12 不保存 VB 绑定缓存；每次绑定从当前 PSO 取得 stride 并直接下发。校验层拒绝未先绑定 PSO 的调用。
 切换 PSO 时不自动重新下发 VB。
 Vulkan 的 VB 绑定同样不保存去重缓存，每次合法调用都直接下发。
 两个后端的索引缓冲绑定也不保存去重缓存；每次合法的 `BindIndexBuffer` 调用都会下发原生绑定。
@@ -406,7 +460,7 @@ Device 以具体后端缓存类型的 `unique_ptr` 独占缓存，每个 RHI Pip
 最后一次 `IntrusivePtrRelease` 通过具体后端缓存指针调用虚函数 `Evict`，去虚拟化由编译器根据类型和优化条件完成，
 不通过移除 `virtual` 或限定调用绕过虚派发。
 `BackendShaderArtifact::Layout` 仍是独占包装，名称映射、绑定句柄身份和参数组定位不共享。
-缓存命中也必须完成当前 artifact 的映射与合法性校验；BindingHandle 不可跨包装使用。
+缓存命中也必须完成当前 artifact 的映射与 carrier 解析；开启 RHI 校验时 BindingHandle 不可跨包装使用。
 
 D3D12 以最终 serialized Root Signature 完整字节为 key，Explicit 原样使用 carrier，
 Implicit 仍生成并序列化现有拓扑；只在未命中时调用 `CreateRootSignature`。
@@ -539,7 +593,7 @@ MSAA quality；Vulkan 查询相同 image flags/usage 的 image format properties
 sampled usage，RHI 没有 input attachment 使用接口。
 
 `ValidateTextureDescriptor` 共享 CPU 规则与 backend support facts；两个 `CreateTexture` 都先
-校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
+开启 RHI 校验时先校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
 非 Device texture memory 或不支持的 allocation hint 返回包含字段的 reason。
 validation 不替换 format，也不降低 sample count。资源不足/native create 失败仍返回空。
 Stage A 的 graph view 限制同 format；RHI 原有的格式 view 能力没有新增隐式 reinterpret 策略。
@@ -580,7 +634,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 [构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
 
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
-`ValidateFrame` / `InvalidateFrame` 保证不能伪造也不能用过期帧。
+校验包装用 `ValidateFrame` 检查 owner/token；`InvalidateFrame` 清空后端实际消费的帧。
 
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
 D3D12 仅在 owner/token 匹配时消费 outstanding frame，返回既有 result 的 Success，之后必须
@@ -615,11 +669,11 @@ front-face winding 的影响不同。相机侧因此保持后端无关（见
 
 ## 直接附件与 Vulkan 原生缓存
 
-公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
+公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
 PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；只读 scope 仍要求 PSO 关闭写入。
 
-`CommandBuffer::BeginRenderPass(desc)` 直接校验附件、获取原生对象并开始录制，无独立准备阶段或 token。
+`CommandBuffer::BeginRenderPass(desc)` 经可选校验后获取原生对象并开始录制，无独立准备阶段或 token。
 未处于 recording、已有 active encoder、附件校验或原生对象获取失败时返回 `nullptr`，不录制 clear/Begin，
 不改变 active encoder，调用方可以修正描述后重试。描述及其 span 只借用到调用返回；附件 owner 仍须存活至命令真实完成。
 调用方在 BeginRenderPass 前录制附件 barrier，失败时仍负责处理这些已录制的状态转换。
@@ -635,7 +689,7 @@ view ID 在该 device 内单调且不复用。view 析构按局部 reverse index
 
 运行基线为 Vulkan 1.2 与 timelineSemaphore，不启用 dynamic rendering、imagelessFramebuffer、separateDepthStencilLayouts 或 synchronization2。depth-only 也使用 core depth/stencil layout，VMA 和 instance 使用 1.2；shader 编译策略的默认 SPIR-V target environment 同样为 Vulkan1_2。
 
-ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。generation 是有效性标记，不能替代 layout/provider 的 native 寿命。
+开启 RHI 校验时，ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改；封存状态仅存于校验包装。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。generation 是有效性标记，不能替代 layout/provider 的 native 寿命。
 
 ## 两个后端实现文件的分区
 

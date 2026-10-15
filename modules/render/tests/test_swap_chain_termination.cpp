@@ -27,7 +27,7 @@ Nullable<unique_ptr<SwapChain>> CreateFixtureChain(DeviceContext& context, HWND 
 TEST(RadRaySwapChainTermination, DiscardPreservesForeignTokenAndRequiresRecreate) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
-    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true, true)) GTEST_SKIP() << context.Reason;
     FixtureWindow first(*context.Queue), second(*context.Queue, 192);
     ASSERT_NE(first.Handle, nullptr); ASSERT_NE(second.Handle, nullptr);
     auto a = CreateFixtureChain(context, first.Handle), b = CreateFixtureChain(context, second.Handle);
@@ -69,7 +69,7 @@ TEST(RadRaySwapChainTermination, DiscardPreservesForeignTokenAndRequiresRecreate
 TEST(RadRaySwapChainTermination, HiddenPresentConsumesTokenAndReportsRetry) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
-    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true, true)) GTEST_SKIP() << context.Reason;
     FixtureWindow window(*context.Queue);
     ASSERT_NE(window.Handle, nullptr);
     auto chain = CreateFixtureChain(context, window.Handle); ASSERT_TRUE(chain);
@@ -99,7 +99,7 @@ TEST(RadRaySwapChainTermination, HiddenPresentConsumesTokenAndReportsRetry) {
 TEST(RadRayFenceWait, TimeoutAndEarlierEventDoNotReportCompletion) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
-    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true, false)) GTEST_SKIP() << context.Reason;
     auto created = context.Device->CreateFence(); ASSERT_TRUE(created);
     auto fence = created.Release();
     auto* native = d3d12::CastD3D12Object(fence.get());
@@ -125,7 +125,7 @@ TEST(RadRayFenceWait, TimeoutAndEarlierEventDoNotReportCompletion) {
 TEST(RadRaySwapChainTermination, BackbufferCopyUsageAndShaderVisibilityMatchNativeResource) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
-    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true, false)) GTEST_SKIP() << context.Reason;
     FixtureWindow window(*context.Queue); ASSERT_NE(window.Handle, nullptr);
     auto chain = CreateFixtureChain(context, window.Handle); ASSERT_TRUE(chain);
     auto acquired = chain.Get()->AcquireNext(1000); ASSERT_TRUE(acquired.Frame);
@@ -166,7 +166,7 @@ TEST(RadRaySwapChainTermination, BackbufferCopyUsageAndShaderVisibilityMatchNati
 TEST(RadRaySwapChainTermination, PresentReturnsWhileQueueIsBlocked) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
-    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true, false)) GTEST_SKIP() << context.Reason;
     FixtureWindow window(*context.Queue); ASSERT_NE(window.Handle, nullptr);
     auto chain = CreateFixtureChain(context, window.Handle); ASSERT_TRUE(chain);
     for (bool hidden : {false, true}) {

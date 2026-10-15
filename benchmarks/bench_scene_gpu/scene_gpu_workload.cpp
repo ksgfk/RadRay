@@ -22,6 +22,7 @@ SceneGpuWorkload::SceneGpuWorkload(render::RenderBackend backend, uint32_t fligh
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
+    descriptor.RhiValidation.IsEnabled = false;
     _gpu = GpuSystem::TryCreate(descriptor, _timeline, startup);
     if (!_gpu) {
         _error = startup.Reason;

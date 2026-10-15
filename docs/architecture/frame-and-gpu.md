@@ -330,7 +330,7 @@ TODO：待后续上层 GPU 调度设计确定后恢复资产上传，包括复�
 RenderSystem 通过私有 ShaderProgramCache 拥有 JIT、artifact/program cache，并提供通用 GraphicsPipelineCache；调用方也可直接通过 RHI 创建和持有 PSO。
 program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
 
-帧常量、storage、参数版本仅借用至当前工作域完成。参数集第一次 command binding 后 SealBindings，后续 Set 被拒绝；安全 ResetBindingsForReuse 清理 CPU 旧借用记录后才重新填写。Material 纯默认组保持持久版本，混合组和 override 走帧参数池。PersistentCBufferArena 的 Trim 只在 RT 分配边界执行。
+帧常量、storage、参数版本仅借用至当前工作域完成。开启 [RHI 校验](render-rhi.md#可选-rhi-校验)时，参数集第一次 command binding 后由包装层封存，后续 Set 被拒绝；安全 ResetBindingsForReuse 清理 CPU 旧借用记录后才重新填写。Material 纯默认组保持持久版本，混合组和 override 走帧参数池。PersistentCBufferArena 的 Trim 只在 RT 分配边界执行。
 
 AppFrameTarget::OnOutput 在 Submit/Present 收尾时交付每个输出的 CommandsSubmitted 与 Presentation；命令执行安排、呈现返回与最后的 GPU completion 分别使用各自的事实。
 

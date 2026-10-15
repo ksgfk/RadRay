@@ -28,6 +28,7 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor descriptor{.VulkanInstance = {.IsEnableDebugLayer = !delayed, .IsEnableSynchronizationValidation = !delayed},
                                    .DXGIFactory = {.IsEnableDebugLayer = !delayed},
+                                   .RhiValidation = {.IsEnabled = false},
                                    .FlightDataCount = flights,
                                    .EnableFrameProfiler = false};
     if (backend == render::RenderBackend::Vulkan) {

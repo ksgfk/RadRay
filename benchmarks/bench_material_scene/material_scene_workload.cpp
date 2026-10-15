@@ -28,6 +28,7 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
+    descriptor.RhiValidation.IsEnabled = false;
     _gpu = GpuSystem::TryCreate(descriptor, _timeline, startup);
     if (!_gpu) {
         _error = startup.Reason;

@@ -2,13 +2,6 @@
 
 #include <utility>
 
-#if defined(RADRAY_ENABLE_D3D12)
-#include <radray/render/backend/d3d12_impl.h>
-#endif
-#if defined(RADRAY_ENABLE_VULKAN)
-#include <radray/render/backend/vulkan_impl.h>
-#endif
-
 namespace radray::render {
 namespace {
 
@@ -225,8 +218,8 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
 #if defined(RADRAY_ENABLE_D3D12)
             auto& artifact = std::get<shader::DxilShaderArtifactView>(prepared._artifact);
             auto& resolved = std::get<ResolvedD3D12Layout>(prepared._layout);
-            Nullable<unique_ptr<PipelineLayout>> layout =
-                static_cast<d3d12::DeviceD3D12&>(device).CreatePipelineLayout(resolved);
+            auto* factory = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(&device);
+            Nullable<unique_ptr<PipelineLayout>> layout = factory ? factory->CreatePipelineLayout(resolved) : nullptr;
             if (!layout.HasValue()) {
                 SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
                 return std::nullopt;
@@ -244,8 +237,8 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
 #if defined(RADRAY_ENABLE_VULKAN)
             auto& artifact = std::get<shader::SpirvShaderArtifactView>(prepared._artifact);
             auto& resolved = std::get<ResolvedVulkanLayout>(prepared._layout);
-            Nullable<unique_ptr<PipelineLayout>> layout =
-                static_cast<vulkan::DeviceVulkan&>(device).CreatePipelineLayout(resolved);
+            auto* factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(&device);
+            Nullable<unique_ptr<PipelineLayout>> layout = factory ? factory->CreatePipelineLayout(resolved) : nullptr;
             if (!layout.HasValue()) {
                 SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
                 return std::nullopt;

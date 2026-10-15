@@ -36,6 +36,7 @@ struct GpuSystemDescriptor {
     render::VulkanInstanceDescriptor VulkanInstance{};
     render::DXGIFactoryDescriptor DXGIFactory{};
     render::DeviceDescriptor Device{};
+    render::RhiValidationOptions RhiValidation{};
     uint32_t MainQueueIndex{0};
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};

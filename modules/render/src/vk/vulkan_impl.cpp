@@ -983,11 +983,7 @@ Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t s
 }
 
 Nullable<unique_ptr<CommandAllocator>> DeviceVulkan::CreateCommandAllocator(CommandQueue* queue_) noexcept {
-    Nullable<QueueVulkan*> queue = dynamic_cast<QueueVulkan*>(queue_);
-    if (!queue || queue->_device != this || !queue->IsValid()) {
-        RADRAY_ERR_LOG("command allocator requires a valid queue from this device");
-        return nullptr;
-    }
+    Nullable<QueueVulkan*> queue = static_cast<QueueVulkan*>(queue_);
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.pNext = nullptr;
@@ -1003,11 +999,7 @@ Nullable<unique_ptr<CommandAllocator>> DeviceVulkan::CreateCommandAllocator(Comm
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAllocator* allocator) noexcept {
-    Nullable<CommandAllocatorVulkan*> cmdPool = dynamic_cast<CommandAllocatorVulkan*>(allocator);
-    if (!cmdPool || cmdPool->_device != this || !cmdPool->IsValid()) {
-        RADRAY_ERR_LOG("command buffer requires a valid allocator from this device");
-        return nullptr;
-    }
+    Nullable<CommandAllocatorVulkan*> cmdPool = static_cast<CommandAllocatorVulkan*>(allocator);
     VkCommandBufferAllocateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     bufferInfo.pNext = nullptr;
@@ -1037,15 +1029,6 @@ Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
 }
 
 Nullable<unique_ptr<QueryPool>> DeviceVulkan::CreateQueryPool(const QueryPoolDescriptor& desc) noexcept {
-    if (desc.Count == 0) {
-        RADRAY_ERR_LOG("vk QueryPoolDescriptor Count must be greater than 0");
-        return nullptr;
-    }
-    if (desc.Type != QueryType::Timestamp) {
-        RADRAY_ERR_LOG("vk query type is not supported: {}", static_cast<int32_t>(desc.Type));
-        return nullptr;
-    }
-
     VkQueryPoolCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1130,25 +1113,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
 // == Device: buffer / texture / texture view ==
 
 Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
-    const bool wantsMapRead = desc.Usage.HasFlag(BufferUse::MapRead);
-    const bool wantsMapWrite = desc.Usage.HasFlag(BufferUse::MapWrite);
     const bool wantsPersistentMap = desc.Hints.HasFlag(ResourceHint::PersistentMap);
-    if (wantsMapRead && wantsMapWrite) {
-        RADRAY_ERR_LOG("vk buffer cannot be both map-read and map-write");
-        return nullptr;
-    }
-    if (wantsMapRead && desc.Memory != MemoryType::ReadBack) {
-        RADRAY_ERR_LOG("vk map-read buffer must use readback memory");
-        return nullptr;
-    }
-    if (wantsMapWrite && desc.Memory != MemoryType::Upload) {
-        RADRAY_ERR_LOG("vk map-write buffer must use upload memory");
-        return nullptr;
-    }
-    if (wantsPersistentMap && !wantsMapRead && !wantsMapWrite) {
-        RADRAY_ERR_LOG("vk persistent-map buffer must declare map-read or map-write usage");
-        return nullptr;
-    }
     const uint64_t logicalSize = desc.Size;
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -1242,19 +1207,10 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
 
     for (const MappedBufferRange& mappedRange : mappedRanges) {
         const BufferDescriptor desc = mappedRange.Target->GetDesc();
-        if (!desc.Usage.HasFlag(BufferUse::MapWrite)) {
-            RADRAY_ABORT("Vulkan mapped flush requires MapWrite usage");
-        }
         const uint64_t offset = mappedRange.Range.Offset;
-        if (offset > desc.Size) {
-            RADRAY_ABORT("Vulkan mapped flush offset is outside the buffer");
-        }
         const uint64_t size = mappedRange.Range.Size == BufferRange::All()
                                   ? desc.Size - offset
                                   : mappedRange.Range.Size;
-        if (size > desc.Size - offset) {
-            RADRAY_ABORT("Vulkan mapped flush range is outside the buffer");
-        }
         auto* buffer = CastVkObject(mappedRange.Target);
         if (size == 0) {
             continue;
@@ -1322,10 +1278,6 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
-    if (const auto [supported, reason] = ValidateTextureDescriptor(desc, *this); !supported) {
-        RADRAY_ERR_LOG("Vulkan texture descriptor rejected: {}", reason);
-        return nullptr;
-    }
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -1392,101 +1344,12 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     return result;
 }
 
-static std::optional<SubresourceRange> _ResolveTextureViewArrayRangeVulkan(
-    TextureDimension dim,
-    SubresourceRange range,
-    uint32_t targetArrayLayerCount) noexcept {
-    auto resolveRemainingLayers = [&]() noexcept {
-        if (range.ArrayLayerCount != SubresourceRange::All) {
-            return true;
-        }
-        if (range.BaseArrayLayer >= targetArrayLayerCount) {
-            RADRAY_ERR_LOG(
-                "vk texture view base array layer {} has no remaining layers in target with {} layers",
-                range.BaseArrayLayer,
-                targetArrayLayerCount);
-            return false;
-        }
-        range.ArrayLayerCount = targetArrayLayerCount - range.BaseArrayLayer;
-        return true;
-    };
-
-    switch (dim) {
-        case TextureDimension::Dim1D:
-        case TextureDimension::Dim2D:
-        case TextureDimension::Dim3D:
-            if (range.BaseArrayLayer != 0 ||
-                (range.ArrayLayerCount != 1 && range.ArrayLayerCount != SubresourceRange::All)) {
-                RADRAY_ERR_LOG(
-                    "vk {} texture view requires array range [0, 1] or all",
-                    dim);
-                return std::nullopt;
-            }
-            range.BaseArrayLayer = 0;
-            range.ArrayLayerCount = 1;
-            return range;
-        case TextureDimension::Dim1DArray:
-        case TextureDimension::Dim2DArray:
-            if (!resolveRemainingLayers()) {
-                return std::nullopt;
-            }
-            return range;
-        case TextureDimension::Cube:
-            if (!resolveRemainingLayers()) {
-                return std::nullopt;
-            }
-            if (range.BaseArrayLayer != 0 || range.ArrayLayerCount != 6) {
-                RADRAY_ERR_LOG("vk cube texture view requires array range [0, 6]");
-                return std::nullopt;
-            }
-            return range;
-        case TextureDimension::CubeArray:
-            if (!resolveRemainingLayers()) {
-                return std::nullopt;
-            }
-            if ((range.BaseArrayLayer % 6) != 0 ||
-                range.ArrayLayerCount == 0 || (range.ArrayLayerCount % 6) != 0) {
-                RADRAY_ERR_LOG(
-                    "vk cube array texture view base layer and layer count must be multiples of 6");
-                return std::nullopt;
-            }
-            return range;
-        case TextureDimension::UNKNOWN:
-            return range;
-    }
-    return range;
-}
-
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     auto image = CastVkObject(desc.Target);
-    switch (desc.Usage) {
-        case TextureViewUsage::Resource:
-        case TextureViewUsage::RenderTarget:
-        case TextureViewUsage::DepthRead:
-        case TextureViewUsage::DepthWrite:
-        case TextureViewUsage::UnorderedAccess:
-            break;
-        case TextureViewUsage::UNKNOWN:
-        default:
-            RADRAY_ERR_LOG("vk invalid texture view usage: {}", desc.Usage);
-            return nullptr;
-    }
-    const uint32_t targetArrayLayerCount =
-        image->_dim == TextureDimension::Dim1D || image->_dim == TextureDimension::Dim3D
-            ? 1
-            : image->_depthOrArraySize;
-    auto rangeOpt = _ResolveTextureViewArrayRangeVulkan(
-        desc.Dim, desc.Range, targetArrayLayerCount);
-    if (!rangeOpt.has_value()) {
-        return nullptr;
-    }
-    auto requestedRange = rangeOpt.value();
+    auto requestedRange = desc.Range;
+    if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && requestedRange.ArrayLayerCount == SubresourceRange::All) requestedRange.ArrayLayerCount = 1;
     if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
-    const auto normalized = NormalizeSubresourceRange(image->GetDesc(), requestedRange);
-    if (!normalized) return nullptr;
-    const SubresourceRange range = *normalized;
-    if (desc.Usage == TextureViewUsage::Resource && range.Aspects.HasFlag(TextureAspect::Depth) && range.Aspects.HasFlag(TextureAspect::Stencil)) return nullptr;
-    if ((desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite) && range.Aspects != GetTextureFormatAspects(desc.Format)) return nullptr;
+    const auto range = ResolveSubresourceRange(image->GetDesc(), requestedRange);
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1521,16 +1384,14 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
 
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
-    if (desc.Category != ShaderBlobCategory::SPIRV) {
-        RADRAY_ERR_LOG("vk only supported SPIR-V shader blobs");
-        return nullptr;
-    }
-    if (desc.Source.size() % 4 != 0) {
-        RADRAY_ERR_LOG("vk SPIR-V code byte size must be a multiple of 4: {}", desc.Source.size());
-        return nullptr;
-    }
     size_t realSize = desc.Source.size();
-    const uint32_t* code = std::bit_cast<const uint32_t*>(desc.Source.data());
+    vector<uint32_t> alignedCode;
+    const uint32_t* code = reinterpret_cast<const uint32_t*>(desc.Source.data());
+    if (reinterpret_cast<uintptr_t>(desc.Source.data()) % alignof(uint32_t)) {
+        alignedCode.resize(realSize / sizeof(uint32_t));
+        std::memcpy(alignedCode.data(), desc.Source.data(), realSize);
+        code = alignedCode.data();
+    }
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1627,157 +1488,10 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
     return std::nullopt;
 }
 
-struct PipelineLayoutDescriptorCountsVulkan {
-    uint64_t Samplers{0};
-    uint64_t UniformBuffers{0};
-    uint64_t DynamicUniformBuffers{0};
-    uint64_t StorageBuffers{0};
-    uint64_t DynamicStorageBuffers{0};
-    uint64_t SampledImages{0};
-    uint64_t StorageImages{0};
-    uint64_t Resources{0};
-};
+// == Device: pipeline layout and parameter set ==
 
-static void AddPipelineLayoutDescriptorCountVulkan(
-    PipelineLayoutDescriptorCountsVulkan& counts,
-    VkDescriptorType type,
-    uint32_t count) noexcept {
-    switch (type) {
-        case VK_DESCRIPTOR_TYPE_SAMPLER:
-            counts.Samplers += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-            counts.UniformBuffers += count;
-            counts.Resources += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
-            counts.UniformBuffers += count;
-            counts.DynamicUniformBuffers += count;
-            counts.Resources += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
-            counts.StorageBuffers += count;
-            counts.Resources += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
-            counts.StorageBuffers += count;
-            counts.DynamicStorageBuffers += count;
-            counts.Resources += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
-            counts.SampledImages += count;
-            counts.Resources += count;
-            return;
-        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
-            counts.StorageImages += count;
-            counts.Resources += count;
-            return;
-        default:
-            Unreachable();
-    }
-}
-
-static bool ValidatePipelineLayoutTotalDescriptorCountsVulkan(
-    const PipelineLayoutDescriptorCountsVulkan& counts,
-    const VkPhysicalDeviceLimits& limits) noexcept {
-    auto validate = [](uint64_t actual, uint32_t limit, std::string_view name) noexcept {
-        if (actual <= limit) {
-            return true;
-        }
-        RADRAY_ERR_LOG(
-            "vk pipeline layout exceeds {}: {} > {}",
-            name,
-            actual,
-            limit);
-        return false;
-    };
-    return validate(counts.Samplers, limits.maxDescriptorSetSamplers, "maxDescriptorSetSamplers") &&
-           validate(counts.UniformBuffers, limits.maxDescriptorSetUniformBuffers, "maxDescriptorSetUniformBuffers") &&
-           validate(counts.DynamicUniformBuffers, limits.maxDescriptorSetUniformBuffersDynamic, "maxDescriptorSetUniformBuffersDynamic") &&
-           validate(counts.StorageBuffers, limits.maxDescriptorSetStorageBuffers, "maxDescriptorSetStorageBuffers") &&
-           validate(counts.DynamicStorageBuffers, limits.maxDescriptorSetStorageBuffersDynamic, "maxDescriptorSetStorageBuffersDynamic") &&
-           validate(counts.SampledImages, limits.maxDescriptorSetSampledImages, "maxDescriptorSetSampledImages") &&
-           validate(counts.StorageImages, limits.maxDescriptorSetStorageImages, "maxDescriptorSetStorageImages");
-}
-
-static bool ValidatePipelineLayoutStageDescriptorCountsVulkan(
-    const PipelineLayoutDescriptorCountsVulkan& counts,
-    const VkPhysicalDeviceLimits& limits,
-    ShaderStage stage) noexcept {
-    auto validate = [stage](uint64_t actual, uint32_t limit, std::string_view name) noexcept {
-        if (actual <= limit) {
-            return true;
-        }
-        RADRAY_ERR_LOG(
-            "vk pipeline layout exceeds {} for {} stage: {} > {}",
-            name,
-            stage,
-            actual,
-            limit);
-        return false;
-    };
-    return validate(counts.Samplers, limits.maxPerStageDescriptorSamplers, "maxPerStageDescriptorSamplers") &&
-           validate(counts.UniformBuffers, limits.maxPerStageDescriptorUniformBuffers, "maxPerStageDescriptorUniformBuffers") &&
-           validate(counts.StorageBuffers, limits.maxPerStageDescriptorStorageBuffers, "maxPerStageDescriptorStorageBuffers") &&
-           validate(counts.SampledImages, limits.maxPerStageDescriptorSampledImages, "maxPerStageDescriptorSampledImages") &&
-           validate(counts.StorageImages, limits.maxPerStageDescriptorStorageImages, "maxPerStageDescriptorStorageImages") &&
-           validate(counts.Resources, limits.maxPerStageResources, "maxPerStageResources");
-}
-
-// == Device: pipeline layout 与 parameter set ==
-
-// Full-state immutable sampler creation. The wire record already holds Vulkan enumerants, so it goes
-// straight into the create info: a second mapping table is exactly where a silent state downgrade
-// would hide. Device capability is checked here instead of at resolve time because the resolved
-// layout is device independent.
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
     const VulkanImmutableSamplerState& state) noexcept {
-    if (_device == VK_NULL_HANDLE) {
-        return nullptr;
-    }
-    if (!std::isfinite(state.MipLodBias) || !std::isfinite(state.MaxAnisotropy) ||
-        !std::isfinite(state.MinLod) || !std::isfinite(state.MaxLod)) {
-        RADRAY_ERR_LOG("vk sampler requires finite LOD and anisotropy values");
-        return nullptr;
-    }
-    const VkPhysicalDeviceLimits& limits = this->_properties.limits;
-    if (state.AnisotropyEnable != 0) {
-        if (this->_feature.samplerAnisotropy != VK_TRUE) {
-            RADRAY_ERR_LOG("vk sampler needs the samplerAnisotropy feature");
-            return nullptr;
-        }
-        if (state.MaxAnisotropy > limits.maxSamplerAnisotropy) {
-            RADRAY_ERR_LOG(
-                "vk sampler exceeds maxSamplerAnisotropy: {} > {}",
-                state.MaxAnisotropy,
-                limits.maxSamplerAnisotropy);
-            return nullptr;
-        }
-    }
-    if (std::abs(state.MipLodBias) > limits.maxSamplerLodBias) {
-        RADRAY_ERR_LOG(
-            "vk sampler exceeds maxSamplerLodBias: {} > {}",
-            state.MipLodBias,
-            limits.maxSamplerLodBias);
-        return nullptr;
-    }
-    if (state.ReductionMode != shader::kShaderSamplerReductionModeWeightedAverage &&
-        this->_extFeatures.feature12.samplerFilterMinmax != VK_TRUE) {
-        RADRAY_ERR_LOG("vk sampler needs the samplerFilterMinmax feature");
-        return nullptr;
-    }
-    const bool usesMirrorClampToEdge =
-        state.AddressModeU == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
-        state.AddressModeV == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
-        state.AddressModeW == shader::kShaderSamplerAddressModeMirrorClampToEdge;
-    if (usesMirrorClampToEdge &&
-        this->_extFeatures.feature12.samplerMirrorClampToEdge != VK_TRUE) {
-        RADRAY_ERR_LOG("vk sampler needs the samplerMirrorClampToEdge feature");
-        return nullptr;
-    }
-
     VkSamplerCreateInfo samplerInfo{};
     samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     samplerInfo.magFilter = static_cast<VkFilter>(state.MagFilter);
@@ -1817,109 +1531,11 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
 
 Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
     const ResolvedVulkanLayout& layout) noexcept {
-    const VkPhysicalDeviceLimits& limits = _properties.limits;
-    if (layout.SetCount > limits.maxBoundDescriptorSets) {
-        RADRAY_ERR_LOG(
-            "vk pipeline layout set count exceeds maxBoundDescriptorSets: {} > {}",
-            layout.SetCount,
-            limits.maxBoundDescriptorSets);
-        return nullptr;
-    }
-
-    // Sets below the highest active one may legitimately carry no binding at all. They still get an
-    // empty descriptor set layout, because dropping them would renumber every later set and break
-    // the set indices the shader was compiled against.
     vector<vector<ShaderParameterSetLayoutEntryVulkan>> groupEntries(layout.SetCount);
-    // Resolved binding index -> position inside its set, so DynamicOffsetOrder can be translated
-    // without searching.
     vector<uint32_t> entryIndexByBinding(layout.Bindings.size(), 0);
-    PipelineLayoutDescriptorCountsVulkan totalCounts{};
-    struct StageDescriptorCounts {
-        VkShaderStageFlagBits NativeStage;
-        ShaderStage Stage;
-        PipelineLayoutDescriptorCountsVulkan Counts;
-    };
-    std::array<StageDescriptorCounts, 3> stageCounts{{
-        {VK_SHADER_STAGE_VERTEX_BIT, ShaderStage::Vertex, {}},
-        {VK_SHADER_STAGE_FRAGMENT_BIT, ShaderStage::Pixel, {}},
-        {VK_SHADER_STAGE_COMPUTE_BIT, ShaderStage::Compute, {}},
-    }};
-
     for (size_t bindingIndex = 0; bindingIndex < layout.Bindings.size(); ++bindingIndex) {
-        const ResolvedVulkanBinding& binding = layout.Bindings[bindingIndex];
-        if (binding.Set >= layout.SetCount) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout binding names set {} outside the resolved set count {}",
-                binding.Set,
-                layout.SetCount);
-            return nullptr;
-        }
-        if (binding.Count == 0) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout binding has zero count: set {} binding {}",
-                binding.Set,
-                binding.Binding);
-            return nullptr;
-        }
-        if (binding.Count - 1 > std::numeric_limits<uint32_t>::max() - binding.Binding) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout binding range overflows: set {} binding {} count {}",
-                binding.Set,
-                binding.Binding,
-                binding.Count);
-            return nullptr;
-        }
-        const auto descriptorType =
-            MapPipelineLayoutDescriptorTypeVulkan(binding.LogicalKind, binding.Placement);
-        if (!descriptorType.has_value()) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout binding has no descriptor type: set {} binding {} kind {} placement {}",
-                binding.Set,
-                binding.Binding,
-                static_cast<uint32_t>(binding.LogicalKind),
-                static_cast<uint32_t>(binding.Placement));
-            return nullptr;
-        }
-        const VkShaderStageFlags stages = MapType(binding.Stages);
-        if (stages == 0) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout binding has no shader stages: set {} binding {}",
-                binding.Set,
-                binding.Binding);
-            return nullptr;
-        }
-        // A dynamic descriptor takes exactly one offset, and the public dynamic-offset shape has no
-        // array element, so an array has nowhere to put the remaining offsets.
-        if (binding.Placement == VulkanBufferDescriptorPlacement::Dynamic && binding.Count != 1) {
-            RADRAY_ERR_LOG(
-                "vk dynamic binding must have count 1: set {} binding {} count {}",
-                binding.Set,
-                binding.Binding,
-                binding.Count);
-            return nullptr;
-        }
-        if (binding.ImmutableSamplerIndex != shader::kShaderNoSampler &&
-            (binding.LogicalKind != shader::ShaderBindingKind::Sampler || binding.Count != 1 ||
-             binding.ImmutableSamplerIndex >= layout.ImmutableSamplers.size())) {
-            RADRAY_ERR_LOG(
-                "vk immutable sampler reference is invalid: set {} binding {} index {}",
-                binding.Set,
-                binding.Binding,
-                binding.ImmutableSamplerIndex);
-            return nullptr;
-        }
-
-        vector<ShaderParameterSetLayoutEntryVulkan>& entries = groupEntries[binding.Set];
-        // Resolution already sorted the bindings by (set, binding) and rejected duplicates, so this
-        // only has to confirm the invariant instead of re-sorting behind the resolver's back.
-        if (!entries.empty() && entries.back().Binding >= binding.Binding) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout bindings are not strictly increasing in set {}: {} after {}",
-                binding.Set,
-                binding.Binding,
-                entries.back().Binding);
-            return nullptr;
-        }
+        const auto& binding = layout.Bindings[bindingIndex];
+        auto& entries = groupEntries[binding.Set];
         entryIndexByBinding[bindingIndex] = static_cast<uint32_t>(entries.size());
         entries.push_back(ShaderParameterSetLayoutEntryVulkan{
             .Binding = binding.Binding,
@@ -1927,59 +1543,17 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
             .Placement = binding.Placement,
             .Count = binding.Count,
             .Stages = binding.Stages,
-            .DescriptorType = descriptorType.value(),
+            .DescriptorType = MapPipelineLayoutDescriptorTypeVulkan(binding.LogicalKind, binding.Placement).value(),
             .ImmutableSamplerIndex = binding.ImmutableSamplerIndex});
-
-        AddPipelineLayoutDescriptorCountVulkan(totalCounts, descriptorType.value(), binding.Count);
-        for (StageDescriptorCounts& stageCount : stageCounts) {
-            if ((stages & stageCount.NativeStage) != 0) {
-                AddPipelineLayoutDescriptorCountVulkan(
-                    stageCount.Counts,
-                    descriptorType.value(),
-                    binding.Count);
-            }
-        }
     }
-
-    if (!ValidatePipelineLayoutTotalDescriptorCountsVulkan(totalCounts, limits)) {
-        return nullptr;
-    }
-    for (const StageDescriptorCounts& stageCount : stageCounts) {
-        if (!ValidatePipelineLayoutStageDescriptorCountsVulkan(
-                stageCount.Counts,
-                limits,
-                stageCount.Stage)) {
-            return nullptr;
-        }
-    }
-
     VkPushConstantRange pushConstantRange{};
-    if (layout.PushBlock.has_value()) {
-        const ResolvedPushConstantBlock& pushBlock = layout.PushBlock.value();
-        if (pushBlock.Size == 0 || pushBlock.Size % 4 != 0) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
-                pushBlock.Size);
-            return nullptr;
-        }
-        if (pushBlock.Size > limits.maxPushConstantsSize) {
-            RADRAY_ERR_LOG(
-                "vk pipeline layout push constant size exceeds maxPushConstantsSize: {} > {}",
-                pushBlock.Size,
-                limits.maxPushConstantsSize);
-            return nullptr;
-        }
-        pushConstantRange.stageFlags = MapType(pushBlock.Stages);
-        if (pushConstantRange.stageFlags == 0) {
-            RADRAY_ERR_LOG("vk pipeline layout push constant has no shader stages");
-            return nullptr;
-        }
+    if (layout.PushBlock) {
+        pushConstantRange.stageFlags = MapType(layout.PushBlock->Stages);
         pushConstantRange.offset = 0;
-        pushConstantRange.size = pushBlock.Size;
+        pushConstantRange.size = layout.PushBlock->Size;
     }
 
     auto result = make_unique<PipelineLayoutVulkan>(this);
-    result->_bindingGeneration = reinterpret_cast<uintptr_t>(result.get());
     result->_bindingNames.reserve(layout.Bindings.size());
     for (const ResolvedVulkanBinding& binding : layout.Bindings) {
         result->_bindingNames.push_back(BackendBindingName{
@@ -2017,32 +1591,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     }
 
     result->_dynamicEntryOrder.resize(layout.SetCount);
-    size_t dynamicEntryCount = 0;
-    for (const vector<ShaderParameterSetLayoutEntryVulkan>& entries : groupEntries) {
-        for (const ShaderParameterSetLayoutEntryVulkan& entry : entries) {
-            dynamicEntryCount += entry.IsDynamic() ? 1 : 0;
-        }
-    }
-    if (layout.DynamicOffsetOrder.size() != dynamicEntryCount) {
-        RADRAY_ERR_LOG(
-            "vk resolved dynamic offset order covers {} of {} dynamic bindings",
-            layout.DynamicOffsetOrder.size(),
-            dynamicEntryCount);
-        return nullptr;
-    }
     for (uint32_t bindingIndex : layout.DynamicOffsetOrder) {
-        if (bindingIndex >= layout.Bindings.size()) {
-            RADRAY_ERR_LOG("vk resolved dynamic offset order is out of bounds: {}", bindingIndex);
-            return nullptr;
-        }
-        const ResolvedVulkanBinding& binding = layout.Bindings[bindingIndex];
-        if (binding.Placement != VulkanBufferDescriptorPlacement::Dynamic) {
-            RADRAY_ERR_LOG(
-                "vk resolved dynamic offset order names a non-dynamic binding: set {} binding {}",
-                binding.Set,
-                binding.Binding);
-            return nullptr;
-        }
+        const auto& binding = layout.Bindings[bindingIndex];
         result->_dynamicEntryOrder[binding.Set].push_back(entryIndexByBinding[bindingIndex]);
     }
 
@@ -2110,12 +1660,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
-    auto* layout = dynamic_cast<PipelineLayoutVulkan*>(desc.Layout);
-    if (layout == nullptr || !layout->IsValid() || layout->_device != this ||
-        desc.GroupIndex >= layout->_parameterSetLayouts.size()) {
-        RADRAY_ERR_LOG("vk parameter set requires a live local layout and a valid group");
-        return nullptr;
-    }
+    auto* layout = CastVkObject(desc.Layout);
 
     const vector<ShaderParameterSetLayoutEntryVulkan>& entries =
         layout->_parameterSetLayouts[desc.GroupIndex];
@@ -2131,10 +1676,6 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
         if (poolSize == poolSizes.end()) {
             poolSizes.push_back(VkDescriptorPoolSize{entry.DescriptorType, entry.Count});
         } else {
-            if (entry.Count > std::numeric_limits<uint32_t>::max() - poolSize->descriptorCount) {
-                RADRAY_ERR_LOG("vk descriptor pool size overflows");
-                return nullptr;
-            }
             poolSize->descriptorCount += entry.Count;
         }
     }
@@ -2188,7 +1729,7 @@ void ShaderParameterSetVulkan::DestroyImpl() noexcept {
     _device = nullptr;
 }
 
-void ShaderParameterSetVulkan::ClearBindings() noexcept {
+void ShaderParameterSetVulkan::ResetBindingsForReuse() noexcept {
     for (auto& view : _texelBufferViews) view.reset();
 }
 
@@ -2196,34 +1737,7 @@ bool ShaderParameterSetVulkan::Set(
     BindingHandle binding,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
-    if (AreBindingsSealed()) {
-        RADRAY_ERR_LOG("Cannot modify a shader parameter version after command binding");
-        return false;
-    }
-    if (!IsValid() || !binding.IsValid()) {
-        RADRAY_ERR_LOG("vk shader parameter set write has an invalid binding handle");
-        return false;
-    }
-    const auto record = FindBackendBindingRecord(
-        _layout->_bindingNames,
-        _layout->_bindingGeneration,
-        binding);
-    // A handle minted by another layout carries a foreign generation, and a push handle names the
-    // push range rather than a descriptor slot; neither may be written through a parameter set.
-    if (!record.HasValue() ||
-        record.Get()->Kind != BackendBindingRecordKind::Descriptor) {
-        RADRAY_ERR_LOG("vk shader parameter set write has an invalid binding handle");
-        return false;
-    }
-    // The record names the set the declaration lives in, so a handle for another set is rejected
-    // instead of resolving against whatever binding happens to share its number here.
-    if (record.Get()->Location.Group != _groupIndex) {
-        RADRAY_ERR_LOG(
-            "vk shader parameter set write names set {} but this set is {}",
-            record.Get()->Location.Group,
-            _groupIndex);
-        return false;
-    }
+    Nullable<const BackendBindingName*> record = &_layout->_bindingNames[BindingHandleAccess::RecordIndex(binding)];
     const uint32_t bindingNumber = record.Get()->Location.Binding;
     const auto& entries = _layout->_parameterSetLayouts[_groupIndex];
     const auto entry = std::find_if(
@@ -2234,18 +1748,6 @@ bool ShaderParameterSetVulkan::Set(
                    shader::GetWireBindingNamespace(static_cast<uint32_t>(value.LogicalKind)) ==
                        record.Get()->Namespace;
         });
-    // An immutable sampler slot takes its state from the policy, so a caller has nothing to write
-    // there: the descriptor set layout already fixed it.
-    if (entry == entries.end() ||
-        arrayElement >= entry->Count ||
-        entry->HasImmutableSampler()) {
-        RADRAY_ERR_LOG(
-            "vk shader parameter set write is invalid: binding {} element {}",
-            bindingNumber,
-            arrayElement);
-        return false;
-    }
-
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = _allocation.Set;
@@ -2263,12 +1765,7 @@ bool ShaderParameterSetVulkan::Set(
         case shader::ShaderBindingKind::RWStructuredBuffer:
         case shader::ShaderBindingKind::RawBuffer:
         case shader::ShaderBindingKind::RWRawBuffer: {
-            const auto* input = std::get_if<ShaderBufferBinding>(&value);
-            if (input == nullptr || input->Target == nullptr || input->Target->GetDevice() != _device || !input->Target->IsValid()) {
-                RADRAY_ERR_LOG("vk descriptor write requires a live local buffer of the expected value type");
-                return false;
-            }
-            const auto& buffer = *input;
+            const auto& buffer = std::get<ShaderBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             bufferInfo.buffer = native->_buffer;
             bufferInfo.offset = buffer.Range.Offset;
@@ -2280,12 +1777,7 @@ bool ShaderParameterSetVulkan::Set(
         }
         case shader::ShaderBindingKind::TypedBuffer:
         case shader::ShaderBindingKind::RWTypedBuffer: {
-            const auto* input = std::get_if<ShaderTexelBufferBinding>(&value);
-            if (input == nullptr || input->Target == nullptr || input->Target->GetDevice() != _device || !input->Target->IsValid()) {
-                RADRAY_ERR_LOG("vk descriptor write requires a live local buffer of the expected value type");
-                return false;
-            }
-            const auto& buffer = *input;
+            const auto& buffer = std::get<ShaderTexelBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             VkBufferViewCreateInfo viewInfo{};
             viewInfo.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
@@ -2306,12 +1798,7 @@ bool ShaderParameterSetVulkan::Set(
         }
         case shader::ShaderBindingKind::Texture:
         case shader::ShaderBindingKind::RWTexture: {
-            const auto* input = std::get_if<TextureView*>(&value);
-            const auto* view = input == nullptr ? nullptr : dynamic_cast<ImageViewVulkan*>(*input);
-            if (view == nullptr || !view->IsValid() || view->_device != _device || !view->_image->IsValid()) {
-                RADRAY_ERR_LOG("vk descriptor write requires a live local texture view");
-                return false;
-            }
+            const auto* view = CastVkObject(std::get<TextureView*>(value));
             imageInfo.imageView = view->_imageView;
             imageInfo.imageLayout = entry->LogicalKind == shader::ShaderBindingKind::RWTexture
                                         ? VK_IMAGE_LAYOUT_GENERAL
@@ -2320,12 +1807,7 @@ bool ShaderParameterSetVulkan::Set(
             break;
         }
         case shader::ShaderBindingKind::Sampler: {
-            const auto* input = std::get_if<Sampler*>(&value);
-            const auto* sampler = input == nullptr ? nullptr : dynamic_cast<SamplerVulkan*>(*input);
-            if (sampler == nullptr || !sampler->IsValid() || sampler->_device != _device) {
-                RADRAY_ERR_LOG("vk descriptor write requires a live local sampler");
-                return false;
-            }
+            const auto* sampler = CastVkObject(std::get<Sampler*>(value));
             imageInfo.sampler = sampler->_sampler;
             write.pImageInfo = &imageInfo;
             break;
@@ -2340,26 +1822,12 @@ bool ShaderParameterSetVulkan::Set(
 }
 
 bool ShaderParameterSetVulkan::FlushWrites() noexcept {
-    return IsValid();
+    return true;
 }
 
 // == Device: PSO / sampler / 同步原语 ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
-    if (!ValidateVertexInputState(desc.VertexInput)) {
-        RADRAY_ERR_LOG("vk vertex input state is invalid");
-        return nullptr;
-    }
-    if (desc.Primitive.StripIndexFormat.has_value() &&
-        desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
-        desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
-        RADRAY_ERR_LOG("StripIndexFormat is only valid for LineStrip or TriangleStrip topology");
-        return nullptr;
-    }
-    if (desc.Primitive.Poly == PolygonMode::Point && !_feature.fillModeNonSolid) {
-        RADRAY_ERR_LOG("vk point polygon mode requires fillModeNonSolid feature");
-        return nullptr;
-    }
     vector<VkPipelineShaderStageCreateInfo> shaderStages;
     vector<string> entryPointsOwned;
     {
@@ -2379,10 +1847,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         for (const auto& i : ss) {
             if (!i.shader.has_value()) continue;
             const auto& src = i.shader.value();
-            if (src.EntryPoint.empty()) {
-                RADRAY_ERR_LOG("vk graphics shader entry point is empty");
-                return nullptr;
-            }
             auto shaderVulkan = CastVkObject(src.Target);
             entryPointsOwned.emplace_back(src.EntryPoint);
             auto& stage = shaderStages.emplace_back();
@@ -2400,10 +1864,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     {
         vertexInputBindings.reserve(desc.VertexInput.Buffers.size());
         for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
-            if (buffer.Binding >= _properties.limits.maxVertexInputBindings) {
-                RADRAY_ERR_LOG("vk vertex buffer binding is out of range: {}", buffer.Binding);
-                return nullptr;
-            }
             auto& bindingDesc = vertexInputBindings.emplace_back();
             bindingDesc.binding = buffer.Binding;
             bindingDesc.stride = buffer.ArrayStride;
@@ -2575,7 +2035,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         return nullptr;
     }
     auto result = make_unique<GraphicsPipelineVulkan>(this, rs, pipeline);
-    result->_attachmentSignature = signature;
     return result;
 }
 
@@ -3492,10 +2951,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkCommandBuffer> cmdBufs;
     cmdBufs.reserve(desc.CmdBuffers.size());
     for (auto i : desc.CmdBuffers) {
-        Nullable<CommandBufferVulkan*> cmdBuffer = dynamic_cast<CommandBufferVulkan*>(i);
-        if (!cmdBuffer || !cmdBuffer->IsValid() || !cmdBuffer->_executable || cmdBuffer->_cmdPool->_queue != this)
-            RADRAY_ABORT("submit requires closed, current recordings from this queue");
-        cmdBuffer->_executable = false;
+        auto* cmdBuffer = static_cast<CommandBufferVulkan*>(i);
         cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
     }
 
@@ -3543,10 +2999,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         if (signalValue + 1 > fenceObj->_fenceValue) {
             fenceObj->_fenceValue = signalValue + 1;
         }
-    }
-
-    if (!desc.WaitToExecute.empty() && submitCompletionFence == nullptr) {
-        RADRAY_ABORT("vk queue submit with swapchain wait sync objects must signal a fence");
     }
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -3636,19 +3088,11 @@ void CommandAllocatorVulkan::SetDebugName(std::string_view name) noexcept {
 
 void CommandAllocatorVulkan::Reset() noexcept {
     RADRAY_PROFILE_SCOPE_N("CommandAllocatorVulkan::Reset");
-    if (!IsValid()) RADRAY_ABORT("invalid command allocator");
-    for (auto* child : _children)
-        if (child->_recording) RADRAY_ABORT("cannot reset command allocator while recording");
     if (_used) {
         if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0); vr != VK_SUCCESS)
             RADRAY_ABORT("vkResetCommandPool failed: {}", vr);
     }
     _used = false;
-    for (auto* child : _children) {
-        child->_endedEncoders.clear();
-        child->_used = false;
-        child->_executable = false;
-    }
     if (_hasRenderScopes) {
         for (auto* child : _children) {
             if (!child->_passPins.empty()) {
@@ -3661,7 +3105,6 @@ void CommandAllocatorVulkan::Reset() noexcept {
 }
 
 void CommandAllocatorVulkan::DestroyImpl() noexcept {
-    if (!_children.empty()) RADRAY_ABORT("destroy command buffers before their allocator");
     if (_cmdPool != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyCommandPool(_device->_device, _cmdPool, _device->GetAllocationCallbacks());
         _cmdPool = VK_NULL_HANDLE;
@@ -3704,7 +3147,6 @@ void CommandBufferVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::DestroyImpl() noexcept {
-    if (_recording) RADRAY_ABORT("cannot destroy a recording command buffer");
     if (_cmdBuffer == VK_NULL_HANDLE) return;
     std::erase(_cmdPool->_children, this);
 #ifdef RADRAY_ENABLE_PROFILER
@@ -3714,7 +3156,6 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
         _profilerZones->Zones.clear();
     }
 #endif
-    _endedEncoders.clear();
     if (_cmdBuffer != VK_NULL_HANDLE) {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
         _cmdBuffer = VK_NULL_HANDLE;
@@ -3724,10 +3165,7 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
 }
 
 void CommandBufferVulkan::Begin() noexcept {
-    if (!IsValid() || _used) RADRAY_ABORT("command buffer Begin requires creation or allocator Reset");
     _cmdPool->_used = true;
-    _used = true;
-    _recording = true;
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.pNext = nullptr;
@@ -3744,7 +3182,6 @@ void CommandBufferVulkan::Begin() noexcept {
 }
 
 void CommandBufferVulkan::End() noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("command End requires recording with all encoders ended");
 #ifdef RADRAY_ENABLE_PROFILER
     // Zone end timestamps must be recorded before vkEndCommandBuffer; unbalanced groups are closed here.
     _profilerZones->Zones.clear();
@@ -3753,12 +3190,9 @@ void CommandBufferVulkan::End() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkEndCommandBuffer failed: {}", vr);
     }
-    _recording = false;
-    _executable = true;
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     const auto shaderStages = [](VkPipelineStageFlags native, ShaderStages stages) {
         constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         if (!stages || !(native & mask)) return native;
@@ -3786,7 +3220,6 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bufBarrier.buffer = buf->_buffer;
-            if (bb->Range.Offset > buf->_reqSize || (bb->Range.Size != BufferRange::All() && bb->Range.Size > buf->_reqSize - bb->Range.Offset)) RADRAY_ABORT("Vulkan buffer barrier range is invalid");
             bufBarrier.offset = bb->Range.Offset;
             bufBarrier.size = bb->Range.Size == BufferRange::All() ? buf->_reqSize - bb->Range.Offset : bb->Range.Size;
 
@@ -3806,14 +3239,13 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             imgBarrier.image = tex->_image;
-            const auto normalized = NormalizeSubresourceRange(tex->GetDesc(), tb->Range);
-            if (!normalized) RADRAY_ABORT("Vulkan texture barrier range is invalid");
+            const auto normalized = ResolveSubresourceRange(tex->GetDesc(), tb->Range);
             // This backend uses coupled depth/stencil layouts, so transitions cover both aspects.
             imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-            imgBarrier.subresourceRange.baseMipLevel = normalized->BaseMipLevel;
-            imgBarrier.subresourceRange.levelCount = normalized->MipLevelCount;
-            imgBarrier.subresourceRange.baseArrayLayer = normalized->BaseArrayLayer;
-            imgBarrier.subresourceRange.layerCount = normalized->ArrayLayerCount;
+            imgBarrier.subresourceRange.baseMipLevel = normalized.BaseMipLevel;
+            imgBarrier.subresourceRange.levelCount = normalized.MipLevelCount;
+            imgBarrier.subresourceRange.baseArrayLayer = normalized.BaseArrayLayer;
+            imgBarrier.subresourceRange.layerCount = normalized.ArrayLayerCount;
 
             auto srcStage = shaderStages(TextureStateToPipelineStageFlags(tb->Before, true), tb->BeforeStages);
             auto dstStage = shaderStages(TextureStateToPipelineStageFlags(tb->After, false), tb->AfterStages);
@@ -3824,7 +3256,6 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             srcStageMask |= srcStage;
             dstStageMask |= dstStage;
         } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v); uav != nullptr) {
-            RADRAY_ASSERT(uav->Target->GetTag() == RenderObjectTag::Buffer || uav->Target->GetTag() == RenderObjectTag::Texture);
             uavMemoryBarrier = true;
             srcStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             dstStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -3845,7 +3276,6 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
 }
 
 void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
 #ifdef RADRAY_ENABLE_PROFILER
     if (_queue->_profilerContext != nullptr) {
         _profilerZones->Zones.emplace_back(
@@ -3862,7 +3292,6 @@ void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::PopDebugGroup() noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
 #ifdef RADRAY_ENABLE_PROFILER
     if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
 #endif
@@ -3875,22 +3304,20 @@ void CommandBufferVulkan::PopDebugGroup() noexcept {
 // == 编码器 / RenderPass / Framebuffer ==
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    if (!_recording || _activeEncoder) return nullptr;
-    const auto signature = ValidateRenderScope(desc, *_device);
-    if (!signature) return nullptr;
-    FramebufferKeyVulkan key{*signature, {}, desc.Width, desc.Height, desc.Layers};
+    AttachmentSignature signature;
+    for (const auto& color : desc.Colors) signature.Colors.push_back(color.View->GetDesc().Format);
+    if (desc.DepthStencil) signature.DepthStencil = desc.DepthStencil->View->GetDesc().Format;
+    signature.Samples = (desc.Colors.empty() ? desc.DepthStencil->View : desc.Colors.front().View)->GetDesc().Target->GetDesc().SampleCount;
+    FramebufferKeyVulkan key{signature, {}, desc.Width, desc.Height, desc.Layers};
     vector<VkImageView> views;
     const auto addView = [&](TextureView* raw) {
-        auto* view = dynamic_cast<ImageViewVulkan*>(raw);
-        if (!view || view->_device != _device) return false;
+        auto* view = static_cast<ImageViewVulkan*>(raw);
         views.push_back(view->_imageView);
         key.Views.push_back(view->_viewId);
-        return true;
     };
-    for (const auto& color : desc.Colors)
-        if (!addView(color.View)) return nullptr;
-    if (desc.DepthStencil && !addView(desc.DepthStencil->View)) return nullptr;
-    auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, *signature), desc.Name);
+    for (const auto& color : desc.Colors) addView(color.View);
+    if (desc.DepthStencil) addView(desc.DepthStencil->View);
+    auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, signature), desc.Name);
     if (!pass) return nullptr;
     auto framebuffer = _device->_renderPassCache->Acquire(key, pass->Native, views, desc.Name);
     if (!framebuffer) return nullptr;
@@ -3899,9 +3326,9 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
         const auto& value = desc.Colors[i].Clear;
         VkClearValue clear{};
         for (uint32_t c = 0; c < 4; ++c) {
-            if (IsUintFormat(signature->Colors[i]))
+            if (IsUintFormat(signature.Colors[i]))
                 clear.color.uint32[c] = static_cast<uint32_t>(value.Value[c]);
-            else if (IsSintFormat(signature->Colors[i]))
+            else if (IsSintFormat(signature.Colors[i]))
                 clear.color.int32[c] = static_cast<int32_t>(value.Value[c]);
             else
                 clear.color.float32[c] = value.Value[c];
@@ -3916,7 +3343,6 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     const auto area = desc.RenderArea.value_or(Rect{0, 0, desc.Width, desc.Height});
     auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
     encoder->_framebuffer = framebuffer.Get();
-    encoder->_attachmentSignature = *signature;
     const auto nativePass = pass->Native;
     const auto nativeFramebuffer = framebuffer->Native;
     if (std::none_of(_passPins.begin(), _passPins.end(), [&](const auto& pin) { return pin.Get() == pass.Get(); })) _passPins.push_back(std::move(pass));
@@ -3930,32 +3356,24 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     info.clearValueCount = static_cast<uint32_t>(clears.size());
     info.pClearValues = clears.data();
     _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
-    _activeEncoder = encoder.get();
     return encoder;
 }
 
-void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
-    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
-    _activeEncoder = nullptr;
+void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept {
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
-    _endedEncoders.emplace_back(std::move(encoder));
+    encoder.reset();
 }
 
 Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferVulkan::BeginComputePass() noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
     auto encoder = make_unique<SimulateComputeEncoderVulkan>(_device, this);
-    _activeEncoder = encoder.get();
     return encoder;
 }
 
-void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
-    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
-    _activeEncoder = nullptr;
-    _endedEncoders.emplace_back(std::move(encoder));
+void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept {
+    encoder.reset();
 }
 
 void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     VkBufferCopy copyInfo{};
@@ -3966,13 +3384,6 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
 }
 
 bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
-    if (!desc.Source || !desc.Destination) return false;
-    const auto [supported, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
-    if (!supported) {
-        RADRAY_ERR_LOG("{}", reason);
-        return false;
-    }
     auto src = CastVkObject(desc.Source);
     auto dst = CastVkObject(desc.Destination);
     const auto& r = desc.Region;
@@ -3988,38 +3399,12 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
 }
 
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     const uint32_t bpp = GetTextureFormatBytesPerPixel(dst->_format);
-    if (bpp == 0) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture invalid texture format {}", dst->_format);
-        return;
-    }
-    if (dstRange.MipLevelCount == SubresourceRange::All || dstRange.ArrayLayerCount == SubresourceRange::All) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture requires explicit SubresourceRange count");
-        return;
-    }
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
-    if (mipLevels == 0 || layerCount == 0) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
-        return;
-    }
-    if (dstRange.BaseMipLevel >= dst->_mipLevels ||
-        dstRange.BaseMipLevel + mipLevels > dst->_mipLevels) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture mip range out of bounds (base={}, count={}, total={})",
-                       dstRange.BaseMipLevel, mipLevels, dst->_mipLevels);
-        return;
-    }
     bool is3D = dst->_dim == TextureDimension::Dim3D;
-    uint32_t arraySize = is3D ? 1u : dst->_depthOrArraySize;
-    if (dstRange.BaseArrayLayer >= arraySize ||
-        dstRange.BaseArrayLayer + layerCount > arraySize) {
-        RADRAY_ERR_LOG("vk CopyBufferToTexture array range out of bounds (base={}, count={}, total={})",
-                       dstRange.BaseArrayLayer, layerCount, arraySize);
-        return;
-    }
     const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
     VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(dst->_rawFormat);
     uint64_t bufferOffset = srcOffset;
@@ -4030,11 +3415,6 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
         uint32_t mipDepth = is3D ? std::max(dst->_depthOrArraySize >> mipLevel, 1u) : 1u;
         uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
-        if (alignedBytesPerRow % bpp != 0) {
-            RADRAY_ERR_LOG(
-                "vk CopyBufferToTexture row pitch cannot be represented in texels (alignedBytesPerRow={}, bpp={})", alignedBytesPerRow, bpp);
-            return;
-        }
         uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / bpp);
         uint64_t bytesPerImage = alignedBytesPerRow * mipHeight;
         for (uint32_t layer = 0; layer < layerCount; layer++) {
@@ -4056,38 +3436,12 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
 }
 
 void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     const uint32_t bpp = GetTextureFormatBytesPerPixel(src->_format);
-    if (bpp == 0) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid texture format {}", src->_format);
-        return;
-    }
-    if (srcRange.MipLevelCount == SubresourceRange::All || srcRange.ArrayLayerCount == SubresourceRange::All) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer requires explicit SubresourceRange count");
-        return;
-    }
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
-    if (mipLevels == 0 || layerCount == 0) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer invalid SubresourceRange count (mipLevels={}, layerCount={})", mipLevels, layerCount);
-        return;
-    }
-    if (srcRange.BaseMipLevel >= src->_mipLevels ||
-        srcRange.BaseMipLevel + mipLevels > src->_mipLevels) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer mip range out of bounds (base={}, count={}, total={})",
-                       srcRange.BaseMipLevel, mipLevels, src->_mipLevels);
-        return;
-    }
     bool is3D = src->_dim == TextureDimension::Dim3D;
-    uint32_t arraySize = is3D ? 1u : src->_depthOrArraySize;
-    if (srcRange.BaseArrayLayer >= arraySize ||
-        srcRange.BaseArrayLayer + layerCount > arraySize) {
-        RADRAY_ERR_LOG("vk CopyTextureToBuffer array range out of bounds (base={}, count={}, total={})",
-                       srcRange.BaseArrayLayer, layerCount, arraySize);
-        return;
-    }
     const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
     VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(src->_rawFormat);
     uint64_t bufferOffset = dstOffset;
@@ -4098,11 +3452,6 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
         uint32_t mipDepth = is3D ? std::max(src->_depthOrArraySize >> mipLevel, 1u) : 1u;
         uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
-        if (alignedBytesPerRow % bpp != 0) {
-            RADRAY_ERR_LOG(
-                "vk CopyTextureToBuffer row pitch cannot be represented in texels (alignedBytesPerRow={}, bpp={})", alignedBytesPerRow, bpp);
-            return;
-        }
         uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / bpp);
         uint64_t bytesPerImage = alignedBytesPerRow * mipHeight;
         for (uint32_t layer = 0; layer < layerCount; layer++) {
@@ -4124,71 +3473,9 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
 }
 
 void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
-    if (desc.Source == nullptr || desc.Destination == nullptr) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture source or destination is null");
-        return;
-    }
     auto* src = CastVkObject(desc.Source);
     auto* dst = CastVkObject(desc.Destination);
-    if (!src->IsValid() || !dst->IsValid() ||
-        !src->_usage.HasFlag(TextureUse::CopySource) ||
-        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
-        src->_format != dst->_format ||
-        MapType(src->_dim) != MapType(dst->_dim) ||
-        src->_sampleCount != dst->_sampleCount || IsDepthStencilFormat(src->_format)) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture requires valid, matching non-depth textures with copy usage");
-        return;
-    }
-    if (desc.Width == 0 || desc.Height == 0 || desc.Depth == 0 || desc.ArrayLayerCount == 0 ||
-        desc.SourceMipLevel >= src->_mipLevels || desc.DestinationMipLevel >= dst->_mipLevels) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture invalid extent, layer count, or mip level");
-        return;
-    }
-
     const bool is3D = src->_dim == TextureDimension::Dim3D;
-    const bool is1D = src->_dim == TextureDimension::Dim1D || src->_dim == TextureDimension::Dim1DArray;
-    const uint32_t srcWidth = std::max(src->_width >> desc.SourceMipLevel, 1u);
-    const uint32_t srcHeight = is1D ? 1 : std::max(src->_height >> desc.SourceMipLevel, 1u);
-    const uint32_t srcDepth = is3D ? std::max(src->_depthOrArraySize >> desc.SourceMipLevel, 1u) : 1u;
-    const uint32_t dstWidth = std::max(dst->_width >> desc.DestinationMipLevel, 1u);
-    const uint32_t dstHeight = is1D ? 1 : std::max(dst->_height >> desc.DestinationMipLevel, 1u);
-    const uint32_t dstDepth = is3D ? std::max(dst->_depthOrArraySize >> desc.DestinationMipLevel, 1u) : 1u;
-    if (desc.SourceX > srcWidth || desc.Width > srcWidth - desc.SourceX ||
-        desc.SourceY > srcHeight || desc.Height > srcHeight - desc.SourceY ||
-        desc.SourceZ > srcDepth || desc.Depth > srcDepth - desc.SourceZ ||
-        desc.DestinationX > dstWidth || desc.Width > dstWidth - desc.DestinationX ||
-        desc.DestinationY > dstHeight || desc.Height > dstHeight - desc.DestinationY ||
-        desc.DestinationZ > dstDepth || desc.Depth > dstDepth - desc.DestinationZ) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture region is out of bounds");
-        return;
-    }
-
-    const uint32_t srcArraySize = is3D ? 1u : src->_depthOrArraySize;
-    const uint32_t dstArraySize = is3D ? 1u : dst->_depthOrArraySize;
-    if (is3D) {
-        if (desc.SourceArrayLayer != 0 || desc.DestinationArrayLayer != 0 || desc.ArrayLayerCount != 1) {
-            RADRAY_ERR_LOG("vk CopyTextureToTexture 3D textures require array layer zero and one layer");
-            return;
-        }
-    } else if (desc.SourceZ != 0 || desc.DestinationZ != 0 || desc.Depth != 1 ||
-               desc.SourceArrayLayer >= srcArraySize || desc.ArrayLayerCount > srcArraySize - desc.SourceArrayLayer ||
-               desc.DestinationArrayLayer >= dstArraySize || desc.ArrayLayerCount > dstArraySize - desc.DestinationArrayLayer) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture invalid array-layer or depth range");
-        return;
-    }
-    if (is1D && (desc.SourceY != 0 || desc.DestinationY != 0 || desc.Height != 1)) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture 1D textures require a one-texel Y extent");
-        return;
-    }
-    if (src->_sampleCount > 1 &&
-        (desc.SourceX != 0 || desc.SourceY != 0 || desc.SourceZ != 0 ||
-         desc.DestinationX != 0 || desc.DestinationY != 0 || desc.DestinationZ != 0 ||
-         desc.Width != srcWidth || desc.Height != srcHeight || desc.Depth != srcDepth ||
-         desc.Width != dstWidth || desc.Height != dstHeight || desc.Depth != dstDepth)) {
-        RADRAY_ERR_LOG("vk CopyTextureToTexture multisampled copies must cover whole subresources");
-        return;
-    }
 
     VkImageCopy region{};
     region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4219,42 +3506,10 @@ void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc
 }
 
 void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
-    if (desc.Source == nullptr || desc.Destination == nullptr) {
-        RADRAY_ERR_LOG("vk ResolveTexture source or destination is null");
-        return;
-    }
     auto* src = CastVkObject(desc.Source);
     auto* dst = CastVkObject(desc.Destination);
-    const bool sourceIs2D = src->_dim == TextureDimension::Dim2D ||
-                            src->_dim == TextureDimension::Dim2DArray ||
-                            src->_dim == TextureDimension::Cube ||
-                            src->_dim == TextureDimension::CubeArray;
-    const bool destinationIs2D = dst->_dim == TextureDimension::Dim2D ||
-                                 dst->_dim == TextureDimension::Dim2DArray ||
-                                 dst->_dim == TextureDimension::Cube ||
-                                 dst->_dim == TextureDimension::CubeArray;
-    if (!src->IsValid() || !dst->IsValid() ||
-        !src->_usage.HasFlag(TextureUse::CopySource) ||
-        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
-        !sourceIs2D || !destinationIs2D ||
-        src->_format != dst->_format || IsDepthStencilFormat(src->_format) ||
-        src->_sampleCount <= 1 || dst->_sampleCount != 1 ||
-        desc.SourceMipLevel >= src->_mipLevels || desc.DestinationMipLevel >= dst->_mipLevels ||
-        desc.ArrayLayerCount == 0) {
-        RADRAY_ERR_LOG("vk ResolveTexture requires matching 2D color textures with copy usage, multisampled source, and single-sampled destination");
-        return;
-    }
     const uint32_t srcWidth = std::max(src->_width >> desc.SourceMipLevel, 1u);
     const uint32_t srcHeight = std::max(src->_height >> desc.SourceMipLevel, 1u);
-    const uint32_t dstWidth = std::max(dst->_width >> desc.DestinationMipLevel, 1u);
-    const uint32_t dstHeight = std::max(dst->_height >> desc.DestinationMipLevel, 1u);
-    if (srcWidth != dstWidth || srcHeight != dstHeight ||
-        desc.SourceArrayLayer >= src->_depthOrArraySize || desc.ArrayLayerCount > src->_depthOrArraySize - desc.SourceArrayLayer ||
-        desc.DestinationArrayLayer >= dst->_depthOrArraySize || desc.ArrayLayerCount > dst->_depthOrArraySize - desc.DestinationArrayLayer) {
-        RADRAY_ERR_LOG("vk ResolveTexture subresource extents or array ranges do not match");
-        return;
-    }
 
     VkImageResolve region{};
     region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -4277,27 +3532,12 @@ void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) n
 }
 
 void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(pool_);
-    if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_count) {
-        RADRAY_ERR_LOG("vk ResetQueryPool invalid range (first={}, count={})", firstIndex, count);
-        return;
-    }
     _device->_ftb.vkCmdResetQueryPool(_cmdBuffer, pool->_pool, firstIndex, count);
 }
 
 void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(desc.Pool);
-    if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_count) {
-        RADRAY_ERR_LOG("vk WriteTimestamp invalid query index {}", desc.Index);
-        return;
-    }
-    if (pool->_type != QueryType::Timestamp) {
-        RADRAY_ERR_LOG("vk WriteTimestamp requires a timestamp query pool");
-        return;
-    }
-
     VkPipelineStageFlagBits stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     switch (desc.Stage) {
         case QueryPipelineStage::Top:
@@ -4317,29 +3557,8 @@ void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) n
 }
 
 void CommandBufferVulkan::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept {
-    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(desc.Pool);
     auto dst = CastVkObject(desc.Destination);
-    if (pool == nullptr || !pool->IsValid() || dst == nullptr || !dst->IsValid() ||
-        desc.Count == 0 || desc.FirstIndex + desc.Count > pool->_count) {
-        RADRAY_ERR_LOG("vk ResolveQueryData invalid descriptor");
-        return;
-    }
-    if (pool->_type != QueryType::Timestamp) {
-        RADRAY_ERR_LOG("vk ResolveQueryData requires a timestamp query pool");
-        return;
-    }
-    if ((desc.DestinationOffset % alignof(uint64_t)) != 0) {
-        RADRAY_ERR_LOG("vk ResolveQueryData destination offset must be 8-byte aligned");
-        return;
-    }
-    const BufferDescriptor dstDesc = dst->GetDesc();
-    const uint64_t requiredBytes = desc.DestinationOffset + sizeof(uint64_t) * static_cast<uint64_t>(desc.Count);
-    if (dstDesc.Size < requiredBytes) {
-        RADRAY_ERR_LOG("vk ResolveQueryData destination buffer is too small (required={}, size={})", requiredBytes, dstDesc.Size);
-        return;
-    }
-
     _device->_ftb.vkCmdCopyQueryPoolResults(
         _cmdBuffer,
         pool->_pool,
@@ -4400,45 +3619,13 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
 }
 
 void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
-    if (bindings.empty()) {
-        return;
-    }
-    uint32_t lowest = std::numeric_limits<uint32_t>::max();
-    uint32_t highest = 0;
-    for (size_t i = 0; i < bindings.size(); ++i) {
-        const VertexBufferBinding& binding = bindings[i];
-        if (binding.Binding >= _device->_properties.limits.maxVertexInputBindings) {
-            RADRAY_ERR_LOG(
-                "vk vertex buffer binding {} is out of range [0, {})",
-                binding.Binding,
-                _device->_properties.limits.maxVertexInputBindings);
-            return;
-        }
-        if (binding.View.Target == nullptr) {
-            RADRAY_ERR_LOG("vk vertex buffer binding {} has a null buffer", binding.Binding);
-            return;
-        }
-        for (size_t j = 0; j < i; ++j) {
-            if (bindings[j].Binding == binding.Binding) {
-                RADRAY_ERR_LOG("vk duplicate vertex buffer binding {}", binding.Binding);
-                return;
-            }
-        }
+    if (bindings.empty()) return;
+    uint32_t lowest = UINT32_MAX, highest = 0;
+    for (const auto& binding : bindings) {
         lowest = std::min(lowest, binding.Binding);
         highest = std::max(highest, binding.Binding);
     }
-    // vkCmdBindVertexBuffers 只接受连续的 firstBinding + bindingCount, 一次性下发要求
-    // 调用方给出的 binding 集合必须是连续区间。
     const uint32_t bindingCount = highest - lowest + 1;
-    if (bindingCount != bindings.size()) {
-        RADRAY_ERR_LOG(
-            "vk vertex buffer bindings must form a contiguous range, got {} bindings spanning [{}, {}]",
-            bindings.size(),
-            lowest,
-            highest);
-        return;
-    }
-
     constexpr uint32_t kInlineBindings = 16;
     std::array<VkBuffer, kInlineBindings> inlineBuffers{};
     std::array<VkDeviceSize, kInlineBindings> inlineOffsets{};
@@ -4468,16 +3655,11 @@ void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBuffe
 void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept {
     auto buffer = CastVkObject(ibv.Target);
     auto indexType = MapIndexType(ibv.Stride);
-    if (indexType == VK_INDEX_TYPE_MAX_ENUM) {
-        RADRAY_ERR_LOG("vk index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
-        return;
-    }
     _device->_ftb.vkCmdBindIndexBuffer(_cmdBuffer->_cmdBuffer, buffer->_buffer, ibv.Offset, indexType);
 }
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto p = CastVkObject(pso);
-    if (p->_attachmentSignature != _attachmentSignature) RADRAY_ABORT("pipeline attachment signature does not match render scope");
     if (_boundPso == p) {
         return;
     }
@@ -4494,18 +3676,7 @@ static bool BindShaderParameterSetVulkan(
     uint32_t groupIndex,
     ShaderParameterSet* parameterSet,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
-    auto* set = dynamic_cast<ShaderParameterSetVulkan*>(parameterSet);
-    if (destinationLayout == nullptr || !destinationLayout->IsValid() || set == nullptr || !set->IsValid() ||
-        destinationLayout->_device != device || set->_device != device) {
-        RADRAY_ERR_LOG("vk descriptor binding requires a live local layout and parameter set");
-        return false;
-    }
-    if (groupIndex >= destinationLayout->GetSetLayouts().size() ||
-        set->_groupIndex >= set->_layout->GetSetLayouts().size() ||
-        destinationLayout->GetSetLayouts()[groupIndex].Get() != set->_layout->GetSetLayouts()[set->_groupIndex].Get()) {
-        RADRAY_ERR_LOG("vk parameter set layout is incompatible with the target group");
-        return false;
-    }
+    auto* set = static_cast<ShaderParameterSetVulkan*>(parameterSet);
     const auto& destinationEntries = destinationLayout->_parameterSetLayouts[groupIndex];
     const auto& dynamicEntryOrder = destinationLayout->_dynamicEntryOrder[groupIndex];
 
@@ -4519,21 +3690,12 @@ static bool BindShaderParameterSetVulkan(
     }
     // 原生 offsets 必须按 layout 的 dynamic descriptor 顺序排列；调用方保证每项恰好提供一次。
     for (const auto& dynamicOffset : dynamicOffsets) {
-        const auto record = FindBackendBindingRecord(
-            destinationLayout->_bindingNames, destinationLayout->_bindingGeneration, dynamicOffset.Binding);
-        if (!record.HasValue() || record.Get()->Kind != BackendBindingRecordKind::Descriptor ||
-            record.Get()->Location.Group != groupIndex) {
-            RADRAY_ERR_LOG("vk dynamic offset cannot resolve its binding");
-            return false;
-        }
+        Nullable<const BackendBindingName*> record = &destinationLayout->_bindingNames[BindingHandleAccess::RecordIndex(dynamicOffset.Binding)];
         const auto slot = std::find_if(dynamicEntryOrder.begin(), dynamicEntryOrder.end(), [&](uint32_t entryIndex) noexcept {
             const auto& entry = destinationEntries[entryIndex];
             return entry.Binding == record.Get()->Location.Binding &&
                    shader::GetWireBindingNamespace(static_cast<uint32_t>(entry.LogicalKind)) == record.Get()->Namespace;
         });
-        if (slot == dynamicEntryOrder.end()) {
-            return false;
-        }
         packedDynamicOffsets[static_cast<size_t>(slot - dynamicEntryOrder.begin())] = dynamicOffset.Offset;
     }
     device->_ftb.vkCmdBindDescriptorSets(
@@ -4545,7 +3707,6 @@ static bool BindShaderParameterSetVulkan(
         &set->_allocation.Set,
         static_cast<uint32_t>(dynamicEntryOrder.size()),
         dynamicEntryOrder.empty() ? nullptr : packedDynamicOffsets);
-    set->SealBindings();
     return true;
 }
 
@@ -4569,51 +3730,8 @@ static bool SetPushConstantsVulkan(
     PipelineLayoutVulkan* boundLayout,
     BindingHandle binding,
     std::span<const byte> data) noexcept {
-    if (boundLayout == nullptr) {
-        RADRAY_ERR_LOG("vk push constants require a bound pipeline state");
-        return false;
-    }
-    if (!boundLayout->IsValid() || boundLayout->_device != device) {
-        RADRAY_ERR_LOG("vk push constant pipeline layout is invalid or belongs to another device");
-        return false;
-    }
-    if (!binding.IsValid()) {
-        RADRAY_ERR_LOG("vk push constant binding handle is invalid for the bound layout");
-        return false;
-    }
-    const auto record = FindBackendBindingRecord(
-        boundLayout->_bindingNames,
-        boundLayout->_bindingGeneration,
-        binding);
-    // Only a push record may be written here: a descriptor handle names a slot that goes through a
-    // parameter set instead, and a handle from another layout carries a foreign generation.
-    if (!record.HasValue() || record.Get()->Kind != BackendBindingRecordKind::Push) {
-        RADRAY_ERR_LOG("vk push constant binding handle is invalid for the bound layout");
-        return false;
-    }
-    const ShaderBindingLocation location = record.Get()->Location;
-    if (!boundLayout->_pushConstantRange.has_value() ||
-        !boundLayout->_pushConstantLocation.has_value() ||
-        boundLayout->_pushConstantLocation.value() != location) {
-        RADRAY_ERR_LOG(
-            "vk push constant range at space {} register {} is unavailable",
-            location.Group,
-            location.Binding);
-        return false;
-    }
-
-    const VkPushConstantRange& range =
-        boundLayout->_pushConstantRange.value();
-    if (data.size() != range.size) {
-        RADRAY_ERR_LOG(
-            "vk push constant size mismatch at space {} register {}: expected {}, actual {}",
-            location.Group,
-            location.Binding,
-            range.size,
-            data.size());
-        return false;
-    }
-
+    (void)binding;
+    const auto& range = *boundLayout->_pushConstantRange;
     device->_ftb.vkCmdPushConstants(
         commandBuffer->_cmdBuffer,
         boundLayout->GetNative(),
@@ -4643,31 +3761,8 @@ void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t ins
     _device->_ftb.vkCmdDrawIndexed(_cmdBuffer->_cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
-static Nullable<BufferVulkan*> _ValidateIndirectBufferVulkan(
-    Buffer* argumentBuffer,
-    uint64_t argumentOffset,
-    uint32_t commandCount,
-    uint32_t commandStride) noexcept {
-    if (argumentBuffer == nullptr || commandCount == 0 || argumentOffset % 4 != 0) {
-        RADRAY_ERR_LOG("vk indirect command has a null buffer, zero count, or unaligned offset");
-        return nullptr;
-    }
-    auto* buffer = CastVkObject(argumentBuffer);
-    const uint64_t requiredSize = static_cast<uint64_t>(commandCount) * commandStride;
-    if (!buffer->IsValid() || !buffer->_usage.HasFlag(BufferUse::Indirect) ||
-        argumentOffset > buffer->_reqSizeLogical || requiredSize > buffer->_reqSizeLogical - argumentOffset) {
-        RADRAY_ERR_LOG("vk indirect argument buffer is invalid, lacks BufferUse::Indirect, or is out of bounds");
-        return nullptr;
-    }
-    return buffer;
-}
-
 void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
-    auto buffer = _ValidateIndirectBufferVulkan(
-        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndirectArguments));
-    if (!buffer) {
-        return;
-    }
+    auto* buffer = CastVkObject(argumentBuffer);
     const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
@@ -4675,7 +3770,7 @@ void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t
         const uint32_t batchSize = std::min(drawCount - firstDraw, maxBatchSize);
         _device->_ftb.vkCmdDrawIndirect(
             _cmdBuffer->_cmdBuffer,
-            buffer.Get()->_buffer,
+            buffer->_buffer,
             argumentOffset + static_cast<uint64_t>(firstDraw) * sizeof(DrawIndirectArguments),
             batchSize,
             sizeof(DrawIndirectArguments));
@@ -4684,11 +3779,7 @@ void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t
 }
 
 void SimulateCommandEncoderVulkan::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
-    auto buffer = _ValidateIndirectBufferVulkan(
-        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndexedIndirectArguments));
-    if (!buffer) {
-        return;
-    }
+    auto* buffer = CastVkObject(argumentBuffer);
     const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
@@ -4696,7 +3787,7 @@ void SimulateCommandEncoderVulkan::DrawIndexedIndirect(Buffer* argumentBuffer, u
         const uint32_t batchSize = std::min(drawCount - firstDraw, maxBatchSize);
         _device->_ftb.vkCmdDrawIndexedIndirect(
             _cmdBuffer->_cmdBuffer,
-            buffer.Get()->_buffer,
+            buffer->_buffer,
             argumentOffset + static_cast<uint64_t>(firstDraw) * sizeof(DrawIndexedIndirectArguments),
             batchSize,
             sizeof(DrawIndexedIndirectArguments));
@@ -4773,14 +3864,10 @@ void SimulateComputeEncoderVulkan::Dispatch(uint32_t groupCountX, uint32_t group
 }
 
 void SimulateComputeEncoderVulkan::DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept {
-    auto buffer = _ValidateIndirectBufferVulkan(
-        argumentBuffer, argumentOffset, 1, sizeof(DispatchIndirectArguments));
-    if (!buffer) {
-        return;
-    }
+    auto* buffer = CastVkObject(argumentBuffer);
     _device->_ftb.vkCmdDispatchIndirect(
         _cmdBuffer->_cmdBuffer,
-        buffer.Get()->_buffer,
+        buffer->_buffer,
         argumentOffset);
 }
 
@@ -5057,7 +4144,6 @@ void SwapChainVulkan::RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> sy
 }
 
 void SwapChainVulkan::DestroyImpl() noexcept {
-    RADRAY_ASSERT(!_outstandingAcquire.IsValid());
     _outstandingAcquire.Reset();
     _recycledSyncObjects.clear();
     _frames.clear();
@@ -5073,13 +4159,6 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
     if (_swapchain == VK_NULL_HANDLE) {
         result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = VK_ERROR_OUT_OF_DATE_KHR;
-        return result;
-    }
-    RADRAY_ASSERT(!_outstandingAcquire.IsValid());
-    if (_outstandingAcquire.IsValid()) {
-        RADRAY_ERR_LOG("vkAcquireNextImageKHR called before Present");
-        result.Status = SwapChainStatus::Error;
-        result.NativeStatusCode = -1;
         return result;
     }
 
@@ -5160,16 +4239,6 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
 
 SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame&& frame) noexcept {
     SwapChainPresentResult result{};
-    RADRAY_ASSERT(frame.IsValid());
-    RADRAY_ASSERT(ValidateFrame(frame, this, _outstandingFrameToken));
-    RADRAY_ASSERT(_outstandingAcquire.IsValid());
-    if (!ValidateFrame(frame, this, _outstandingFrameToken) || !_outstandingAcquire.IsValid()) {
-        RADRAY_ERR_LOG("vkQueuePresentKHR skipped: invalid or foreign SwapChainFrame");
-        InvalidateFrame(frame);
-        result.Status = SwapChainStatus::Error;
-        result.NativeStatusCode = -1;
-        return result;
-    }
 
     auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent));
     const VkSemaphore waitSem = readyToPresentSync->_semaphore->_semaphore;
@@ -5205,10 +4274,6 @@ SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame&& fr
 }
 
 bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
-    if (_outstandingAcquire.IsValid()) {
-        RADRAY_ABORT("vkCreateSwapchainKHR skipped: outstanding SwapChainFrame must be presented first");
-    }
-
     SwapChainDescriptor desc = this->GetDesc();
     desc.BackBufferCount = _backBufferCount;
     desc.Width = width;
@@ -5353,12 +4418,7 @@ void BufferVulkan::DestroyImpl() noexcept {
 }
 
 void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
-    if (!_usage.HasFlag(BufferUse::MapRead) && !_usage.HasFlag(BufferUse::MapWrite)) {
-        RADRAY_ABORT("cannot map a Vulkan buffer without MapRead or MapWrite usage");
-    }
-    if (offset > _reqSizeLogical || size > _reqSizeLogical - offset) {
-        RADRAY_ABORT("Vulkan buffer map range is out of bounds");
-    }
+    (void)size;
     void* mappedData = nullptr;
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {
         if (_allocInfo.pMappedData == nullptr) {
@@ -5383,15 +4443,9 @@ void BufferVulkan::Unmap() noexcept {
 
 void BufferVulkan::FlushMappedRange(BufferRange range) noexcept {
     const uint64_t offset = range.Offset;
-    if (!_usage.HasFlag(BufferUse::MapWrite) || offset > _reqSizeLogical) {
-        RADRAY_ABORT("invalid Vulkan mapped flush range");
-    }
     const uint64_t size = range.Size == BufferRange::All()
                               ? _reqSizeLogical - offset
                               : range.Size;
-    if (size > _reqSizeLogical - offset) {
-        RADRAY_ABORT("invalid Vulkan mapped flush range");
-    }
     if (size == 0) {
         return;
     }
@@ -5405,15 +4459,9 @@ void BufferVulkan::FlushMappedRange(BufferRange range) noexcept {
 
 void BufferVulkan::InvalidateMappedRange(BufferRange range) noexcept {
     const uint64_t offset = range.Offset;
-    if (!_usage.HasFlag(BufferUse::MapRead) || offset > _reqSizeLogical) {
-        RADRAY_ABORT("invalid Vulkan mapped invalidate range");
-    }
     const uint64_t size = range.Size == BufferRange::All()
                               ? _reqSizeLogical - offset
                               : range.Size;
-    if (size > _reqSizeLogical - offset) {
-        RADRAY_ABORT("invalid Vulkan mapped invalidate range");
-    }
     if (size == 0) {
         return;
     }
@@ -5587,9 +4635,6 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noexcept {
-    if (_bindingGeneration == 0) {
-        return {};
-    }
     const auto binding = std::find_if(
         _bindingNames.begin(),
         _bindingNames.end(),
@@ -5599,7 +4644,7 @@ BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noe
     }
     return BindingHandleAccess::Make(
         static_cast<uint32_t>(std::distance(_bindingNames.begin(), binding)),
-        _bindingGeneration);
+        reinterpret_cast<uintptr_t>(this));
 }
 
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
@@ -5607,7 +4652,6 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _parameterSetLayouts.clear();
     _dynamicEntryOrder.clear();
     _bindingNames.clear();
-    _bindingGeneration = 0;
     _pushConstantRange.reset();
     _pushConstantLocation.reset();
     _device = nullptr;

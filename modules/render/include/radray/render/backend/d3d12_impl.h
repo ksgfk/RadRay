@@ -313,7 +313,7 @@ public:
     bool _validationEnabled{false};
 };
 
-class DeviceD3D12 final : public Device {
+class DeviceD3D12 final : public Device, public detail::D3D12PipelineLayoutFactory {
 public:
     DeviceD3D12(
         ComPtr<ID3D12Device> device,
@@ -360,7 +360,7 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::DxilShaderArtifactView& artifact, const D3D12TargetLayoutOptions& options = {}) noexcept;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& layout) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& layout) noexcept override;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -498,9 +498,7 @@ public:
     DeviceD3D12* _device;
     CmdQueueD3D12* _queue;
     vector<NativeStorage> _native;
-    vector<CmdListD3D12*> _children;
     string _name;
-    bool _valid{true};
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -531,11 +529,11 @@ public:
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
-    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept override;
 
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
 
-    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
+    void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
@@ -562,13 +560,8 @@ public:
 #endif
     CommandAllocatorD3D12* _allocator;
     size_t _nativeIndex{0};
-    bool _recording{false};
-    bool _used{false};
-    bool _executable{false};
-    Nullable<CommandEncoder*> _activeEncoder{nullptr};
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     D3D12_COMMAND_LIST_TYPE _type;
-    vector<unique_ptr<Buffer>> _keepAliveBuffers;
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
     // zones open only outside one, and pops issued while a render pass is recording are deferred to
@@ -619,7 +612,6 @@ public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
-    AttachmentSignature _attachmentSignature;
 };
 
 class CmdComputePassD3D12 final : public ComputeCommandEncoder {
@@ -687,7 +679,6 @@ public:
     const void* _nativeHandler{nullptr};
     PresentMode _mode{PresentMode::FIFO};
     uint64_t _outstandingFrameToken{0};
-    uint32_t _outstandingBackBufferIndex{std::numeric_limits<uint32_t>::max()};
     bool _requiresRecreateAfterDiscard{false};
     bool _frameLatencyReady{false};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
@@ -731,7 +722,6 @@ public:
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
     void* _mappedData{nullptr};
-    bool _mapped{false};
 };
 
 class QueryPoolD3D12 final : public QueryPool {
@@ -983,7 +973,6 @@ public:
     DeviceD3D12* _device{nullptr};
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
     vector<BackendBindingName> _bindingNames;
-    uintptr_t _bindingGeneration{0};
     vector<PushConstantBindingD3D12> _pushConstantBindings;
     IntrusivePtr<CachedPipelineLayoutD3D12> _nativeLayout;
 };
@@ -1000,6 +989,8 @@ public:
     bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept override;
 
     bool FlushWrites() noexcept override;
+
+    void ResetBindingsForReuse() noexcept override;
 
 public:
     DeviceD3D12* _device{nullptr};
@@ -1048,7 +1039,6 @@ public:
     ComPtr<ID3D12PipelineState> _pso;
     std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _vertexStrides{};
     D3D12_PRIMITIVE_TOPOLOGY _topo;
-    AttachmentSignature _attachmentSignature;
 };
 
 class ComputePsoD3D12 final : public ComputePipelineState {

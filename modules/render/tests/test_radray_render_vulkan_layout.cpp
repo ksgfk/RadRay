@@ -10,6 +10,7 @@
 #include <radray/shader/shader_artifact.h>
 
 #include "gpu_test_fixture.h"
+#include "rhi_validation.h"
 #include "shader_contract_fixtures.h"
 
 // M3 覆盖: Vulkan native chain 只从 ResolvedVulkanLayout 建立。这些测试要真设备,
@@ -146,6 +147,8 @@ struct VulkanDeviceFixture : ::testing::Test {
 
 TEST_F(VulkanDeviceFixture, DescriptorWritesRejectInvalidObjectsWithoutCachingValues) {
     if (!Available) GTEST_SKIP() << "Vulkan is unavailable";
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(checked.get());
     ResolvedVulkanLayout description;
     description.SetCount = 1;
     description.Bindings = {
@@ -153,13 +156,13 @@ TEST_F(VulkanDeviceFixture, DescriptorWritesRejectInvalidObjectsWithoutCachingVa
         MakeBinding("Typed", shader::ShaderBindingKind::TypedBuffer, 0, 1),
         MakeBinding("Texture", shader::ShaderBindingKind::Texture, 0, 2),
         MakeBinding("Sampler", shader::ShaderBindingKind::Sampler, 0, 3)};
-    auto layout = VkDevice->CreatePipelineLayout(description);
+    auto layout = factory->CreatePipelineLayout(description);
     ASSERT_TRUE(layout.HasValue());
-    EXPECT_FALSE(VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 1}).HasValue());
-    auto set = VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0});
+    EXPECT_FALSE(checked->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 1}).HasValue());
+    auto set = checked->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0});
     ASSERT_TRUE(set.HasValue());
-    auto buffer = VkDevice->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer | BufferUse::Resource});
-    auto sampler = VkDevice->CreateSampler({});
+    auto buffer = checked->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer | BufferUse::Resource});
+    auto sampler = checked->CreateSampler({});
     ASSERT_TRUE(buffer.HasValue());
     ASSERT_TRUE(sampler.HasValue());
     const auto bufferHandle = layout->FindBinding("Buffer");
@@ -192,9 +195,12 @@ TEST_F(VulkanDeviceFixture, DescriptorWritesRejectInvalidObjectsWithoutCachingVa
     EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
     EXPECT_FALSE(set->Set(samplerHandle, 0, sampler.Get()));
     layout->Destroy();
+    EXPECT_TRUE(layout->IsValid());
+    set->Destroy();
+    layout->Destroy();
     EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
     EXPECT_FALSE(set->FlushWrites());
-    EXPECT_FALSE(VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0}).HasValue());
+    EXPECT_FALSE(checked->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0}).HasValue());
     EXPECT_EQ(Context.ValidationErrors.load(), 0u);
 }
 
@@ -235,7 +241,7 @@ TEST_F(VulkanDeviceFixture, LogicalKindDecidesTheNativeDescriptorType) {
     const BindingHandle albedo = native->FindBinding("Albedo");
     ASSERT_TRUE(albedo.IsValid());
     const auto albedoRecord = FindBackendBindingRecord(
-        native->_bindingNames, native->_bindingGeneration, albedo);
+        native->_bindingNames, reinterpret_cast<uintptr_t>(native), albedo);
     ASSERT_TRUE(albedoRecord.HasValue());
     EXPECT_EQ(albedoRecord.Get()->Kind, BackendBindingRecordKind::Descriptor);
     EXPECT_EQ(albedoRecord.Get()->Location.Group, 0u);
@@ -243,13 +249,16 @@ TEST_F(VulkanDeviceFixture, LogicalKindDecidesTheNativeDescriptorType) {
     EXPECT_FALSE(native->FindBinding("NotDeclared").IsValid());
 }
 
-TEST_F(VulkanDeviceFixture, IllegalDynamicPlacementFailsNativeCreation) {
+TEST_F(VulkanDeviceFixture, ValidationRejectsIllegalDynamicPlacement) {
     if (!Available) {
         GTEST_SKIP() << "Vulkan is unavailable on this machine";
     }
     // A texture has no dynamic descriptor type. Reaching native creation with one means the wire or
     // the resolve produced something the backend cannot express, so it must fail rather than pick a
     // nearby descriptor type.
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(checked.get());
+    ASSERT_NE(factory, nullptr);
     ResolvedVulkanLayout layout{};
     layout.Bindings = {MakeBinding(
         "Albedo",
@@ -259,21 +268,21 @@ TEST_F(VulkanDeviceFixture, IllegalDynamicPlacementFailsNativeCreation) {
         VulkanBufferDescriptorPlacement::Dynamic)};
     layout.SetCount = 1;
     layout.DynamicOffsetOrder = {0};
-    EXPECT_FALSE(VkDevice->CreatePipelineLayout(layout).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(layout).HasValue());
 
     // The dynamic order has to name exactly the dynamic bindings: a short, long or mistargeted order
     // would shift every later offset onto the wrong buffer.
     ResolvedVulkanLayout missingOrder = MakeMixedLayout();
     missingOrder.DynamicOffsetOrder = {0};
-    EXPECT_FALSE(VkDevice->CreatePipelineLayout(missingOrder).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(missingOrder).HasValue());
 
     ResolvedVulkanLayout wrongOrder = MakeMixedLayout();
     wrongOrder.DynamicOffsetOrder = {0, 2};
-    EXPECT_FALSE(VkDevice->CreatePipelineLayout(wrongOrder).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(wrongOrder).HasValue());
 
     ResolvedVulkanLayout outOfRangeSet = MakeMixedLayout();
     outOfRangeSet.SetCount = 1;
-    EXPECT_FALSE(VkDevice->CreatePipelineLayout(outOfRangeSet).HasValue());
+    EXPECT_FALSE(factory->CreatePipelineLayout(outOfRangeSet).HasValue());
 }
 
 TEST_F(VulkanDeviceFixture, PolicySamplerBecomesAnImmutableSamplerWithEmptySetHoles) {
@@ -316,7 +325,11 @@ TEST_F(VulkanDeviceFixture, PolicySamplerBecomesAnImmutableSamplerWithEmptySetHo
     ASSERT_TRUE(samplerHandle.IsValid());
     auto ownSampler = Context.Device->CreateSampler(SamplerDescriptor{});
     ASSERT_TRUE(ownSampler.HasValue());
-    EXPECT_FALSE(parameterSet.Get()->Set(samplerHandle, 0, ownSampler.Get()));
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto checkedLayout = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(checked.get())->CreatePipelineLayout(*layout).Unwrap();
+    auto checkedSet = checked->CreateShaderParameterSet({checkedLayout.get(), 4}).Unwrap();
+    auto checkedSampler = checked->CreateSampler({}).Unwrap();
+    EXPECT_FALSE(checkedSet->Set(checkedLayout->FindBinding("ShadowSampler"), 0, checkedSampler.get()));
 
     // The texture in the same set is an ordinary sampled image and stays writable.
     const BindingHandle textureHandle = native->FindBinding("ShadowTexture");
@@ -455,16 +468,26 @@ TEST_F(VulkanDeviceFixture, RejectedSamplerDoesNotPopulateDeviceCache) {
     if (!Available) {
         GTEST_SKIP() << "Vulkan is unavailable on this machine";
     }
-    VulkanImmutableSamplerState state{};
-    state.MipLodBias = VkDevice->_properties.limits.maxSamplerLodBias + 1.0f;
-    EXPECT_FALSE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(checked.get());
+    ResolvedVulkanLayout desc{};
+    desc.SetCount = 1;
+    desc.Bindings = {MakeBinding("Sampler", shader::ShaderBindingKind::Sampler, 0, 0)};
+    desc.Bindings[0].ImmutableSamplerIndex = 0;
+    desc.ImmutableSamplers = {VulkanImmutableSamplerState{}};
+    desc.ImmutableSamplers[0].MipLodBias = VkDevice->_properties.limits.maxSamplerLodBias + 1.0f;
+    EXPECT_FALSE(factory->CreatePipelineLayout(desc));
     EXPECT_TRUE(VkDevice->_samplerCache.empty());
-    state.MipLodBias = std::numeric_limits<float>::quiet_NaN();
-    EXPECT_FALSE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    desc.ImmutableSamplers[0].MipLodBias = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(factory->CreatePipelineLayout(desc));
     EXPECT_TRUE(VkDevice->_samplerCache.empty());
-    state.MipLodBias = 0.0f;
-    EXPECT_TRUE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    desc.ImmutableSamplers[0].MipLodBias = 0.0f;
+    {
+        auto retry = factory->CreatePipelineLayout(desc);
+        EXPECT_TRUE(retry);
+    }
     EXPECT_EQ(VkDevice->_samplerCache.size(), 1u);
+    checked.reset();
     Context.Reset();
     EXPECT_EQ(Context.ValidationErrors.load(), 0u);
 }
@@ -518,14 +541,17 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     ASSERT_TRUE(artifact.has_value());
     const auto bytecode = artifact->Generic().FindStageBytecode(shader::ShaderStage::Compute);
     ASSERT_TRUE(bytecode.has_value());
-    Device* const device = Context.Device.get();
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto* const device = checked.get();
+    auto* const queue = device->GetCommandQueue(QueueType::Direct).Get();
+    auto* const factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(device);
 
-    auto layoutResult = VkDevice->CreatePipelineLayout(resolved.value());
+    auto layoutResult = factory->CreatePipelineLayout(resolved.value());
     ASSERT_TRUE(layoutResult.HasValue());
     unique_ptr<PipelineLayout> layout = layoutResult.Release();
     // A second layout over the same resolved input: its handles look identical but carry another
     // generation, which is what makes them unusable here.
-    auto otherResult = VkDevice->CreatePipelineLayout(resolved.value());
+    auto otherResult = factory->CreatePipelineLayout(resolved.value());
     ASSERT_TRUE(otherResult.HasValue());
     unique_ptr<PipelineLayout> otherLayout = otherResult.Release();
 
@@ -534,12 +560,6 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     ASSERT_TRUE(push.IsValid());
     ASSERT_TRUE(output.IsValid());
     EXPECT_NE(push, output);
-    const auto pushRecord = FindBackendBindingRecord(
-        CastVkObject(layout.get())->_bindingNames,
-        CastVkObject(layout.get())->_bindingGeneration,
-        push);
-    ASSERT_TRUE(pushRecord.HasValue());
-    EXPECT_EQ(pushRecord.Get()->Kind, BackendBindingRecordKind::Push);
     const BindingHandle foreignPush = otherLayout->FindBinding("TestConstants");
     ASSERT_TRUE(foreignPush.IsValid());
     const BindingHandle collidingDescriptor = layout->FindBinding("UnusedAtPushLocation");
@@ -584,10 +604,13 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     // A push handle names a push constant block, which owns no descriptor slot, so a parameter set
     // write through it has nowhere to land and must be refused instead of silently dropped.
     EXPECT_FALSE(parameterSet->Set(push, 0, outputValue));
+    EXPECT_FALSE(parameterSet->Set(otherLayout->FindBinding("Output"), 0, outputValue));
     ASSERT_TRUE(parameterSet->Set(output, 0, outputValue));
+    auto unusedBuffer = device->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer}).Unwrap();
+    ASSERT_TRUE(parameterSet->Set(collidingDescriptor, 0, ShaderBufferBinding{unusedBuffer.get(), {0, 256}, 0}));
     ASSERT_TRUE(parameterSet->FlushWrites());
 
-    auto commandResultStorage = device->CreateCommandAllocator(Context.Queue).Unwrap();
+    auto commandResultStorage = device->CreateCommandAllocator(queue).Unwrap();
 
     auto commandResult = device->CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
@@ -626,8 +649,8 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     command->CopyBufferToBuffer(readback.get(), 0, outputBuffer.get(), 0, sizeof(uint32_t));
     command->End();
     CommandBuffer* commands[]{command.get()};
-    Context.Queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commands});
-    Context.Queue->Wait();
+    queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commands});
+    queue->Wait();
 
     // The dispatch still runs with the push range declared and written, so the extra range did not
     // invalidate the layout the shader was compiled against.
@@ -659,7 +682,6 @@ TEST_F(VulkanDeviceFixture, NativeLayoutCacheSharesRenamedWrappersAndEvictsLastU
     auto buffer = VkDevice->CreateBuffer({.Size = 256, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
     ASSERT_TRUE(buffer);
     const ShaderBufferBinding value{.Target = buffer.Get(), .Range = {0, 256}};
-    EXPECT_FALSE(set.Get()->Set(first->FindBinding("First"), 0, value));
     EXPECT_TRUE(set.Get()->Set(second->FindBinding("Second"), 0, value));
     EXPECT_FALSE(second->FindBinding("First").IsValid());
     first->Destroy();
@@ -717,7 +739,8 @@ TEST_F(VulkanDeviceFixture, NativeLayoutCacheKeysNativeFactsAndSharesSetLayouts)
     const auto count = VkDevice->_pipelineLayoutCache->GetEntryCount();
     changed = desc;
     changed.DynamicOffsetOrder = {0};
-    EXPECT_FALSE(VkDevice->CreatePipelineLayout(changed));
+    auto checked = detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    EXPECT_FALSE(dynamic_cast<detail::VulkanPipelineLayoutFactory*>(checked.get())->CreatePipelineLayout(changed));
     EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), count);
 }
 
@@ -756,7 +779,7 @@ TEST_F(VulkanDeviceFixture, NativeLayoutCacheRollsBackNativeFailureAndCanRetry) 
 TEST_F(VulkanDeviceFixture, NativeLayoutCacheDoesNotShareAcrossDevices) {
     if (!Available) GTEST_SKIP() << "no vulkan device";
     const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
-    auto otherResult = Device::Create(DeviceDescriptor{VulkanDeviceDescriptor{.Queues = queues}});
+    auto otherResult = Device::Create(DeviceDescriptor{VulkanDeviceDescriptor{.Queues = queues}}, {.IsEnabled = false});
     ASSERT_TRUE(otherResult);
     auto other = otherResult.Release();
     auto* otherVk = static_cast<DeviceVulkan*>(other.get());

@@ -10,6 +10,22 @@
 
 namespace radray::render {
 
+namespace detail {
+
+class D3D12PipelineLayoutFactory {
+public:
+    virtual ~D3D12PipelineLayoutFactory() noexcept = default;
+    virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& layout) noexcept = 0;
+};
+
+class VulkanPipelineLayoutFactory {
+public:
+    virtual ~VulkanPipelineLayoutFactory() noexcept = default;
+    virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept = 0;
+};
+
+}  // namespace detail
+
 // 后端共用的少量 layout 辅助类型。两个后端都直接消费 `ResolvedD3D12Layout` /
 // `ResolvedVulkanLayout`，这里不再存在第二种 layout 描述。
 struct ShaderBindingLocation {
@@ -37,7 +53,7 @@ struct BackendBindingName {
 // Backend-internal view of a BindingHandle's token. The handle is opaque to callers: it pairs the
 // layout's address with an index into that layout's record table, so one handle names
 // exactly one declaration and neither the group nor the register class can be mistaken. The bit
-// layout is not ABI and only the two backends may take it apart.
+// layout is not ABI and only the backends and internal validation layer may take it apart.
 struct BindingHandleAccess {
     static BindingHandle Make(uint32_t recordIndex, uintptr_t generation) noexcept;
 

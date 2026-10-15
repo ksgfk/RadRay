@@ -19,33 +19,54 @@ TEST_P(CommandAllocatorTest, Copies2dTextureIntoCubeFaceAndReadsThatLayer) {
     const uint64_t bufferSize = rowPitch * 2;
     const size_t rowWords = static_cast<size_t>(rowPitch / sizeof(uint32_t));
     auto source = device.CreateTexture({TextureDimension::Dim2D, 2, 2, 1, 1, 1, TextureFormat::RGBA8_UNORM,
-        MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination});
+                                        MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination});
     auto cube = device.CreateTexture({TextureDimension::Cube, 2, 2, 6, 1, 1, TextureFormat::RGBA8_UNORM,
-        MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination | TextureUse::Resource});
+                                      MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination | TextureUse::Resource});
     auto upload = device.CreateBuffer({bufferSize, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite});
     auto readback = device.CreateBuffer({bufferSize, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
     auto storage = device.CreateCommandAllocator(Context.Queue);
-    ASSERT_TRUE(source); ASSERT_TRUE(cube); ASSERT_TRUE(upload); ASSERT_TRUE(readback); ASSERT_TRUE(storage);
-    auto command = device.CreateCommandBuffer(storage.Get()); auto fence = device.CreateFence(); ASSERT_TRUE(command); ASSERT_TRUE(fence);
-    auto* pixels = static_cast<uint32_t*>(upload->Map(0, bufferSize)); ASSERT_NE(pixels, nullptr);
-    pixels[0] = 0x80402010; pixels[1] = 0x12345678; pixels[rowWords] = 0xff010203; pixels[rowWords + 1] = 0xffffffff;
-    upload->FlushMappedRange({0, bufferSize}); upload->Unmap(); command->Begin();
+    ASSERT_TRUE(source);
+    ASSERT_TRUE(cube);
+    ASSERT_TRUE(upload);
+    ASSERT_TRUE(readback);
+    ASSERT_TRUE(storage);
+    auto command = device.CreateCommandBuffer(storage.Get());
+    auto fence = device.CreateFence();
+    ASSERT_TRUE(command);
+    ASSERT_TRUE(fence);
+    auto* pixels = static_cast<uint32_t*>(upload->Map(0, bufferSize));
+    ASSERT_NE(pixels, nullptr);
+    pixels[0] = 0x80402010;
+    pixels[1] = 0x12345678;
+    pixels[rowWords] = 0xff010203;
+    pixels[rowWords + 1] = 0xffffffff;
+    upload->FlushMappedRange({0, bufferSize});
+    upload->Unmap();
+    command->Begin();
     const ResourceBarrierDescriptor initial[]{BarrierTextureDescriptor{source.Get(), TextureState::Undefined, TextureState::CopyDestination},
-        BarrierTextureDescriptor{cube.Get(), TextureState::Undefined, TextureState::CopyDestination}};
+                                              BarrierTextureDescriptor{cube.Get(), TextureState::Undefined, TextureState::CopyDestination}};
     command->ResourceBarrier(initial);
     ASSERT_TRUE(command->CopyBufferToTextureRegion({upload.Get(), source.Get(), {.RowPitch = static_cast<uint32_t>(rowPitch), .Width = 2, .Height = 2}}));
     ResourceBarrierDescriptor barrier = BarrierTextureDescriptor{source.Get(), TextureState::CopyDestination, TextureState::CopySource};
     command->ResourceBarrier(std::span{&barrier, 1});
     command->CopyTextureToTexture({.Destination = cube.Get(), .DestinationArrayLayer = 5, .Source = source.Get(), .Width = 2, .Height = 2});
-    barrier = BarrierTextureDescriptor{cube.Get(), TextureState::CopyDestination, TextureState::CopySource}; command->ResourceBarrier(std::span{&barrier, 1});
-    command->CopyTextureToBuffer(readback.Get(), 0, cube.Get(), {5, 1, 0, 1}); command->End();
-    CommandBuffer* commands[]{command.Get()}; Fence* fences[]{fence.Get()}; uint64_t values[]{1};
+    barrier = BarrierTextureDescriptor{cube.Get(), TextureState::CopyDestination, TextureState::CopySource};
+    command->ResourceBarrier(std::span{&barrier, 1});
+    command->CopyTextureToBuffer(readback.Get(), 0, cube.Get(), {5, 1, 0, 1});
+    command->End();
+    CommandBuffer* commands[]{command.Get()};
+    Fence* fences[]{fence.Get()};
+    uint64_t values[]{1};
     Context.Queue->Submit({.CmdBuffers = commands, .SignalFences = fences, .SignalValues = values});
     ASSERT_TRUE(fence->WaitFor(1, 5000));
-    auto* observed = static_cast<const uint32_t*>(readback->Map(0, bufferSize)); ASSERT_NE(observed, nullptr);
+    auto* observed = static_cast<const uint32_t*>(readback->Map(0, bufferSize));
+    ASSERT_NE(observed, nullptr);
     readback->InvalidateMappedRange({0, bufferSize});
-    EXPECT_EQ(observed[0], 0x80402010u); EXPECT_EQ(observed[1], 0x12345678u);
-    EXPECT_EQ(observed[rowWords], 0xff010203u); EXPECT_EQ(observed[rowWords + 1], 0xffffffffu); readback->Unmap();
+    EXPECT_EQ(observed[0], 0x80402010u);
+    EXPECT_EQ(observed[1], 0x12345678u);
+    EXPECT_EQ(observed[rowWords], 0xff010203u);
+    EXPECT_EQ(observed[rowWords + 1], 0xffffffffu);
+    readback->Unmap();
 }
 
 TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterCompletion) {
@@ -92,7 +113,6 @@ TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterComp
             if (GetParam() == RenderBackend::D3D12) {
                 auto* native = static_cast<d3d12::CommandAllocatorD3D12*>(storage.get());
                 EXPECT_EQ(native->_native.size(), peak);
-                EXPECT_EQ(native->_children.size(), commands.size());
             }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
@@ -126,7 +146,7 @@ TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterComp
     EXPECT_FALSE(storage->IsValid());
 }
 
-TEST_P(CommandAllocatorTest, ReclaimsInactiveChildEncoderStateAtGroupedReset) {
+TEST_P(CommandAllocatorTest, ConsumesEncodersImmediatelyAndAllowsGroupedReset) {
     auto storage = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
     vector<unique_ptr<CommandBuffer>> commands;
     for (uint32_t i = 0; i < 64; ++i) {
@@ -134,41 +154,75 @@ TEST_P(CommandAllocatorTest, ReclaimsInactiveChildEncoderStateAtGroupedReset) {
         command->Begin();
         auto encoder = command->BeginComputePass().Unwrap();
         command->EndComputePass(std::move(encoder));
+        EXPECT_FALSE(encoder);
         command->End();
         commands.push_back(std::move(command));
     }
     // Unsubmitted recordings may be discarded as a group.
     storage->Reset();
-#if defined(RADRAY_ENABLE_VULKAN)
-    if (GetParam() == RenderBackend::Vulkan)
-        for (const auto& command : commands) EXPECT_TRUE(static_cast<vulkan::CommandBufferVulkan*>(command.get())->_endedEncoders.empty());
-#endif
+
     commands.front()->Begin();
     commands.front()->End();
 }
 
-class CommandAllocatorDeathTest : public CommandAllocatorTest {};
+class CommandAllocatorValidationTest : public CommandAllocatorTest {
+    void SetUp() override {
+        if (!TryCreateDevice(GetParam(), Context, true, true)) GTEST_SKIP() << Context.Reason;
+    }
+};
 
-TEST_P(CommandAllocatorDeathTest, RejectsInvalidRecordingAndOwnershipTransitions) {
+TEST_P(CommandAllocatorValidationTest, RejectsInvalidRecordingAndOwnershipTransitions) {
     auto storage = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
     auto command = Context.Device->CreateCommandBuffer(storage.get()).Unwrap();
     auto* raw = command.get();
-    EXPECT_DEATH(storage->Destroy(), "");
-    EXPECT_DEATH(command->End(), "");
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        storage->Destroy();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        command->End();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
     command->Begin();
-    EXPECT_DEATH(command->Begin(), "");
-    EXPECT_DEATH(storage->Reset(), "");
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        command->Begin();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        storage->Reset();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
     auto encoder = command->BeginComputePass().Unwrap();
-    EXPECT_DEATH(command->End(), "");
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        command->End();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
     command->EndComputePass(std::move(encoder));
     command->End();
-    EXPECT_DEATH(command->Begin(), "");
-    EXPECT_DEATH(command->End(), "");
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        command->Begin();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        command->End();
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
     storage->Reset();
-    EXPECT_DEATH(Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}}), "");
+    {
+        const auto errors = Context.RhiValidationErrors.load();
+        Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+        EXPECT_GT(Context.RhiValidationErrors.load(), errors);
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, CommandAllocatorTest, testing::Values(RenderBackend::D3D12, RenderBackend::Vulkan));
-INSTANTIATE_TEST_SUITE_P(Backends, CommandAllocatorDeathTest, testing::Values(RenderBackend::D3D12, RenderBackend::Vulkan));
+INSTANTIATE_TEST_SUITE_P(Backends, CommandAllocatorValidationTest, testing::Values(RenderBackend::D3D12, RenderBackend::Vulkan));
 }  // namespace
 }  // namespace radray::render::test

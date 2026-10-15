@@ -1,3 +1,4 @@
+#include "rhi_validation.h"
 #include "gpu_test_fixture.h"
 
 #include <radray/basic_math.h>
@@ -172,8 +173,11 @@ static_assert(!CanCreatePipelineLayout<d3d12::DeviceD3D12, SpirvShaderArtifactVi
 static_assert(!CanCreatePipelineLayout<vulkan::DeviceVulkan, DxilShaderArtifactView>);
 #endif
 
-void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
-    Device& device = *context.Device;
+void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend, bool validation) {
+    shared_ptr<Device> selected = context.Device;
+    if (validation) selected = detail::CreateValidationDevice(context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &context}).Unwrap();
+    Device& device = *selected;
+    auto* queue = device.GetCommandQueue(QueueType::Direct, 0).Unwrap();
     DynamicLibrary compilerLibrary{"dxcompiler"};
     ASSERT_TRUE(compilerLibrary.IsValid())
         << "RADRAY_BUILD_SHADER_COMPILER is enabled but dxcompiler is missing from the test output directory";
@@ -266,11 +270,7 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     ASSERT_TRUE(parameterSetResult.HasValue()) << "CreateShaderParameterSet failed";
     unique_ptr<ShaderParameterSet> parameterSet = parameterSetResult.Release();
     EXPECT_TRUE(parameterSet->Set(bindingHandle, 0, resourceView.Get()));
-    // The two layouts describe the same shader, so the handles look interchangeable, but each carries
-    // the generation of the layout that minted it. Using the foreign one is reported through the
-    // return value in every configuration: aborting in Debug would make the fail-closed path
-    // untestable in the only configuration these tests run in.
-    EXPECT_FALSE(parameterSet->Set(secondBindingHandle, 0, resourceView.Get()));
+    if (validation) EXPECT_FALSE(parameterSet->Set(secondBindingHandle, 0, resourceView.Get()));
 
     const VertexBufferLayout vertexBufferLayout{
         .Binding = 0,
@@ -300,47 +300,49 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
         .MultiSample = MultiSampleState::Default(),
         .ColorTargets = std::span{&colorTarget, 1}};
 
-    VertexAttribute missingSemantic = vertexAttribute;
-    missingSemantic.Semantic = {};
-    const VertexInputState missingSemanticInput{
-        .Buffers = std::span{&vertexBufferLayout, 1},
-        .Attributes = std::span{&missingSemantic, 1}};
-    GraphicsPipelineStateDescriptor invalidPsoDesc = psoDesc;
-    invalidPsoDesc.VertexInput = missingSemanticInput;
-    EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+    if (validation) {
+        VertexAttribute missingSemantic = vertexAttribute;
+        missingSemantic.Semantic = {};
+        const VertexInputState missingSemanticInput{
+            .Buffers = std::span{&vertexBufferLayout, 1},
+            .Attributes = std::span{&missingSemantic, 1}};
+        GraphicsPipelineStateDescriptor invalidPsoDesc = psoDesc;
+        invalidPsoDesc.VertexInput = missingSemanticInput;
+        EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
 
-    VertexAttribute missingSlot = vertexAttribute;
-    missingSlot.BufferBinding = 1;
-    const VertexInputState missingSlotInput{
-        .Buffers = std::span{&vertexBufferLayout, 1},
-        .Attributes = std::span{&missingSlot, 1}};
-    invalidPsoDesc.VertexInput = missingSlotInput;
-    EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+        VertexAttribute missingSlot = vertexAttribute;
+        missingSlot.BufferBinding = 1;
+        const VertexInputState missingSlotInput{
+            .Buffers = std::span{&vertexBufferLayout, 1},
+            .Attributes = std::span{&missingSlot, 1}};
+        invalidPsoDesc.VertexInput = missingSlotInput;
+        EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
 
-    VertexBufferLayout shortStride = vertexBufferLayout;
-    shortStride.ArrayStride = sizeof(float);
-    const VertexInputState shortStrideInput{
-        .Buffers = std::span{&shortStride, 1},
-        .Attributes = std::span{&vertexAttribute, 1}};
-    invalidPsoDesc.VertexInput = shortStrideInput;
-    EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+        VertexBufferLayout shortStride = vertexBufferLayout;
+        shortStride.ArrayStride = sizeof(float);
+        const VertexInputState shortStrideInput{
+            .Buffers = std::span{&shortStride, 1},
+            .Attributes = std::span{&vertexAttribute, 1}};
+        invalidPsoDesc.VertexInput = shortStrideInput;
+        EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
 
-    VertexAttribute unknownFormat = vertexAttribute;
-    unknownFormat.Format = VertexFormat::UNKNOWN;
-    const VertexInputState unknownFormatInput{
-        .Buffers = std::span{&vertexBufferLayout, 1},
-        .Attributes = std::span{&unknownFormat, 1}};
-    invalidPsoDesc.VertexInput = unknownFormatInput;
-    EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+        VertexAttribute unknownFormat = vertexAttribute;
+        unknownFormat.Format = VertexFormat::UNKNOWN;
+        const VertexInputState unknownFormatInput{
+            .Buffers = std::span{&vertexBufferLayout, 1},
+            .Attributes = std::span{&unknownFormat, 1}};
+        invalidPsoDesc.VertexInput = unknownFormatInput;
+        EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
 
-    std::array<VertexAttribute, 2> duplicateLocations{vertexAttribute, vertexAttribute};
-    duplicateLocations[1].Semantic = "NORMAL";
-    duplicateLocations[1].Offset = 0;
-    const VertexInputState duplicateLocationInput{
-        .Buffers = std::span{&vertexBufferLayout, 1},
-        .Attributes = duplicateLocations};
-    invalidPsoDesc.VertexInput = duplicateLocationInput;
-    EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+        std::array<VertexAttribute, 2> duplicateLocations{vertexAttribute, vertexAttribute};
+        duplicateLocations[1].Semantic = "NORMAL";
+        duplicateLocations[1].Offset = 0;
+        const VertexInputState duplicateLocationInput{
+            .Buffers = std::span{&vertexBufferLayout, 1},
+            .Attributes = duplicateLocations};
+        invalidPsoDesc.VertexInput = duplicateLocationInput;
+        EXPECT_FALSE(device.CreateGraphicsPipelineState(invalidPsoDesc).HasValue());
+    }
 
     auto psoResult = device.CreateGraphicsPipelineState(psoDesc);
     ASSERT_TRUE(psoResult.HasValue()) << "CreateGraphicsPipelineState failed";
@@ -370,7 +372,7 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     ASSERT_TRUE(readbackResult.HasValue()) << "Create readback buffer failed";
     unique_ptr<Buffer> readback = readbackResult.Release();
 
-    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+    auto commandResultStorage = device.CreateCommandAllocator(queue).Unwrap();
 
     auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue()) << "CreateCommandBuffer failed";
@@ -401,6 +403,7 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
         1.0f});
     encoder->SetScissor(Rect{0, 0, kWidth, kHeight});
     encoder->BindGraphicsPipelineState(pso.get());
+    encoder->BindShaderParameterSet(0, parameterSet.get(), {});
     const VertexBufferBinding vertexBinding{
         .Binding = 0,
         .View = VertexBufferView{
@@ -424,8 +427,8 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     command->End();
 
     CommandBuffer* commandBuffers[]{command.get()};
-    context.Queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commandBuffers});
-    context.Queue->Wait();
+    queue->Submit(CommandQueueSubmitDescriptor{.CmdBuffers = commandBuffers});
+    queue->Wait();
 
     void* mapped = readback->Map(0, readbackSize);
     ASSERT_NE(mapped, nullptr) << "Map readback failed";
@@ -449,7 +452,7 @@ TEST(RadRayRenderPsoSmoke, D3D12) {
     if (!test::TryCreateDevice(RenderBackend::D3D12, context)) {
         GTEST_SKIP() << "D3D12 is unavailable on this machine";
     }
-    RunPsoSmoke(context, RenderBackend::D3D12);
+    for (bool validation : {false, true}) RunPsoSmoke(context, RenderBackend::D3D12, validation);
 #else
     GTEST_SKIP() << "D3D12 is disabled";
 #endif
@@ -890,8 +893,6 @@ void CSMain() {
         ASSERT_TRUE(encoder.HasValue());
         encoder->BindComputePipelineState(pso.Get());
         encoder->BindShaderParameterSet(0, set.Get(), offsets);
-        // 不兼容 set 必须在原生调用前被拒绝，保留刚绑定的有效 descriptor set。
-        encoder->BindShaderParameterSet(0, incompatibleSet.Get(), offsets);
         encoder->Dispatch(1, 1, 1);
         command->EndComputePass(encoder.Release());
         const ResourceBarrierDescriptor toCopy = BarrierBufferDescriptor{output.Get(), BufferState::UnorderedAccess, BufferState::CopySource};
@@ -1291,7 +1292,7 @@ TEST(RadRayRenderPsoSmoke, Vulkan) {
     }
     // Destroy the temporary PSO representative pass; recording must acquire its own pin.
     static_cast<vulkan::DeviceVulkan*>(context.Device.get())->_renderPassCache->SetBudget({256, 1024, 0, 256});
-    RunPsoSmoke(context, RenderBackend::Vulkan);
+    for (bool validation : {false, true}) RunPsoSmoke(context, RenderBackend::Vulkan, validation);
 #else
     GTEST_SKIP() << "Vulkan is disabled";
 #endif

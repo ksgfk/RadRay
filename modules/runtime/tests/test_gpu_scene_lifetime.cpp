@@ -77,6 +77,7 @@ void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, b
     GpuSystemDescriptor descriptor{
         .VulkanInstance = {.IsEnableDebugLayer = !delayed, .IsEnableSynchronizationValidation = !delayed},
         .DXGIFactory = {.IsEnableDebugLayer = !delayed},
+        .RhiValidation = {.IsEnabled = false},
         .FlightDataCount = 2,
         .EnableFrameProfiler = false};
     if (backend == render::RenderBackend::Vulkan) {
@@ -276,7 +277,7 @@ task<AssetLoadResult> UploadNotification(FrameTimeline& timeline, bool fail) {
 void RunUploadCancellation(render::RenderBackend backend) {
     test::RuntimeLogCapture logs;
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
-    GpuSystemDescriptor descriptor{.FlightDataCount = 2, .EnableFrameProfiler = false};
+    GpuSystemDescriptor descriptor{.RhiValidation = {.IsEnabled = false}, .FlightDataCount = 2, .EnableFrameProfiler = false};
     if (backend == render::RenderBackend::Vulkan) {
         render::VulkanDeviceDescriptor vk;
         vk.Queues = std::span{&queue, 1};

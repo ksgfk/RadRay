@@ -68,6 +68,7 @@ inline bool SetupMustFail(DeviceSetupStatus status, bool required) noexcept {
 
 struct DeviceContext {
     std::atomic<uint32_t> ValidationErrors{0};
+    std::atomic<uint32_t> RhiValidationErrors{0};
     bool VulkanEnvInitialized{false};
     Nullable<void (*)() noexcept> ShutdownEnvironment{nullptr};
     unique_ptr<DXGIFactory> Factory;
@@ -115,11 +116,17 @@ inline void CaptureValidationMessage(LogLevel level, std::string_view message, v
     }
 }
 
+inline void CaptureRhiValidationMessage(LogLevel, std::string_view, void* userData) {
+    static_cast<DeviceContext*>(userData)->RhiValidationErrors.fetch_add(1, std::memory_order_relaxed);
+}
+
 inline bool TryCreateDevice(
     RenderBackend backend,
     DeviceContext& context,
-    bool enableValidation = false) {
+    bool enableValidation = false,
+    bool enableRhiValidation = false) {
     context.Reset();
+    context.RhiValidationErrors = 0;
     context.Status = DeviceSetupStatus::NotAttempted;
     context.ValidationEnabled = context.SynchronizationValidationEnabled = context.GpuValidationEnabled = false;
     context.Reason.clear();
@@ -159,7 +166,7 @@ inline bool TryCreateDevice(
         D3D12DeviceDescriptor deviceDesc{};
         deviceDesc.Factory = context.Factory.get();
         deviceDesc.AdapterIndex = selected;
-        auto device = Device::Create(DeviceDescriptor{deviceDesc});
+        auto device = Device::Create(DeviceDescriptor{deviceDesc}, {.IsEnabled = enableRhiValidation, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
         if (!device.HasValue()) {
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "D3D12 device creation failed for an available adapter");
         }
@@ -198,7 +205,7 @@ inline bool TryCreateDevice(
         VulkanDeviceDescriptor deviceDesc{};
         deviceDesc.PhysicalDeviceIndex = selected;
         deviceDesc.Queues = queues;
-        auto device = Device::Create(DeviceDescriptor{deviceDesc});
+        auto device = Device::Create(DeviceDescriptor{deviceDesc}, {.IsEnabled = enableRhiValidation, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
         if (!device.HasValue()) {
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "Vulkan device creation failed for an available adapter");
         }
