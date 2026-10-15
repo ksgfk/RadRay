@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明 schema 8 当前 RHI layout 契约、所有权与两个后端映射。上层使用方式见帧与 GPU 文档
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_render_pass_cache.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -719,7 +719,7 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 - **D3D12 的 swapchain 同步槽未接线**：`Submit` 忽略 `WaitToExecute` / `ReadyToPresent`。
 - **D3D12 纹理不带优化 clear value**：`CreateTexture` 里那段 `D3D12_CLEAR_VALUE` 逻辑被整段
   注释掉，`clearPtr` 恒为 `nullptr`。
-- **`FlushMappedRanges` / `FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**，
+- **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**，
   Vulkan 侧有完整实现。upload heap 无需 flush 可以解释，readback 的 invalidate 语义未覆盖。
 - **`CmdListD3D12::_keepAliveBuffers` 是死字段**，只被 clear 从未 push_back。
 - **非 Win32/非 Apple 平台没有 surface 创建**（`vulkan_impl.cpp` 有 TODO 标记），走 `#else`

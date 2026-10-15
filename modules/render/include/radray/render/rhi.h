@@ -900,11 +900,6 @@ struct BufferDescriptor {
     ResourceHints Hints{};
 };
 
-struct MappedBufferRange {
-    Buffer* Target{nullptr};
-    BufferRange Range{};
-};
-
 struct SamplerDescriptor {
     AddressMode AddressS{};
     AddressMode AddressT{};
@@ -1311,8 +1306,6 @@ public:
     virtual Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
-
-    virtual void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept = 0;
 
     virtual Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 

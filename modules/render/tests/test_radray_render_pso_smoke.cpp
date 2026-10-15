@@ -5,7 +5,7 @@
 #include <radray/dynamic_library.h>
 #include <radray/render/backend_shader_artifact.h>
 #ifdef RADRAY_ENABLE_VULKAN
-#include <radray/render/backend/vulkan_render_pass_cache.h>
+#include <radray/render/backend/vulkan_impl.h>
 #endif
 #include <radray/shader_compiler/client.h>
 #include <radray/utility.h>
@@ -995,7 +995,7 @@ void CSMain() {{
             std::memset(mapped, round ? 0xa5 : 0x5a, 256);
             std::memcpy(mapped, values.data(), 12);
             std::memcpy(mapped + secondRegister * 16, values.data() + 3, 12);
-            context.Device->FlushMappedRanges(std::array{MappedBufferRange{upload.Get(), {0, 256}}});
+            upload->FlushMappedRange({0, 256});
             upload->Unmap();
             auto set = context.Device->CreateShaderParameterSet({artifact->Layout.get(), 0});
             ASSERT_TRUE(set);

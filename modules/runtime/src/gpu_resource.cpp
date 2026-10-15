@@ -11,7 +11,46 @@
 #include <radray/profiler.h>
 #include <radray/runtime/vertex_data.h>
 
+#if defined(RADRAY_ENABLE_VULKAN)
+#include <radray/render/backend/vulkan_impl.h>
+#endif
+
 namespace radray {
+
+#if defined(RADRAY_ENABLE_VULKAN)
+namespace {
+
+bool FlushNativeVulkanHostWrites(render::Device& device, std::span<const MappedBufferRange> ranges) noexcept {
+    auto* nativeDevice = dynamic_cast<render::vulkan::DeviceVulkan*>(&device);
+    if (nativeDevice == nullptr) return false;
+
+    vector<VmaAllocation> allocations;
+    vector<VkDeviceSize> offsets;
+    vector<VkDeviceSize> sizes;
+    allocations.reserve(ranges.size());
+    offsets.reserve(ranges.size());
+    sizes.reserve(ranges.size());
+    for (const auto& range : ranges) {
+        auto* buffer = dynamic_cast<render::vulkan::BufferVulkan*>(range.Target);
+        if (buffer == nullptr || buffer->_device != nativeDevice) return false;
+        if (buffer->_hostCoherent) continue;
+        allocations.push_back(buffer->_allocation);
+        offsets.push_back(range.Range.Offset);
+        sizes.push_back(range.Range.Size);
+    }
+    if (allocations.size() > UINT32_MAX) return false;
+    if (!allocations.empty()) {
+        if (auto vr = vmaFlushAllocations(nativeDevice->_vma->_vma, static_cast<uint32_t>(allocations.size()),
+                                          allocations.data(), offsets.data(), sizes.data());
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vmaFlushAllocations failed: {}", vr);
+        }
+    }
+    return true;
+}
+
+}  // namespace
+#endif
 
 struct PersistentCBufferArena::Page {
     std::mutex Mutex;
@@ -249,7 +288,7 @@ void HostWriteBatch::Record(render::Buffer* target, render::BufferRange range) {
 
     const uint64_t rangeEnd = range.Offset + size;
     if (!_ranges.empty()) {
-        render::MappedBufferRange& last = _ranges.back();
+        MappedBufferRange& last = _ranges.back();
         if (last.Target == target) {
             const uint64_t lastEnd = last.Range.Offset + last.Range.Size;
             if (range.Offset <= lastEnd && last.Range.Offset <= rangeEnd) {
@@ -260,13 +299,23 @@ void HostWriteBatch::Record(render::Buffer* target, render::BufferRange range) {
             }
         }
     }
-    _ranges.push_back(render::MappedBufferRange{
+    _ranges.push_back(MappedBufferRange{
         .Target = target,
         .Range = render::BufferRange{.Offset = range.Offset, .Size = size}});
 }
 
 void HostWriteBatch::Flush(render::Device& device) noexcept {
-    device.FlushMappedRanges(_ranges);
+    if (device.GetBackend() == render::RenderBackend::Vulkan) {
+        bool flushed = false;
+#if defined(RADRAY_ENABLE_VULKAN)
+        flushed = FlushNativeVulkanHostWrites(device, _ranges);
+#endif
+        if (!flushed) {
+            for (const MappedBufferRange& range : _ranges) {
+                range.Target->FlushMappedRange(range.Range);
+            }
+        }
+    }
     _stats.FlushedRangeCount += _ranges.size();
     _ranges.clear();
 }

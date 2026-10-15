@@ -33,7 +33,6 @@ public:
     Nullable<unique_ptr<QueryPool>> CreateQueryPool(const QueryPoolDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor&) noexcept override { return nullptr; }
-    void FlushMappedRanges(std::span<const MappedBufferRange>) noexcept override {}
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor&) noexcept override { return nullptr; }
 

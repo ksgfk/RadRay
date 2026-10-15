@@ -1,6 +1,6 @@
 > - 适用: 2026-10-13–14 GPU 生命周期、Vulkan 1.2 与 per-flight Scene 计划实施验收
 > - 权威: 本次执行状态与测量快照，不作为长期契约；当前行为以 architecture/guide 为准
-> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_render_pass_cache.cpp`, `tools/run_gpu_lifecycle_benchmark.py`
+> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_impl.cpp`, `tools/run_gpu_lifecycle_benchmark.py`
 
 # GPU 生命周期计划实施与验收
 

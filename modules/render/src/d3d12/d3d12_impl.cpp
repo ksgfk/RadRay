@@ -1368,8 +1368,6 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     return result;
 }
 
-void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange>) noexcept {}
-
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {

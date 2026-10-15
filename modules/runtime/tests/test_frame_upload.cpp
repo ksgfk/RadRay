@@ -1,5 +1,7 @@
 #include "upload_test_support.h"
+#include "gpu_test_fixture.h"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 namespace radray {
@@ -13,6 +15,119 @@ protected:
     HostWriteBatch Writes;
     test::UploadTestCommand Command;
 };
+
+TEST_F(FrameUploadTest, HostWritesFlushCommittedRangesForVulkanAndDrainForBothBackends) {
+    for (const auto backend : {render::RenderBackend::D3D12, render::RenderBackend::Vulkan}) {
+        SCOPED_TRACE(static_cast<uint32_t>(backend));
+        Device.Backend = backend;
+        const render::BufferDescriptor desc{128, render::MemoryType::Upload, render::BufferUse::CopySource | render::BufferUse::MapWrite, render::ResourceHint::PersistentMap};
+        auto firstBuffer = Device.CreateBuffer(desc).Unwrap();
+        auto secondBuffer = Device.CreateBuffer(desc).Unwrap();
+        auto* firstProbe = static_cast<test::UploadTestBuffer*>(firstBuffer.get());
+        auto* secondProbe = static_cast<test::UploadTestBuffer*>(secondBuffer.get());
+        MappedUploadPage firstPage{std::move(firstBuffer)};
+        MappedUploadPage secondPage{std::move(secondBuffer)};
+        firstPage.ReserveAt(16, 32, Writes).Commit(16);
+        firstPage.ReserveAt(32, 32, Writes).Commit(16);
+        secondPage.ReserveAt(64, 32, Writes).Commit(8);
+        Writes.Seal();
+        Writes.Flush(Device);
+        EXPECT_TRUE(Writes.Empty());
+        const size_t expectedFlushes = backend == render::RenderBackend::Vulkan ? 1 : 0;
+        ASSERT_EQ(firstProbe->FlushedRanges.size(), expectedFlushes);
+        ASSERT_EQ(secondProbe->FlushedRanges.size(), expectedFlushes);
+        if (expectedFlushes) {
+            EXPECT_EQ(firstProbe->FlushedRanges[0].Offset, 16u);
+            EXPECT_EQ(firstProbe->FlushedRanges[0].Size, 32u);
+            EXPECT_EQ(secondProbe->FlushedRanges[0].Offset, 64u);
+            EXPECT_EQ(secondProbe->FlushedRanges[0].Size, 8u);
+        }
+        Writes.Flush(Device);
+        EXPECT_EQ(firstProbe->FlushedRanges.size(), expectedFlushes);
+        EXPECT_EQ(secondProbe->FlushedRanges.size(), expectedFlushes);
+        Writes.Reset();
+        firstPage.ReserveAt(96, 16, Writes).Commit(4);
+        Writes.Seal();
+        Writes.Flush(Device);
+        ASSERT_EQ(firstProbe->FlushedRanges.size(), expectedFlushes * 2);
+        EXPECT_EQ(secondProbe->FlushedRanges.size(), expectedFlushes);
+        if (expectedFlushes) {
+            EXPECT_EQ(firstProbe->FlushedRanges[1].Offset, 96u);
+            EXPECT_EQ(firstProbe->FlushedRanges[1].Size, 4u);
+        }
+        Writes.Reset();
+    }
+}
+
+TEST(FrameUploadGpuTest, VulkanHostWritesAcrossPagesReachTheGpuWithAndWithoutRhiValidation) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    for (bool validation : {false, true}) {
+        SCOPED_TRACE(validation);
+        render::test::DeviceContext context;
+        if (!render::test::TryCreateDevice(render::RenderBackend::Vulkan, context, true, validation)) {
+            GTEST_SKIP() << context.Reason;
+        }
+        HostWriteBatch writes;
+        array<unique_ptr<MappedUploadPage>, 2> pages;
+        for (auto& page : pages) {
+            auto buffer = context.Device->CreateBuffer({128, render::MemoryType::Upload,
+                                                        render::BufferUse::CopySource | render::BufferUse::MapWrite,
+                                                        render::ResourceHint::PersistentMap});
+            ASSERT_TRUE(buffer);
+            page = make_unique<MappedUploadPage>(buffer.Release());
+        }
+        struct Patch {
+            size_t Page;
+            uint64_t Offset, Size;
+            byte Value;
+        };
+        const array patches{Patch{0, 4, 12, byte{0x23}}, Patch{1, 20, 16, byte{0x91}}, Patch{0, 40, 8, byte{0x5b}}};
+        for (const auto& patch : patches) {
+            auto reservation = pages[patch.Page]->ReserveAt(patch.Offset, patch.Size + 4, writes);
+            ASSERT_TRUE(reservation.IsValid());
+            std::fill_n(static_cast<byte*>(reservation.Data()), patch.Size, patch.Value);
+            reservation.Commit(patch.Size);
+        }
+        writes.Seal();
+        writes.Flush(*context.Device);
+        EXPECT_TRUE(writes.Empty());
+        auto readback = context.Device->CreateBuffer({256, render::MemoryType::ReadBack,
+                                                      render::BufferUse::CopyDestination | render::BufferUse::MapRead})
+                            .Unwrap();
+        auto allocator = context.Device->CreateCommandAllocator(context.Queue).Unwrap();
+        auto command = context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
+        command->Begin();
+        for (const auto& page : pages) {
+            const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{
+                .Target = page->GetBuffer(), .Before = render::BufferState::HostWrite, .After = render::BufferState::CopySource};
+            command->ResourceBarrier(std::span{&barrier, 1});
+        }
+        for (const auto& patch : patches) {
+            command->CopyBufferToBuffer(readback.get(), patch.Page * 128 + patch.Offset,
+                                        pages[patch.Page]->GetBuffer(), patch.Offset, patch.Size);
+        }
+        const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{
+            .Target = readback.get(), .Before = render::BufferState::CopyDestination, .After = render::BufferState::HostRead};
+        command->ResourceBarrier(std::span{&barrier, 1});
+        command->End();
+        auto* submitted = command.get();
+        context.Queue->Submit({.CmdBuffers = std::span{&submitted, 1}});
+        context.Queue->Wait();
+        ScopedBufferMap mapped{readback.get(), {0, 256}};
+        ASSERT_TRUE(mapped);
+        const auto* bytes = static_cast<const byte*>(mapped.Data());
+        for (const auto& patch : patches) {
+            for (uint64_t i = 0; i < patch.Size; ++i) {
+                EXPECT_EQ(bytes[patch.Page * 128 + patch.Offset + i], patch.Value);
+            }
+        }
+        EXPECT_EQ(context.ValidationErrors.load(), 0u);
+        EXPECT_EQ(context.RhiValidationErrors.load(), 0u);
+    }
+#else
+    GTEST_SKIP() << "Vulkan is disabled";
+#endif
+}
 
 TEST_F(FrameUploadTest, AllocationFailureLeavesNoRecordedMeshCopies) {
     for (int failure = 1; failure <= 2; ++failure) {

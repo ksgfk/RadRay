@@ -1,6 +1,6 @@
 > - 适用: 2026-10-13 GPU 生命周期实施任务的输入计划；历史快照
 > - 权威: 仅保留原始计划及 7a807 基线，不替代 architecture/guide 当前契约；执行证据见 [验收记录](gpu-lifecycle-implementation-2026-10-13.md)
-> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_render_pass_cache.cpp`
+> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RadRay GPU 生命周期与架构收缩：完整实施计划
 

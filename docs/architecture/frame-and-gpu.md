@@ -316,6 +316,11 @@ PublishCompletion 的同一 CompletedSerial 账本负责完成与等待。WaitFr
 
 GpuFrameResources 每 flight 拥有一份 HostWriteBatch、单 epoch StagingBufferPool、借用它的 ResourceUploader、constants/storage 页与参数池。SealEpoch 要求所有 reservation 已 Commit，包括 Commit(0)；完成后先清参数旧借用，再归还 active staging。Uploader 不再内嵌 F 个 pending 容器。
 `MappedUploadPage` 持久映射，`Reservation` 是仅可移动的映射切片，提交时记录实际写入范围。
+`HostWriteBatch::Flush` 在 runtime 按设备后端处理收集的范围：实现文件条件引入 Vulkan 后端头，
+原生 Vulkan 设备和 buffer 直接收集非 coherent allocation，并通过一次 `vmaFlushAllocations`
+批量刷新，由 VMA 处理 atom 对齐；RHI 校验或自定义包装对象保留逐范围 `Buffer::FlushMappedRange`
+路径，不强转或绕过包装；D3D12 跳过刷新。
+范围记录及相邻合并属于 runtime，公共 RHI 不提供设备级批量刷新接口。
 
 ### 资产 GPU 上传待设计
 

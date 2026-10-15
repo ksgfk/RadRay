@@ -50,7 +50,6 @@ public:
     render::DeviceDetail GetDetail() const noexcept override { return _native->GetDetail(); }
     const render::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _native->GetCapabilities(); }
     Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override { return _native->CreateBuffer(desc); }
-    void FlushMappedRanges(std::span<const render::MappedBufferRange> ranges) noexcept override { _native->FlushMappedRanges(ranges); }
     Nullable<unique_ptr<render::ShaderParameterSet>> CreateShaderParameterSet(const render::ShaderParameterSetDescriptor& desc) noexcept override {
         auto native = _native->CreateShaderParameterSet(desc);
         if (!native) return nullptr;

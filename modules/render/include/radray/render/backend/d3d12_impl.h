@@ -350,8 +350,6 @@ public:
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
 
-    void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept override;
-
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;

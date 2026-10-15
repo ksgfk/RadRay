@@ -58,7 +58,6 @@ public:
         ++NativeCreates;
         return nullptr;
     }
-    void FlushMappedRanges(std::span<const render::MappedBufferRange>) noexcept override {}
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor&) noexcept override {
         ++NativeCreates;
         return nullptr;

@@ -63,7 +63,12 @@ struct UploadMemoryStats {
     uint64_t FlushedRangeCount{0};
 };
 
-/// 收集持久映射缓冲区的写入范围，以便统一批量刷新。
+struct MappedBufferRange {
+    render::Buffer* Target{nullptr};
+    render::BufferRange Range{};
+};
+
+/// 收集持久映射缓冲区的写入范围，在提交前按后端完成刷新。
 class HostWriteBatch {
 public:
     HostWriteBatch();
@@ -73,7 +78,7 @@ public:
 
     bool Empty() const noexcept { return _ranges.empty(); }
     bool IsSealed() const noexcept { return _sealed; }
-    std::span<const render::MappedBufferRange> GetRanges() const noexcept { return _ranges; }
+    std::span<const MappedBufferRange> GetRanges() const noexcept { return _ranges; }
     const UploadMemoryStats& GetStats() const noexcept { return _stats; }
 
     void Seal() noexcept;
@@ -83,7 +88,7 @@ public:
     void RecordPageAllocation(uint64_t capacity) noexcept;
 
 private:
-    vector<render::MappedBufferRange> _ranges;
+    vector<MappedBufferRange> _ranges;
     UploadMemoryStats _stats{};
     bool _sealed{false};
     uint32_t _reservations{0};

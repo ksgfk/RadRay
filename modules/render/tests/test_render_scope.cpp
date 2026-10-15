@@ -2,7 +2,7 @@
 #include <cstring>
 #include <radray/basic_math.h>
 #ifdef RADRAY_ENABLE_VULKAN
-#include <radray/render/backend/vulkan_render_pass_cache.h>
+#include <radray/render/backend/vulkan_impl.h>
 #endif
 
 namespace radray::render::test {

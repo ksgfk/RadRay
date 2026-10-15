@@ -1686,16 +1686,6 @@ public:
         if (!result) return nullptr;
         return make_unique<BufferValidation>(_context, result.Release());
     }
-    void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept override {
-        if (!Ready("FlushMappedRanges")) return;
-        vector<MappedBufferRange> converted;
-        for (const auto& range : ranges) {
-            const auto buffer = WrapperOf<BufferValidation>(*_context, range.Target, "FlushMappedRanges");
-            if (!buffer || !buffer.Get()->ValidateMapped(range.Range, true, "FlushMappedRanges")) return;
-            converted.push_back({buffer.Get()->Real(), range.Range});
-        }
-        _context->NativeDevice->FlushMappedRanges(converted);
-    }
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override {
         if (!Ready("CreateTexture")) return nullptr;
         const auto [valid, reason] = ValidateTextureDescriptor(desc, *this);

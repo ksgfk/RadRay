@@ -15,7 +15,7 @@ struct ValidationProbe {
     std::mutex LogMutex;
     vector<string> Errors;
     std::atomic<uint32_t> BufferCreates{0};
-    uint32_t Begins{0}, Ends{0}, Resets{0}, Copies{0}, Barriers{0}, Flushes{0};
+    uint32_t Begins{0}, Ends{0}, Resets{0}, Copies{0}, Barriers{0};
     uint32_t PassBegins{0}, VertexBinds{0}, PipelineBinds{0}, QueryResets{0}, Timestamps{0}, QueryResolves{0};
     uint32_t Sets{0}, Binds{0}, Pushes{0}, Dispatches{0}, EndPasses{0}, Submits{0}, Presents{0};
     uint32_t ParameterResets{0};
@@ -31,7 +31,6 @@ struct ValidationProbe {
     BindingHandle WrittenHandle{}, OffsetHandle{};
     std::optional<ShaderParameterValue> WrittenValue;
     vector<ResourceBarrierDescriptor> NativeBarriers;
-    vector<MappedBufferRange> NativeFlushes;
     vector<CommandBuffer*> NativeCommands;
     vector<Fence*> NativeFences;
     vector<SwapChainSyncObject*> NativeSyncs, NativePresentSyncs;
@@ -330,10 +329,6 @@ public:
         ++Probe.BufferCreates;
         return make_unique<ProbeBuffer>(this, desc);
     }
-    void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept override {
-        ++Probe.Flushes;
-        Probe.NativeFlushes.assign(ranges.begin(), ranges.end());
-    }
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override { return make_unique<ProbeTexture>(this, desc); }
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override { return make_unique<ProbeView>(desc); }
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override { return make_unique<ProbeShader>(desc.Stages); }
@@ -430,9 +425,6 @@ TEST_F(RhiValidationTest, BatchesPreflightEveryItemBeforeForwardingAndRejectCros
     const ResourceBarrierDescriptor barriers[]{BarrierBufferDescriptor{local.get(), BufferState::CopySource, BufferState::CopyDestination}, BarrierBufferDescriptor{foreign.get(), BufferState::CopySource, BufferState::CopyDestination}};
     command->ResourceBarrier(barriers);
     EXPECT_EQ(Probe.Barriers, 0u);
-    const MappedBufferRange ranges[]{{local.get(), {0, 256}}, {foreign.get(), {0, 256}}};
-    Device->FlushMappedRanges(ranges);
-    EXPECT_EQ(Probe.Flushes, 0u);
     command->CopyBufferToBuffer(local.get(), 0, foreign.get(), 0, 16);
     EXPECT_EQ(Probe.Copies, 0u);
     command->CopyBufferToBuffer(local.get(), 0, local.get(), 32, 16);
@@ -442,11 +434,8 @@ TEST_F(RhiValidationTest, BatchesPreflightEveryItemBeforeForwardingAndRejectCros
     command->ResourceBarrier(std::span{barriers, 1});
     EXPECT_EQ(Probe.Barriers, 1u);
     EXPECT_NE(std::get<BarrierBufferDescriptor>(Probe.NativeBarriers[0]).Target, local.get());
-    Device->FlushMappedRanges(std::span{ranges, 1});
-    EXPECT_EQ(Probe.Flushes, 1u);
-    EXPECT_NE(Probe.NativeFlushes[0].Target, local.get());
     command->End();
-    EXPECT_GE(Probe.Errors.size(), 3u);
+    EXPECT_GE(Probe.Errors.size(), 2u);
 }
 
 TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStateRetryable) {

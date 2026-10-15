@@ -8,7 +8,7 @@
 #include <radray/scope_guard.h>
 #include <radray/runtime/render_framework/scene_manager.h>
 #ifdef RADRAY_ENABLE_VULKAN
-#include <radray/render/backend/vulkan_render_pass_cache.h>
+#include <radray/render/backend/vulkan_impl.h>
 #endif
 
 namespace radray {

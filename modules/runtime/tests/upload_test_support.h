@@ -19,10 +19,12 @@ public:
     void SetDebugName(std::string_view) noexcept override {}
     void* Map(uint64_t offset, uint64_t) noexcept override { return _bytes.data() + offset; }
     void Unmap() noexcept override {}
-    void FlushMappedRange(render::BufferRange) noexcept override {}
+    void FlushMappedRange(render::BufferRange range) noexcept override { FlushedRanges.push_back(range); }
     void InvalidateMappedRange(render::BufferRange) noexcept override {}
     render::BufferDescriptor GetDesc() const noexcept override { return _desc; }
     render::Device* GetDevice() const noexcept override { return _device; }
+
+    vector<render::BufferRange> FlushedRanges;
 
 private:
     render::Device* _device;
@@ -60,6 +62,8 @@ private:
 };
 class UploadTestDevice final : public RuntimeTestDevice {
 public:
+    render::RenderBackend Backend{render::RenderBackend::D3D12};
+    render::RenderBackend GetBackend() noexcept override { return Backend; }
     int LiveDeviceBuffers{0}, DeviceAllocations{0}, FailDeviceAllocation{0};
     int UploadAllocations{0}, FailUploadAllocation{0};
     int LiveTextures{0}, LiveTextureViews{0};
