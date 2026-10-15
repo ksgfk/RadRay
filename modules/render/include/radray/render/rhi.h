@@ -1378,12 +1378,13 @@ public:
     /// Returns null on invalid recording state, invalid attachments or native acquisition failure, without recording a pass.
     virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
 
-    /// Only a successful end consumes encoder; validation rejection preserves ownership.
-    virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept = 0;
+    /// Takes ownership of encoder on entry and destroys it before returning; validation failure aborts.
+    virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
 
-    virtual void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept = 0;
+    /// Takes ownership of encoder on entry and destroys it before returning; validation failure aborts.
+    virtual void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
@@ -1508,13 +1509,14 @@ public:
 
     virtual SwapChainAcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
 
-    virtual SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept = 0;
+    /// Takes ownership on entry. Every returned status consumes the frame; validation failure aborts.
+    virtual SwapChainPresentResult Present(SwapChainFrame frame) noexcept = 0;
 
     // Explicit non-presenting termination. The caller must discard unsubmitted
-    // backbuffer commands and wait all submitted work before calling. Success
-    // consumes only this chain's outstanding token and requires recreate/close;
-    // Error leaves frame untouched (including unsupported backends).
-    virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept = 0;
+    // backbuffer commands and wait all submitted work before calling. Takes ownership
+    // on entry and consumes this chain's outstanding token, requiring recreate/close.
+    // Validation failure or an unsupported backend aborts; the frame cannot be retried.
+    virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept = 0;
 
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 

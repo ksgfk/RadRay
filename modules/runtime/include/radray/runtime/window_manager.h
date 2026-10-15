@@ -99,7 +99,7 @@ public:
 
     WindowHandle GetHandle() const noexcept { return {_manager, _id}; }
     render::SwapChainAcquireResult AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept;
-    render::SwapChainPresentResult PresentSwapChainFrame(render::SwapChainFrame&& frame) noexcept;
+    render::SwapChainPresentResult PresentSwapChainFrame(render::SwapChainFrame frame) noexcept;
     NativeWindow* GetNativeWindow() const noexcept;
     render::SwapChain* GetSwapChain() const noexcept;
     bool IsMainWindow() const noexcept;

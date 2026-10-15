@@ -20,7 +20,7 @@ struct ValidationProbe {
     uint32_t Sets{0}, Binds{0}, Pushes{0}, Dispatches{0}, EndPasses{0}, Submits{0}, Presents{0};
     uint32_t ParameterResets{0};
     uint32_t Recreates{0};
-    bool FailSet{false}, FailPass{false}, FailPresent{false}, ConsumePresentError{false};
+    bool FailSet{false}, FailPass{false}, FailPresent{false};
     bool FailRecreate{false};
     Nullable<CommandQueue*> AllocatorQueue{nullptr};
     Nullable<CommandAllocator*> CommandAllocator{nullptr};
@@ -200,12 +200,12 @@ public:
         if (Probe.FailPass) return nullptr;
         return make_unique<ProbeGraphicsEncoder>(Probe, this);
     }
-    void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept override {
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override {
         ++Probe.EndPasses;
         encoder.reset();
     }
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override { return make_unique<ProbeComputeEncoder>(Probe, this); }
-    void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept override {
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override {
         ++Probe.EndPasses;
         encoder.reset();
     }
@@ -276,12 +276,12 @@ public:
         if (!Live) return {.Status = SwapChainStatus::RequireRecreate};
         return {.Status = SwapChainStatus::Success, .Frame = MakeFrame(this, ++Token, &Image, 0, &AcquireSync, &PresentSync)};
     }
-    SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override {
+    SwapChainPresentResult Present(SwapChainFrame frame) noexcept override {
         ++Probe.Presents;
-        if (!Probe.FailPresent || Probe.ConsumePresentError) InvalidateFrame(frame);
+        InvalidateFrame(frame);
         return {.Status = Probe.FailPresent ? SwapChainStatus::Error : SwapChainStatus::Success};
     }
-    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept override { return Present(std::move(frame)); }
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept override { return Present(std::move(frame)); }
     bool Recreate(uint32_t width, uint32_t height, TextureFormat, PresentMode) noexcept override {
         ++Probe.Recreates;
         Live = !Probe.FailRecreate;
@@ -438,7 +438,7 @@ TEST_F(RhiValidationTest, BatchesPreflightEveryItemBeforeForwardingAndRejectCros
     EXPECT_GE(Probe.Errors.size(), 2u);
 }
 
-TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStateRetryable) {
+TEST_F(RhiValidationTest, InvalidRecordingLeavesStateRetryableAndSuccessfulEndConsumesEncoder) {
     auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
     auto secondAllocator = Device->CreateCommandAllocator(Queue).Unwrap();
     auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
@@ -452,9 +452,6 @@ TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStat
     EXPECT_EQ(Probe.Resets, 0u);
     auto encoder = first->BeginComputePass().Unwrap();
     second->Begin();
-    second->EndComputePass(std::move(encoder));
-    EXPECT_TRUE(encoder);
-    EXPECT_EQ(Probe.EndPasses, 0u);
     first->End();
     EXPECT_EQ(Probe.Ends, 0u);
     first->EndComputePass(std::move(encoder));
@@ -588,7 +585,7 @@ TEST_F(RhiValidationTest, HandleTranslationSealingFullPushSizeAndNativeFailureCo
     EXPECT_TRUE(set->Set(binding, 0, ShaderBufferBinding{buffer.get(), {0, 256}, 0}));
 }
 
-TEST_F(RhiValidationTest, SwapchainTokensTrackNativeConsumptionAndKeepBorrowedIdentity) {
+TEST_F(RhiValidationTest, SwapchainCallsConsumeTokensEvenOnPresentErrorAndKeepBorrowedIdentity) {
     auto chain = Device->CreateSwapChain({.PresentQueue = Queue, .NativeHandler = reinterpret_cast<void*>(1), .Width = 8, .Height = 8, .BackBufferCount = 2, .Format = TextureFormat::RGBA8_UNORM, .PresentMode = PresentMode::FIFO}).Unwrap();
     EXPECT_EQ(chain->GetDesc().PresentQueue, Queue);
     auto acquired = chain->AcquireNext();
@@ -608,27 +605,26 @@ TEST_F(RhiValidationTest, SwapchainTokensTrackNativeConsumptionAndKeepBorrowedId
     Queue->Submit({.WaitToExecute = invalidWaits});
     EXPECT_EQ(Probe.Submits, 1u);
     EXPECT_FALSE(chain->AcquireNext().Frame);
-    auto foreignChain = Device->CreateSwapChain(chain->GetDesc()).Unwrap();
-    EXPECT_EQ(foreignChain->Present(std::move(frame)).Status, SwapChainStatus::Error);
-    EXPECT_TRUE(frame.IsValid());
-    EXPECT_EQ(Probe.Presents, 0u);
     auto view = Device->CreateTextureView({image, TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
     EXPECT_EQ(view->GetDesc().Target, image);
     Probe.FailPresent = true;
     EXPECT_EQ(chain->Present(std::move(frame)).Status, SwapChainStatus::Error);
-    EXPECT_TRUE(frame.IsValid());
-    Probe.FailPresent = false;
-    EXPECT_EQ(chain->Present(std::move(frame)).Status, SwapChainStatus::Success);
     EXPECT_FALSE(frame.IsValid());
+    Probe.FailPresent = false;
     EXPECT_FALSE(chain->Recreate(16, 16, TextureFormat::RGBA8_UNORM, PresentMode::FIFO));
     view.reset();
     auto next = chain->AcquireNext();
     EXPECT_EQ(next.Frame->GetBackBuffer(), image);
     EXPECT_EQ(next.Frame->GetWaitToDraw(), sync);
-    Probe.FailPresent = Probe.ConsumePresentError = true;
+    Probe.FailPresent = true;
     EXPECT_EQ(chain->Present(std::move(*next.Frame)).Status, SwapChainStatus::Error);
     EXPECT_FALSE(next.Frame->IsValid());
     EXPECT_TRUE(chain->Recreate(16, 16, TextureFormat::RGBA8_UNORM, PresentMode::FIFO));
+    auto discarded = chain->AcquireNext();
+    ASSERT_TRUE(discarded.Frame);
+    Probe.FailPresent = false;
+    EXPECT_EQ(chain->DiscardAcquiredFrame(std::move(*discarded.Frame)).Status, SwapChainStatus::Success);
+    EXPECT_FALSE(discarded.Frame->IsValid());
 }
 
 TEST_F(RhiValidationTest, NativeSwapchainRecreateFailurePreservesTheRecoveryPath) {
@@ -801,6 +797,66 @@ TEST_F(RhiValidationTest, RegistrySupportsIndependentWorkers) {
 }
 
 using RhiValidationDeathTest = RhiValidationTest;
+TEST_F(RhiValidationDeathTest, SwapchainConsumptionRejectsForeignAndConsumedFramesByAborting) {
+    const SwapChainDescriptor desc{.PresentQueue = Queue, .NativeHandler = reinterpret_cast<void*>(1), .Width = 8, .Height = 8, .BackBufferCount = 2, .Format = TextureFormat::RGBA8_UNORM, .PresentMode = PresentMode::FIFO};
+    auto first = Device->CreateSwapChain(desc).Unwrap();
+    auto second = Device->CreateSwapChain(desc).Unwrap();
+    auto acquired = first->AcquireNext();
+    auto foreign = second->AcquireNext();
+    ASSERT_TRUE(acquired.Frame);
+    ASSERT_TRUE(foreign.Frame);
+    EXPECT_DEATH(second->Present(std::move(*acquired.Frame)), "");
+    EXPECT_DEATH(second->DiscardAcquiredFrame(std::move(*acquired.Frame)), "");
+    EXPECT_EQ(first->Present(std::move(*acquired.Frame)).Status, SwapChainStatus::Success);
+    EXPECT_DEATH(first->Present(std::move(*acquired.Frame)), "");
+    EXPECT_DEATH(first->DiscardAcquiredFrame(std::move(*acquired.Frame)), "");
+    EXPECT_EQ(second->DiscardAcquiredFrame(std::move(*foreign.Frame)).Status, SwapChainStatus::Success);
+    first->Destroy();
+    EXPECT_DEATH(first->Present(SwapChainFrame{}), "");
+    EXPECT_DEATH(first->DiscardAcquiredFrame(SwapChainFrame{}), "");
+}
+
+TEST_F(RhiValidationDeathTest, EndComputePassRejectsInvalidStateAndEncoderByAborting) {
+    auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto secondAllocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto second = Device->CreateCommandBuffer(secondAllocator.get()).Unwrap();
+    unique_ptr<ComputeCommandEncoder> empty;
+    EXPECT_DEATH(first->EndComputePass(std::move(empty)), "");
+    first->Begin();
+    EXPECT_DEATH(first->EndComputePass(std::move(empty)), "");
+    auto encoder = first->BeginComputePass().Unwrap();
+    second->Begin();
+    EXPECT_DEATH(second->EndComputePass(std::move(encoder)), "");
+    first->EndComputePass(std::move(encoder));
+    EXPECT_FALSE(encoder);
+    EXPECT_EQ(Probe.EndPasses, 1u);
+    first->End();
+    second->End();
+}
+
+TEST_F(RhiValidationDeathTest, EndRenderPassRejectsInvalidStateAndEncoderByAborting) {
+    auto texture = Device->CreateTexture({TextureDimension::Dim2D, 8, 8, 1, 1, 1, TextureFormat::RGBA8_UNORM, MemoryType::Device, TextureUse::RenderTarget}).Unwrap();
+    auto view = Device->CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
+    const array colors{RenderPassColorAttachment{view.get(), LoadAction::Clear, StoreAction::Store, {}}};
+    auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto secondAllocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto second = Device->CreateCommandBuffer(secondAllocator.get()).Unwrap();
+    unique_ptr<GraphicsCommandEncoder> empty;
+    EXPECT_DEATH(first->EndRenderPass(std::move(empty)), "");
+    first->Begin();
+    EXPECT_DEATH(first->EndRenderPass(std::move(empty)), "");
+    auto encoder = first->BeginRenderPass({.Colors = colors, .Width = 8, .Height = 8}).Unwrap();
+    second->Begin();
+    EXPECT_DEATH(second->EndRenderPass(std::move(encoder)), "");
+    first->EndRenderPass(std::move(encoder));
+    EXPECT_FALSE(encoder);
+    EXPECT_EQ(Probe.EndPasses, 1u);
+    first->End();
+    second->End();
+}
+
 TEST_F(RhiValidationDeathTest, IrrevocableDestructionAndInfallibleQueriesAbort) {
     auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
     auto command = Device->CreateCommandBuffer(allocator.get()).Unwrap();

@@ -45,14 +45,17 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 | 非法调用 | 行为 |
 |---|---|
 | 有失败结果的操作 | 记录日志并返回空值、false 或既有错误状态 |
-| 普通 void 操作 | 记录日志并跳过，校验状态不变 |
+| 普通 void 操作（不含 EndRenderPass / EndComputePass） | 记录日志并跳过，校验状态不变 |
+| EndRenderPass / EndComputePass | 记录日志并 ABORT |
+| Present / DiscardAcquiredFrame 的非法 frame 或失效对象 | 记录日志并 ABORT |
 | 没有可靠失败值的查询 | 记录日志并 ABORT |
 | 无法撤销的非法析构 | 记录日志并 ABORT |
 
 显式 `Destroy()` 可被拒绝并重试；析构无法保留对象，违反依赖顺序时立即终止。
 原生创建失败、Unsupported、超时和 RetryLater 沿用既有结果。`EndRenderPass` / `EndComputePass`
-通过 `unique_ptr<T>&&` 接收 encoder，拒绝时保留调用方所有权，成功后消费并清空。
-swapchain 包装保存真实 outstanding frame，只有后端实际消费后才清空外层 token；失败时可按原有状态重试。
+按值接收 `unique_ptr<T>` encoder，调用时转移所有权，正常返回前销毁 encoder；校验失败立即 ABORT，不提供恢复或重试路径。
+swapchain 包装保存真实 outstanding frame；Present / DiscardAcquiredFrame 按值接收 frame，调用时转移 token，
+校验失败立即 ABORT。正常返回后清理 outstanding 状态，所有返回状态均不允许重试同一个 frame。
 原生重建尝试可能在失败时也释放旧 images / sync；包装随之失效，但存活的 swapchain 仍可再次 Recreate，
 AcquireNext 继续透传原生 RequireRecreate 等状态。
 
@@ -639,14 +642,14 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 [构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
 
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
-校验包装用 `ValidateFrame` 检查 owner/token；`InvalidateFrame` 清空后端实际消费的帧。
+校验包装用 `ValidateFrame` 检查 owner/token；Present / DiscardAcquiredFrame 按值接收，移动后调用方 frame 失效。
+外来、已消费或失效的 frame 在开启校验时立即 ABORT；关闭校验时由调用方保证契约。
 
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
-D3D12 仅在 owner/token 匹配时消费 outstanding frame，返回既有 result 的 Success，之后必须
-Recreate 或关闭；`DiscardAcquiredFrame` 是纯虚接口，Vulkan 当前显式返回 Error 且保留原 frame，
-D3D12 的错误同样保留原 frame。析构不是 token 取消。
+D3D12 消费 outstanding frame，返回既有 result 的 Success，之后必须 Recreate 或关闭；
+`DiscardAcquiredFrame` 是纯虚接口，Vulkan 当前不支持该操作，调用立即 ABORT。析构不是 token 取消。
 D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
-不能把它统计成实际可见呈现；错误的外来 frame 保留给真正 owner 终结。
+不能把它统计成实际可见呈现。Vulkan Present 的 RequireRecreate / Error 同样消费帧，不保留重试 token。
 
 D3D12 记录已经取得但尚未通过实际 Present 使用的 frame-latency readiness。
 显式撤销、ResizeBuffers 或隐藏窗口跳过 Present 不会消费这个 readiness；下一次合法

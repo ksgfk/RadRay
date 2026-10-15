@@ -3705,7 +3705,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     return encoder;
 }
 
-void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept {
+void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
     _renderPassList->EndRenderPass();
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = false;
@@ -3723,7 +3723,7 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noe
     return encoder;
 }
 
-void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept {
+void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     encoder.reset();
 }
 
@@ -4301,7 +4301,7 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     }
 }
 
-SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept {
+SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
     SwapChainPresentResult result{};
     InvalidateFrame(frame);
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
@@ -4342,7 +4342,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     return result;
 }
 
-SwapChainPresentResult SwapChainD3D12::DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept {
+SwapChainPresentResult SwapChainD3D12::DiscardAcquiredFrame(SwapChainFrame frame) noexcept {
     InvalidateFrame(frame);
     _requiresRecreateAfterDiscard = true;
     return {.NativeStatusCode = 0, .Status = SwapChainStatus::Success};

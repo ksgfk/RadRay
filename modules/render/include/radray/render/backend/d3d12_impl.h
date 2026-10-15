@@ -522,11 +522,11 @@ public:
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
-    void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
 
-    void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept override;
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
 
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
@@ -647,9 +647,9 @@ public:
 
     SwapChainAcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
 
-    SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override;
+    SwapChainPresentResult Present(SwapChainFrame frame) noexcept override;
 
-    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept override;
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept override;
 
     bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept override;
 

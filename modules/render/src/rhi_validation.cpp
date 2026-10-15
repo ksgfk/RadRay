@@ -738,9 +738,9 @@ public:
     }
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
-    void EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept override;
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
     Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
-    void EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept override;
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
     void CopyBufferToTexture(Texture* dst, SubresourceRange range, Buffer* src, uint64_t offset) noexcept override;
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
@@ -1078,12 +1078,12 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferValidation::BeginRende
     return encoder;
 }
 
-void CommandBufferValidation::EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept {
-    if (!Recording("EndRenderPass", false)) return;
+void CommandBufferValidation::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
+    if (!Recording("EndRenderPass", false)) RADRAY_ABORT("RHI validation: EndRenderPass: command is not recording");
     const auto wrapper = WrapperOf<GraphicsEncoderValidation>(*Context, encoder.get(), "EndRenderPass");
-    if (!wrapper) return;
+    if (!wrapper) RADRAY_ABORT("RHI validation: EndRenderPass: invalid encoder");
     if (Active.Get() != wrapper.Get()) {
-        Context->Reject("EndRenderPass", "encoder belongs to another command or pass");
+        Context->Fatal("EndRenderPass", "encoder belongs to another command or pass");
         return;
     }
     auto native = wrapper.Get()->TakeNative();
@@ -1107,12 +1107,12 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferValidation::BeginComput
     return encoder;
 }
 
-void CommandBufferValidation::EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept {
-    if (!Recording("EndComputePass", false)) return;
+void CommandBufferValidation::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    if (!Recording("EndComputePass", false)) RADRAY_ABORT("RHI validation: EndComputePass: command is not recording");
     const auto wrapper = WrapperOf<ComputeEncoderValidation>(*Context, encoder.get(), "EndComputePass");
-    if (!wrapper) return;
+    if (!wrapper) RADRAY_ABORT("RHI validation: EndComputePass: invalid encoder");
     if (Active.Get() != wrapper.Get()) {
-        Context->Reject("EndComputePass", "encoder belongs to another command or pass");
+        Context->Fatal("EndComputePass", "encoder belongs to another command or pass");
         return;
     }
     auto native = wrapper.Get()->TakeNative();
@@ -1468,23 +1468,20 @@ public:
         result.Frame = MakeFrame(this, Token, found->second.get(), NativeFrame->GetBackBufferIndex(), WrapSync(NativeFrame->GetWaitToDraw()).Get(), WrapSync(NativeFrame->GetReadyToPresent()).Get());
         return result;
     }
-    SwapChainPresentResult Finish(SwapChainFrame&& frame, bool discard) noexcept {
+    SwapChainPresentResult Finish(SwapChainFrame frame, bool discard) noexcept {
         const auto operation = discard ? "DiscardAcquiredFrame" : "Present";
-        if (!Alive(operation)) return {};
+        if (!Alive(operation)) RADRAY_ABORT("RHI validation: {}: swapchain or device is destroyed", operation);
         if (!NativeFrame || !NativeFrame->IsValid() || !ValidateFrame(frame, this, Token)) {
-            Context->Reject(operation, "frame belongs to another swapchain or has already been consumed");
+            Context->Fatal(operation, "frame belongs to another swapchain or has already been consumed");
             return {};
         }
         const auto result = discard ? Real()->DiscardAcquiredFrame(std::move(*NativeFrame)) : Real()->Present(std::move(*NativeFrame));
-        if (!NativeFrame->IsValid()) {
-            InvalidateFrame(frame);
-            NativeFrame.reset();
-            Open = false;
-        }
+        NativeFrame.reset();
+        Open = false;
         return result;
     }
-    SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override { return Finish(std::move(frame), false); }
-    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept override { return Finish(std::move(frame), true); }
+    SwapChainPresentResult Present(SwapChainFrame frame) noexcept override { return Finish(std::move(frame), false); }
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept override { return Finish(std::move(frame), true); }
     bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode mode) noexcept override {
         if (!Alive("Recreate")) return false;
         if ((NativeFrame && NativeFrame->IsValid()) || !width || !height || !ValidEnum(format) || format == TextureFormat::UNKNOWN || IsDepthStencilFormat(format) || !ValidEnum(mode)) return Context->Reject("Recreate", "swapchain has an outstanding frame or invalid dimensions, format, or mode");

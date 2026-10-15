@@ -24,25 +24,20 @@ Nullable<unique_ptr<SwapChain>> CreateFixtureChain(DeviceContext& context, HWND 
 }  // namespace
 #endif
 
-TEST(RadRaySwapChainTermination, DiscardPreservesForeignTokenAndRequiresRecreate) {
+TEST(RadRaySwapChainTermination, DiscardConsumesTokenAndRequiresRecreate) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;
     if (!TryCreateDevice(RenderBackend::D3D12, context, true, true)) GTEST_SKIP() << context.Reason;
-    FixtureWindow first(*context.Queue), second(*context.Queue, 192);
-    ASSERT_NE(first.Handle, nullptr); ASSERT_NE(second.Handle, nullptr);
-    auto a = CreateFixtureChain(context, first.Handle), b = CreateFixtureChain(context, second.Handle);
-    ASSERT_TRUE(a); ASSERT_TRUE(b);
+    FixtureWindow first(*context.Queue);
+    ASSERT_NE(first.Handle, nullptr);
+    auto a = CreateFixtureChain(context, first.Handle);
+    ASSERT_TRUE(a);
     auto acquired = a.Get()->AcquireNext(1000);
     ASSERT_EQ(acquired.Status, SwapChainStatus::Success); ASSERT_TRUE(acquired.Frame);
     auto& frame = *acquired.Frame;
-    EXPECT_EQ(b.Get()->DiscardAcquiredFrame(std::move(frame)).Status, SwapChainStatus::Error);
-    EXPECT_TRUE(frame.IsValid());
-    EXPECT_EQ(b.Get()->Present(std::move(frame)).Status, SwapChainStatus::Error);
-    EXPECT_TRUE(frame.IsValid());
     context.Queue->Wait();
     EXPECT_EQ(a.Get()->DiscardAcquiredFrame(std::move(frame)).Status, SwapChainStatus::Success);
     EXPECT_FALSE(frame.IsValid());
-    EXPECT_EQ(a.Get()->DiscardAcquiredFrame(std::move(frame)).Status, SwapChainStatus::Error);
     EXPECT_EQ(a.Get()->AcquireNext(0).Status, SwapChainStatus::RequireRecreate);
     ASSERT_TRUE(a.Get()->Recreate(128, 128, TextureFormat::RGBA8_UNORM, PresentMode::FIFO));
     auto next = a.Get()->AcquireNext(1000);

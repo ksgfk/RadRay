@@ -3539,7 +3539,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     return encoder;
 }
 
-void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder>&& encoder) noexcept {
+void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
     encoder.reset();
 }
@@ -3549,7 +3549,7 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferVulkan::BeginComputePas
     return encoder;
 }
 
-void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder>&& encoder) noexcept {
+void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
     encoder.reset();
 }
 
@@ -4408,7 +4408,7 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
     return result;
 }
 
-SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame&& frame) noexcept {
+SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     SwapChainPresentResult result{};
 
     auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent));
@@ -4439,8 +4439,9 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame&& frame) noexcept
     return result;
 }
 
-SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept {
+SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame frame) noexcept {
     RADRAY_UNUSED(frame);
+    RADRAY_ABORT("Vulkan does not support DiscardAcquiredFrame");
     return {.NativeStatusCode = -1, .Status = SwapChainStatus::Error};
 }
 

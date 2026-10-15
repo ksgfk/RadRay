@@ -81,9 +81,9 @@ render::SwapChainAcquireResult AppWindow::AcquireNextSwapChainFrame(const AppRen
     return result;
 }
 
-render::SwapChainPresentResult AppWindow::PresentSwapChainFrame(render::SwapChainFrame&& frame) noexcept {
+render::SwapChainPresentResult AppWindow::PresentSwapChainFrame(render::SwapChainFrame frame) noexcept {
     if (!_swapchain) {
-        return render::SwapChainPresentResult{};
+        RADRAY_ABORT("PresentSwapChainFrame requires a swapchain");
     }
 
     render::SwapChainPresentResult result = _swapchain->Present(std::move(frame));
