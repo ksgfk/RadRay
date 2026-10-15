@@ -66,7 +66,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.5.2"
+            "Tag": "v3.5.3"
         },
         {
             "Name": "pugixml",
@@ -84,7 +84,7 @@
             "Name": "libpng",
             "Type": "git",
             "Git": "https://github.com/pnggroup/libpng.git",
-            "Tag": "v1.6.58"
+            "Tag": "v1.6.59"
         },
         {
             "Name": "libjpeg",
@@ -132,13 +132,13 @@
             "Name": "freetype",
             "Type": "git",
             "Git": "https://github.com/freetype/freetype.git",
-            "Tag": "VER-2-14-3"
+            "Tag": "VER-2-15-0"
         },
         {
             "Name": "imgui",
             "Type": "git",
             "Git": "https://github.com/ocornut/imgui.git",
-            "Tag": "v1.92.9b-docking"
+            "Tag": "v1.93.0-docking"
         },
         {
             "Name": "googletest",
@@ -150,7 +150,7 @@
             "Name": "googlebenchmark",
             "Type": "git",
             "Git": "https://github.com/google/benchmark.git",
-            "Tag": "v1.9.5"
+            "Tag": "v1.10.0"
         },
         {
             "Name": "tracy",
