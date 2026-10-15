@@ -184,7 +184,7 @@ static void WINAPI _D3D12ValidationMessageCallback(
     LPCSTR pDescription,
     void* pContext) noexcept {
     auto* device = static_cast<DeviceD3D12*>(pContext);
-    if (device == nullptr || !device->_isDebugLayerEnabled) {
+    if (!device->_isDebugLayerEnabled) {
         return;
     }
     _LogD3D12ValidationMessage(device, category, severity, id, pDescription);
@@ -204,8 +204,7 @@ static string _GetAdapterName(const DXGI_ADAPTER_DESC1& desc) {
 }
 
 static bool _IsD3D12Supported(IDXGIAdapter1* adapter) noexcept {
-    return adapter != nullptr &&
-           SUCCEEDED(::D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr));
+    return SUCCEEDED(::D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr));
 }
 
 static DXGI_FORMAT _SwapChainStorageFormat(TextureFormat format) noexcept {
@@ -227,8 +226,6 @@ static bool _IsPresentableHwnd(HWND hwnd) noexcept {
 }
 
 static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
-    RADRAY_ASSERT(swapChain != nullptr);
-
     DXGI_SWAP_CHAIN_DESC1 desc{};
     if (HRESULT hr = swapChain->_swapchain->GetDesc1(&desc); FAILED(hr)) {
         swapChain->_device->TryDrainValidationMessages();
@@ -327,7 +324,7 @@ static std::optional<uint32_t> _FindAdapterIndexByLuid(std::span<const AdapterIn
 }
 
 static std::optional<uint32_t> _SelectHighPerformanceAdapterIndex(IDXGIFactory4* factory, std::span<const AdapterInfoD3D12> adapters) noexcept {
-    if (factory == nullptr || adapters.empty()) {
+    if (adapters.empty()) {
         return std::nullopt;
     }
 
@@ -869,7 +866,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     TryDrainValidationMessages();
     if (_infoQueueCallbackCookie.has_value()) {
         ComPtr<ID3D12InfoQueue1> infoQueue1;
-        if (SUCCEEDED(_device.As(&infoQueue1)) && infoQueue1 != nullptr) {
+        if (SUCCEEDED(_device.As(&infoQueue1))) {
             infoQueue1->UnregisterMessageCallback(*_infoQueueCallbackCookie);
         }
     }
@@ -1910,7 +1907,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             serialized.data(),
             serialized.size(),
             IID_PPV_ARGS(deserializer.GetAddressOf()));
-        FAILED(hr) || deserializer == nullptr) {
+        FAILED(hr)) {
         RADRAY_ERR_LOG(
             "D3D12CreateVersionedRootSignatureDeserializer failed: {} {}",
             GetErrorName(hr),
@@ -3467,7 +3464,7 @@ void CmdListD3D12::Destroy() noexcept {
     if (!_cmdList) return;
 #ifdef RADRAY_ENABLE_PROFILER
     // Open zones would record end queries into a list that is being destroyed; drop them.
-    if (_profilerZones && !_profilerZones->Zones.empty()) {
+    if (!_profilerZones->Zones.empty()) {
         RADRAY_WARN_LOG("d3d12 command list destroyed with {} open profiler zones", _profilerZones->Zones.size());
         _profilerZones->Zones.clear();
     }
@@ -4260,7 +4257,7 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
         result.Status = SwapChainStatus::RequireRecreate;
         return result;
     }
-    if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
+    if (_frameLatencyEvent == nullptr) {
         return result;
     }
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
@@ -4309,11 +4306,6 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
 SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept {
     SwapChainPresentResult result{};
     InvalidateFrame(frame);
-    if (_swapchain == nullptr) {
-        result.NativeStatusCode = static_cast<int64_t>(E_POINTER);
-        result.Status = SwapChainStatus::Error;
-        return result;
-    }
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
     if (!_IsPresentableHwnd(hwnd)) {
         RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
@@ -4496,9 +4488,6 @@ uint32_t QueryPoolD3D12::GetCount() const noexcept {
 
 TimestampQueryCalibration QueryPoolD3D12::GetTimestampCalibration(CommandQueue* queue_) const noexcept {
     auto queue = CastD3D12Object(queue_);
-    if (queue == nullptr || queue->_queue == nullptr) {
-        return {};
-    }
     uint64_t frequency = 0;
     if (HRESULT hr = queue->_queue->GetTimestampFrequency(&frequency);
         FAILED(hr) || frequency == 0) {
@@ -4603,7 +4592,7 @@ void RootSigD3D12::Destroy() noexcept {
 }
 
 void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
-    if (IsValid()) SetObjectName(name, GetNative());
+    SetObjectName(name, GetNative());
 }
 
 Nullable<const ShaderParameterGroupLayoutD3D12*> RootSigD3D12::FindParameterGroup(

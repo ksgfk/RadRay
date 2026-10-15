@@ -81,6 +81,7 @@ public:
     vector<VulkanPhysicalDeviceInfo> GetPhysicalDevices() const noexcept override;
 
     std::optional<uint32_t> SelectHighPerformancePhysicalDevice() const noexcept override;
+
     bool IsValidationEnabled() const noexcept override;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
@@ -129,9 +130,7 @@ struct DescriptorSetLayoutCacheKeyVulkan {
 
     vector<BindingKey> Bindings;
 
-    friend bool operator==(
-        const DescriptorSetLayoutCacheKeyVulkan&,
-        const DescriptorSetLayoutCacheKeyVulkan&) noexcept = default;
+    friend bool operator==(const DescriptorSetLayoutCacheKeyVulkan&, const DescriptorSetLayoutCacheKeyVulkan&) noexcept = default;
 };
 
 }  // namespace radray::render::vulkan
@@ -140,8 +139,7 @@ namespace std {
 
 template <>
 struct hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan> {
-    size_t operator()(
-        const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept;
+    size_t operator()(const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept;
 };
 
 }  // namespace std
@@ -189,8 +187,7 @@ public:
 
     ~DescriptorSetLayoutCacheVulkan() noexcept;
 
-    IntrusivePtr<DescriptorSetLayoutVulkan> GetOrCreate(
-        std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
+    IntrusivePtr<DescriptorSetLayoutVulkan> GetOrCreate(std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
 
     void Destroy() noexcept;
 

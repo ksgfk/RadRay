@@ -27,7 +27,7 @@ size_t PipelineLayoutCacheD3D12::GetEntryCount() const noexcept {
 }
 
 IntrusivePtr<CachedPipelineLayoutD3D12> PipelineLayoutCacheD3D12::GetOrCreate(std::span<const byte> serialized) noexcept {
-    if (IsClosed() || _device->_device == nullptr || serialized.empty()) return nullptr;
+    if (IsClosed() || serialized.empty()) return nullptr;
     vector<byte> key(serialized.begin(), serialized.end());
     if (const auto it = _layouts.find(key); it != _layouts.end()) return RetainRef(it->second.get());
 

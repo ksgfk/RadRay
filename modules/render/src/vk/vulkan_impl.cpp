@@ -254,9 +254,7 @@ static bool _TryCreateVkInstance(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         exceptionCode = static_cast<uint32_t>(GetExceptionCode());
         result = VK_ERROR_UNKNOWN;
-        if (instance != nullptr) {
-            *instance = VK_NULL_HANDLE;
-        }
+        *instance = VK_NULL_HANDLE;
         return false;
     }
 #else
@@ -281,9 +279,7 @@ static bool _TryCreateVkDebugUtilsMessenger(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         exceptionCode = static_cast<uint32_t>(GetExceptionCode());
         result = VK_ERROR_UNKNOWN;
-        if (messenger != nullptr) {
-            *messenger = VK_NULL_HANDLE;
-        }
+        *messenger = VK_NULL_HANDLE;
         return false;
     }
 #else
@@ -421,9 +417,7 @@ static bool _TryCreateVkDevice(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         exceptionCode = static_cast<uint32_t>(GetExceptionCode());
         result = VK_ERROR_UNKNOWN;
-        if (device != nullptr) {
-            *device = VK_NULL_HANDLE;
-        }
+        *device = VK_NULL_HANDLE;
         return false;
     }
 #else
@@ -455,9 +449,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
         const auto msg = fmt::format(
             "type={} id={} {}: {}",
             VulkanDebugUtilsMessageTypeFlagsEXT{static_cast<std::underlying_type_t<VkDebugUtilsMessageTypeFlagBitsEXT>>(messageType)},
-            pCallbackData == nullptr ? 0 : pCallbackData->messageIdNumber,
-            (pCallbackData == nullptr || pCallbackData->pMessageIdName == nullptr) ? "" : pCallbackData->pMessageIdName,
-            (pCallbackData == nullptr || pCallbackData->pMessage == nullptr) ? "" : pCallbackData->pMessage);
+            pCallbackData->messageIdNumber,
+            pCallbackData->pMessageIdName == nullptr ? "" : pCallbackData->pMessageIdName,
+            pCallbackData->pMessage == nullptr ? "" : pCallbackData->pMessage);
         if (instance != nullptr && instance->_logCallback != nullptr) {
             instance->_logCallback(lvl, msg, instance->_logUserData);
         } else {
@@ -512,11 +506,6 @@ vector<VulkanPhysicalDeviceInfo> InstanceVulkanImpl::GetPhysicalDevices() const 
 }
 
 std::optional<uint32_t> InstanceVulkanImpl::SelectHighPerformancePhysicalDevice() const noexcept {
-    if (_instance == VK_NULL_HANDLE) {
-        RADRAY_ERR_LOG("vk env not init");
-        return std::nullopt;
-    }
-
     auto physicalDevices = _EnumeratePhysicalDeviceInfos(_instance, false);
     if (!physicalDevices.has_value()) {
         return std::nullopt;
@@ -529,8 +518,7 @@ std::optional<uint32_t> InstanceVulkanImpl::SelectHighPerformancePhysicalDevice(
 }
 
 bool InstanceVulkanImpl::IsValidationEnabled() const noexcept {
-    return _debugMessenger != VK_NULL_HANDLE &&
-           std::find(_layers.begin(), _layers.end(), "VK_LAYER_KHRONOS_validation") != _layers.end();
+    return _debugMessenger != VK_NULL_HANDLE && std::find(_layers.begin(), _layers.end(), "VK_LAYER_KHRONOS_validation") != _layers.end();
 }
 
 const VkAllocationCallbacks* InstanceVulkanImpl::GetAllocationCallbacks() const noexcept {
@@ -590,14 +578,10 @@ DescriptorSetLayoutVulkan::~DescriptorSetLayoutVulkan() noexcept {
 }
 
 void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
-    if (_device != nullptr &&
-        _device->_device != VK_NULL_HANDLE &&
-        _layout != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroyDescriptorSetLayout(
-            _device->_device,
-            _layout,
-            _device->GetAllocationCallbacks());
-    }
+    _device->_ftb.vkDestroyDescriptorSetLayout(
+        _device->_device,
+        _layout,
+        _device->GetAllocationCallbacks());
     _layout = VK_NULL_HANDLE;
     _device = nullptr;
 }
@@ -624,7 +608,7 @@ DescriptorSetLayoutCacheVulkan::~DescriptorSetLayoutCacheVulkan() noexcept {
 
 IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCreate(
     std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept {
-    if (_device == nullptr || _device->_device == VK_NULL_HANDLE) {
+    if (_device == nullptr) {
         return nullptr;
     }
 
@@ -687,9 +671,7 @@ IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCre
 void DescriptorSetLayoutCacheVulkan::Evict(DescriptorSetLayoutVulkan* layout) noexcept {
     const auto it = _layouts.find(*layout->_key);
     RADRAY_ASSERT(it != _layouts.end() && it->second.get() == layout);
-    if (it != _layouts.end()) {
-        _layouts.erase(it);
-    }
+    _layouts.erase(it);
 }
 
 void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
@@ -876,13 +858,11 @@ void DescriptorSetAllocatorVulkan::Destroy(Allocation allocation) noexcept {
 }
 
 void DescriptorSetAllocatorVulkan::Clear() noexcept {
-    if (_device != nullptr && _device->_device != VK_NULL_HANDLE) {
-        for (const unique_ptr<Page>& page : _pages) {
-            _device->_ftb.vkDestroyDescriptorPool(
-                _device->_device,
-                page->Pool,
-                _device->GetAllocationCallbacks());
-        }
+    for (const unique_ptr<Page>& page : _pages) {
+        _device->_ftb.vkDestroyDescriptorPool(
+            _device->_device,
+            page->Pool,
+            _device->GetAllocationCallbacks());
     }
     _pages.clear();
     _device = nullptr;
@@ -1719,7 +1699,7 @@ void ShaderParameterSetVulkan::Destroy() noexcept {
 
 void ShaderParameterSetVulkan::DestroyImpl() noexcept {
     _texelBufferViews.clear();
-    if (_device != nullptr && _allocation.IsValid()) {
+    if (_allocation.IsValid()) {
         _device->_descriptorSetAllocator.Destroy(_allocation);
     }
     _allocation = DescriptorSetAllocatorVulkan::Allocation::Invalid();
@@ -2747,10 +2727,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         for (const auto& j : i.queueIndices) {
             VkQueue queuePtr = VK_NULL_HANDLE;
             deviceR->_ftb.vkGetDeviceQueue(deviceR->_device, j.Family, j.IndexInFamily, &queuePtr);
-            if (queuePtr == VK_NULL_HANDLE) {
-                RADRAY_ERR_LOG("vkGetDeviceQueue failed: {} {}", j.Family, j.IndexInFamily);
-                return nullptr;
-            }
             auto queue = make_unique<QueueVulkan>(
                 deviceR.get(),
                 queuePtr,
@@ -3057,9 +3033,7 @@ void QueueVulkan::DestroyImpl() noexcept {
         _profilerContext = nullptr;
     }
 #endif
-    if (_queue != VK_NULL_HANDLE) {
-        _queue = VK_NULL_HANDLE;
-    }
+    _queue = VK_NULL_HANDLE;
 }
 
 CommandAllocatorVulkan::CommandAllocatorVulkan(
@@ -3150,15 +3124,13 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
     std::erase(_cmdPool->_children, this);
 #ifdef RADRAY_ENABLE_PROFILER
     // Open zones would record end timestamps into a buffer that is being freed; drop them.
-    if (_profilerZones && !_profilerZones->Zones.empty()) {
+    if (!_profilerZones->Zones.empty()) {
         RADRAY_WARN_LOG("vk command buffer destroyed with {} open profiler zones", _profilerZones->Zones.size());
         _profilerZones->Zones.clear();
     }
 #endif
-    if (_cmdBuffer != VK_NULL_HANDLE) {
-        _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
-        _cmdBuffer = VK_NULL_HANDLE;
-    }
+    _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
+    _cmdBuffer = VK_NULL_HANDLE;
     _framebufferPins.clear();
     _passPins.clear();
 }
@@ -4137,9 +4109,7 @@ Nullable<unique_ptr<SwapChainSyncObjectVulkan>> SwapChainVulkan::AcquireSyncObje
 }
 
 void SwapChainVulkan::RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> syncObject) noexcept {
-    if (syncObject != nullptr) {
-        _recycledSyncObjects.emplace_back(std::move(syncObject));
-    }
+    _recycledSyncObjects.emplace_back(std::move(syncObject));
 }
 
 void SwapChainVulkan::DestroyImpl() noexcept {
@@ -4188,13 +4158,6 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         &imageIndex);
     if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
         Frame& imageFrame = _frames[imageIndex];
-        if (imageFrame.readyToPresent == nullptr) {
-            RADRAY_ERR_LOG("vk acquire failed: missing per-image present semaphore");
-            this->RecycleSyncObject(std::move(waitToDraw));
-            result.Status = SwapChainStatus::Error;
-            result.NativeStatusCode = -1;
-            return result;
-        }
         if (imageFrame.acquireSyncObject != nullptr) {
             this->RecycleSyncObject(std::move(imageFrame.acquireSyncObject));
         }
@@ -4365,11 +4328,7 @@ uint32_t QueryPoolVulkan::GetCount() const noexcept {
     return _count;
 }
 
-TimestampQueryCalibration QueryPoolVulkan::GetTimestampCalibration(CommandQueue* queue_) const noexcept {
-    auto queue = CastVkObject(queue_);
-    if (queue == nullptr || queue->_device != _device) {
-        return {};
-    }
+TimestampQueryCalibration QueryPoolVulkan::GetTimestampCalibration(CommandQueue*) const noexcept {
     const double periodNs = static_cast<double>(_device->_properties.limits.timestampPeriod);
     if (periodNs <= 0.0) {
         return {};
@@ -4611,11 +4570,10 @@ PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
 }
 
 VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept {
-    return _nativeLayout ? _nativeLayout->Layout : VK_NULL_HANDLE;
+    return _nativeLayout->Layout;
 }
 
 std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> PipelineLayoutVulkan::GetSetLayouts() const noexcept {
-    if (!_nativeLayout) return {};
     return _nativeLayout->SetLayouts;
 }
 
@@ -4628,9 +4586,7 @@ void PipelineLayoutVulkan::Destroy() noexcept {
 }
 
 void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
-    if (IsValid()) {
-        _device->SetObjectName(name, GetNative());
-    }
+    _device->SetObjectName(name, GetNative());
 }
 
 BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noexcept {

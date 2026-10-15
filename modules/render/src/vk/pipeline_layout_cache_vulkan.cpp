@@ -41,11 +41,10 @@ size_t PipelineLayoutCacheVulkan::GetEntryCount() const noexcept {
 IntrusivePtr<CachedPipelineLayoutVulkan> PipelineLayoutCacheVulkan::GetOrCreate(
     std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> setLayouts,
     std::span<const VkPushConstantRange> pushRanges, VkPipelineLayoutCreateFlags flags) noexcept {
-    if (IsClosed() || _device->_device == VK_NULL_HANDLE) return nullptr;
+    if (IsClosed()) return nullptr;
     PipelineLayoutKeyVulkan key;
     key.Flags = flags;
     for (const auto& setLayout : setLayouts) {
-        if (!setLayout) return nullptr;
         key.SetLayouts.push_back(setLayout.Get());
     }
     for (const auto& range : pushRanges) key.PushRanges.push_back({range.stageFlags, range.offset, range.size});

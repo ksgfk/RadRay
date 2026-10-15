@@ -35,6 +35,9 @@ artifact 桥调用内部 target-typed 纯虚 layout 工厂，仍使用现有 res
 能力探测、artifact 解码 / carrier 解析、原生创建失败和不可恢复执行错误处理仍在对应实现中。
 依赖具体后端类型的工具或测试须显式关闭包装，公共 RHI 调用方不强转后端类型。
 
+D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句柄，非空性由校验层预检或关闭校验时的调用方契约保证。
+创建前的 DXGI factory / Vulkan 环境检查、幂等销毁、可选接口 / 句柄、缓存关闭状态与原生失败结果处理仍然保留。
+
 校验层检查 device 归属与有效性、范围与对齐、usage、录制与 allocator epoch、encoder 配对、
 附件 / PSO 兼容、binding 类型和 handle、完整 dynamic offsets，以及 CPU 上可检测的父子销毁顺序。
 批量调用全部预检通过才向后端转发；状态在成功后提交，不自动修正录制顺序或补发同步。
