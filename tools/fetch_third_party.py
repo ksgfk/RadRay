@@ -19,7 +19,7 @@ from dependency_fetcher import (
 
 
 COMMANDS = {
-    "restore": "Restore third_party/ to match the manifest and lockfile.",
+    "restore": "Restore third_party/ to match the manifest and lockfile; use --apply to refresh mutable refs.",
     "list": "Show whether installed dependencies match the manifest.",
     "upgrade": "Show available upgrades; use --apply to update and install.",
     "lock": "Regenerate project_manifest.lock.json.",
@@ -95,7 +95,8 @@ def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="With upgrade, actually update manifest/lockfile and install the selected package(s).",
+        help="With restore/install, refresh mutable refs and existing lockfile entries. "
+        "With upgrade, update manifest/lockfile and install the selected package(s).",
     )
     parser.add_argument(
         "--force",
@@ -118,7 +119,7 @@ def main() -> int:
             repo_root=repo_root,
             target_root=args.third_party_dir,
             only=split_names(args.only),
-            update=args.update,
+            update=args.update or (args.apply and args.command in {"restore", "install"}),
             force=args.force,
             lockfile=args.lockfile,
             use_lock=not args.no_lock,

@@ -557,7 +557,19 @@ class GitDependencyFetcher:
     def fetch_manifest(self, manifest: dict[str, Any]) -> None:
         require_git()
         for source in manifest_git_sources(manifest, self.only):
-            self.fetch_one(self.source_for_install(source))
+            install_source = self.source_for_install(source)
+            updated_entry = None
+            if self.update and self.is_mutable_ref(source) and self.lock_data:
+                note(f"{source['Name']}: refreshing locked {ref_label(source)}")
+                updated_entry = self.lock_entry_for_source(source)
+                install_source["Commit"] = updated_entry["commit"]
+
+            self.fetch_one(install_source)
+            if updated_entry is not None and updated_entry != self.lock_entries[str(source["Name"])]:
+                self.lock_entries[str(source["Name"])] = updated_entry
+                self.lock_data["third_parties"] = list(self.lock_entries.values())
+                self.lock_data["generated_at_utc"] = utc_now()
+                self.write_updated_lockfile(self.lock_data)
 
     def lock_manifest(self, manifest: dict[str, Any]) -> None:
         require_git()
@@ -1178,7 +1190,8 @@ class GitDependencyFetcher:
             else:
                 git(target, "checkout", value, capture=False)
         elif existing and self.update:
-            git(target, "pull", "--ff-only", capture=False)
+            git(target, "fetch", "origin", "HEAD", capture=False)
+            git(target, "checkout", "--detach", "FETCH_HEAD", capture=False)
 
     def apply_patch_if_needed(self, target: Path, source: dict[str, Any]) -> None:
         patch_value = source.get("Patch")
