@@ -647,6 +647,7 @@ public:
         : ValidatedObject(std::move(context), std::move(native)), Queue(queue) { AddDependency(Context->Find(queue).Get()); }
     CommandQueue* Queue;
     vector<CommandBufferValidation*> Children;
+    Nullable<CommandBufferValidation*> RecordingCommand{nullptr};
     void Reset() noexcept override;
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
@@ -699,7 +700,13 @@ public:
             Context->Reject("Begin", "command must be new or reset by its allocator");
             return;
         }
+        const bool d3d12 = Context->NativeDevice->GetBackend() == RenderBackend::D3D12;
+        if (d3d12 && Allocator->RecordingCommand) {
+            Context->Reject("Begin", "D3D12 allocator already has an open recording");
+            return;
+        }
         Real()->Begin();
+        if (d3d12) Allocator->RecordingCommand = this;
         State = RecordingState::Recording;
         Open = true;
     }
@@ -710,6 +717,7 @@ public:
             return;
         }
         Real()->End();
+        if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) Allocator->RecordingCommand = nullptr;
         State = RecordingState::Executable;
         Open = false;
     }

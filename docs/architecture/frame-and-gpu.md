@@ -134,19 +134,24 @@ channel 不拥有回调或资产引用，没有观察者注册、注销与跨线
 
 ### 命令分配与有序批次
 
-`GpuFlightSlot::CommandAllocator` 实现窄接口 `IGpuCmdAllocator`，拥有当前 flight/main queue 的一个 RHI
-CommandAllocator 以及独占 command wrappers。`Allocate()` Begin 一个本 epoch 尚未使用的 wrapper；
+`GpuFlightSlot::CommandAllocator` 实现窄接口 `IGpuCmdAllocator`，拥有当前 flight/main queue 的 RHI
+CommandAllocator 分组池；每组持有一个 allocator、独占 command wrappers、本轮分配 cursor 与打开录制数量。
+初始化创建一组；按 `GetBackend()`，D3D12 选择第一个没有打开录制的组，全部占用时新增一组；Vulkan 始终使用第一组。
+`Allocate()` 从选中组 Begin 一个本 epoch 尚未使用的 wrapper，不足时创建；wrapper 固定绑定所属组的 allocator。
 `Return(span)` 只 End 并关闭借用，不登记、不提交、不重用 wrapper，也不决定执行顺序。
 `RegisterClosedCommandBuffers(desc, target)` 登记已归还命令，复制数组，批次按登记顺序、项内按数组顺序执行。
-同一个 command 必须归还并登记一次；封口拒绝未处理命令。结果数组可以与 Allocate、Return 的顺序不同。
+同一个执行用 command 必须归还并登记一次；未接受的 Recording/Closed command 可 Discard，之后本 epoch 不再借出。
+Return 或 Discard 仅在结束仍打开的录制时释放组占用。批量操作先跨组检查全部命令，再修改状态；封口拒绝未处理命令。
+结果数组可以与 Allocate、Return 的顺序不同。
 
 旧 `AppFrameContext::AllocateCommandBuffer/ReturnCommandBuffers` 保留；后者是 Return + Register 的适配入口。
-内部 profiler 与 late-drop cleanup 通过同一 allocator 的私有续录入口追加命令；公开录制封口后不能再调用。
-所有提交及内部续录仍由原 final flight fence 覆盖。观察到真实完成后，CompleteFlight 统一 Reset storage、
+内部 profiler 与 late-drop cleanup 通过同一分组池的私有续录入口追加命令；公开录制封口后不能再调用。
+所有提交及内部续录仍由原 final flight fence 覆盖。观察到真实完成后，CompleteFlight 逐组 Reset 本轮用过的 storage、清零 cursor，
 清理全部 child 临时状态，清除参数旧借用并重置参数/常量 cursor，然后发布 completion。
 GT 消费完成并释放 owner 后才允许下一次 BeginFrameRecord；Begin 不再二次 Reset，Allocate/Return/Submit 也不 Reset。
 终止清理会先释放借用 program layout 的 GpuFrameResources，再拆 RenderSystem caches。
-Reset 不新增 GPU 等待；native 容量按高水位保留。D3D12 按同时 open 数增长，Vulkan 每 flight 一个 pool。
+Reset 不新增 GPU 等待；D3D12 组数按同时 open 数的高水位保留，Vulkan 每 flight 一个 pool。
+每组 wrapper 容量按该组使用高水位保留，全部 children 先于组内 allocator 销毁。
 
 应用 wait/signal 作用于当前批次，允许无命令、无目标的纯同步批次。`WaitToExecute` 和
 `ReadyToPresent` 必须为空，交换链同步由 runtime 根据可选呈现目标注入。

@@ -129,12 +129,23 @@ private:
                                      Discarded };
         State Phase{State::Idle};
     };
+    struct StorageGroup {
+        // Commands are destroyed before their borrowed native storage.
+        unique_ptr<render::CommandAllocator> Allocator;
+        vector<Entry> Pool;
+        size_t AllocatedCount{0};
+        size_t RecordingCount{0};
+    };
+    struct CommandLocation {
+        StorageGroup* Group;
+        Entry* Command;
+    };
+    std::optional<CommandLocation> FindAllocated(render::CommandBuffer* commands) noexcept;
+
     Nullable<render::Device*> _device;
-    // Commands are destroyed before their borrowed native storage.
-    unique_ptr<render::CommandAllocator> _storage;
-    vector<Entry> _pool;
+    Nullable<render::CommandQueue*> _queue;
+    vector<StorageGroup> _groups;
     bool _applicationRecording{false};
-    size_t _allocatedCount{0};
 };
 
 struct GpuFlightSubmitBatch {

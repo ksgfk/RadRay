@@ -184,7 +184,7 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 ## 命令录制存储
 
 `Device::CreateCommandAllocator(queue)` 创建独占的 RHI recording storage，绑定同 device 的实际 queue。
-`CreateCommandBuffer(allocator)` 创建独占 wrapper/native list，借用 allocator；旧 queue 工厂已移除。
+`CreateCommandBuffer(allocator)` 创建独占 wrapper/native list，固定借用创建时的 allocator；旧 queue 工厂已移除。
 allocator 必须晚于全部 children 销毁。销毁 child 只注销并释放自身，不销毁共享 storage。
 开启 RHI 校验时，创建检查 backend、device、有效性与实际 queue；提交检查录制状态及绑定 queue。
 
@@ -196,14 +196,16 @@ Reset 使旧录制失效，并清理所有 child 的原生 keepalive 与校验 e
 开启 RHI 校验时，违反 Begin/End、encoder、Reset、父子销毁顺序或提交已失效录制会被拒绝并诊断；创建仍返回可空结果。
 可检测状态不等于完整 ABA 防护：裸指针重新录制后不能识别调用方保留的旧逻辑引用。
 
-D3D12 storage 持有 native allocator 数组：仅在所有 block 都有 open list 时扩容，按同时录制高水位 K 复用。
-顺序录制 M 条 list 通常只需一个 native allocator；每条 list 仍单独 Reset/Close。安全复用时仅 Reset 用过的 block。
+D3D12 storage 在创建时持有唯一的 `ID3D12CommandAllocator`，创建失败返回空值；不自动池化或扩容。
+同一 allocator 同时最多一条 list 处于 Begin/End 区间，关闭后可以继续顺序录制其他 child，无需先提交或等待 GPU。
+开启 RHI 校验时，第二条重叠 Begin 在原生调用前被拒绝，且可以在原录制成功 End 后重试；被拒绝的 End 不释放占用。
 Vulkan 一个 storage 持有一个未开启逐 buffer reset 的 command pool，绑定真实 queue family；安全复用时整池 Reset。
 同线程交错录制不增加 pool。共享 allocator 的全部操作由调用方串行化；独立 storage 可以由独立 worker 录制。
+两端直接暴露各自的录制约束，调用方通过 `GetBackend()` 选择分配策略；runtime 池化见[帧与 GPU](frame-and-gpu.md#命令分配与有序批次)。
 共享录制内存不提供 GPU 数据同步，barrier 和 Submit 数组顺序仍由调用方负责。
 
 名称分别作用于 allocator 与 child，child 命名不会改写共享 pool 的名称。
-`Backends/CommandAllocatorTest` 验证共享、高水位、组复用、读回和临时 encoder 清理；非法状态在驱动调用前拒绝。
+`Backends/CommandAllocatorTest` 验证原生 storage 共享、组复用、读回和临时 encoder 清理；校验用例验证后端录制差异与非法状态的可重试性。
 
 ## 后端选择：descriptor visit + artifact 动态桥
 
@@ -493,10 +495,10 @@ Device::CreateCommandBuffer(allocator) → CommandBuffer
 CommandAllocator::Reset()                // 真实完成后结束旧 epoch
 ```
 
-D3D12 的逻辑 `CommandAllocator` 保存可扩展的 native allocator 集合，命令在 Begin 借出一项；
-Vulkan 逻辑 allocator 拥有共享 command pool。Begin 不结束旧 epoch，重复借出命令前必须 Reset。
+allocator 的原生映射与后端限制见[命令录制存储](#命令录制存储)。
+Begin 不结束旧 epoch，重复借出同一命令前必须 Reset。
 两个后端的 allocator Reset 都要求全部录制关闭、GPU 使用结束；Vulkan 先 reset native pool，
-再清理已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时调用一次 Reset，
+再清理已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时逐个 Reset 本轮使用的 storage，
 下一次 BeginFrameRecord 不再次重置。
 
 D3D12 不为 command buffer 创建或持有空 root signature；`EndRenderPass` 与 `EndComputePass`

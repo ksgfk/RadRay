@@ -482,23 +482,18 @@ public:
 
 class CommandAllocatorD3D12 final : public CommandAllocator {
 public:
-    CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue) noexcept;
+    CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue, ComPtr<ID3D12CommandAllocator> allocator) noexcept;
     ~CommandAllocatorD3D12() noexcept override;
+
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
     void Reset() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
-    std::optional<size_t> AcquireNative() noexcept;
 
-    struct NativeStorage {
-        ComPtr<ID3D12CommandAllocator> Allocator;
-        bool Recording{false};
-        bool Used{false};
-    };
+public:
     DeviceD3D12* _device;
     CmdQueueD3D12* _queue;
-    vector<NativeStorage> _native;
-    string _name;
+    ComPtr<ID3D12CommandAllocator> _native;
 };
 
 class CmdListD3D12 final : public CommandBuffer {
@@ -559,8 +554,8 @@ public:
     CmdQueueD3D12* _queue;
 #endif
     CommandAllocatorD3D12* _allocator;
-    size_t _nativeIndex{0};
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
+    ComPtr<ID3D12GraphicsCommandList4> _renderPassList;
     D3D12_COMMAND_LIST_TYPE _type;
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
@@ -572,7 +567,6 @@ public:
     uint32_t _deferredZonePops{0};
     uint32_t _suppressedZonePushes{0};
 #endif
-    ComPtr<ID3D12GraphicsCommandList4> _renderPassList;
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {

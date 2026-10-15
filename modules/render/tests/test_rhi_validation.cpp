@@ -310,7 +310,7 @@ public:
         Capabilities.Features = {.TimestampQueries = true, .IndirectDraw = true, .IndirectDispatch = true, .SubresourceBarriers = true, .UavMemoryBarrier = true, .UavWriteStages = ShaderStage::Graphics | ShaderStage::Compute};
         Capabilities.Queues[0].CreatedCount = 1;
     }
-    RenderBackend GetBackend() noexcept override { return RenderBackend::D3D12; }
+    RenderBackend GetBackend() noexcept override { return Backend; }
     DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
     TextureSupport QueryTextureSupport(const TextureSupportQuery&) const noexcept override { return {true, SampleCount::X1 | SampleCount::X4, true, true, 16384, 16384, 2048, 2048, 15, UINT64_MAX}; }
@@ -361,6 +361,7 @@ public:
     Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor&) noexcept override { return &CachedSampler; }
     ValidationProbe& Probe;
     RenderDeviceCapabilities Capabilities;
+    RenderBackend Backend{RenderBackend::D3D12};
     ProbeQueue Queue;
     NamedProbeObject<render::Sampler> CachedSampler;
 };
@@ -450,8 +451,9 @@ TEST_F(RhiValidationTest, BatchesPreflightEveryItemBeforeForwardingAndRejectCros
 
 TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStateRetryable) {
     auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto secondAllocator = Device->CreateCommandAllocator(Queue).Unwrap();
     auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
-    auto second = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto second = Device->CreateCommandBuffer(secondAllocator.get()).Unwrap();
     first->End();
     EXPECT_EQ(Probe.Ends, 0u);
     first->Begin();
@@ -478,6 +480,7 @@ TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStat
     first->Begin();
     first->End();
     EXPECT_EQ(Probe.Begins, 3u);
+    secondAllocator->Reset();
     CommandBuffer* commands[]{first.get(), second.get()};
     Queue->Submit({.CmdBuffers = commands});
     EXPECT_EQ(Probe.Submits, 0u);
@@ -486,6 +489,54 @@ TEST_F(RhiValidationTest, InvalidRecordingAndEncoderPairingLeaveOwnershipAndStat
     EXPECT_NE(Probe.NativeCommands[0], first.get());
     Queue->Submit({.CmdBuffers = std::span{commands, 1}});
     EXPECT_EQ(Probe.Submits, 1u);
+}
+
+TEST_F(RhiValidationTest, D3D12AllocatorRejectsOverlapUntilRecordingSuccessfullyEnds) {
+    auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto second = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    first->Begin();
+    second->Begin();
+    EXPECT_EQ(Probe.Begins, 1u);
+    ASSERT_EQ(Probe.Errors.size(), 1u);
+    auto encoder = first->BeginComputePass().Unwrap();
+    first->End();
+    second->Begin();
+    EXPECT_EQ(Probe.Ends, 0u);
+    EXPECT_EQ(Probe.Begins, 1u);
+    first->EndComputePass(std::move(encoder));
+    first->PushDebugGroup("Still open");
+    first->End();
+    second->Begin();
+    EXPECT_EQ(Probe.Ends, 0u);
+    EXPECT_EQ(Probe.Begins, 1u);
+    first->PopDebugGroup();
+    first->End();
+    second->Begin();
+    EXPECT_EQ(Probe.Ends, 1u);
+    EXPECT_EQ(Probe.Begins, 2u);
+    second->End();
+    allocator->Reset();
+    first->Begin();
+    first->End();
+    EXPECT_EQ(Probe.Begins, 3u);
+    EXPECT_EQ(Probe.Resets, 1u);
+    EXPECT_EQ(Probe.Errors.size(), 5u);
+}
+
+TEST_F(RhiValidationTest, VulkanAllocatorAllowsInterleavedRecordings) {
+    Native->Backend = RenderBackend::Vulkan;
+    auto allocator = Device->CreateCommandAllocator(Queue).Unwrap();
+    auto first = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto second = Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    first->Begin();
+    second->Begin();
+    EXPECT_EQ(Probe.Begins, 2u);
+    second->End();
+    first->End();
+    allocator->Reset();
+    EXPECT_EQ(Probe.Resets, 1u);
+    EXPECT_TRUE(Probe.Errors.empty());
 }
 
 TEST_F(RhiValidationTest, HandleTranslationSealingFullPushSizeAndNativeFailureCommitOnlyOnSuccess) {
@@ -800,11 +851,15 @@ TEST_P(RhiValidationGpuTest, PublicCopyPathWithValidationOnAndOff) {
         source->FlushMappedRange({0, 256});
         source->Unmap();
         command->Begin();
-        const ResourceBarrierDescriptor before[]{BarrierBufferDescriptor{source.get(), BufferState::HostWrite, BufferState::CopySource}, BarrierBufferDescriptor{destination.get(), BufferState::Undefined, BufferState::CopyDestination}};
-        command->ResourceBarrier(before);
+        if (backend == RenderBackend::Vulkan) {
+            const ResourceBarrierDescriptor before[]{BarrierBufferDescriptor{source.get(), BufferState::HostWrite, BufferState::CopySource}, BarrierBufferDescriptor{destination.get(), BufferState::Undefined, BufferState::CopyDestination}};
+            command->ResourceBarrier(before);
+        }
         command->CopyBufferToBuffer(destination.get(), 0, source.get(), 0, 256);
-        const ResourceBarrierDescriptor after = BarrierBufferDescriptor{destination.get(), BufferState::CopyDestination, BufferState::HostRead};
-        command->ResourceBarrier(std::span{&after, 1});
+        if (backend == RenderBackend::Vulkan) {
+            const ResourceBarrierDescriptor after = BarrierBufferDescriptor{destination.get(), BufferState::CopyDestination, BufferState::HostRead};
+            command->ResourceBarrier(std::span{&after, 1});
+        }
         command->End();
         CommandBuffer* commands[]{command.get()};
         Fence* fences[]{fence.get()};

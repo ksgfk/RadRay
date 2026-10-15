@@ -1166,13 +1166,20 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
 }
 
 Nullable<unique_ptr<CommandAllocator>> DeviceD3D12::CreateCommandAllocator(CommandQueue* queue_) noexcept {
-    Nullable<CmdQueueD3D12*> queue = static_cast<CmdQueueD3D12*>(queue_);
-    return make_unique<CommandAllocatorD3D12>(this, queue.Get());
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    Nullable<CmdQueueD3D12*> queue = CastD3D12Object(queue_);
+    ComPtr<ID3D12CommandAllocator> allocator;
+    const HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
+    if (FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<CommandAllocatorD3D12>(this, queue.Get(), std::move(allocator));
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllocator* allocator_) noexcept {
     ScopeGuard drain([this] { TryDrainValidationMessages(); });
-    Nullable<CommandAllocatorD3D12*> allocator = static_cast<CommandAllocatorD3D12*>(allocator_);
+    Nullable<CommandAllocatorD3D12*> allocator = CastD3D12Object(allocator_);
     auto* queue = allocator->_queue;
     HRESULT hr;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -1180,12 +1187,8 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
     if (SUCCEEDED(_device.As(&device4))) {
         hr = device4->CreateCommandList1(0, queue->_type, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(list.GetAddressOf()));
     } else {
-        const auto index = allocator->AcquireNative();
-        if (!index) return nullptr;
-        auto& native = allocator->_native[*index];
-        hr = _device->CreateCommandList(0, queue->_type, native.Allocator.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        hr = _device->CreateCommandList(0, queue->_type, allocator->_native.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
         if (SUCCEEDED(hr)) _CheckD3D12Result(this, list->Close(), "ID3D12GraphicsCommandList::Close");
-        native.Recording = false;
     }
     if (FAILED(hr)) {
         TryDrainValidationMessages();
@@ -3257,7 +3260,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
     for (auto& i : desc.CmdBuffers) {
-        auto* cmdList = static_cast<CmdListD3D12*>(i);
+        auto* cmdList = CastD3D12Object(i);
         submits.emplace_back(cmdList->_cmdList.Get());
     }
     if (!submits.empty()) {
@@ -3410,48 +3413,25 @@ uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
     return _fenceValue - 1;
 }
 
-CommandAllocatorD3D12::CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue) noexcept
-    : _device(device), _queue(queue) {}
+CommandAllocatorD3D12::CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue, ComPtr<ID3D12CommandAllocator> allocator) noexcept
+    : _device(device), _queue(queue), _native(std::move(allocator)) {}
 
 CommandAllocatorD3D12::~CommandAllocatorD3D12() noexcept { Destroy(); }
 
-bool CommandAllocatorD3D12::IsValid() const noexcept { return _device != nullptr; }
+bool CommandAllocatorD3D12::IsValid() const noexcept { return _native != nullptr; }
 
 void CommandAllocatorD3D12::Destroy() noexcept {
-    _native.clear();
+    _native.Reset();
     _device = nullptr;
 }
 
 void CommandAllocatorD3D12::SetDebugName(std::string_view name) noexcept {
-    _name = name;
-    for (auto& native : _native) SetObjectName(_name, native.Allocator.Get());
-}
-
-std::optional<size_t> CommandAllocatorD3D12::AcquireNative() noexcept {
-    size_t index = 0;
-    while (index < _native.size() && _native[index].Recording) ++index;
-    if (index == _native.size()) {
-        ComPtr<ID3D12CommandAllocator> allocator;
-        const HRESULT hr = _device->_device->CreateCommandAllocator(_queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
-        if (FAILED(hr)) {
-            _device->TryDrainValidationMessages();
-            RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
-            return std::nullopt;
-        }
-        if (!_name.empty()) SetObjectName(_name, allocator.Get());
-        _native.push_back({std::move(allocator)});
-    }
-    _native[index].Recording = true;
-    _native[index].Used = true;
-    return index;
+    SetObjectName(name, _native.Get());
 }
 
 void CommandAllocatorD3D12::Reset() noexcept {
     RADRAY_PROFILE_SCOPE_N("CommandAllocatorD3D12::Reset");
-    for (auto& native : _native) {
-        if (native.Used) _CheckD3D12Result(_device, native.Allocator->Reset(), "ID3D12CommandAllocator::Reset");
-        native.Used = false;
-    }
+    _CheckD3D12Result(_device, _native->Reset(), "ID3D12CommandAllocator::Reset");
     _device->TryDrainValidationMessages();
 }
 
@@ -3504,10 +3484,7 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
-    const auto index = _allocator->AcquireNative();
-    if (!index) RADRAY_ABORT("cannot allocate command recording storage");
-    _nativeIndex = *index;
-    _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native[_nativeIndex].Allocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
     _device->TryDrainValidationMessages();
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
         ID3D12DescriptorHeap* descriptorHeaps[] = {
@@ -3530,7 +3507,6 @@ void CmdListD3D12::End() noexcept {
     const HRESULT hr = _cmdList->Close();
     _device->TryDrainValidationMessages();
     _CheckD3D12Result(_device, hr, "ID3D12GraphicsCommandList::Close");
-    _allocator->_native[_nativeIndex].Recording = false;
 }
 
 void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
@@ -3677,7 +3653,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     }
     auto flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
     for (const auto& color : desc.Colors) {
-        auto* view = static_cast<TextureViewD3D12*>(color.View);
+        auto* view = CastD3D12Object(color.View);
         D3D12_RENDER_PASS_RENDER_TARGET_DESC rt{};
         rt.cpuDescriptor = view->_heapView.HandleCpu();
         rt.BeginningAccess.Type = MapType(color.Load);
@@ -3692,7 +3668,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     }
     if (desc.DepthStencil) {
         const auto& d = *desc.DepthStencil;
-        auto* view = static_cast<TextureViewD3D12*>(d.View);
+        auto* view = CastD3D12Object(d.View);
         D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
         ds.cpuDescriptor = view->_heapView.HandleCpu();
         ds.DepthBeginningAccess.Type = MapType(d.DepthLoad);

@@ -10,6 +10,7 @@ protected:
         if (!TryCreateDevice(GetParam(), Context, true)) GTEST_SKIP() << Context.Reason;
     }
     void TearDown() override { EXPECT_EQ(Context.ValidationErrors.load(), 0u); }
+    void CheckSharedStorage(bool wrapped);
     DeviceContext Context;
 };
 
@@ -69,7 +70,7 @@ TEST_P(CommandAllocatorTest, Copies2dTextureIntoCubeFaceAndReadsThatLayer) {
     readback->Unmap();
 }
 
-TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterCompletion) {
+void CommandAllocatorTest::CheckSharedStorage(bool wrapped) {
     auto& device = *Context.Device;
     auto storage = device.CreateCommandAllocator(Context.Queue).Unwrap();
     storage->SetDebugName("Shared recording storage");
@@ -82,14 +83,13 @@ TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterComp
     for (uint32_t i = 0; i < 128; ++i) mapped[i] = 17 + i * 31;
     upload->FlushMappedRange({0, 512});
     upload->Unmap();
-    size_t peak = 0;
     for (uint32_t overlap : {1u, 2u, 4u}) {
+        if (GetParam() == RenderBackend::D3D12 && overlap != 1) continue;
         for (uint32_t count : {1u, 8u, 32u, 128u, 1u}) {
             storage->Reset();
             vector<CommandBuffer*> submission;
             for (uint32_t begin = 0; begin < count; begin += overlap) {
                 const uint32_t end = std::min(count, begin + overlap);
-                peak = std::max(peak, size_t(end - begin));
                 for (uint32_t i = begin; i < end; ++i) {
                     auto* command = commands[i].get();
                     command->Begin();
@@ -110,13 +110,14 @@ TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterComp
                 for (uint32_t i = end; i > begin; --i) commands[i - 1]->End();
             }
 #if defined(RADRAY_ENABLE_D3D12)
-            if (GetParam() == RenderBackend::D3D12) {
+            if (!wrapped && GetParam() == RenderBackend::D3D12) {
                 auto* native = static_cast<d3d12::CommandAllocatorD3D12*>(storage.get());
-                EXPECT_EQ(native->_native.size(), peak);
+                EXPECT_NE(native->_native.Get(), nullptr);
+                for (const auto& command : commands) EXPECT_EQ(static_cast<d3d12::CmdListD3D12*>(command.get())->_allocator, native);
             }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-            if (GetParam() == RenderBackend::Vulkan) {
+            if (!wrapped && GetParam() == RenderBackend::Vulkan) {
                 auto* native = static_cast<vulkan::CommandAllocatorVulkan*>(storage.get());
                 EXPECT_EQ(native->_children.size(), commands.size());
                 for (const auto& command : commands) EXPECT_EQ(static_cast<vulkan::CommandBufferVulkan*>(command.get())->_cmdPool, native);
@@ -146,6 +147,26 @@ TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterComp
     EXPECT_FALSE(storage->IsValid());
 }
 
+TEST_P(CommandAllocatorTest, SharesNativeStorageAndReusesAfterCompletion) {
+    CheckSharedStorage(false);
+}
+
+TEST_P(CommandAllocatorTest, IndependentAllocatorsAllowInterleavedRecordings) {
+    vector<unique_ptr<CommandAllocator>> storages;
+    vector<unique_ptr<CommandBuffer>> commands;
+    vector<CommandBuffer*> submission;
+    for (uint32_t i = 0; i < 4; ++i) {
+        storages.push_back(Context.Device->CreateCommandAllocator(Context.Queue).Unwrap());
+        commands.push_back(Context.Device->CreateCommandBuffer(storages.back().get()).Unwrap());
+        commands.back()->Begin();
+        submission.push_back(commands.back().get());
+    }
+    for (auto it = commands.rbegin(); it != commands.rend(); ++it) (*it)->End();
+    Context.Queue->Submit({.CmdBuffers = submission});
+    Context.Queue->Wait();
+    for (auto& storage : storages) storage->Reset();
+}
+
 TEST_P(CommandAllocatorTest, ConsumesEncodersImmediatelyAndAllowsGroupedReset) {
     auto storage = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
     vector<unique_ptr<CommandBuffer>> commands;
@@ -170,6 +191,34 @@ class CommandAllocatorValidationTest : public CommandAllocatorTest {
         if (!TryCreateDevice(GetParam(), Context, true, true)) GTEST_SKIP() << Context.Reason;
     }
 };
+
+TEST_P(CommandAllocatorValidationTest, SharesNativeStorageAndReusesAfterCompletion) {
+    CheckSharedStorage(true);
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+}
+
+TEST_P(CommandAllocatorValidationTest, RecordingOverlapFollowsBackendAndRejectedBeginCanRetry) {
+    auto storage = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
+    auto first = Context.Device->CreateCommandBuffer(storage.get()).Unwrap();
+    auto second = Context.Device->CreateCommandBuffer(storage.get()).Unwrap();
+    first->Begin();
+    second->Begin();
+    if (GetParam() == RenderBackend::D3D12) {
+        EXPECT_EQ(Context.RhiValidationErrors.load(), 1u);
+        first->End();
+        second->Begin();
+        second->End();
+        EXPECT_EQ(Context.RhiValidationErrors.load(), 1u);
+    } else {
+        second->End();
+        first->End();
+        EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+    }
+    CommandBuffer* submission[]{first.get(), second.get()};
+    Context.Queue->Submit({.CmdBuffers = submission});
+    Context.Queue->Wait();
+    storage->Reset();
+}
 
 TEST_P(CommandAllocatorValidationTest, RejectsInvalidRecordingAndOwnershipTransitions) {
     auto storage = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();

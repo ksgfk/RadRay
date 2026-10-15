@@ -21,8 +21,9 @@ namespace radray {
 bool GpuFlightCommandAllocator::Initialize(render::Device* device, render::CommandQueue* queue) {
     auto storage = device->CreateCommandAllocator(queue);
     if (!storage) return false;
-    _storage = storage.Release();
+    _groups.push_back({storage.Release()});
     _device = device;
+    _queue = queue;
     return true;
 }
 
@@ -37,22 +38,41 @@ void GpuFlightCommandAllocator::Return(std::span<render::CommandBuffer*> command
 }
 
 render::CommandBuffer* GpuFlightCommandAllocator::AllocateInternal() {
-    if (_allocatedCount == _pool.size()) {
-        auto commands = _device->CreateCommandBuffer(_storage.get());
-        if (!commands) RADRAY_ABORT("command buffer creation failed");
-        _pool.push_back({commands.Release()});
+    size_t groupIndex = 0;
+    if (_device->GetBackend() == render::RenderBackend::D3D12) {
+        while (groupIndex < _groups.size() && _groups[groupIndex].RecordingCount != 0) ++groupIndex;
+        if (groupIndex == _groups.size()) {
+            auto storage = _device->CreateCommandAllocator(_queue.Get());
+            if (!storage) RADRAY_ABORT("command allocator creation failed");
+            _groups.push_back({storage.Release()});
+        }
     }
-    auto& entry = _pool[_allocatedCount++];
+    auto& group = _groups[groupIndex];
+    if (group.AllocatedCount == group.Pool.size()) {
+        auto commands = _device->CreateCommandBuffer(group.Allocator.get());
+        if (!commands) RADRAY_ABORT("command buffer creation failed");
+        group.Pool.push_back({commands.Release()});
+    }
+    auto& entry = group.Pool[group.AllocatedCount++];
     entry.Phase = Entry::State::Recording;
     entry.Commands->Begin();
+    ++group.RecordingCount;
     return entry.Commands.get();
+}
+
+std::optional<GpuFlightCommandAllocator::CommandLocation> GpuFlightCommandAllocator::FindAllocated(render::CommandBuffer* commands) noexcept {
+    for (auto& group : _groups) {
+        const auto end = group.Pool.begin() + group.AllocatedCount;
+        const auto entry = std::find_if(group.Pool.begin(), end, [&](const auto& value) { return value.Commands.get() == commands; });
+        if (entry != end) return CommandLocation{&group, &*entry};
+    }
+    return std::nullopt;
 }
 
 void GpuFlightCommandAllocator::ReturnInternal(std::span<render::CommandBuffer*> commands) {
     for (size_t i = 0; i < commands.size(); ++i) {
-        const auto end = _pool.begin() + _allocatedCount;
-        const auto found = std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == commands[i]; });
-        if (found == end || found->Phase != Entry::State::Recording) {
+        const auto found = FindAllocated(commands[i]);
+        if (!found || found->Command->Phase != Entry::State::Recording) {
             RADRAY_ABORT("command buffer is foreign, unallocated or already returned");
         }
         if (std::find(commands.begin(), commands.begin() + i, commands[i]) != commands.begin() + i) {
@@ -60,32 +80,33 @@ void GpuFlightCommandAllocator::ReturnInternal(std::span<render::CommandBuffer*>
         }
     }
     for (auto* commandsToReturn : commands) {
-        const auto entry = std::find_if(_pool.begin(), _pool.begin() + _allocatedCount,
-                                        [&](const auto& item) { return item.Commands.get() == commandsToReturn; });
+        const auto entry = FindAllocated(commandsToReturn);
         commandsToReturn->End();
-        entry->Phase = Entry::State::Closed;
+        entry->Command->Phase = Entry::State::Closed;
+        --entry->Group->RecordingCount;
     }
 }
 
 bool GpuFlightCommandAllocator::HasOutstanding() const noexcept {
-    return std::any_of(_pool.begin(), _pool.begin() + _allocatedCount, [](const auto& entry) { return entry.Phase == Entry::State::Recording; });
+    return std::any_of(_groups.begin(), _groups.end(), [](const auto& group) { return group.RecordingCount != 0; });
 }
 
 bool GpuFlightCommandAllocator::HasUnregistered() const noexcept {
-    return std::any_of(_pool.begin(), _pool.begin() + _allocatedCount, [](const auto& entry) { return entry.Phase == Entry::State::Closed; });
+    return std::any_of(_groups.begin(), _groups.end(), [](const auto& group) {
+        return std::any_of(group.Pool.begin(), group.Pool.begin() + group.AllocatedCount, [](const auto& entry) { return entry.Phase == Entry::State::Closed; });
+    });
 }
 
 void GpuFlightCommandAllocator::Register(std::span<render::CommandBuffer*> commands) {
-    const auto end = _pool.begin() + _allocatedCount;
     for (size_t i = 0; i < commands.size(); ++i) {
-        const auto found = std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == commands[i]; });
-        if (found == end || found->Phase != Entry::State::Closed)
+        const auto found = FindAllocated(commands[i]);
+        if (!found || found->Command->Phase != Entry::State::Closed)
             RADRAY_ABORT("registration requires returned, unregistered commands from this flight");
         if (std::find(commands.begin(), commands.begin() + i, commands[i]) != commands.begin() + i)
             RADRAY_ABORT("command batch contains a duplicate command buffer");
     }
     for (auto* command : commands) {
-        std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == command; })->Phase = Entry::State::Accepted;
+        FindAllocated(command)->Command->Phase = Entry::State::Accepted;
     }
 }
 
@@ -94,31 +115,35 @@ void GpuFlightCommandAllocator::Discard(std::span<render::CommandBuffer*> comman
     DiscardInternal(commands, false);
 }
 void GpuFlightCommandAllocator::DiscardInternal(std::span<render::CommandBuffer*> commands, bool accepted) {
-    const auto end = _pool.begin() + _allocatedCount;
     for (size_t i = 0; i < commands.size(); ++i) {
-        const auto entry = std::find_if(_pool.begin(), end, [&](const auto& value) { return value.Commands.get() == commands[i]; });
-        if (entry == end || (accepted ? entry->Phase != Entry::State::Accepted : entry->Phase != Entry::State::Recording && entry->Phase != Entry::State::Closed) ||
+        const auto entry = FindAllocated(commands[i]);
+        if (!entry || (accepted ? entry->Command->Phase != Entry::State::Accepted : entry->Command->Phase != Entry::State::Recording && entry->Command->Phase != Entry::State::Closed) ||
             std::find(commands.begin(), commands.begin() + i, commands[i]) != commands.begin() + i) RADRAY_ABORT("Invalid command discard");
     }
     for (auto* command : commands) {
-        auto& entry = *std::find_if(_pool.begin(), end, [&](const auto& value) { return value.Commands.get() == command; });
-        if (entry.Phase == Entry::State::Recording) command->End();
-        entry.Phase = Entry::State::Discarded;
+        const auto entry = FindAllocated(command);
+        if (entry->Command->Phase == Entry::State::Recording) {
+            command->End();
+            --entry->Group->RecordingCount;
+        }
+        entry->Command->Phase = Entry::State::Discarded;
     }
 }
 void GpuFlightCommandAllocator::MarkSubmitted(std::span<render::CommandBuffer*> commands) {
-    const auto end = _pool.begin() + _allocatedCount;
     for (auto* command : commands) {
-        const auto entry = std::find_if(_pool.begin(), end, [&](const auto& value) { return value.Commands.get() == command; });
-        if (entry == end || entry->Phase != Entry::State::Accepted) RADRAY_ABORT("Only accepted commands may submit");
-        entry->Phase = Entry::State::Submitted;
+        const auto entry = FindAllocated(command);
+        if (!entry || entry->Command->Phase != Entry::State::Accepted) RADRAY_ABORT("Only accepted commands may submit");
+        entry->Command->Phase = Entry::State::Submitted;
     }
 }
 
 void GpuFlightCommandAllocator::ResetForReuse() {
     if (HasOutstanding() || HasUnregistered()) RADRAY_ABORT("cannot reset command allocator with unhandled commands");
-    _storage->Reset();
-    _allocatedCount = 0;
+    for (auto& group : _groups) {
+        if (group.AllocatedCount != 0) group.Allocator->Reset();
+        group.AllocatedCount = 0;
+        group.RecordingCount = 0;
+    }
     _applicationRecording = false;
 }
 

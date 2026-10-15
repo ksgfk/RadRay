@@ -120,7 +120,8 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                         auto* device = gpu->GetDevice();
                         vector<unique_ptr<render::CommandAllocator>> allocators;
                         vector<unique_ptr<render::CommandBuffer>> commands;
-                        for (uint32_t i = 0; i < (shared ? 1u : count); ++i) {
+                        const uint32_t allocatorCount = shared ? (backend == render::RenderBackend::D3D12 ? overlap : 1u) : count;
+                        for (uint32_t i = 0; i < allocatorCount; ++i) {
                             auto allocator = device->CreateCommandAllocator(gpu->GetMainQueue());
                             if (!allocator) {
                                 state.SkipWithError("allocator creation failed");
@@ -129,7 +130,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                             allocators.push_back(allocator.Release());
                         }
                         for (uint32_t i = 0; i < count; ++i) {
-                            auto command = device->CreateCommandBuffer(allocators[shared ? 0 : i].get());
+                            auto command = device->CreateCommandBuffer(allocators[i % allocatorCount].get());
                             if (!command) {
                                 state.SkipWithError("command creation failed");
                                 return;
@@ -160,13 +161,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                             recordings += std::chrono::duration<double, std::micro>(finish - reset).count();
                             state.SetIterationTime(std::chrono::duration<double>(finish - start).count());
                         }
-                        size_t nativeCount = allocators.size();
-#if defined(RADRAY_ENABLE_D3D12)
-                        if (backend == render::RenderBackend::D3D12) {
-                            nativeCount = 0;
-                            for (const auto& allocator : allocators) nativeCount += static_cast<render::d3d12::CommandAllocatorD3D12*>(allocator.get())->_native.size();
-                        }
-#endif
+                        const size_t nativeCount = allocators.size();
 #if defined(RADRAY_ENABLE_D3D12)
                         if (backend == render::RenderBackend::D3D12) {
                             state.counters["sizeof_allocator"] = sizeof(render::d3d12::CommandAllocatorD3D12);

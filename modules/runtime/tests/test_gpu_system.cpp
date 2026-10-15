@@ -14,12 +14,12 @@
 namespace radray {
 namespace {
 
-unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, FrameTimeline& timeline, RuntimeStartupResult& startup, bool validation = true) {
+unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, FrameTimeline& timeline, RuntimeStartupResult& startup, bool validation = true, bool rhiValidation = false) {
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor desc{
         .VulkanInstance = {.IsEnableDebugLayer = validation, .IsEnableSynchronizationValidation = validation},
         .DXGIFactory = {.IsEnableDebugLayer = validation},
-        .RhiValidation = {.IsEnabled = false},
+        .RhiValidation = {.IsEnabled = rhiValidation},
         .FlightDataCount = timeline.GetFlightDataCount(),
         .EnableFrameProfiler = profiler};
     if (backend == render::RenderBackend::Vulkan) {
@@ -35,11 +35,11 @@ void GpuSystemBufferBarrier(render::CommandBuffer* commands, render::Buffer* buf
     commands->ResourceBarrier(std::span{&barrier, 1});
 }
 
-void RunCommandBatches(render::RenderBackend backend, bool profiler) {
+void RunCommandBatches(render::RenderBackend backend, bool profiler, bool rhiValidation = false) {
     test::RuntimeLogCapture logs;
     RuntimeStartupResult startup;
     FrameTimeline timeline{2};
-    auto gpu = CreateGpuSystem(backend, profiler, timeline, startup);
+    auto gpu = CreateGpuSystem(backend, profiler, timeline, startup, true, rhiValidation);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
     auto* device = gpu->GetDevice();
@@ -150,6 +150,110 @@ TEST(GpuSystemTest, D3D12OrderedBatches) { RunCommandBatches(render::RenderBacke
 TEST(GpuSystemTest, D3D12OrderedBatchesWithProfiler) { RunCommandBatches(render::RenderBackend::D3D12, true); }
 TEST(GpuSystemTest, VulkanOrderedBatches) { RunCommandBatches(render::RenderBackend::Vulkan, false); }
 TEST(GpuSystemTest, VulkanOrderedBatchesWithProfiler) { RunCommandBatches(render::RenderBackend::Vulkan, true); }
+TEST(GpuSystemTest, D3D12OrderedBatchesWithRhiValidation) { RunCommandBatches(render::RenderBackend::D3D12, true, true); }
+TEST(GpuSystemTest, VulkanOrderedBatchesWithRhiValidation) { RunCommandBatches(render::RenderBackend::Vulkan, true, true); }
+
+Nullable<render::CommandAllocator*> CommandStorage(render::CommandBuffer* commands, render::RenderBackend backend) {
+#if defined(RADRAY_ENABLE_D3D12)
+    if (backend == render::RenderBackend::D3D12) return static_cast<render::d3d12::CmdListD3D12*>(commands)->_allocator;
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+    if (backend == render::RenderBackend::Vulkan) return static_cast<render::vulkan::CommandBufferVulkan*>(commands)->_cmdPool;
+#endif
+    return nullptr;
+}
+
+class GpuSystemAllocatorTest : public testing::TestWithParam<render::RenderBackend> {};
+
+TEST_P(GpuSystemAllocatorTest, PoolsRecordingGroupsAcrossEpochPatternsAndDiscard) {
+    const auto backend = GetParam();
+    test::RuntimeLogCapture logs;
+    RuntimeStartupResult startup;
+    FrameTimeline timeline{2};
+    auto gpu = CreateGpuSystem(backend, false, timeline, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpu, nullptr) << startup.Reason;
+    auto* device = gpu->GetDevice();
+    const bool vulkan = backend == render::RenderBackend::Vulkan;
+    const array<uint32_t, 5> patterns{1, 2, 4, 1, 4};
+    array<array<vector<render::CommandBuffer*>, 5>, 2> previous;
+    array<vector<render::CommandAllocator*>, 2> knownStorages;
+    array<uint32_t, 2> peaks{};
+    for (uint32_t round = 0; round < 20; ++round) {
+        const uint32_t flight = round % 2;
+        const uint32_t pattern = (round / 2) % patterns.size();
+        const uint32_t overlap = patterns[pattern];
+        SCOPED_TRACE(fmt::format("round={} flight={} overlap={}", round, flight, overlap));
+        gpu->BeginUpdateForFlight(flight);
+        auto frame = gpu->BeginFrameRecord(flight, {}, {}, false);
+        auto& allocator = frame.GetCmdAllocator();
+        vector<render::CommandBuffer*> allocated;
+        vector<render::CommandAllocator*> usedStorages;
+        const auto allocate = [&] {
+            auto* commands = allocator.Allocate();
+            EXPECT_EQ(std::find(allocated.begin(), allocated.end(), commands), allocated.end());
+            allocated.push_back(commands);
+            auto* storage = CommandStorage(commands, backend).Unwrap();
+            if (std::find(usedStorages.begin(), usedStorages.end(), storage) == usedStorages.end()) usedStorages.push_back(storage);
+            auto& known = knownStorages[flight];
+            if (std::find(known.begin(), known.end(), storage) == known.end()) known.push_back(storage);
+            return commands;
+        };
+        auto* discardedOpen = allocate();
+        allocator.Discard(std::span{&discardedOpen, 1});
+        auto* discardedClosed = allocate();
+        EXPECT_EQ(CommandStorage(discardedClosed, backend), CommandStorage(discardedOpen, backend));
+        allocator.Return(std::span{&discardedClosed, 1});
+        allocator.Discard(std::span{&discardedClosed, 1});
+        auto upload = device->CreateBuffer({32, render::MemoryType::Upload, render::BufferUse::CopySource | render::BufferUse::MapWrite}).Unwrap();
+        auto readback = device->CreateBuffer({32, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead}).Unwrap();
+        array<uint32_t, 8> expected;
+        for (uint32_t i = 0; i < expected.size(); ++i) expected[i] = round * 100 + i;
+        {
+            ScopedBufferMap map{upload.get(), {0, 32}};
+            ASSERT_TRUE(map);
+            std::memcpy(map.Data(), expected.data(), 32);
+            upload->FlushMappedRange({0, 32});
+        }
+        for (uint32_t begin = 0; begin < expected.size(); begin += overlap) {
+            vector<render::CommandBuffer*> batch;
+            for (uint32_t i = begin; i < begin + overlap; ++i) {
+                auto* commands = allocate();
+                if (vulkan && i == 0) {
+                    GpuSystemBufferBarrier(commands, upload.get(), render::BufferState::HostWrite, render::BufferState::CopySource);
+                    GpuSystemBufferBarrier(commands, readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
+                }
+                commands->CopyBufferToBuffer(readback.get(), i * 4, upload.get(), i * 4, 4);
+                if (vulkan && i + 1 == expected.size()) GpuSystemBufferBarrier(commands, readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
+                batch.push_back(commands);
+            }
+            for (auto it = batch.rbegin(); it != batch.rend(); ++it) allocator.Return(std::span{&*it, 1});
+            frame.RegisterClosedCommandBuffers({.CmdBuffers = batch});
+        }
+        EXPECT_EQ(usedStorages.size(), vulkan ? 1u : overlap);
+        peaks[flight] = std::max(peaks[flight], overlap);
+        EXPECT_EQ(knownStorages[flight].size(), vulkan ? 1u : peaks[flight]);
+        if (round < 10)
+            previous[flight][pattern] = allocated;
+        else
+            EXPECT_EQ(allocated, previous[flight][pattern]);
+        frame.SubmitFrame();
+        ASSERT_TRUE(gpu->CompleteFlightIfReady(flight, true));
+        FlightCompletion notification;
+        while (timeline.TryReadCompletion(notification)) {
+        }
+        gpu->ReleaseFrameResourcesGT({.FlightIndex = flight, .FrameSerial = frame.FrameSerial()});
+        ScopedBufferMap map{readback.get(), {0, 32}};
+        ASSERT_TRUE(map);
+        readback->InvalidateMappedRange({0, 32});
+        array<uint32_t, 8> actual;
+        std::memcpy(actual.data(), map.Data(), 32);
+        EXPECT_EQ(actual, expected);
+    }
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+
+INSTANTIATE_TEST_SUITE_P(Backends, GpuSystemAllocatorTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 
 bool ReleaseFence(render::Fence* fence, render::RenderBackend backend, uint64_t value) {
 #if defined(RADRAY_ENABLE_D3D12)
@@ -197,6 +301,7 @@ void RunFinalFence(render::RenderBackend backend) {
     auto target = resources.BorrowTexture(desc, render::TextureViewUsage::RenderTarget);
     ASSERT_TRUE(target);
     auto* command = context.AllocateCommandBuffer();
+    auto* extra = context.AllocateCommandBuffer();
     const render::RenderPassColorAttachment color{target->View, render::LoadAction::Clear, render::StoreAction::Store};
     const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{target->Target, target->InitialState, render::TextureState::RenderTarget};
     command->ResourceBarrier(std::span{&before, 1});
@@ -206,7 +311,8 @@ void RunFinalFence(render::RenderBackend backend) {
     render::Fence* signals[]{intermediate.get()};
     render::Fence* waits[]{gate.get()};
     uint64_t values[]{1};
-    context.ReturnCommandBuffers({.CmdBuffers = std::span{&command, 1}, .SignalFences = signals, .SignalValues = values});
+    render::CommandBuffer* batch[]{command, extra};
+    context.ReturnCommandBuffers({.CmdBuffers = batch, .SignalFences = signals, .SignalValues = values});
     context.ReturnCommandBuffers({.WaitFences = waits, .WaitValues = values});
     waits[0] = nullptr;
     values[0] = 0;

@@ -1351,6 +1351,8 @@ public:
 };
 
 /// Single recording thread, one queue. Children must be destroyed before their allocator.
+/// D3D12 owns one native allocator and permits one open recording. Vulkan owns one pool
+/// and permits interleaved recordings; all access to the pool and its children is serialized.
 class CommandAllocator : public RenderBase, public IDebugName {
 public:
     virtual ~CommandAllocator() noexcept = default;
@@ -1368,7 +1370,8 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
 
-    /// Begin once after creation or parent Reset. Never resets shared recording storage.
+    /// Begin once after creation or parent Reset, using the allocator bound at creation.
+    /// Never resets shared storage. On D3D12, no sibling may have an open recording.
     virtual void Begin() noexcept = 0;
 
     virtual void End() noexcept = 0;

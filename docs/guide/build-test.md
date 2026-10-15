@@ -628,6 +628,9 @@ Vulkan 对照交换两个后端选项，使用 `build_rhi_vulkan` 和 required b
 性能用 Google Benchmark 串行采样，关闭原生验证并显式选择 RHI 开关。
 `CommandAllocator/` 和 `D3D12Descriptor/` 固定关闭 RHI 校验；前者输出原生 allocator、command、
 graphics encoder、parameter set、graphics PSO 的 `sizeof_*`，仅表示 C++ 对象字节数，不含堆内存或驱动分配。
+`CommandAllocator/<backend>/shared/M<n>/K<k>` 的共享策略由 benchmark 显式管理：D3D12 创建 K 个 RHI allocator，
+第 i 条 command 固定绑定第 `i % K` 个；Vulkan 只创建一个 pool。`per_command` 每条命令各用一个 allocator。
+两端 `native_capacity` 与 `rhi_allocators` 均按实际 RHI allocator 数报告；RHI 本身不自动创建额外 allocator。
 `RhiBinding/<backend>/raw|validation` 每次录制 128 次真实参数集绑定，初始化和首次扩容在计时外，
 不提交 GPU；`items_per_second` 是绑定吞吐，Time 是整次录制的 CPU 墙钟耗时。
 该基准读取仓库内 compute artifact，无需运行 shader compiler。
