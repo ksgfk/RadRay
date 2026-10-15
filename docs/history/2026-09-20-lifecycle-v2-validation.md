@@ -9,6 +9,9 @@
 [runtime 契约](../architecture/render-framework.md#对象-gpu-参数与当帧视图)为准。
 以下测试结果与 CSV 采集于移除运行时测试统计之前。当前实现已删除相关累计字段，测试改用自身 probe、
 实际更新包与对象状态；旧 CSV 的 Gather、矩阵求值、owner 搬移计数及性能数值仅保留为历史数据，不能视为当前版本的测量。
+后续也已移除 TextureAsset 的保守 DeferDestroy 和 AssetManager 的 GPU 等待注入，改为完整使用者保活；
+下文对此的“保留”及旧测试名仅描述 v2 时点。当前契约见[资产系统](../architecture/asset-system.md#gpu-使用者保活)，
+现行基准见[性能测量](../guide/performance.md#cpu-生命周期与-obj)。
 基线：`88942aa8a6cad2e7f0d0973d91d2f95ea5ceaee1`，分支 `refactor/render-framework-reset`；开始时工作树干净。
 实施依据为仓库外 `RadRay_Lifecycle_and_Incremental_Rendering_Plan_v2.md`。未查询远端，不把本地 HEAD 称为远端最新。
 
@@ -123,7 +126,7 @@ CPU benchmark 不提交 GPU、不维护窗口；真 GPU/窗口行为由独立用
 分配统计来自现有 mimalloc FULL，RT 在 GT 等待时合并其统计；数据为 allocator 报告的累计分配字节，不是活跃内存或显存。
 小于 1 μs 的时长接近计时开销，不用于推导细粒度速度提升。
 
-原始数据：[384 组帧阶段](lifecycle-v2-perf.csv)、[144 组删除批次](lifecycle-v2-delete.csv)、[48 组创建阶段](lifecycle-v2-setup.csv)。
+原始数据：[384 组帧阶段](2026-09-20-lifecycle-v2-perf.csv)、[144 组删除批次](2026-09-20-lifecycle-v2-delete.csv)、[48 组创建阶段](2026-09-20-lifecycle-v2-setup.csv)。
 帧 CSV 的分配是 7 个正式样本总和；Gather/矩阵计数包含该配置的预热。删除批次依次删除 1、1%、50%，后两批的存量已减少。
 
 以下选取 F=2、depth=1、共享资产、单线程、View=1，单位 ms；括号内为 p95：

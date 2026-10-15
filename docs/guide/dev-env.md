@@ -29,7 +29,6 @@
     "C_Cpp.codeAnalysis.runAutomatically": true,
     "C_Cpp.codeAnalysis.clangTidy.enabled": true,
     "C_Cpp.codeAnalysis.clangTidy.args": [
-        "--config-file=${workspaceFolder}/.clang-tidy",
         "-p",
         "${workspaceFolder}/.vscode"
     ],
@@ -55,13 +54,14 @@
         "**/build**/**",
         "**/assets/**",
         "**/third_party/**",
-        "**/SDKs/**",
+        "**/SDKs/**"
     ]
 }
 ```
 
 `--compile-commands-dir` 指向 `.vscode`，所以改完构建配置要重新生成或复制编译数据库；
 Ninja 和 MSBuild 的处理不同，见[构建与测试](build-test.md)。
+仓库没有 `.clang-tidy`；示例不传不存在的配置文件。需要自定义检查时先建立自己的配置再指定它。
 
 ### launch.json
 
@@ -74,13 +74,13 @@ Ninja 和 MSBuild 的处理不同，见[构建与测试](build-test.md)。
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
-            "args": ["--backend", "d3d12", "--multithread", "--valid-layer"],
+            "args": ["--d3d12", "--multithread", "--valid-layer"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [
                 {
                     "name": "PATH",
-                    "value": "${command:cmake.getLaunchTargetDirectory}:${env:PATH}"
+                    "value": "${command:cmake.getLaunchTargetDirectory};${env:PATH}"
                 }
             ],
             "console": "integratedTerminal"
@@ -89,8 +89,8 @@ Ninja 和 MSBuild 的处理不同，见[构建与测试](build-test.md)。
 }
 ```
 
-`--backend` 可选 `d3d12` / `vulkan`。
-`PATH` 必须带上目标输出目录，否则 DXC 运行库加载不到。
+以上参数用于 `example_scene_sync`，用 `--vulkan` 切换后端；`example_framework_stress` 的验证开关是 `--validation`。
+先选择对应 CMake launch target。Windows `PATH` 用分号分隔，并包含已部署 DXC 运行库的目标输出目录。
 
 ## 格式化
 

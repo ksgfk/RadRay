@@ -15,6 +15,26 @@
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | — |
 
+## 资源寿命与回收条件
+
+寿命描述的是具体资源版本或分配，而不是常驻容器。逻辑释放停止新使用；退休证明旧使用已经结束；
+回收才销毁对象、归还范围或允许下一次借出。引用计数、generation 与 FrameSerial 各有职责，均不能独自代替 GPU 完成和 barrier。
+
+| 寿命 | 当前 owner 与示例 | 允许回收的条件 |
+|---|---|---|
+| 持久版本 | StaticMesh/TextureAsset、MaterialGpuState、SceneGpuData 的每 flight 镜像 | 逻辑 owner 不再使用，且所有已经接纳的录制和 GPU 使用结束 |
+| 帧内分配 | GpuFrameResources 的 staging、常量/storage 切片、临时参数集与 texture lease | 整个 flight 的 final fence 完成、旧 command epoch 结束，旧参数/视图借用已清理 |
+| 跨帧保留的结果版本 | 调用方的 history/readback 过程 owner | 最后 producer/reader 的 GPU 使用结束，并且 CPU 消费或历史保留权结束 |
+
+池保留物理存储不等于上一逻辑版本仍有效；新 texture lease 的内容有效性必须重新建立。
+持久资产进入退休阶段仍是原来的资源版本，不因等待 fence 就变成另一种 owner。
+当前跨帧过程使用显式 owner 与已有完成机制，没有通用 history/readback 管理服务。
+
+提交前先确认所有命令已接纳或丢弃、acquire token 有合法终结路径、owner 已登记、主机写入已提交，
+再建立有序提交和 final signal。完成时先核验真实 signal 与身份、Reset 覆盖的全部 command epoch，
+处理 profiler 结果和帧资源，再发布完成，由 GT 释放语义 owner。取消通知不改变这两个安全边界。
+RHI 独立调用方须自行提供同等证明；一个宿主的 serial/fence 不覆盖另一个宿主的使用。
+
 ## 对象参数上传与必要工作
 
 每个 SceneGpuData 仍拥有 F 份独立的物理 buffer。Scene Apply 的最终变化登记到各 flight 的去重 Pending，删除按完整 ShapeId 移除；首次初始化和扩容枚举存活行，暖机后只访问 Pending。对象与各实例参数流独立接纳，不要求整 Scene 的上传事务。
@@ -427,6 +447,7 @@ Application 先创建 FrameTimeline，再按可选配置创建其余对象、连
 | `OnInit` | 所选系统就绪后一次。加载资产、Spawn Actor、建相机 |
 | `OnRender` | GPU runner 开始录制后由 Render 调用；默认空，可覆盖以记录 RHI 命令 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
+| `OnCollectRenderViews` | S1 完成 World 收集后、Seal 前；只提交按值视图，不修改 World 或泵 scheduler/asset |
 | `OnRenderFrameComplete` | game thread 消费 `FlightCompletion`，包括 GPU 跳过帧、无 GPU 的完成（`OutputsExecuted` 为 false）和 shutdown；允许释放 GT 资产引用 |
 | `OnShutdown` | 关停，游戏侧清理 |
 

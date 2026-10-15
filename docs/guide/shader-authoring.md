@@ -16,7 +16,8 @@ header；include 必须使用 root-relative、尖括号路径：
 
 不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统绝对路径作为 `SourceName`。
 `SourceName` 相对 caller 的 source root，它与 include root 可以不同；以 `shaderlib/` 为 source
-root 时，逻辑路径类似 `pipelines/forward/forward.hlsl`，会进入诊断和 compile input identity。
+root 时使用相对此根的路径；例如以 `examples/scene_sync/` 为 source root 时，`scene_sync_instanced.hlsl`
+是有效逻辑名称，会进入诊断和 compile input identity。
 测试与示例专用 source 的归属与路径配置见 [Shaderlib](../architecture/shaderlib.md)。
 
 ## Entry 与 keyword
@@ -155,7 +156,7 @@ VisibleBase 映射到反射中的 uint push 字段，shader 用 VisibleBase+SV_I
 按 slot 读取的矩阵 stride 为 64；自定义参数 stride/字段须与 InstanceParameterLayout 完全一致，
 像素阶段通过 nointerpolation varying 接收 slot。DirectObject 与自动合批许可独立；详见[实例绘制](instancing.md)。
 数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
-旧 Forward ABI 与专用 POD 生成器已移除，历史设计见[临时快照](../temp/render-framework-design.md)。
+旧 Forward ABI 与专用 POD 生成器已移除，历史设计见[历史快照](../history/2026-09-14-render-framework-design.md)。
 
 cbuffer 里避开非方阵、`bool` 和元素大小非 16 字节整数倍的 struct 数组：这三类构造两个 lane 的
 type payload 不一致，编译会 fail closed。原因见
@@ -174,7 +175,7 @@ entry 数量、active binding、stage visibility 和 target-specific binding fac
 ## 验收命令
 
 ```powershell
-cmake --build build_debug --parallel 24
+cmake --build build_debug --config Debug --parallel 24
 ctest --test-dir build_debug -C Debug -R "RadRayShaderLibPass" --output-on-failure
 ```
 

@@ -67,8 +67,8 @@ CPU 字节及 schema 在 Prepare 内复制，返回后可释放输入数组。�
 
 ## 压测与验收
 
-`bench_material_scene` 真正创建 GPU mesh/material、同步 World/Scene、准备和录制 draw、提交两 flight。
+`bench_material_scene` 真正创建 GPU mesh/material、同步 World/Scene、准备和录制 draw，覆盖 F=1/2/3/4；原有 F2 名称保持兼容。
 自动路径包含 N=1k/10k/100k、M=1/100/独立材质、V=1/3 和 dirty=0/1/10/100%；
 Direct/Manual/ManualTint 提供单 draw 对照、集合变换与参数流更新，Churn/UniqueAssetChurn 覆盖三种生命周期时序。
-运行命令见[构建与测试](build-test.md#真实材质和实例化压测)，本轮前后实测见[验收报告](../temp/material-instancing-performance-2026-10-13.md)。
+运行命令见[性能测量](performance.md#真实材质和实例化压测)，2026-10-13 的前后实测见[历史验收报告](../history/2026-10-13-material-instancing-performance.md)。
 更完整的所有权、排序、容量和缓存契约见[Runtime 架构](../architecture/render-framework.md#pipeline材质与绘制)。

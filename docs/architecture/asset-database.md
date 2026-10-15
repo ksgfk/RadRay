@@ -125,20 +125,15 @@ importer 时记 error 并返回无效引用，不 abort。原有 `Load(AssetLoad
 
 ## 装配与关停
 
-`Application` 在 `GpuSystem` 与 `AssetManager` 已创建后构造默认 importer 并调用 `Open`。
+`Application` 在 `AssetManager` 已创建且配置了非空资产根时构造默认 importer 并调用 `Open`；不要求启用 Gpu。
 Application 直接调用 `AssetManager::SetAssetSource(_assetDatabase.get())`，将已打开的数据库作为
 `IAssetSource` 连接；未启用或打开失败时传入空值。依赖关系与生命周期见
 [Application 直接装配](render-framework.md#application-直接装配)。
 打开失败只记 error，应用仍保留显式 `AssetLoadRequest` 路径。
 
-关停顺序固定为：
-
-```text
-World → SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
-```
-
 数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束。
-GPU 资产的延迟销毁仍要求 GpuSystem 最后销毁。manifest 与扩展名登记不代表当前 importer 已实现 GPU 加载。
+AssetManager 必须先于 RenderSystem 销毁，释放材质持有的参数集和 layout 借用；GPU owner 必须先于 device 释放。
+完整顺序统一见[帧与 GPU](frame-and-gpu.md#关停顺序)。manifest 与扩展名登记不代表当前 importer 已实现 GPU 加载。
 
 ## 测试
 

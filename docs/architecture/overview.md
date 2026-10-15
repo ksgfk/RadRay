@@ -14,13 +14,15 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
 | `modules/runtime/{include/radray/runtime,src}/` | 底层 GPU/上传、shader/PSO 服务、通用资产及 Application 装配 |
 | `modules/runtime/{include/radray/runtime,src}/render_framework/` | 可选的场景管理与交付、材质、视图、pipeline 与绘制 |
+| `modules/runtime/{include/radray/runtime,src}/game_framework/`、`components/` | World/Actor、紧凑变换存储与业务组件 |
 | `shaderlib/` | HLSL 数学、BSDF、光照、阴影共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复、文档检查、编译数据库脚本和 raw shader compile CLI |
 | `benchmarks/` | 性能测量程序 |
+| `examples/` | scene_sync 可视样例与 framework_stress 持续采样入口 |
 | `cmake/` | 构建辅助函数 |
 | `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |
 | `docs/guide/` | 使用、开发、验证和文档维护方法 |
-| `docs/temp/` | 标明状态与基线的临时设计快照、草案和交接 |
+| `docs/history/` | 经用户授权保留的开发历史；日期前缀命名，注明状态与基线 |
 | `.agents/skills/` | 随仓库维护的 RadRay doc 与 grill 技能 |
 | `assets/` | 被忽略的本地资产根；样例和测试资产通过仓库外渠道分发 |
 | `third_party/`、`SDKs/` | 恢复脚本填充的只读依赖树 |
@@ -49,6 +51,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 主题 | 文档 |
 |---|---|
 | 配置、恢复依赖、构建、测试、编译数据库 | [构建与测试](../guide/build-test.md) |
+| 选择基准、Tracy、配对测量、CPU/GPU 与内存口径 | [性能测量](../guide/performance.md) |
 | 命名、接口、异常、测试和注释约定 | [C++ 约定](../guide/cpp-conventions.md) |
 | IDE、clangd、调试器 | [开发环境](../guide/dev-env.md) |
 | 写 HLSL pass、keyword、binding 与 target gate | [Shader authoring](../guide/shader-authoring.md) |
@@ -56,7 +59,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 容器、协程、日志、RTTI、数学和 IO | [Core 基础设施](core-facilities.md) |
 | HLSL 共享库导航 | [Shaderlib](shaderlib.md) |
 | Source contract、wire、target layout、JIT 与发布边界 | [Shader pipeline](shader-pipeline.md) |
-| 资产引用计数、加载与延迟销毁 | [资产系统](asset-system.md) |
+| 资产引用计数、加载与 GPU 使用者保活 | [资产系统](asset-system.md) |
 | JSON 身份库、importer/settings 与加载桥接 | [AssetDatabase](asset-database.md) |
 | 帧序、flight、上传与关停 | [帧与 GPU](frame-and-gpu.md) |
 | ImGui 移除状态及旧设计 | [Runtime ImGui](runtime-imgui.md) |
@@ -64,8 +67,30 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | Application、多 World、场景同步、材质、Pipeline 与 shader 服务 | [Runtime 宿主](render-framework.md) |
 | 自动合批、稳定实例集合、native frame 数据与压测 | [实例绘制](../guide/instancing.md) |
 | Renderer foundation 移除状态 | [Renderer foundation](renderer-foundation.md) |
-| 重构前设计、依赖边界与历史附件 | [临时设计快照](../temp/render-framework-design.md) |
-| World 变换存储原型、性能对照与迁移代价 | [2026-09-24 实验快照](../temp/world-transform-store-benchmark-2026-09-24.md) |
+
+## 历史资料
+
+记录与附件统一保存在 `docs/history/`。经用户明确要求或同意后新增；AI 可询问是否留档，日常改动不自动写入。[归档规则](../guide/documentation.md#开发历史)说明命名与日期选择。
+
+以下文件保留删除前设计、实验结果、原始数据或当时的验收覆盖。可复用的当前契约已归入上面的子系统页面，
+测量方法归入性能指南；历史记录中的“当前”、测试名、工作树和命令均限定在其基线，不代表最新实现或本次验证。
+CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 不保证随 checkout 存在。
+
+| 历史资料 | 保留价值与当前归属 |
+|---|---|
+| [旧渲染框架设计](../history/2026-09-14-render-framework-design.md) | a68237f 删除前的分层、数据流与重构范围；当前能力见 Runtime 宿主 |
+| [旧渲染框架附件](../history/2026-09-14-render-framework-legacy.md) | 原 Scene/proxy、Forward、服务和材质契约；API 已移除 |
+| [旧 Renderer foundation 附件](../history/2026-09-14-renderer-foundation-legacy.md) | 原 RenderGraph、pool/history、draw list；不能作为 RasterGraph 用法 |
+| [旧 ImGui 附件](../history/2026-09-14-runtime-imgui-legacy.md) | 已移除 UI 模块的集成、输入和字体设计 |
+| [生命周期 v2 验收](../history/2026-09-20-lifecycle-v2-validation.md) | 2026-09-20 覆盖边界与 CSV；当前 owner/完成协议见帧与 GPU、资产系统 |
+| [Scene 变换实验](../history/2026-09-23-scene-transform-benchmark.md) | 世界矩阵转到 RT 的收益和代价；当前存储算法见 Runtime 宿主 |
+| [直接导入实验与回退](../history/2026-09-23-scene-direct-import-benchmark.md) | 未采纳的 freeze/ack、全量求值方案及配对数据 |
+| [World 紧凑变换存储](../history/2026-09-24-world-transform-store-benchmark.md) | 已采纳布局的性能与接口迁移记录，含 JSON 原始结果 |
+| [100k 场景诊断](../history/2026-10-06-scene-sync-100k-performance.md) | 自动实例化之前的 copy/draw 瓶颈；后续实现不能沿用旧帧率 |
+| [第一阶段验收](../history/2026-10-07-phase1-rhi-command-allocator-validation.md) | allocator/pipeline 接入时的覆盖与 CSV，命令用法见性能测量 |
+| [材质和实例化验收](../history/2026-10-13-material-instancing-performance.md) | 双后端 CPU/GPU、churn 和内存对照，含回退项及图表 |
+| [GPU 生命周期输入计划](../history/2026-10-13-gpu-lifecycle-plan-vulkan12-per-flight.md) | 7a807 基线的迁移目标与验收矩阵，已执行且后续 API 有变化 |
+| [GPU 生命周期实施验收](../history/2026-10-13-gpu-lifecycle-implementation.md) | 2026-10-13–14 的实际覆盖、限制及性能证据；不替代当前 RHI |
 
 ## 关键代码入口
 

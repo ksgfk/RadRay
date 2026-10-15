@@ -13,7 +13,7 @@ compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
 测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
 
-旧产品 shader 的归属和设计见[临时快照](../temp/render-framework-design.md)。
+旧产品 shader 的归属和设计见[历史快照](../history/2026-09-14-render-framework-design.md)。
 
 ## 分层
 
@@ -36,7 +36,7 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `bsdf/fresnel.hlsli` | 介电 Fresnel 与折射几何辅助量 |
 | `bsdf/microfacet.hlsli` | GGX 的 D/G 项和 roughness 转换 |
 | `bsdf/principled.hlsli` | Principled BRDF 反射半球求值 |
-| `lighting/lights.hlsli` | CPU/GPU 共享的光源布局与辐照度 |
+| `lighting/lights.hlsli` | shader 光源布局与辐照度；不等同于 runtime CPU LightSceneData 的内存布局 |
 | `shadow/filtering.hlsli` | 阴影 UV、bias、PCF 原语 |
 | `shadow/cascade.hlsli` | 方向光级联阴影数据与求值 |
 | `shadow/cube.hlsli` | 点光源 cube shadow 数据与面序 |
@@ -52,8 +52,8 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 ```
 
 共享结构的字段顺序、对齐和矩阵约定是 shader ABI；compiler 为每个 active CBuffer declaration
-发布指向当前 target-lane payload root 的 owner。按名写 blob 的 runtime 路径从该 root 按成员名逐字段
-打包，不按 type 发射顺序猜测。`shadow/filtering.hlsli` 中的序列化枚举值和 `lights.hlsli` 中的上限
+发布指向当前 target-lane payload root 的 owner。调用方根据这份布局准备实际 GPU 字节；runtime 不再提供通用按名参数存储/setter，
+也不能把 CPU 光源表直接 memcpy 成 shader 布局。`shadow/filtering.hlsli` 中的序列化枚举值和 `lights.hlsli` 中的上限
 属于 ABI，不能因为重命名或排版而改变。
 
 `core/platform.hlsli` 只提供 DXIL/SPIR-V target gate：`VK_LOCATION`、`VK_BINDING` 和

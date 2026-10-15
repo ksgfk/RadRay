@@ -1,4 +1,4 @@
-> - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
+> - 适用: 资产生命周期、引用计数、加载去重与 GPU 使用者保活
 > - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 [frame-and-gpu](frame-and-gpu.md)，开发时身份登记与 AssetDatabase 见 [asset-database](asset-database.md)
 > - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`
 
@@ -93,6 +93,7 @@ TextureAsset::OnUnload 直接按子 views → 默认 SRV → shared texture 的�
 | `ImageAsset` | CPU 像素数据 | 无 |
 | `TextureAsset` | device-local texture、默认 SRV 和子 view 缓存 | `TextureView*` |
 | `StaticMesh` | CPU mesh，以及共享的 `StaticMeshRenderData`（GPU mesh、sections、局部 bounds） | `const StaticMeshRenderData&`、`const GpuMesh&` |
+| `Material` | 不可变 pass 定义、独立默认参数与纹理依赖、`MaterialGpuState` | RT 借用已封存的材质数据；具体契约见 [Pipeline、材质与绘制](render-framework.md#pipeline材质与绘制) |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
 StaticMeshComponent 保存 mesh ref，SceneManager 中每个 SceneWriter 在 GT 为场景活跃资产持续持有类型无关的引用，

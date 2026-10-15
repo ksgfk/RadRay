@@ -1,8 +1,12 @@
 > - 适用: 诊断 `examples/scene_sync` 在 `--instances=100000` 时的稳态性能瓶颈与优化顺序
-> - 权威: 2026-10-06 本机实测快照；诊断已完成，优化未实施，不作为跨机器性能契约
+> - 权威: 2026-10-06 本机历史诊断；描述优化前实现，不作为当前性能或跨机器契约
 > - 锚点: `examples/scene_sync/example_scene_sync.cpp`, `examples/scene_sync/scene_draw.cpp`, `modules/runtime/src/render_framework/scene_gpu.cpp`, `modules/runtime/src/gpu_resource.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `benchmarks/bench_scene_gpu/bench_scene_gpu.cpp`
 
 # scene_sync：100,000 对象性能诊断
+
+状态：诊断当时只保留插桩；后续已实现公共 pipeline、VisibleSlots 自动实例化与材质复用。
+当前用法见[实例绘制](../guide/instancing.md)，后续实测见[材质和实例化验收](2026-10-13-material-instancing-performance.md)。
+以下逐对象 draw 数、上传范围与帧率只属于所列基线；稀疏 copy 的当前成本需按[性能测量](../guide/performance.md#scene-gpu-上传)重新采样。
 
 ## 结论
 

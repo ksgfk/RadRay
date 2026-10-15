@@ -10,6 +10,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 |---|---|
 | 定位子系统、理解当前设计 | [架构地图](docs/architecture/overview.md)，再读所属子系统文档 |
 | 配置、构建、测试、恢复依赖 | [构建与测试](docs/guide/build-test.md) |
+| 性能采样、运行基准、比较改动 | [性能测量](docs/guide/performance.md) |
 | 编写 C++ | [C++ 约定](docs/guide/cpp-conventions.md) |
 | 编写 HLSL、修改 binding | [Shader authoring](docs/guide/shader-authoring.md)、[Shader pipeline](docs/architecture/shader-pipeline.md) |
 | 整理或同步文档 | 项目技能 [radray-doc](.agents/skills/radray-doc/SKILL.md) |
@@ -17,7 +18,8 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 
 长期知识只放在本文件、`docs/architecture/` 与 `docs/guide/`；README 是项目介绍与入口。
 术语、约束和必要的设计理由就地维护在所属文档，历史由 Git 保存。
-行为变化时同步更新对应文档；用户要求保存的临时设计快照、草案和交接放在 `docs/temp/`，注明状态与基线，不作为长期契约；未要求保存的会话笔记不自动落入仓库。
+行为变化时同步更新对应长期文档。开发历史放在 `docs/history/`，仅在用户明确要求或同意保存时写入；未授权则默认不写。AI 可以说明拟记录的内容与保留价值，询问是否入库，但不必每次改动都询问；已有授权不重复确认。
+历史文件使用 `YYYY-MM-DD-主题.扩展名`，注明状态与基线，不作为当前契约；具体归档规则见[文档维护](docs/guide/documentation.md#开发历史)。
 代码注释写 API 契约与局部约束，设计说明放文档；代码至多保留一处指向所属文档的文件头入口。
 
 ## 硬规则

@@ -2,13 +2,14 @@
 > - 权威: 删除前的历史设计快照；不代表新框架方案或当前可调用 API
 > - 锚点: `AGENTS.md`, `modules/runtime/`, `modules/render/`, `modules/shader/`
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`（原 main）
+> - 记录日期: 2026-09-14，依据 Git 首次保存提交 `b543db17`；不是基线提交日期
 
 # 旧渲染框架设计快照
 
 本快照在删除代码前保存。重构分支为 `refactor/render-framework-reset`。
 本文根据基线实现及所属架构文档整理；细节保留在
-[渲染框架原文](render-framework-legacy.md)、[Renderer foundation 原文](renderer-foundation-legacy.md)
-和 [ImGui 原文](runtime-imgui-legacy.md)。附件中的现状、代码路径和能力均只对应基线。
+[渲染框架原文](2026-09-14-render-framework-legacy.md)、[Renderer foundation 原文](2026-09-14-renderer-foundation-legacy.md)
+和 [ImGui 原文](2026-09-14-runtime-imgui-legacy.md)。附件中的现状、代码路径和能力均只对应基线。
 
 ## 本次重构边界
 

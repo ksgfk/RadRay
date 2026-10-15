@@ -2,6 +2,7 @@
 > - 权威: 历史快照附件，不描述重构分支当前实现
 > - 锚点: `AGENTS.md`
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
+> - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
 以下内容保存自基线的 `docs/architecture/render-framework.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
@@ -54,7 +55,7 @@ flight 复用互斥，通过 frame serial 校验收据，沿用现有提交和�
 `RenderPrepareContext` 提供 output 值目录、workload builder，以及本 flight 冻结的 `RenderGraphRuntimeOptions`；pipeline 向当前 flight 的 frame plan
 写入 view families。`RenderPipelineContext` 提供 resolved families、graph/output/history 操作，
 不公开 AppFrameContext、窗口或 command buffer。`Application::SetRenderGraphRuntimeOptions` 只影响尚未冻结的后续帧。具体接口与验证见
-[Renderer foundation](renderer-foundation-legacy.md)。
+[Renderer foundation](2026-09-14-renderer-foundation-legacy.md)。
 
 `RenderSystem` 只取得 plan 请求的目标，graph 按真实初始状态导入；成功写入标记由 executor 产生。
 host 对未写 output clear 后转换到各自 required final state。没有 pipeline 时默认请求 active
@@ -80,7 +81,7 @@ Application 不提供独立的 view 内容录制钩子。
 否则 `Display.Clear`；随后 Scene 组件、overlays 按注册序串接，最后一次 blit 编码到输出（非 sRGB UNORM
 显式 sRGB 编码，sRGB attachment 由硬件编码）并 Export。该重载返回每个输出的导出值，包装它的自定义
 composer 可以在其后追加 readback 等操作。渲染框架不知道 overlay 的内容；ImGui 只是一个 overlay
-（见 [Runtime ImGui](runtime-imgui-legacy.md)）。`RenderSystemOverlay` 测试用回读验证 UNORM 与 sRGB 输出的编码一致。
+（见 [Runtime ImGui](2026-09-14-runtime-imgui-legacy.md)）。`RenderSystemOverlay` 测试用回读验证 UNORM 与 sRGB 输出的编码一致。
 默认装配 shell 的 `FrameGraphTemplateCache` 在 graph runtime 内跨 flight 共享，最多保留四个结构变体。
 输出 ID/描述符、最终状态、PreserveContents、pipeline 是否存在及 overlay 数量决定 shell 结构；
 实际组件对象和注册顺序在当前帧绑定，组件仍各调用一次 `BuildGraph`。clear、canvas 与 blit 的稳定
@@ -93,7 +94,7 @@ composer 可以在其后追加 readback 等操作。渲染框架不知道 overla
 anchor 和默认固定功能状态。`Material::Create(technique)` 借用 technique，后者及其 programs 必须活过
 Material 的 authoring/snapshot 调用；program 还必须活过帧执行。primary pass 定义 canonical 数值布局
 与资源声明，Material 保存一份数值/纹理/sampler 值及逐 pass 的状态覆盖。布局兼容、资源子集与
-metadata 的校验限制见 [Renderer foundation](renderer-foundation-legacy.md#材质-technique)。
+metadata 的校验限制见 [Renderer foundation](2026-09-14-renderer-foundation-legacy.md#材质-technique)。
 
 Material setter 接受 primary cbuffer 内的相对字段路径（如 `BaseColor`）或带 primary declaration 的
 完整路径（如 `ForwardMaterial.BaseColor`），拒绝其他 cbuffer。Texture/Sampler 使用声明的 exact name。
@@ -125,7 +126,7 @@ key 记成显式失败记录以避免逐帧重试，同时不会污染其他 key
 `GetOrCreateShaderProgram(bytes, expectedIdentity, recipe)` 不依赖 compiler，按当前设备 target
 验证、复制 bytes，并复用现有 decoder、layout 与 ShaderProgram。该缓存按 bytes 和 resolved
 layout 区分，GPU idle 后随 RenderSystem 销毁。内置 UI shader 使用这个入口，具体装配见
-[Runtime ImGui](runtime-imgui-legacy.md)。
+[Runtime ImGui](2026-09-14-runtime-imgui-legacy.md)。
 
 ## 场景表示
 
@@ -183,7 +184,7 @@ primitive 保存 generation、
 和 material 索引。同一 snapshot 附带稳定 `DrawRecord` 目录，view 只筛选紧凑可见子集。材质以唯一身份去重，
 不承诺按首次遇到顺序排列；batch 中的 material 索引是当前 snapshot 的映射。program generation 是稳定身份，
 ProgramFrameId 仅作帧内映射。光源保存参数和球形界限。发布、失败重试与资产保活的契约见
-[Renderer foundation](renderer-foundation-legacy.md#场景快照与剔除)。
+[Renderer foundation](2026-09-14-renderer-foundation-legacy.md#场景快照与剔除)。
 `StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
 无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。
 
@@ -205,7 +206,7 @@ processor 不保留另一套 command 模板或拥有原生组的缓存；所有�
 `ResetView` 使这些句柄及当前 view 数值身份失效，随后重新填充并驻留 view bytes。
 带时域的 object 身份包含 view、历史提供者、已提交 serial 与失效 revision，不能因对象 clean 而跳过必要的历史更新。
 不跨帧复用 Rg handles 或 arena 切片；完整索引、共享与失效契约见
-[Renderer foundation](renderer-foundation-legacy.md#renderer-lists-与帧内绘制资源)。
+[Renderer foundation](2026-09-14-renderer-foundation-legacy.md#renderer-lists-与帧内绘制资源)。
 render thread 不访问 Scene、proxy、CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 
 ### cbuffer 冻结与 gather
@@ -247,7 +248,7 @@ CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其�
 
 每个 flight 的 `FrameDrawResources` 持有 arena 与不可变 sets；renderer lists 必须先清空，才能清 sets
 和重置 arena。pass 的 prepare 回调解析 PSO 与参数 set，execute 回调只绑定并 draw。snapshot/culling/list/执行统计和
-精确的资源寿命契约见 [Renderer foundation](renderer-foundation-legacy.md#场景快照与剔除)。
+精确的资源寿命契约见 [Renderer foundation](2026-09-14-renderer-foundation-legacy.md#场景快照与剔除)。
 
 `ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入 view/list、可选 work、
 attachment handles 与 Load/Clear 策略，模块只向同一张 graph 加 pass，不创建或执行另一张图。
@@ -266,7 +267,7 @@ AO、TAA 或 4x MSAA、Bloom 与多 view 输出。HDR 多相机时阴影图集�
 观察相机采样该图集并跳过 TAA/AO/Bloom/预通道。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。
 产品 pass 的 graph 资源经通用 `RendererListPassSets`（`renderer_list_pass_sets.{h,cpp}`）在该 pass 的 prepare
 阶段建成 per-program 参数 set，被该 program 的所有 draw 共用，再进入既有录制循环。目标、时域原子提交、
-配置互斥和当前范围统一见 [Renderer foundation](renderer-foundation-legacy.md#forward-范围)。
+配置互斥和当前范围统一见 [Renderer foundation](2026-09-14-renderer-foundation-legacy.md#forward-范围)。
 
 ## Application 与 runner
 

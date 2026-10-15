@@ -4,7 +4,13 @@
 
 # GPU 生命周期计划实施与验收
 
-状态：P0–P9 全部实现并完成本机验收。输入是 [原始完整计划](gpu-lifecycle-plan-vulkan12-per-flight.md) 及同轮补充说明 a.md。实施基线为 `7a807f037c5e15045bf2fc6c702d8819842b9ed5`，最终代码与文档仍在工作树，未提交。已知 descriptor 容量边界及未具备的 Vulkan 1.2-only 硬件分别如实列出，不计作已执行场景。
+状态：2026-10-13–14 的历史实施与验收记录，当时报告 P0–P9 完成；不是本次文档整理重新执行的验证。
+输入是 [原始完整计划](2026-10-13-gpu-lifecycle-plan-vulkan12-per-flight.md) 及当时仓库外的补充说明 `a.md`，后者未随仓库保存。
+实施基线为 `7a807f037c5e15045bf2fc6c702d8819842b9ed5`，测量对象是当时未提交的工作树。
+已知 descriptor 容量边界及未具备的 Vulkan 1.2-only 硬件分别列出，不计作已执行场景。
+
+后续实现已移除 Prepare token，当前直接 `BeginRenderPass(desc)`；encoder 与 swapchain frame 的终结也已改为按值消费。
+下文阶段表、测试名及原生复用记录保持采样时语义，调用当前 API 以长期文档为准。`build*/` 下原始证据未入库，不保证本机仍保留。
 
 当前合同见 [帧与 GPU](../architecture/frame-and-gpu.md)、[RHI 与后端](../architecture/render-rhi.md)、[渲染框架](../architecture/render-framework.md)、[资产系统](../architecture/asset-system.md)，运行入口见 [构建与测试](../guide/build-test.md#gpu-生命周期回归)。
 

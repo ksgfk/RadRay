@@ -133,13 +133,13 @@ D3D12 检查事件注册、系统等待结果，并在唤醒后重新核验完�
 这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
 D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
 对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
-返回 `RetryLater`。已经 acquire 的帧在 submit 时若窗口已不可呈现，则只提交上传命令；Present
+返回 `RetryLater`。runtime 已 acquire 的帧在 submit 时若窗口已不可呈现，只跳过该目标 batch，必要更新和独立离屏工作继续提交；Present
 跳过 DXGI Present 并消费 token，返回 RetryLater，不等待 present queue；提交完成仍须实际 fence
 证明。正常 Present 使用 [DXGI_PRESENT_DO_NOT_WAIT](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/dxgi-present)，
 DXGI_ERROR_WAS_STILL_DRAWING 返回 RetryLater，保留未排入呈现的 readiness；不会当成 device loss。
 同一帧有多个 D3D12 flip HWND 时，每个 HWND 使用独立
 present command buffer：对该窗 `Execute` 后立刻 `Present`，不在 Present 前等待 graphics queue。
-单窗口与 Vulkan 仍一次 Submit 再 Present。
+Vulkan 先提交全部应用批次，再逐目标 Present；批次合并与 final signal 见[帧与 GPU](frame-and-gpu.md#命令分配与有序批次)。
 runtime 窗口通过 WindowManager 的协程接口修改 surface，由 runner 在维护阶段统一排空旧 CPU
 工作及主队列（含排在帧 fence 之后的 Present）。NativeWindow 的修改前通知只检查阶段，不执行等待。
 不得用原始 `ShowWindow` 等 API 绕过此约束，也不要在 Win32 钩子或 `WndProc` 里等待渲染线程。
@@ -164,20 +164,22 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 创建与 resize 使用同一映射。编码发生在 RTV 写入，符合
 [DXGI 色彩空间契约](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/converting-data-color-space)。
 
-## 所有权：一个 shared，其余全 unique
+## 所有权：设备、独占对象与借用
 
 | 对象 | 持有方式 |
 |---|---|
 | `Device` | `shared_ptr`，且 `enable_shared_from_this` |
-| 其他一切 | `Nullable<unique_ptr<T>>`，由创建者独占 |
+| buffer、texture、view、allocator、command、shader、layout、parameter set、PSO 等 | 创建入口返回 `Nullable<unique_ptr<T>>`，调用方持有 owner |
+| queue、缓存 sampler、swapchain image 与同步对象 | 从所属 device/cache/swapchain 借用，不转移 owner |
+| graphics/compute encoder | Begin 返回独占 owner，按值交给 End 消费 |
 
-`Device::Create` 是唯一的入口，全部 `CreateXxx` 都是 `Device` 上的纯虚工厂。返回
-`Nullable<unique_ptr<T>>` 表达"可能没有值"，`Get()` 取裸指针，`Release()` 转移所有权
-（缓存类就靠它把对象搬进自己的 map）。
+`Device::Create` 创建 RHI device；普通资源通过其纯虚工厂创建，layout 由 artifact 的 target-typed
+入口创建，encoder 由 command 开始。`Nullable<unique_ptr<T>>` 表达可能创建失败；`Get()` 借用，`Release()` 转移 owner。
 
 `Device` 之所以是 `shared_ptr`：后端实现对象需要回指 device 拿分配器、描述符堆和函数表，
-而 device 的生命周期由上层（`GpuSystem`）决定。其余对象一律独占，不存在共享所有权——
-需要共享的是上层的事；当前 runtime 不再持有 layout cache。
+而 device 的生命周期由上层（例如 `GpuSystem`）管理。RHI 不为每个资源公开共享工厂；上层可以显式共享
+一个独占创建的 owner（例如 TextureAsset 的共享 immutable texture），仍须满足全部使用者的完成条件。
+native layout 复用归设备缓存，runtime 的 program cache 持有独立的 RHI layout 包装。
 
 **两段式析构**：每个实现类都有幂等的 `Destroy()` 和内部的 `DestroyImpl()`，析构函数兜底调
 后者。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
@@ -185,7 +187,7 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 `RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `rhi.h` 中直接返回类型标签外，
 所有实例操作都是纯虚接口；保留构造、虚析构、静态工厂和无状态辅助函数。
 `RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
-（`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），目前只被日志的 `format_as` 消费。
+（`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），用于日志和 RHI 校验注册表的对象类型检查。
 
 ## 命令录制存储
 
@@ -529,7 +531,7 @@ Vulkan 传统 render-pass 路径不需要对应 begin flag，写阶段是否合�
 
 `ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>`，
 调用方给出 before/after 状态。render 层**不做** per-resource 状态跟踪，初始状态在创建时固化
-（buffer 按 memory type 推，texture 一律 `COMMON`）。Buffer/Texture barrier 均不支持跨队列
+（buffer 按 memory type 映射；D3D12 texture 使用 COMMON，Vulkan image 使用 UNDEFINED layout）。Buffer/Texture barrier 均不支持跨队列
 ownership transfer；Vulkan 的源/目标 queue family 均为 `VK_QUEUE_FAMILY_IGNORED`。
 
 后端各自把状态对翻译成原生形式：D3D12 把 UAV→UAV 变成 UAV barrier，把无变化和
@@ -557,7 +559,7 @@ barrier 仍作用于整资源。
 Buffer barrier 携带 `BufferRange`，Vulkan 映射 offset/size，D3D12 legacy barrier 保守转换整 buffer。
 Texture/Buffer barrier 都携带 BeforeStages/AfterStages，UNKNOWN 保留保守映射；Vulkan 只收窄 shader
 stage，保留 transfer、host、attachment 阶段。ShaderRead 对应普通 shader resource，不附带未公开的
-input-attachment access。RG 的物理状态策略与逻辑区间有效性见 [Renderer foundation](renderer-foundation.md)。
+input-attachment access。当前 RasterGraph 的显式状态组织见 [Runtime 宿主](render-framework.md#对象-gpu-参数与当帧视图)；旧 RenderGraph 已移除。
 
 `PushDebugGroup` / `PopDebugGroup` 必须平衡，分别映射 D3D12 command-list Unicode event 与
 Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
@@ -600,11 +602,11 @@ D3D12 无法报告专用物理引擎，Dedicated 为 false。buffer size 报告 
 MSAA quality；Vulkan 查询相同 image flags/usage 的 image format properties。`Resource` 只映射
 sampled usage，RHI 没有 input attachment 使用接口。
 
-`ValidateTextureDescriptor` 共享 CPU 规则与 backend support facts；两个 `CreateTexture` 都先
-开启 RHI 校验时先校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
+`ValidateTextureDescriptor` 共享 CPU 规则与 backend support facts；开启 RHI 校验时，`CreateTexture`
+先校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
 非 Device texture memory 或不支持的 allocation hint 返回包含字段的 reason。
 validation 不替换 format，也不降低 sample count。资源不足/native create 失败仍返回空。
-Stage A 的 graph view 限制同 format；RHI 原有的格式 view 能力没有新增隐式 reinterpret 策略。
+上层 view 必须明确选择兼容格式；RHI 不提供自动 reinterpret 策略。
 
 ## 同步
 
@@ -621,7 +623,7 @@ Vulkan 的 acquire wait 使用 `ALL_COMMANDS`。RHI 不限制 acquired image 的
 DXGI 的 frame-latency waitable object 达到同一效果。
 
 `Fence` 在 D3D12 是 `ID3D12Fence` + Win32 event（`_fenceValue` 表示"下一个可用值"）；
-在 Vulkan 是 timeline semaphore，**不支持 `timelineSemaphore` 直接 `RADRAY_ABORT`**。
+在 Vulkan 是 timeline semaphore；设备创建时显式检查 `timelineSemaphore`，不支持则创建失败。
 
 `SwapChainVulkan` 的两个信号量按 Khronos 推荐拆分，**索引维度刻意不同**：
 
@@ -641,7 +643,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 多交换链与同队列 timeline 串联的旧校验层问题、已恢复用例和校验层版本门槛见
 [构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
 
-`SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
+`SwapChainFrame` 是 move-only 句柄，带 owner + token，由 protected `MakeFrame` 创建。
 校验包装用 `ValidateFrame` 检查 owner/token；Present / DiscardAcquiredFrame 按值接收，移动后调用方 frame 失效。
 外来、已消费或失效的 frame 在开启校验时立即 ABORT；关闭校验时由调用方保证契约。
 
@@ -669,13 +671,13 @@ Vulkan 的 NDC Y 轴朝下，要得到与 D3D12 一致的画面，处理它是**
 front-face winding 的影响不同。相机侧因此保持后端无关（见
 [render-framework](render-framework.md)）。
 
-当 Vulkan 物理设备 API 版本低于 1.1 时，负 `Height` 依赖
-`VK_KHR_maintenance1`；runtime 会在现有 device-extension 集合中只补这个扩展。API 版本为
-1.1 或更高时使用核心能力，不再请求已提升进核心的扩展，也不加入 AMD fallback。runtime 不
-新增一套 capability 检测或用户提示；扩展缺失时沿用现有 device-extension 校验和设备创建
-结果。
+当前 Vulkan 最低版本为 1.2，负 `Height` 使用核心能力，不提供 Vulkan 1.0 的扩展回退路径。
 
 ## 直接附件与 Vulkan 原生缓存
+
+Instance、物理设备与 VMA 按 Vulkan 1.2 接入，低于该版本或缺少必需 timeline semaphore feature 时拒绝创建。
+传统单 subpass VkRenderPass/VkFramebuffer 是主路径；不启用 dynamic rendering、imageless framebuffer、
+separate depth/stencil layouts 或 synchronization2。SPIR-V 编译目标同样固定为 Vulkan1_2。
 
 公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
@@ -701,11 +703,11 @@ view ID 在该 device 内单调且不复用。view 析构按局部 reverse index
 
 ## 两个后端实现文件的分区
 
-`vulkan_impl.cpp`（5.6k 行）与 `d3d12_impl.cpp`（4.6k 行）都在文件顶部有 banner 列出章节，
+`vulkan_impl.cpp` 与 `d3d12_impl.cpp` 都在文件顶部有 banner 列出章节，
 每章以 `// == 章节名 ==` 开头。跳转：
 
 ```
-Grep "^// == " modules/render/src/d3d12/d3d12_impl.cpp
+rg -n '^// == ' modules/render/src/d3d12/d3d12_impl.cpp modules/render/src/vk/vulkan_impl.cpp
 ```
 
 两份实现的大致顺序一致：辅助函数与适配器/物理设备选择 → 描述符堆与分配器 → 环境对象与
@@ -719,12 +721,11 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
 ## 现状陷阱
 
+- **SwapChain 尚不支持 HDR 输出配置**：公共 descriptor 不提供色彩空间或 HDR metadata 设置；选择浮点或高位深格式不能替代完整 HDR 输出契约。
 - **D3D12 的 swapchain 同步槽未接线**：`Submit` 忽略 `WaitToExecute` / `ReadyToPresent`。
-- **D3D12 纹理不带优化 clear value**：`CreateTexture` 里那段 `D3D12_CLEAR_VALUE` 逻辑被整段
-  注释掉，`clearPtr` 恒为 `nullptr`。
+- **D3D12 纹理不带优化 clear value**：`CreateTexture` 的 `clearPtr` 恒为 `nullptr`。
 - **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**，
   Vulkan 侧有完整实现。upload heap 无需 flush 可以解释，readback 的 invalidate 语义未覆盖。
-- **`CmdListD3D12::_keepAliveBuffers` 是死字段**，只被 clear 从未 push_back。
 - **非 Win32/非 Apple 平台没有 surface 创建**（`vulkan_impl.cpp` 有 TODO 标记），走 `#else`
   后直接报错返回。
 - **`format_as(RenderObjectTag)` 漏了 `QueryPool` 与 `ShaderParameterSet`**，二者日志显示
@@ -738,4 +739,4 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 | `RenderScopeKeys` | clear/load、attachment 顺序、兼容签名、无 stencil 规范化 |
 | `Backends/RenderScopeTest` | Begin 失败恢复、跨 Reset GPU readback、局部 area、Vulkan 引用/预算/view 清理 |
 
-无可用 device 时测试 SKIP 而非 FAIL。
+后端不可用与初始化失败的判定统一见[GPU 测试规则](../guide/build-test.md#测试)；必测后端缺失不得算作通过。

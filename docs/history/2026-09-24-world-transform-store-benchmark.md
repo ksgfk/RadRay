@@ -4,7 +4,7 @@
 
 # World → Scene 变换存储原型测量
 
-状态：实现和性能测量已完成。测量时为工作树原型，文档收尾时实现已纳入 `40f9f31bc180657f4e06c4a57b0795fa22b41514`；已核对当前源码与最终测量快照一致。基线为 `5c10ae4eedb3e9e94ffa1c25d3dbca415823ded7` 加开始本轮时已有的未提交改动；不是纯净 HEAD。日期：2026-09-24，最终候选为 `prototype_v3`。负数表示耗时降低。
+状态：实现和性能测量已完成。测量时为工作树原型，归档时实现已纳入 `40f9f31bc180657f4e06c4a57b0795fa22b41514`，当时核对源码与最终测量快照一致；不表示之后的工作树仍与该快照相同。基线为 `5c10ae4eedb3e9e94ffa1c25d3dbca415823ded7` 加开始该轮时已有的未提交改动；不是纯净 HEAD。日期：2026-09-24，最终候选为 `prototype_v3`。负数表示耗时降低。
 
 ## 结论
 
@@ -79,7 +79,7 @@ Debug 580/580，Release 578/578 测试通过，失败/跳过均为零；测试�
 
 ## 五轮完整结果
 
-CV 是五个运行均值的变异系数。近似持平且范围重叠的场景不作显著改善/恶化判断；比如巡游新版一轮为 17.742 μs，其余结果接近原版，所以同时保留原始样本。完整 min/max 与每轮数据见 [结果数据](world-transform-store-results-2026-09-24.json)。
+CV 是五个运行均值的变异系数。近似持平且范围重叠的场景不作显著改善/恶化判断；比如巡游新版一轮为 17.742 μs，其余结果接近原版，所以同时保留原始样本。完整 min/max 与每轮数据见 [结果数据](2026-09-24-world-transform-store-results.json)。
 
 | 场景 / flight / 执行方式 | 原版 μs/帧 | 新版 μs/帧 | 耗时变化 | 原版 / 新版 CV |
 |---|---:|---:|---:|---:|
@@ -274,11 +274,11 @@ CV 是五个运行均值的变异系数。近似持平且范围重叠的场景�
 
 ## 留档与复现
 
-[随文结果 JSON](world-transform-store-results-2026-09-24.json) 保存三个正式阶段的全部比较、每轮数值、min/max、CV、CPU 时间、命令、退出状态、时间戳与二进制 SHA-256；阅读本文不依赖本机 artifacts。
+[随文结果 JSON](2026-09-24-world-transform-store-results.json) 保存三个正式阶段的全部比较、每轮数值、min/max、CV、CPU 时间、命令、退出状态、时间戳与二进制 SHA-256；阅读本文不依赖本机 artifacts。
 
 本机额外留档根目录为 `artifacts/transform_store_20260924`，被 Git 忽略：`baseline/sources`、`prototype_v3/sources` 保存前后源码；各自 `source.patch` 保存相对 Git HEAD 的完整差异（包含开始时用户已有改动）；`implementation.patch` 仅含本轮 C++ 改动。该目录还保存原始 native JSON、构建/测试日志与测量脚本。`quick*`、`sweep`、`prototype` 是开发中间版本，不能替代本报告的最终结果。
 
-构建与原生基准用法见[构建与测试](../guide/build-test.md#world--renderscene-状态同步基准)。比较新旧版时先分别保留 Release 二进制，再固定 affinity 串行交替执行；原生示例（路径需替换为对应版本）：
+构建与原生基准用法见[性能测量](../guide/performance.md#world--renderscene-状态同步基准)。比较新旧版时先分别保留 Release 二进制，再固定 affinity 串行交替执行；原生示例（路径需替换为对应版本）：
 
 ```powershell
 ./build_transform_perf/_build/Release/bench_scene_sync.exe `

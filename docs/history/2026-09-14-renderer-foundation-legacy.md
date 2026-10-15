@@ -2,6 +2,7 @@
 > - 权威: 历史快照附件，不描述重构分支当前实现
 > - 锚点: `AGENTS.md`
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
+> - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
 以下内容保存自基线的 `docs/architecture/renderer-foundation.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
@@ -83,7 +84,7 @@ history 与 `CreateRenderGraph`/`ExecuteGraph`。AppFrameContext 和 surface 实
 ports，`Connect` 连接指定生产值，`Expand` 调用组件的 BuildGraph 并连接其返回值。所有端口必须且
 只能连接一次，描述符精确匹配。消费者可以先声明，依赖决定执行顺序；端口循环、缺失连接、非法
 版本在 freeze 前诊断。默认装配器连接 renderer 与输出；注册了 overlay 时在线性 canvas 上串接
-Scene 与 overlays 再编码导出（见 [Render framework](render-framework-legacy.md#overlay-与默认装配)）。
+Scene 与 overlays 再编码导出（见 [Render framework](2026-09-14-render-framework-legacy.md#overlay-与默认装配)）。
 没有全局 latest output、固定 UI 阶段或隐式输出重定向。
 
 Texture/Buffer 使用 `RgTextureValue` / `RgBufferValue`，携带资源 index、graph generation 和内容
@@ -702,7 +703,8 @@ motion、AO、tile occupancy/overflow、Bloom、cascade、当前/历史 HDR 和�
 `RequestCapture` 只申请下一次 prepared frame；readback 由 graph 声明，`CompleteCaptures(flight)`
 必须在所属 fence 完成后调用，生成 PNG 与 graph JSON/DOT。截图读取最终输出目标，包含启用的
 ImGui；默认选择 workload 中首个可用 view family。正常帧不增加全队列等待。
-展示宿主与回归命令见 [构建与测试](../guide/build-test.md#样例与专项验证)。
+展示宿主与回归命令见基线 `docs/guide/build-test.md` 的「样例与专项验证」：
+`git show a68237f:docs/guide/build-test.md`。该节对应的旧样例已移除。
 
 当前不实现 async compute、并行录制、heap aliasing、常驻场景、GPUScene、GPU count buffer、
 depth resolve、骨骼/形变运动、透明时域重投影或跨分辨率 history 重建。CPU 绘制准备保持串行，不为

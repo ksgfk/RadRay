@@ -113,7 +113,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 `AssetWaitAwaitable::await_suspend` 为此把自己模板化，见 [asset-system](asset-system.md)。
 
 `ManualCoroutineScheduler` 的记录不能搬动——记录里存着回指调度器的指针（stop callback）。
-`GpuSystem::_flights` 因此是 `vector<unique_ptr<FlightSlot>>` 而非 `vector<FlightSlot>`。
+帧等待表因此放在 `FrameTimeline::_flights` 的 `vector<unique_ptr<Flight>>` 中，保证调度器地址稳定。
 
 记录默认在 stop callback 中立即恢复。持有尚未完成的外部操作时，可以设置
 `ResumeOnCancel=false`：stop callback 仍标记 `Canceled`，由记录拥有者在操作安全完成后恢复。
@@ -151,7 +151,7 @@ ApplicationScheduler、帧边界等待和资产 Ready 通知共用此派发实�
 `profiler.h` 是全仓库唯一的插桩入口，后端是 Tracy（`third_party/tracy`）；业务代码不 include `tracy/*`，
 只有 render 后端为 GPU 时间戳直接使用 `TracyD3D12.hpp` / `TracyVulkan.hpp`。
 `RADRAY_ENABLE_PROFILER` 未定义时所有宏展开为空。开关、viewer 与采样步骤见
-[构建与测试](../guide/build-test.md#性能采样tracy)。
+[性能测量](../guide/performance.md#性能采样tracy)。
 
 | 宏 | 语义 |
 |---|---|
@@ -204,19 +204,19 @@ return h.ToHashCode();
 `StringHash` / `StringEqual` 支持异质查找，让 `unordered_map<string, V, StringHash, StringEqual>`
 能直接用 `string_view` 查。
 
-`PodHasher<T>` / `PodEqual<T>` 是逐字节版，只对 trivially copyable 生效，
-且**要求 key 值初始化（`PodKey{}`）清零 padding**。
+`PodHasher<T>` / `PodEqual<T>` 是逐字节版，只对 trivially copyable 生效。
+调用方必须保证整个对象表示稳定，包含 padding；有成员值相等但表示不同的可能时，使用逐字段哈希与比较。
 
 ### 写一个自定义 map key
 
 `unordered_map` 的契约是 **`equal => same hash`**。违反它的表现是"明明存进去了却查不到"，
 且不会报错。三条规则：
 
-1. **逐字段 `Add`，不要 `memcmp` 整个对象。** 带 `std::optional` 或任何非平凡成员的类型
-   有填充字节，两个 `operator==` 相等的对象可能 padding 不同、散列不等。
-   这类 key 不是 trivially copyable，所以也用不了 `PodHasher`。
+1. **逐字段 `Add`，不要 `memcmp` 整个对象。** key 或其成员可能含 padding，也可能有多种表示对应同一个值；
+   两个 `operator==` 相等的对象因而未必具有相同的字节表示。
+   不能仅凭使用 `optional` 推断整个 key 是否 trivially copyable 或是否适合逐字节比较。
 
-   `std::optional` 本身不可哈希，喂法是**先喂"有没有值"，有值再喂内容**：
+   对没有成员 hasher 的可选描述符，**先喂"有没有值"，有值再逐字段喂内容**：
 
    ```cpp
    hash.Add(entry.ImmutableSampler.has_value() ? 1u : 0u);
@@ -228,13 +228,12 @@ return h.ToHashCode();
    嵌套的 `optional` 成员逐层照此展开。`vector` 同理：先喂 `size()`，再逐元素喂。
 2. **相等比较逐字段**（`= default` 的 `operator==` 就够），并确认它和哈希看的是同一批字段。
    刻意排除某个字段就要在哈希里同样排除。
-3. **在 key 内缓存 `_hash` 时，移动构造与移动赋值必须自己写。** 默认移动会留下
-   "空容器 + 原 `_hash`"的源，那个源与一个真正的空 key 内容相等却散列不等，直接违反契约。
-   移动后把源的散列值重算（此时源已空，是常数开销）。
+3. **缓存散列值的 key 在移动后也须保持内容与散列一致。** 默认移动成员可能保留旧散列而改变源内容；
+   若移后对象仍可参与比较或查表，就显式恢复它的有效状态，不假定所有容器移后必为空。
 
-`PipelineLayoutKey` 是这三条都踩过的实例，见 [asset-system](asset-system.md)。
-另一个方向的例子是 `RenderPassCacheKey`：它**刻意不归一化**，因为字段顺序携带语义，
-见 [render-rhi](render-rhi.md)。
+当前 native layout key 及完整判等见 [RHI 布局缓存](render-rhi.md#native-pipelinelayout-缓存)。
+附件顺序有渲染语义，`AttachmentSignature` 与 `RenderPassExecutionKeyVulkan` 不得为了复用而重排 color slots；
+允许忽略的字段见[直接附件与 Vulkan 原生缓存](render-rhi.md#直接附件与-vulkan-原生缓存)。
 
 ## JSON
 

@@ -5,8 +5,11 @@
 # 第一阶段实施与验收记录
 
 基线为 `eb4f1f4d2a4479af2f2f83b017c33af0be80c913`，分支 `refactor/render-framework-reset`。
-记录对应在此基线上的未提交工作树；原始输入为仓库根的 `RadRay_Phase1_Plan_RHI_CommandAllocator.md`。
+记录对应测量当时在此基线上的未提交工作树；原始输入 `RadRay_Phase1_Plan_RHI_CommandAllocator.md` 未随当前仓库保存。
 公共实现和调用方迁移已落地，下述实测覆盖不能等同原计划每个矩阵格都已独立验证。
+本文保留 2026-10-07 的 CSV 与覆盖边界；后续已迁移到完成时 Reset、设备内附件缓存和持久材质组，
+D3D12 command 的 empty root signature 也已删除。当前接口见[RHI](../architecture/render-rhi.md)、
+[帧与 GPU](../architecture/frame-and-gpu.md)，当前命令和测量口径见[性能测量](../guide/performance.md)。
 
 ## 实施范围与当前边界
 
@@ -78,11 +81,11 @@ Release 全量验证先于最后的局部准备/参数池优化；该优化的�
 这不是旧提交二进制的端到端比较，也不包含 GPU 执行和 flight 等待。
 
 完整矩阵为两个后端 × 两种 storage × 10 组 M/K，共 40 个场景，每场景 5 次；
-[原始样本与汇总](phase1-command-allocator-samples.csv) 共 360 行。
+[原始样本与汇总](2026-10-07-phase1-command-allocator-samples.csv) 共 360 行。
 未固定 CPU 的样本离散较大，M=1 两组也有偏差，因此不据此宣称固定速度比。
 
 补充固定主线程到 logical CPU 0，warmup 0.2 秒、min-time 0.2 秒、7 repetitions，
-只复测 M=1/32、K=1 的 8 个场景；[原始样本](phase1-command-allocator-pinned.csv) 共 88 行。
+只复测 M=1/32、K=1 的 8 个场景；[原始样本](2026-10-07-phase1-command-allocator-pinned.csv) 共 88 行。
 下表为每次 iteration 样本的中位数，单位 μs；分项分别取中位数，和不必精确等于总计。
 
 | 后端 | M | storage | 总计 | Reset | Record |
@@ -124,7 +127,7 @@ build_release/_build/Release/bench_command_allocator.exe --benchmark_min_time=0.
 
 ### 10,000 objects
 
-原始数据：[phase1-scene-samples.csv](phase1-scene-samples.csv)。
+原始数据：[2026-10-07-phase1-scene-samples.csv](2026-10-07-phase1-scene-samples.csv)。
 
 | 后端 | GPU profiler | legacy ms（min–max） | pipeline ms（min–max） | legacy / pipeline 峰值 MiB |
 |---|---|---:|---:|---:|
@@ -134,7 +137,7 @@ build_release/_build/Release/bench_command_allocator.exe --benchmark_min_time=0.
 | Vulkan | on | 1.450（1.436–1.462） | 1.444（1.444–1.446） | 167.74 / 167.65 |
 
 最初的准备和 draw 循环重复查询相同 geometry/material；
-[优化前样本](phase1-scene-before-samples.csv) 中 D3D12 profiler-off 的 public/legacy 中位数为 1.036/0.786 ms，
+[优化前样本](2026-10-07-phase1-scene-before-samples.csv) 中 D3D12 profiler-off 的 public/legacy 中位数为 1.036/0.786 ms，
 Vulkan 为 1.716/1.480 ms。移除相邻相同组合的重复查表、延迟创建空材质的等待 scope 后，
 固定负载的主要额外开销下降；参数池另按 layout/group 缓存，避免随版本数线性扫描。
 这些对照不能精确拆分三个优化各自的收益；没有改变 draw 数或变换算法。
@@ -148,7 +151,7 @@ D3D12 pipeline 在 10k 场景的峰值工作集高约 32 MiB，warmup 后仍可�
 
 保持前述参数，仅将 `--objects=100000`；每帧仍移动 100 个对象，仍逐对象绘制，
 没有通过增加深度测试、排序或剔除改变旧绘制语义。
-原始数据：[phase1-scene100k-samples.csv](phase1-scene100k-samples.csv)。
+原始数据：[2026-10-07-phase1-scene100k-samples.csv](2026-10-07-phase1-scene100k-samples.csv)。
 
 | 后端 | GPU profiler | legacy ms（min–max） | pipeline ms（min–max） | legacy / pipeline 峰值 MiB |
 |---|---|---:|---:|---:|

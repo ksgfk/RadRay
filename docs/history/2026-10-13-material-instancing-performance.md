@@ -1,11 +1,13 @@
-> - 适用: 本轮材质、增量同步和实例化的功能与性能验收
-> - 权威: 本机实测；以保存的 benchmark JSON、Tracy trace 和验证日志为证据，不作为跨机器性能保证
+> - 适用: 2026-10-13 材质、增量同步和实例化的历史功能与性能验收
+> - 权威: 历史本机实测；不作为当前性能或跨机器保证，当前契约见 render-framework
 > - 锚点: `benchmarks/bench_material_scene/bench_material_scene.cpp`, `benchmarks/bench_material_scene/material_scene_workload.cpp`, `tools/run_material_scene_benchmark.py`
 
 # 材质和实例化验收
 
-状态：P0–P6 已实施并完成最终测量。基线为 `b63c14d571c10fcbc7b519bd80b218b6541fe5e7`，
-分支为 `refactor/render-framework-reset`；当前结果对应本轮未提交工作树，源码快照保存在本机 perf 目录。
+状态：P0–P6 在该轮实施并完成测量。基线为 `b63c14d571c10fcbc7b519bd80b218b6541fe5e7`，
+分支为 `refactor/render-framework-reset`；结果对应测量时未提交的工作树，源码快照当时保存在本机 perf 目录。
+后续 GPU 生命周期改动将绘制模板归入 RenderScene、共享计划归入 MaterialPass，并移除 Scene Attempt；
+本文的实施表和数值不追溯改写。当前接口见[Runtime 架构](../architecture/render-framework.md)，可复用的测量方法见[性能测量](../guide/performance.md)。
 最初的 benchmark 和 Tracy 基线在任何行为修改之前完成。修正 workload 后另用原提交源码重建对照，原始数据保留。
 
 在 N=100k、M=1、V=3、无变换更新时，CPU 准备和录制从 D3D12 86.90 ms 降到 15.61 ms，
@@ -87,7 +89,7 @@ D3D12 默认 shader-visible resource descriptor heap 为 65,536 个，见 `modul
 | vulkan | 100 | 0% | 105.16 → 18.22 | 5.77× | 300,000 → 300 | 4.631 → 0.745 |
 | vulkan | 100 | 100% | 120.95 → 28.55 | 4.24× | 300,000 → 300 | 4.740 → 0.749 |
 
-![100k 对象的 CPU 压力结果](material-instancing-cpu-2026-10-13.png)
+![100k 对象的 CPU 压力结果](2026-10-13-material-instancing-cpu.png)
 
 10% 的均匀稀疏变换会产生多个上传范围，100% 相邻变化可以合并；Prepare/record 与 GPU 时间不必随上传字节严格单调。
 
@@ -241,7 +243,7 @@ UniqueAssetChurn 每轮真实创建独立新 GPU mesh/material 并提交上传�
 | Unique asset churn / stage3 | 328.2 → 330.9 | 173.8 → 175.7 | 16.1 / 12.9 |
 | D3D12 manual 100k / M1 / V3 | — → 465.5 | — → 274.8 | — / 15.7 |
 
-![进程内存曲线](material-instancing-memory-2026-10-13.png)
+![进程内存曲线](2026-10-13-material-instancing-memory.png)
 
 100k 共享材质的普通路径 private 峰值约降 23.4%；集合路径相对原版约降 33.2%。Vulkan 100k 独立材质约降 35.5%。
 churn 两版峰值接近，独立资产最终约 326–331 MiB；重复 fixture 回到较低平台，未观察到随迭代持续增长。

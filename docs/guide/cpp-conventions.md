@@ -22,8 +22,8 @@
 **没有 `m_` 前缀**，一律 `_`。公开数据成员用 PascalCase 是刻意的：它让 descriptor struct
 的字段读起来像"属性"而非局部变量。
 
-枚举成员在**新代码里 PascalCase**（`RenderQueue::Geometry`、`LightType::Point`），
-但已有代码是 ALL_CAPS（`VertexDataType::FLOAT`、`VertexSemantics::POSITION`）。
+枚举成员在**新代码里 PascalCase**（`AssetState::Ready`、`LightType::Point`），
+部分已有枚举使用 ALL_CAPS（例如 `TextureFormat::UNKNOWN`）。
 **不要为统一风格去改它们**——`AGENTS.md` 禁止重命名枚举成员，`magic_enum` 与序列化数据在消费
 这些名字。
 
@@ -67,7 +67,7 @@ std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
 
 **裸指针意味着非空**（`AGENTS.md` 硬规则）。想表达"可能为空"就用 `Nullable`。
 
-`bool` + out 参数用在"填充一个已有对象"的场合（`GetLightRenderParameters(out)`），
+`bool` + out 参数用在"填充一个已有对象"的场合（例如 `JsonDeserializer<T>::Read(value, output)`），
 不用来代替返回值。
 
 **错误处理的主流做法是：`RADRAY_ERR_LOG` + 返回空/false。** 不可恢复的不变量违反用
@@ -88,8 +88,9 @@ std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
 static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc);
 ```
 
-**runtime 层相反**，公有构造 + `make_unique`（`GpuSystem`、`RenderSystem`、`AssetManager`、
-`World`）。区别的理由是前者可能创建失败，后者不会。
+runtime 的普通 owner 使用公有构造 + `make_unique`（例如 `RenderSystem`、`AssetManager`）。
+需要报告启动失败的设施使用结果入口：`GpuSystem::TryCreate` / `TryAttachDevice` 填写
+`RuntimeStartupResult`，`RenderSystem::OnInitialize` 也可能失败；不能把 runtime 构造一概视为不会失败。
 
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
 [RHI 所有权](../architecture/render-rhi.md)。runtime 的 World/Actor/Component 先由显式驱动器注销与 teardown，
@@ -107,8 +108,8 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 要同时对 Release 与 Debug 负责：Debug 默认 `/Od /Ob0`，Eigen 表达式模板、`std::span`、小容器的
 每个算子都是一次真实调用，Debug 帧率主要由这些路径决定。约定：
 
-- 每 primitive 一次的数值代码直接操作 `data()` 分量数组（`render_bounds.cpp`、`culling.cpp`、
-  `MakeNormalToWorld`）；Eigen 仍用于接口类型与非热路径。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
+- 每 primitive 一次的 bounds/剔除数值代码优先使用直接分量访问（当前入口为 `raster_scene.cpp`、`render_scene.cpp`）；
+  既有矩阵运算可继续使用 Eigen，是否展开由测量决定。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
 - 不在每 draw 路径上构造 `string`、`fmt::format`、按名字查找绑定；启动或首次遇到 program 时解析成
   绑定句柄或索引再复用。
 - 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
@@ -143,16 +144,10 @@ radray_add_test(test_radray_runtime SOURCES test_foo.cpp test_bar.cpp LINK_LIBS 
 **`ctest -R` 匹配 gtest 套件名（C++ 类名），不是 cmake 目标名。** 对照表在
 [build-test](build-test.md)。
 
-**需要 GPU 的测试无条件注册，用例内 `GTEST_SKIP()`**，不做条件 CMake 注册：
-
-```cpp
-auto device = TryCreateDevice(...);
-if (!device) {
-    GTEST_SKIP() << "the render backend is unavailable on this machine";
-}
-```
-
-这样在有设备的机器上一定会跑，在 CI 上也不会假绿。
+需要 GPU 的测试按已构建测试目标注册，由公共 fixture 区分后端未编译、无 adapter、缺验证层与初始化失败。
+仅可选后端不可用时 `GTEST_SKIP()`；指定为必测的后端缺失，以及 native 创建、提交或读回失败，都必须失败。
+使用 `RADRAY_TEST_REQUIRED_BACKENDS` 和现有 GPU fixture，具体入口见[构建与测试](build-test.md#测试)，
+不要把所有空 device 结果统一跳过。
 
 现成的测试辅助设施：
 

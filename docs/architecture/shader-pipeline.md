@@ -38,8 +38,8 @@ Variant 是一组 target-independent keyword assignments；Compiled Variant arti
   返回的 domain 校验。普通 `Defines` 与 keyword assignments 是两个独立的 typed channel。
 
 `DiscoverSourceContract` 输出 kind、entry topology、keyword domain 和 `ContractHash`。caller
-只把 shaderlib-root-relative 的逻辑 `SourceName` 传给 compiler；物理仓库路径不属于 source
-identity。`CompileVariant` 会重新 discovery 并拒绝 `ExpectedContract` 漂移。
+把相对调用方 source root 的逻辑 `SourceName` 传给 compiler；它可与 `shaderlib/` include root 不同，
+不使用物理绝对路径作 source identity。`CompileVariant` 会重新 discovery 并拒绝 `ExpectedContract` 漂移。
 
 entry topology 在合法 keyword domain 内保持不变；keyword 可以改变资源使用和函数体，不能
 让 entry 声明只在部分 Variant 出现。discovery 与 compile 共享 Defines、CompilePolicy 和
@@ -280,10 +280,11 @@ graphics draw 与 compute dispatch/readback 的 JIT 测试使用此路径覆盖 
 ## Build boundary
 
 默认 `win-x64-debug` 即开启 compiler、JIT 与 tools（三者默认 ON）。隔离配置用主预设加 `-B`
-与 `-D` 表达：关 compiler 的纯 runtime 构建（`-DRADRAY_BUILD_SHADER_COMPILER=OFF`，JIT/tools
+与 `-D` 表达：关 compiler 的纯 runtime 构建（`-DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_EXAMPLES=OFF`，JIT/tools
 随之强制 OFF）不发现 RadRay DXC package，构建树不部署 `dxcompiler` 或
-`radrayshadercompiler`；tools-only 构建（`-DRADRAY_BUILD_TESTS=OFF -DRADRAY_BUILD_RENDER=OFF
--DRADRAY_BUILD_RUNTIME=OFF`）只编译 `radray_shader_compile`。
+`radrayshadercompiler`；tools-only 构建（`-DRADRAY_BUILD_TESTS=OFF -DRADRAY_BUILD_WINDOW=OFF -DRADRAY_BUILD_RENDER=OFF
+-DRADRAY_BUILD_RUNTIME=OFF -DRADRAY_BUILD_EXAMPLES=OFF -DRADRAY_BUILD_BENCHMARKS=OFF`）保留 shader CLI 及其依赖，
+可用 `--target radray_shader_compile` 构建工具。examples 默认 ON，依赖关闭时必须显式禁用。
 
 正式 compiler 配置按 Manifest `Name` 使用
 `SDKs/radray_dxc/extracted`，以 `find_package(RadRayDXC CONFIG REQUIRED COMPONENTS
@@ -305,8 +306,8 @@ artifact index 或 publisher 输出，也不代表 stock DXC 已提供 RadRay ex
 只链接 `radrayshadercompiler`，可用 map/import 检查确认没有反向引入 render/runtime/backend。
 
 旧 Forward cbuffer 与 ImGui/blit artifact 的专用生成器和 custom targets 已随渲染框架移除；
-历史方案见[设计快照](../temp/render-framework-design.md)。raw shader compile CLI 继续保留。
+历史方案见[设计快照](../history/2026-09-14-render-framework-design.md)。raw shader compile CLI 继续保留。
 
-第一阶段仍没有正式 shader artifact publisher、索引或安装导出层；fork SDK autobuild 只发布
+当前没有正式 shader artifact publisher、索引或安装导出层；fork SDK autobuild 只发布
 compiler package。runtime-only 的 compiler-free 验证消费版本控制的 raw golden bytecode/metadata
 fixture，证明 build-tree decoder/runtime boundary，不把这些 fixture 充当产品 artifact 发布链。

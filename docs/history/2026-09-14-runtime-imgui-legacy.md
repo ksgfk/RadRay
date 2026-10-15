@@ -2,11 +2,12 @@
 > - 权威: 历史快照附件，不描述重构分支当前实现
 > - 锚点: `AGENTS.md`
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
+> - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
 以下内容保存自基线的 `docs/architecture/runtime-imgui.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
 > - 适用: 接入可选 runtime UI、字体、平台窗口、资产图片或本帧 Graph 图片
-> - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步与扩展槽见 [帧与 GPU](../architecture/frame-and-gpu.md)，overlay 与 Graph 规则见 [Render framework](render-framework-legacy.md)、[Renderer foundation](renderer-foundation-legacy.md)
+> - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步与扩展槽见 [帧与 GPU](../architecture/frame-and-gpu.md)，overlay 与 Graph 规则见 [Render framework](2026-09-14-render-framework-legacy.md)、[Renderer foundation](2026-09-14-renderer-foundation-legacy.md)
 > - 基线源码路径: `modules/imgui/CMakeLists.txt`, `modules/imgui/include/radray/imgui/imgui_config.h`, `modules/imgui/include/radray/imgui/imgui_system.h`, `modules/imgui/include/radray/imgui/imgui_graph.h`, `modules/imgui/src/imgui_system.cpp`, `modules/imgui/src/imgui_graph.cpp`, `modules/imgui/tests/test_imgui_rendering.cpp`, `modules/runtime/include/radray/runtime/application_extension.h`, `shaderlib/ui/`, `tools/generate_builtin_shaders.py`
 
 # 可选 ImGui 模块
@@ -79,7 +80,7 @@ texture upload、VB/IB upload 与 raster draw，然后返回 target 的后继版
 场景排序、tone mapping 或最终编码，不访问 Application、窗口或 RenderSystem。核心 RG、Forward、
 RenderSystem 都没有 ImGui 分支。
 
-默认路径是 [RenderSystem overlay](render-framework-legacy.md#overlay-与默认装配)：有 overlay 时默认装配器
+默认路径是 [RenderSystem overlay](2026-09-14-render-framework-legacy.md#overlay-与默认装配)：有 overlay 时默认装配器
 走 Scene → 显示线性 RGBA16_FLOAT canvas → overlays → Display.Blit 编码 → Export；UNORM 输出显式
 sRGB 编码，sRGB attachment 由硬件编码。对 `RegisterOutput` 注册的输出，组件在 `OutputImages` 未显式
 给出时自行 copy 传入的 pre-UI 版本作为预览图（`ImGui.OutputSnapshot`），编码按 target 格式推断。
@@ -199,7 +200,8 @@ IniFilename 与 LogFilename 均为空。非空 SettingsPath 经项目 IO 显式�
 
 UI shader 源位于 `shaderlib/ui/`，内置 DXIL / SPIR-V 使用当前 schema、decoder、layout recipe、
 ShaderProgram 与 PSO cache。生成文件携带源及 include SHA256 和 artifact 身份；普通构建不运行 DXC。
-重生成、一致性检查和 compiler-off 命令见[构建与测试](../guide/build-test.md#可选-imgui)。
+重生成、一致性检查和 compiler-off 命令见基线 `docs/guide/build-test.md` 的「可选 ImGui」：
+`git show a68237f:docs/guide/build-test.md`。当前不再提供这些 ImGui 目标。
 
 `ImGuiRenderingTest` 使用真实 GPU readback 验证线性混合、UNORM/sRGB、offset、大顶点数、
 图内图像、Alpha8、彩色图集格式切换和线性过滤、atlas 扩容、局部更新、丢帧和错误图不确认上传。平台窗口回归覆盖 Auxiliary、

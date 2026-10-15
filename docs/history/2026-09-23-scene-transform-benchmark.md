@@ -5,7 +5,9 @@
 # World 无世界矩阵缓存：Scene 变换实验与性能报告
 
 本文包含旧手工采样器包装在 Google Benchmark 中得到的历史数据，不能与当前原生自动迭代结果直接比较。
-当前测试/基准分离与计时规则见[构建与测试](../guide/build-test.md#world--renderscene-状态同步基准)。
+状态：变换求值职责已迁入当前架构；下文的 GT 组件排序、通知和存储描述属于测量时实现，
+后续已由[紧凑 World 变换存储](2026-09-24-world-transform-store-benchmark.md)替代相应路径。
+当前测试/基准分离与计时规则见[性能测量](../guide/performance.md#world--renderscene-状态同步基准)。
 
 ## 结论
 
