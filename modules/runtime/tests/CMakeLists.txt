@@ -2,6 +2,8 @@
 # 所以同一可执行文件做两次发现：默认用例，以及下面这些 suite。两次 POST_BUILD 顺序执行，
 # 发现 JSON 按 target 哈希，不会并行争用。
 set(radray_runtime_serial_suites
+    "RuntimeFoundation.*"
+    "WindowOperationsTest.*"
     "*SceneGpu*"
     "SceneDelivery.*"
     "SceneDeliveryDeathTest.*"
@@ -17,6 +19,7 @@ list(JOIN radray_runtime_serial_suites ":" radray_runtime_serial_filter)
 set(radray_runtime_test_sources
     test_actor_component_retirement.cpp
     test_application.cpp
+    test_application_loop.cpp
     test_application_systems.cpp
     test_asset_database.cpp
     test_asset_slot.cpp

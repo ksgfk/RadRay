@@ -153,6 +153,54 @@ TEST(GpuSystemTest, VulkanOrderedBatchesWithProfiler) { RunCommandBatches(render
 TEST(GpuSystemTest, D3D12OrderedBatchesWithRhiValidation) { RunCommandBatches(render::RenderBackend::D3D12, true, true); }
 TEST(GpuSystemTest, VulkanOrderedBatchesWithRhiValidation) { RunCommandBatches(render::RenderBackend::Vulkan, true, true); }
 
+void RunSubmittedPrefix(render::RenderBackend backend) {
+    test::RuntimeLogCapture logs;
+    RuntimeStartupResult startup;
+    FrameTimeline timeline{3};
+    auto gpu = CreateGpuSystem(backend, false, timeline, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpu, nullptr) << startup.Reason;
+    // A domain can be reserved before a different slot submits. Serial identifies, not orders, submissions.
+    gpu->BeginUpdateForFlight(1);
+    gpu->BeginUpdateForFlight(0);
+    gpu->BeginUpdateForFlight(2);
+    for (uint32_t flight : {0u, 1u}) {
+        gpu->BeginFrameTiming(flight);
+        gpu->BeginFrameRecord(flight, {}, {}, false);
+        gpu->EndFrameRecordAndSubmit(flight);
+    }
+    gpu->BeginFrameTiming(2);
+    gpu->BeginFrameRecord(2, {}, {}, false);
+    const auto last = gpu->GetFlightGpuSignal(1);
+    last.Fence->Wait(last.Value);
+    const SubmittedFlight submitted[]{{0, timeline.GetFrameSerial(0)}, {1, timeline.GetFrameSerial(1)}};
+    EXPECT_GT(submitted[0].FrameSerial, submitted[1].FrameSerial);
+    EXPECT_EQ(gpu->RetireSubmittedFlights(submitted), 2u);
+    EXPECT_EQ(gpu->RetireSubmittedFlights({}), 0u);
+    FlightCompletion completion;
+    for (const auto& expected : submitted) {
+        EXPECT_TRUE(timeline.TryReadCompletion(completion));
+        EXPECT_EQ(completion.FlightIndex, expected.FlightIndex);
+        EXPECT_EQ(completion.FrameSerial, expected.FrameSerial);
+        gpu->ReleaseFrameResourcesGT(completion);
+    }
+    EXPECT_FALSE(timeline.TryReadCompletion(completion));
+    // Slot 2 remained recording throughout retirement of the handed-off prefix.
+    gpu->EndFrameRecordAndSubmit(2);
+    gpu->WaitMainQueueIdle();
+    const SubmittedFlight tail{2, timeline.GetFrameSerial(2)};
+    EXPECT_EQ(gpu->RetireSubmittedFlights(std::span{&tail, 1}), 1u);
+    EXPECT_TRUE(timeline.TryReadCompletion(completion));
+    gpu->ReleaseFrameResourcesGT(completion);
+    timeline.BeginStopping();
+    timeline.CleanupCompletedFlights();
+    gpu->AbandonUnpublishedResourcesTerminalGT();
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+
+TEST(GpuSystemTest, D3D12RetireUsesOnlySubmittedPrefixAndFinalSignalOrder) { RunSubmittedPrefix(render::RenderBackend::D3D12); }
+TEST(GpuSystemTest, VulkanRetireUsesOnlySubmittedPrefixAndFinalSignalOrder) { RunSubmittedPrefix(render::RenderBackend::Vulkan); }
+
 Nullable<render::CommandAllocator*> CommandStorage(render::CommandBuffer* commands, render::RenderBackend backend) {
 #if defined(RADRAY_ENABLE_D3D12)
     if (backend == render::RenderBackend::D3D12) return static_cast<render::d3d12::CmdListD3D12*>(commands)->_allocator;

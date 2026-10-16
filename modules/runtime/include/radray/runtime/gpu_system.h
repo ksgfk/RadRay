@@ -32,6 +32,11 @@ class AppFrameContext;
 class FrameTimeline;
 class GpuSystem;
 
+struct SubmittedFlight {
+    uint32_t FlightIndex;
+    uint64_t FrameSerial;
+};
+
 struct GpuSystemDescriptor {
     render::VulkanInstanceDescriptor VulkanInstance{};
     render::DXGIFactoryDescriptor DXGIFactory{};
@@ -301,10 +306,17 @@ public:
     /// [GT，render/GPU idle] 生产者已停止、完成消息已消费；等待者由 FrameTimeline 取消。
     ~GpuSystem() noexcept;
 
-    /// [GT/RT，retire 阶段] 调用方须串行化 retire；对应 Submit 已发布，槽位尚未复用。
-    /// Application runner 由 GT 独占 retire；独立驱动须自行隔离 Submit、其他 retire 与槽位复用。
+    /// [独立宿主，retire 阶段] 会扫描全部槽位；全部提交生产者须静止，并隔离其他 retire 与槽位复用。
+    /// Application 使用只访问 CPU 已交付范围的 RetireSubmittedFlights。
     /// 收据 OnCompleted 在调用线程执行；只发布完成消息，不恢复 GT 协程。
     bool CompleteFlight(uint32_t flightIndex);
+    /// [GT] Only the contiguous, submission-ordered prefix handed off by the CPU producer.
+    /// Acquire the producer's completion publication first. No access to slots outside this range.
+    /// Returns the GPU-completed prefix length; does not release GT owners or resume coroutines.
+    size_t RetireSubmittedFlights(std::span<const SubmittedFlight> flights);
+    /// [exclusive queue owner] Producers must remain quiescent until this call returns.
+    /// Wait only; never retire resources or dispatch application callbacks on this thread.
+    void WaitMainQueueIdle();
     /// [GT，CPU 渲染生产者已停止] 等待主队列 idle，再退休所有已提交 flight；不恢复 GT 协程。
     /// 每个已完成 flight 会先发布完成，再把等待完成标记写进当时已存在的记录。
     void WaitAndRetireFlights();
@@ -375,6 +387,7 @@ private:
     void SubmitFrame(uint32_t flightIndex);
 
     void CheckCanRetainForFrame(uint32_t flightIndex);
+    void RetireFlight(uint32_t flightIndex);
 
     FrameTimeline* _timeline;
     WindowManager* _windowManager{nullptr};

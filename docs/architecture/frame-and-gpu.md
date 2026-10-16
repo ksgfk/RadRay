@@ -1,6 +1,6 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
 > - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的使用者保活契约见 [asset-system](asset-system.md)；RHI 本身见 [render-rhi](render-rhi.md)
-> - 锚点: `modules/runtime/include/radray/runtime/frame_timeline.h`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/vertex_data.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/frame_timeline.h`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/vertex_data.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/application_loop.h`, `modules/runtime/src/application_loop.cpp`, `modules/window/src/win32/win32_window.cpp`
 
 # 帧节奏与 GPU 上传
 
@@ -13,7 +13,7 @@
 | `SceneManager` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休 | 底层 shader 缓存与 GPU 提交时序 |
 | `RenderSystem` | program/artifact cache、GraphicsPipelineCache | 场景、World、Pipeline 与 GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
-| `Application` | 固化帧序与关停顺序；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | — |
+| `Application` / 内部 `ApplicationLoop` | 固化帧序与关停顺序；协调原生消息和 CPU/GPU 进度；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | RHI 内部消息泵 |
 
 ## 资源寿命与回收条件
 
@@ -85,7 +85,7 @@ SrcData 仅借用到暂存完成，staging 随真实 flight 完成回收。必�
 - **RT** 是当前 flight 的录制线程。GT 完成 Update 并交出槽位后，RT 独占录制与提交。
   单线程模式中 RT 与 GT 是同一线程。应用显式调用 uploader 的录制也发生在 RT。
 - **GT/RT，retire 阶段** 表示两种线程都可能回收 flight，不表示函数内部提供互斥。
-  Application 的两个 runner 都由 GT 独占 retire；RT 在 Submit/Present 返回后以 release 发布 CPU 完成计数，
+  ApplicationLoop 的单/双线程路径都由 GT 独占 retire；RT 完成 Submit/Present、最终 Signal 写入和录制收尾后，以 release 发布 CPU 完成计数，
   GT acquire 该计数后才读取对应 flight 的 fence。槽位通过 ready 信号量交给 RT，通过真实 fence 完成回到 GT。
   独立驱动仍可在 GT 或 RT retire，但须自行提供相同的独占和交接前提；channel 的锁只保护消息，不保护 flight 状态。
 - **任意线程** 仅适用于读取固定配置、稳定对象指针或原子统计。对象必须已完成构造/装配发布，
@@ -98,11 +98,12 @@ SrcData 仅借用到暂存完成，staging 随真实 flight 完成回收。必�
 ## 帧序
 
 ```text
-S0 runner::PrepareFrame：固定窗口维护批次 → writable 背压
+ApplicationLoop::PrepareFrame：非阻塞维护与 writable 检查；未就绪返回消息循环
+S0（本帧只执行一次）
   Application::ServiceFrameBoundaryGT
     完成消息批次 → 释放 SceneManager/GpuSystem owner → 帧等待通知
     → OnRenderFrameComplete → AssetManager::Pump → ApplicationScheduler::Pump
-BeginFrameTiming → DispatchEvents → OnUpdate → WorldManager::Tick（统一 epoch）
+BeginFrameTiming → PumpNativeEvents（每次最多 256 条）→ 冻结并派发游戏事件 → OnUpdate → WorldManager::Tick（统一 epoch）
 S1 Application::FinalizeWorldAndSealGT
   FinalizeWorldsGT → CollectRenderUpdates → OnCollectRenderViews → SealFrameGT → PublishFrameGT → ready
 RT BeginFrameRecord → S2 ApplySceneUpdatesRT → 可选 OnRender
@@ -112,22 +113,23 @@ RT BeginFrameRecord → S2 ApplySceneUpdatesRT → 可选 OnRender
 
 
 单线程与双线程普通循环都遵循上述顺序。资源边界是当前 flight 上一轮的 fence 已完成、
-runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成钩子处理结束后的计时点。
+ApplicationLoop 已取得槽位使用权；逻辑帧边界是完成批次与应用完成钩子处理结束后的计时点。
 等待可写槽和处理完成批次放在事件派发之前，让紧接着的 Update 使用这些阶段期间到达的输入。
 完成批次处理有明确终点，不会为回调新建的任务或稍后到达的 GPU 消息反复排空整个系统。
 
-未启用 Gpu 时，CPU runner 共用同一时间线。S0 消费完成并服务等待，BeginFrameTiming 在 Update 前保留身份；Update 后 Scene Publish/Consume 使用此 serial，然后发布 OutputsExecuted=false 的 CPU 完成。该模式没有 AppFrameContext 或 OnRender，但仍调用 OnRenderFrameComplete。发布前退出的域在 terminal 停止时放弃，不伪造 GPU 完成；已经发布的通知在 Shutdown 排空。
+未启用 Gpu 时，同一 ApplicationLoop 在 GT 同步消费场景，使用同一时间线。S0 消费完成并服务等待，BeginFrameTiming 在 Update 前保留身份；Update 后 Scene Publish/Consume 使用此 serial，然后发布 OutputsExecuted=false 的 CPU 完成。该模式没有 AppFrameContext 或 OnRender，但仍调用 OnRenderFrameComplete。发布前退出的域在 terminal 停止时放弃，不伪造 GPU 完成；已经发布的通知在 Shutdown 排空。
 
-`DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。
+`DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。首帧从 OnInit 返回后的循环入口计时，不包含初始化耗时。
 `LastFrameLatency` 从同一个逻辑帧的 `BeginFrameTiming` 计算到 `PublishCompletion`。GPU 路径在观察到该 flight fence 完成时发布，包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。CPU 路径在同一帧场景消费之后发布，因此是该帧开始到完成发布的真实间隔。
 手动驱动 GpuSystem 时，在完成调度之后、开始本帧工作之前调用 `GpuSystem::BeginFrameTiming`；它要求当前槽位没有未完成的 fence，再转给 FrameTimeline。
 
 FrameSerial 在 GT 开域时由 FrameTimeline::OpenFrameDomain 从 1 递增保留，RT BeginFrameRecord 只使用同一身份。非零 serial 不能被循环槽位索引替代。独立单线程驱动的 BeginFrameRecord 可以补开空域；分离 RT 必须先在 GT BeginUpdateForFlight。
 
-GpuSystem::CompleteFlight 先结束覆盖的 command epoch，resolve profiler、CompleteEpoch 并记录真实完成身份，然后发布 FlightCompletion。FrameTimeline 持有预分配的 F 个通知槽；mutex 保护队列与开域身份，每 flight 至多一条未消费终结通知，重复、外来身份和溢出立即诊断。完成账本的 CompletedSerial 同时用于等待恢复，不再转存等待记录的布尔完成标记。
-ThreadedRunner 在 GT 帧首用 `RetireRenderedFrames` 非阻塞检查已提交 flight；需要复用的槽位仍占用时，
-`PrepareFlightSlot` 只等待该槽位的 CPU 提交和 fence。不访问协程等待表，也不调用应用钩子。
-RT 不再回收 flight，staging 回收与 profiler resolve 发生在下一次 GT 回收边界或最终 drain。
+GpuSystem::RetireSubmittedFlights 只接受 GT acquire 确认 CPU 交付的连续提交前缀，每项包含 FlightIndex/FrameSerial；仅访问给定范围，按序退休真实 GPU 完成的前缀并返回数量。不得传入尚由 RT 录制/提交或已经复用的槽位。FrameSerial 核验身份，同一主队列的 final fence 值核验提交顺序；独立宿主提前保留其他槽位的身份，不要求 serial 按提交顺序递增。每个退休先结束覆盖的 command epoch，resolve profiler、CompleteEpoch 并记录真实完成身份，然后发布 FlightCompletion。FrameTimeline 持有预分配的 F 个通知槽；mutex 保护队列与开域身份，每 flight 至多一条未消费终结通知，重复、外来身份和溢出立即诊断。完成账本的 CompletedSerial 同时用于等待恢复，不再转存等待记录的布尔完成标记。
+ApplicationLoop 在 GT 帧首用 `RetireReadyFrames` 检查这个前缀；有空槽就推进下一帧，只对需要复用的最旧槽位形成背压。
+CPU 交付、唤醒、超时、Present 返回都不代替 GPU fence 完成。RT 不回收 flight，staging 回收与 profiler resolve 发生在 GT。
+独立宿主的 `CompleteFlight` / `CompleteFlightIfReady` 会读取其他槽位，调用时必须隔离**全部**提交生产者及 retire/复用；
+`WaitAndRetireFlights` 继续提供生产者静止后的同步排空入口。`WaitMainQueueIdle` 只做主队列等待，不退休或调用游戏代码。
 
 `Application` 是完成通道的唯一消费者。帧顶取得可写槽位后，`Application::ServiceFrameBoundaryGT`
 通过 `FrameTimeline::TryReadCompletion` 非阻塞收集一个本地批次，
@@ -166,7 +168,7 @@ Return 或 Discard 仅在结束仍打开的录制时释放组占用。批量操�
 
 旧 `AppFrameContext::AllocateCommandBuffer/ReturnCommandBuffers` 保留；后者是 Return + Register 的适配入口。
 内部 profiler 与 late-drop cleanup 通过同一分组池的私有续录入口追加命令；公开录制封口后不能再调用。
-所有提交及内部续录仍由原 final flight fence 覆盖。观察到真实完成后，CompleteFlight 逐组 Reset 本轮用过的 storage、清零 cursor，
+所有提交及内部续录仍由原 final flight fence 覆盖。观察到真实完成后，RetireFlight 逐组 Reset 本轮用过的 storage、清零 cursor，
 清理全部 child 临时状态，清除参数旧借用并重置参数/常量 cursor，然后发布 completion。
 GT 消费完成并释放 owner 后才允许下一次 BeginFrameRecord；Begin 不再二次 Reset，Allocate/Return/Submit 也不 Reset。
 终止清理会先释放借用 program layout 的 GpuFrameResources，再拆 RenderSystem caches。
@@ -192,13 +194,15 @@ acquire semaphore 的回收关联到 runtime 持有的 fence。最终收尾 Subm
 
 AcquireWindow 与提交前检查保留实时的最小化、隐藏和客户区判断。不可呈现只丢弃对应目标 batch，保持必要和独立 batch 的顺序、wait/signal 与最终 fence。D3D12 由 Present 消费 token；Vulkan 消费 acquire semaphore、signal present semaphore 并 Present，必要时单独录制 Present 状态收尾。只发布实际执行的 backbuffer 状态。成功 acquire 不能通过析构取消，原始平台 API 不能绕过 runtime 在并发录制时修改窗口。
 
-runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，普通循环的事件派发期间允许模态 Tick。
-普通循环在 DispatchEvents 前保留一个已准备的逻辑帧；模态 Tick 优先消费它，不重复领取 writable
-槽位、重置 HostWrites、恢复完成批次或采样时间。事件派发期间出现模态活动后，外层跳过普通 Tick，
-不会再提交已被模态路径消费的帧；尚未消费的准备状态保留供后续 Tick 使用。
-单线程模态帧取得可写槽、收尾并开始计时后，在 Update 前派发完成回调期间新到达的输入；
-这次事件派发保持 runner 的 ticking guard，拒绝嵌套模态帧，避免 vblank 回调绕过正常帧的输入边界。
-一次模态活动可能产生多个 vblank 帧，不承诺只绘制一帧。双线程模态路径仍先等待已发布的 CPU 录制结束，槽位不可写时跳过本次 Tick。
+普通循环与窗口拖动/菜单 tick 共用同一非阻塞推进协议。已准备帧用唯一游戏帧号标识，
+在原生消息采集期间可由模态 tick 消费；外层只执行自己持有且仍有效的身份，不能重复 S0、计时、输入、Update 或发布。
+OnInit 返回并进入驱动循环前，模态入口不能提前推进帧。准备、完成回调、普通事件派发、Update、录制、维护修改和结果交付期间禁止重入。模态入口未就绪立即返回，
+不等待 CPU 或 GPU。每个模态帧准备后仍再次采集消息，完成回调投递的消息可进入紧接着的 Update。
+双线程丢弃过期非模态绘制但仍消费已发布场景包；最多保留一个尚未 CPU 交付的模态帧。
+Win32 在系统移动、缩放和菜单循环内通过窗口的 WM_TIMER 触发 tick，单/双线程使用相同入口，
+不创建 VBlank 辅助线程或隐藏消息窗口。定时器使用 USER_TIMER_MINIMUM（10 ms），WM_TIMER 优先级低；
+此入口用于维持模态期间的帧推进，不承诺按显示器刷新率稳定出帧，持续高优先级消息可能推迟 tick。
+最终宿主拆除必须回到外层循环，不能发生在原生消息或模态回调栈内。
 
 ### 窗口修改协程
 
@@ -222,9 +226,12 @@ runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 
 等待表是 `ManualCoroutineScheduler<WindowOperationRecord>`：参数和结果由操作协程帧拥有，
 记录只保存入队序号、阶段、协程 continuation 和停止状态，不保存操作回调或另一份命令参数。
 同一条记录从等待安全点转为执行，再转为等待交付，保留最初的入队序号与取消注册。
-runner 在等待前截取入队序号上界，再停止发布新帧、等待旧 CPU
-录制/提交/Present 调用结束、退休 flight 并等待主队列 idle。整个批次只在 runtime 层发起一次主队列
-排空，窗口函数不再嵌套等待。最终 flight signal 位于 Present 调用之后，但 queue fence 不证明显示引擎停止使用图像或 present semaphore，交换链维护仍走统一的队列排空和平台同步路径。
+ApplicationLoop 在尚未开启下一逻辑帧时截取操作序号上界和最后已发布帧号，停止发布新帧，
+非阻塞等待该帧的 CPU 交付。生产者静止后启动临时排空线程，先等待已提交 final fence，再执行一次主队列 `Wait()`。
+该线程只等待，不 retire、释放资源或派发回调；整个排空期间禁止其他队列提交、Present 和队列相关资源修改。
+GT 继续采集原生消息，观察线程实际退出后才 join，随后 GT 退休 flight 并执行冻结批次。普通帧不创建排空线程。
+最终 flight signal 位于 Present 调用之后，但不证明显示引擎停止使用图像或 present semaphore；
+也不能覆盖其他独立队列尾部工作。交换链维护仍走统一的队列排空和平台同步路径。
 
 先处理已有的 OS/后端重建需求，再按 FIFO 恢复截止序号内等待 WaitSafe 的协程；每条协程完成必要的
 交换链处理和 framebuffer 缓存淘汰后，在 FinishOperation 再次挂起。全部修改结束、退出修改阶段后，
@@ -255,15 +262,27 @@ FinishOperation 使用直接 awaitable，无论是否已收到取消都必须先
 
 ### 窗口输入
 
-Win32 窗口线程等待 CPU 提交或 GPU final fence 时，通过 `PeekMessage` 仅处理跨线程
-`SendMessage`，允许 WSI 内部线程继续推进；posted 输入仍在完成通知之后的正常帧边界分发。
-GPU 等待使用有界 `WaitFor`，窗口维护先等待各 flight 的真实 final fence，再做一次主队列排空。
-等待期间抑制模态 Tick 重入，不恢复 Update、窗口操作协程或用户完成回调。
-这一处理满足 [Vulkan Win32 WSI 的消息泵要求](https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html#_win32_platform)。
+Application 创建 WindowManager 时显式启用 `NativeEventDelivery::Deferred`。独立 NativeWindow/WindowManager 默认
+`Immediate`，原生回调时机保持不变。托管 manager 的公共 `DispatchEvents` 拒绝越过 Application 帧边界自行派发。
+Cocoa 继续即时模式，工厂明确拒绝尚未实现的延迟配置；Application 窗口模式目前只支持 Win32。
 
-NativeWindow 保留原始键鼠、文本、滚轮与焦点事件，调用方可直接订阅其信号。
-runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 OnBeforeInput 扩展槽已移除。
-应用自行处理输入状态、捕获与失焦取消；宿主不再提供应用/UI 输入归属路由。
+WndProc 立即完成系统回复、原生状态更新和文本解码；键鼠、重复键、UTF-8 文本、滚轮、焦点、捕获丢失、移动、
+尺寸、显示变化与关闭通知保存到可增长 FIFO，不覆盖旧输入或额外合并事件。文本由队列拥有，回调的 string_view
+只在当前 signal 发射期间有效。事件绑定不复用的窗口注册身份；注销或销毁取消该身份的积压事件。
+每批在入口冻结截止位置，回调产生的事件留到下一批；失焦与捕获丢失按原生接收顺序交付，客户端负责清理输入状态。
+框架保证已经接收事件的顺序与完整性，不恢复操作系统已经合并的鼠标移动。`EventBeforeSurfaceChange` 仍是同步契约检查，
+模态 tick 仍是框架控制入口，两者不进入普通事件 FIFO。
+
+CPU 交付、排空线程返回和 RequestExit 发出进度唤醒。Win32 使用 `MsgWaitForMultipleObjectsEx` 同时等待进度事件、
+实际线程退出句柄与 `QS_ALLINPUT`；通知可以提前、合并或虚假到达，始终重新检查状态。每次原生采集最多 256 条，
+随后检查帧进度。GPU 背压在外层使用 `Fence::WaitFor(value, 1)` 有限片段，每片后重新采集消息；30 秒截止绑定同一帧，
+消息或模态 tick 不会重置它。准备未完成前不派发普通游戏事件或 Update。
+该边界遵循 [DXGI 消息泵要求](https://learn.microsoft.com/en-us/windows/win32/direct3darticles/dxgi-best-practices#multithreading-and-dxgi)
+及 [Vulkan Win32 WSI 契约](https://docs.vulkan.org/spec/latest/chapters/VK_KHR_surface/wsi.html#_win32_platform)；
+同步 OnRender、Acquire/Present 或驱动调用本身仍可能耗时，RHI 不承担窗口消息服务。
+
+NativeWindow 的信号仍是应用输入入口；runtime 不提供统一输入状态或应用/UI 路由。收到退出请求后取消积压输入，
+停止普通派发并持续服务原生消息。Win32 消息泵记住 WM_QUIT，WindowManager 将它纳入退出条件。真实主窗口关闭请求在安全关停点通知一次，再调用 OnShutdown；RequestExit 或 WM_QUIT 不伪造关闭事件。
 
 通用窗口能力通过 `NativeDesktopCapabilities` 查询：光标形状与显隐、桌面鼠标定位、显示器
 工作区和 DPI、UTF-8 clipboard、IME 候选框定位。Win32 实现这些能力及 DPI/display/capture
@@ -278,7 +297,7 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 |---|---|---|
 | 录制态 | `CommandAllocator`, `FrameResources`, `Batches`, `Acquisitions`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
 | 保活态 | `Payloads`, `GpuPayloads`, `FrameSerial` | GT 开域、登记/释放 payload；RT 使用已保留编号，GT 匹配真实完成后清零 |
-| 提交态 | `Signal` | RT 在 `EndFrameRecordAndSubmit` 写；GT 观察 CPU 提交完成后在 retire/`CompleteFlight` 读后清 |
+| 提交态 | `Signal` | RT 在 `EndFrameRecordAndSubmit` 写；GT acquire 确认 CPU 交付后在 `RetireSubmittedFlights` 读，真实退休时清空 |
 
 `Recording` 从 BeginFrameRecord 到提交封口前为 true；AppFrameContext 同时校验保存的 FrameSerial。
 封口后禁止继续录制，runner 的 EndFrameRecordAndSubmit 可重复收尾，不另存 Submitted 标志。
@@ -296,7 +315,7 @@ FrameSerial 在 GT OpenFrameDomain/BeginUpdateForFlight 保留，同时标识当
 ## 帧边界等待
 
 `IWaitFrameProcessor::Wait()` 由 `FrameTimeline` 实现，GpuSystem 不再提供该接口。等待表属于调用时的当前 flight。
-`PublishCompletion` 只发布原子完成事实，GPU 的 CompleteFlight 与 CPU runner 都走这里；
+`PublishCompletion` 只发布原子完成事实，GPU 的 RetireFlight 与 CPU-only 路径都走这里；
 GT PumpWaitFrame 通过 ManualCoroutineScheduler 冻结已就绪等待记录，再按地址和序号验证后恢复。
 等待表是 `vector<unique_ptr<Flight>>`：调度器不可移动，挂起记录的 stop callback 回指调度器。
 正常只泵当前 writable flight；终止排空先捕获每个 flight 等待表的序号截止，再处理全部 flight，
@@ -376,7 +395,7 @@ per-flight timestamp pool + readback。
 `GpuSystem` 提交时从同一命令分配器取得普通 buffer，在应用批次前后分别录制开始 timestamp
 和结束 timestamp / resolve，不保留独立的计时命令 buffer 成员，也不打断 D3D12 的
 Submit → Present 配对。计时范围覆盖整段应用提交序列，可能包含组间 GPU 等待。
-跳过应用工作的帧不录制计时，不发布旧 query 结果。`CompleteFlight` 时读取实际提交的
+跳过应用工作的帧不录制计时，不发布旧 query 结果。flight 真实退休时读取实际提交的
 query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差异内部隐藏。
 最近一次 GPU 耗时通过原子标量发布，允许 game thread 在另一 flight 回收时读取。帧延迟由 FrameTimeline 在 `PublishCompletion` 时发布。
 
@@ -402,18 +421,18 @@ query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差�
 `Application::Shutdown` 的顺序是固化的，每一步都有理由：
 
 ```text
-runner 停止新帧、关闭窗口操作 → 消费并 join 已发布包
-进入 Shutdown / Stopping：停止 World/Scene 新业务和 scheduler 新任务，请求加载生产者停止
-WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
+ApplicationLoop 停止发布和输入派发、关闭窗口操作 → RT 消费已发布包
+继续泵消息 → 观察 RT 实际退出并 join → 系统 BeginStopping（World/Scene/scheduler/加载）
+临时线程等待 final fence + 主队列 idle → GT 观察实际退出并 join → GT 退休并消费完成、释放 owner
 terminal abandon：释放未发布 Scene 包，不生成成功 completion
-OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager
+安全点交付真实主窗口关闭一次 → OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager
 释放 GPU 帧参数资源和未发布 raw frame owner → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
 ```
 
 AssetManager 只拥有加载 scope；取消加载不会释放框架已接纳的 GPU owner。
 Material 的持久 SPS 与常量 allocation 必须在 program/layout 服务退出前释放，因此 GPU drain 后先拆资产，再拆 RenderSystem。
 FrameTimeline 在 AssetManager 之后、GpuSystem 之前销毁：在飞 CPU/加载等待先在时间线仍存活时收束，剩余等待者取消时 device 仍在。
-普通窗口维护通过 WaitAndRetireFlights 等待 GPU 并发布完成，随后在帧边界释放 owner，
+普通窗口维护通过临时线程等待 GPU/队列，再由 GT 退休并发布完成，随后在帧边界释放 owner，
 不 abandon writer 状态；abandon 后不能恢复正常发布。
 
 
@@ -423,13 +442,14 @@ FrameTimeline 在 AssetManager 之后、GpuSystem 之前销毁：在飞 CPU/加�
 完成通道的生命周期跟随 FrameTimeline；关停期间保持可写，直到生产者停止且最终消息已消费后随时间线销毁。
 固定队列随时间线销毁，停止前已经发布的消息必须先消费。
 
-ThreadedRunner 在 join 前消费全部已发布 Scene batch，即使退出已请求，也只跳过应用绘制。
+ApplicationLoop 的 RT 在退出前消费全部已发布 Scene batch，即使退出已请求，也只跳过应用绘制。
 没有发布的 batch 及其退休引用在 RT 停止、GPU idle 后于 GT 清理。RenderScene::Apply 不表示 GPU 完成；CPU 增量交付沿用现有
 ready 交接、fence 与 flight 退休语义。
 
 `Application::Shutdown` 和析构共用 `StopAndDrainRuntime` 停止生产者、排空真实完成并释放未发布 owner，
 随后取消通知并通过 `DestroyRuntime` 按固定顺序拆除。析构作为正常 `Shutdown` 被异常绕过时的保底；该路径
-不调用派生类的 `OnShutdown`，但仍会 wait GPU、取消 scheduler、断开窗口引用并保持同一销毁顺序。
+不派发延迟游戏事件，也不调用派生类的 `OnShutdown`，复用相同排空协议。Run 的作用域清理先排空借用线程，再允许调用栈展开至派生对象成员析构。停止派发时向仍处于系统模态循环的托管窗口发送 WM_CANCELMODE，使菜单等原生状态退出，最终拆除仍回到外层循环。所有线程退出后才销毁设备、窗口和唤醒对象。
+退出请求、超时和线程结束都不能伪造 GPU 完成或授权提前释放在途资源。
 
 ## 服务装配
 

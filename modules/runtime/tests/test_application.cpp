@@ -419,6 +419,17 @@ protected:
         auto* window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
         _hwnd = static_cast<HWND>(window->GetNativeHandler());
         _inputConnection = window->EventTextInput().connect(&FrameBoundaryApp::OnTextInput, this);
+        if (_modal) {
+            ASSERT_NE(::SetTimer(_hwnd, reinterpret_cast<UINT_PTR>(this), 1,
+                                 [](HWND, UINT, UINT_PTR identity, DWORD) {
+                                     auto* self = reinterpret_cast<FrameBoundaryApp*>(identity);
+                                     ++self->_nativeDepth;
+                                     auto* native = self->GetWindowManager()->GetMainWindow()->GetNativeWindow();
+                                     self->GetWindowManager()->EventModalLoopTick()(native);
+                                     --self->_nativeDepth;
+                                 }),
+                      0u);
+        }
         ASSERT_NE(::PostMessageW(_hwnd, WM_CHAR, 'i', 0), 0);
     }
 
@@ -431,7 +442,7 @@ protected:
             if (_modal) {
                 auto* window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
                 GetWindowManager()->EventModalLoopTick()(window);
-                EXPECT_EQ(_updates, 1u);
+                EXPECT_EQ(_updates, 0u);
             }
         } else if (text == "c") {
             ++_handledCompletions;
@@ -448,7 +459,7 @@ protected:
             GetWindowManager()->EventModalLoopTick()(window);
             EXPECT_EQ(_updates, 2u);
         }
-        if (_updates >= 5 && !_closing) {
+        if (_updates >= 5 && (!_modal || _modalFrames.load() != 0 || _updates >= 1000) && !_closing) {
             _closing = true;
             test::CloseMainWindow(*this);
         }
@@ -469,6 +480,8 @@ protected:
     }
 
     void OnShutdown() override {
+        EXPECT_EQ(_nativeDepth, 0u);
+        if (_modal) ::KillTimer(_hwnd, reinterpret_cast<UINT_PTR>(this));
         EXPECT_GT(_handledCompletions, 0u);
         EXPECT_EQ(_handledCompletions, _postedCompletions);
         EXPECT_EQ(_completions, GetFrameTimeline().GetFrameIndex());
@@ -481,6 +494,7 @@ protected:
 
 private:
     bool _modal;
+    uint32_t _nativeDepth{0};
     bool _initialInputHandled{false}, _closing{false};
     uint64_t _updates{0}, _completions{0}, _postedCompletions{0}, _handledCompletions{0};
     std::atomic<uint32_t> _modalFrames{0};
@@ -543,13 +557,24 @@ protected:
         _hwnd = static_cast<HWND>(window->GetNativeHandler());
         _keyboardConnection = window->EventKeyboard().connect([this](KeyCode key, Action action) {
             if (key != KeyCode::F6) return;
-            RecordInput(action == Action::PRESSED ? "key down" : "key up");
+            RecordInput(action == Action::PRESSED ? "key down" : action == Action::REPEATED ? "key repeat"
+                                                                                            : "key up");
             if (action == Action::PRESSED) ++_keyPresses;
             _keyDown = action != Action::RELEASED;
         });
         _textConnection = window->EventTextInput().connect([this](std::string_view text) {
+            if (text == "d") _extraInput = true;
             RecordInput(string{text});
             _text.append(text);
+        });
+        _focusConnection = window->EventFocused().connect([this](bool focused) {
+            if (_extraInput) RecordInput(focused ? "focus" : "blur");
+        });
+        _captureConnection = window->EventCaptureLost().connect([this] {
+            if (_extraInput) RecordInput("capture");
+        });
+        _scrollConnection = window->EventScroll().connect([this](float x, float y) {
+            if (_extraInput && x == -1.0f && y == 0.0f) RecordInput("scroll left");
         });
         _touchConnection = window->EventTouch().connect([this](int x, int y, MouseButton button, Action action) {
             if (button != MouseButton::BUTTON_LEFT || x != 11 || y != 13 || (action != Action::PRESSED && action != Action::RELEASED)) return;
@@ -579,11 +604,12 @@ protected:
         const vector<string> expected{
             "key down", "key up", "a", "mouse down", "mouse up", "wheel up",
             "key down", "key up", "b", "mouse down", "mouse up", "wheel down",
-            "key down", "key up", "c", "mouse down", "mouse up", "wheel up"};
+            "key down", "key up", "c", "mouse down", "mouse up", "wheel up",
+            "d", "key down", "key repeat", "key up", "\xf0\x9f\x98\x80", "scroll left", "blur", "focus", "capture"};
         EXPECT_EQ(_events, expected);
-        EXPECT_EQ(_keyPresses, 3u);
+        EXPECT_EQ(_keyPresses, 4u);
         EXPECT_EQ(_clicks, 3u);
-        EXPECT_EQ(_text, "abc");
+        EXPECT_EQ(_text, "abcd\xf0\x9f\x98\x80");
         EXPECT_EQ(_wheelTotal, WHEEL_DELTA);
         EXPECT_FALSE(_keyDown);
         EXPECT_FALSE(_mouseDown);
@@ -631,6 +657,16 @@ protected:
                 EXPECT_NE(::PostMessageW(_hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(delta)), 0), 0);
                 if (!_sendMessage) std::this_thread::sleep_for(std::chrono::milliseconds{10});
             }
+            EXPECT_NE(::PostMessageW(_hwnd, WM_CHAR, 'd', 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_KEYDOWN, VK_F6, 1), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_KEYDOWN, VK_F6, (LPARAM{1} << 30) | 1), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_KEYUP, VK_F6, static_cast<LPARAM>(0xC0000001u)), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_CHAR, 0xD83D, 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_CHAR, 0xDE00, 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_MOUSEHWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_KILLFOCUS, 0, 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_SETFOCUS, 0, 0), 0);
+            EXPECT_NE(::PostMessageW(_hwnd, WM_CAPTURECHANGED, 0, 0), 0);
             EXPECT_EQ(_updates.load(), 1u);
             EXPECT_EQ(_completedFence->GetCompletedValue(), 0u);
             _released.store(true, std::memory_order_release);
@@ -643,12 +679,15 @@ protected:
     void OnShutdown() override {
         if (_inputThread.joinable()) _inputThread.join();
         EXPECT_TRUE(_verified);
-        EXPECT_EQ(_events.size(), _mutateWindow ? 0u : 18u);
+        EXPECT_EQ(_events.size(), _mutateWindow ? 0u : 27u);
         EXPECT_EQ(_completions, GetFrameTimeline().GetFrameIndex());
         _keyboardConnection.disconnect();
         _textConnection.disconnect();
         _touchConnection.disconnect();
         _wheelConnection.disconnect();
+        _focusConnection.disconnect();
+        _captureConnection.disconnect();
+        _scrollConnection.disconnect();
         _completedFence.reset();
         _gate.reset();
     }
@@ -698,11 +737,12 @@ private:
     unique_ptr<render::Fence> _gate, _completedFence;
     HWND _hwnd{nullptr};
     sigslot::scoped_connection _keyboardConnection, _textConnection, _touchConnection, _wheelConnection;
+    sigslot::scoped_connection _focusConnection, _captureConnection, _scrollConnection;
     vector<string> _events;
     string _text;
     uint32_t _keyPresses{0}, _clicks{0};
     int _wheelTotal{0};
-    bool _keyDown{false}, _mouseDown{false}, _submitted{false}, _verified{false};
+    bool _keyDown{false}, _mouseDown{false}, _submitted{false}, _verified{false}, _extraInput{false};
     uint64_t _completions{0};
     std::atomic<uint32_t> _updates{0};
     std::atomic_bool _released{false};

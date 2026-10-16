@@ -107,7 +107,7 @@ Tracy、CPU/GPU 基准、配对测量与内存口径统一见[性能测量](perf
 
 `cmake --build build_release --config Release --target test_radray_runtime --parallel 4`
 构建 runtime 测试可执行文件。同一模块的 GTest 源文件链进一个 exe：`test_radray_core`、
-`test_radray_render`、`test_radray_runtime`、`test_radray_shader_compiler`。`test_inline_vector`
+`test_radray_render`、`test_radray_runtime`、`test_radray_window`（Win32）、`test_radray_shader_compiler`。`test_inline_vector`
 替换全局 `operator new`，单独成 exe。`radray_runtime_tests` 只依赖 `test_radray_runtime`。
 完成后用 `ctest --test-dir build_release/modules/runtime/tests -C Release --output-on-failure`
 执行该目录的完整回归。CTest 仍是每个 `TEST()` 一个进程；直接运行合并后的 exe 会在同一进程跑该模块全部用例。
@@ -119,6 +119,8 @@ Tracy、CPU/GPU 基准、配对测量与内存口径统一见[性能测量](perf
 | `test_asset_slot.cpp` | `AssetSlotTest` |
 | `test_frame_upload.cpp` | `FrameUploadTest` |
 | `test_runtime_services.cpp` | `RuntimeServices`（关闭 Scene/World，双后端单/双线程 shader 与原生命令读回） |
+| `test_event_pump.cpp`（window） | `NativeEventPumpTest`（延迟 FIFO、文本寿命、冻结派发、注销身份、有限采集、唤醒与即时兼容） |
+| `test_application.cpp`, `test_application_loop.cpp` | `RuntimeFoundation`（双后端单/双线程、F=1/2/3/4、GT/RT 重叠、同步窗口消息、真实 GPU gate、独立队列排空、模态/停止/输入） |
 | `test_application_systems.cpp` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount` 与 Render/Gpu 配置） |
 | `test_gpu_system.cpp` | `GpuSystemTest`, `GpuSystemDeathTest` |
 | `test_scene_delivery.cpp` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |

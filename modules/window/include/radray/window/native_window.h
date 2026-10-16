@@ -3,6 +3,8 @@
 #include <variant>
 #include <string_view>
 #include <optional>
+#include <functional>
+#include <span>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -161,6 +163,9 @@ private:
     sigslot::signal<> _eventBeforeSurfaceChange;
 };
 
+enum class NativeEventDelivery { Immediate,
+                                 Deferred };
+
 class NativeEventPump {
 public:
     virtual ~NativeEventPump() noexcept = default;
@@ -170,7 +175,19 @@ public:
     virtual void Unregister(NativeWindow* window) noexcept = 0;
     virtual sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept = 0;
 
-    static Nullable<unique_ptr<NativeEventPump>> Create(NativeWindowType type) noexcept;
+    /// Deferred mode: collect native messages without invoking ordinary application callbacks.
+    virtual void PumpNativeEvents(uint32_t limit = 256) noexcept;
+    /// Freeze the FIFO boundary; events produced by callbacks belong to the next batch.
+    virtual void DispatchPendingEvents(const std::function<bool()>& canDispatch = {}) noexcept;
+    virtual void StopEventDelivery() noexcept;
+    /// Terminal safe point only; deliver a real close request at most once.
+    virtual void DispatchCloseRequest(NativeWindow* window) noexcept;
+    /// Wake is a hint, not a completion count. Handles are borrowed until the wait returns.
+    virtual void WaitEvents(uint32_t timeoutMs, std::span<void* const> threadHandles = {}) noexcept;
+    virtual void Wake() noexcept;
+    virtual bool QuitRequested() const noexcept;
+
+    static Nullable<unique_ptr<NativeEventPump>> Create(NativeWindowType type, NativeEventDelivery delivery = NativeEventDelivery::Immediate) noexcept;
 };
 
 std::string_view format_as(NativeWindowType v) noexcept;

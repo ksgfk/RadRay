@@ -17,6 +17,7 @@
 namespace radray {
 
 class Application;
+class ApplicationLoop;
 class ApplicationScheduler;
 class SwitchToApplicationSchedulerAwaitable;
 struct ApplicationSchedulerRecord;
@@ -160,8 +161,8 @@ public:
     int Run(const ApplicationRuntimeDescriptor& desc);
     const RuntimeStartupResult& GetStartupResult() const noexcept { return _startup; }
 
-    /// 可从 OnInit/OnUpdate 请求结束；无窗口时也是正常退出入口。
-    void RequestExit() noexcept { _exitRequested = true; }
+    /// Runtime 存活期间可跨线程请求结束并唤醒主循环；调用者须在宿主拆除前结束。
+    void RequestExit() noexcept;
 
     /// 从初始化成功到 DestroyRuntime 之前有效。
     FrameTimeline& GetFrameTimeline() noexcept { return *_frameTimeline; }
@@ -208,7 +209,7 @@ protected:
     /// runner 调用开始/结束/提交；资源必须在帧处理过程(flight)时保持存活。
     virtual void OnRender(AppFrameContext& ctx);
 
-    /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、World 拆除之前)。
+    /// 关闭前的游戏侧清理(真实 CPU/GPU 排空与完成消费之后、World 拆除之前)。
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
@@ -219,16 +220,14 @@ protected:
     bool ShouldExit() const noexcept;
 
 private:
-    friend class SingleThreadRunner;
-    friend class ThreadedRunner;
-    friend class CpuRunner;
+    friend class ApplicationLoop;
     friend class WorldRenderBridge;
     bool SetCollecting(bool collecting);
 
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void StopAndDrainRuntime();
+    void BeginStoppingRuntime();
     void DestroyRuntime() noexcept;
-    void WaitAndCleanupCompletedFlights();
     /// 有 flightIndex 时推进该可写槽位；空值仅用于 GPU idle 后的全量清理。
     void PumpFlightCompletions(std::optional<uint32_t> flightIndex);
     /// 上一帧完成后，在主线程完成回调，Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
@@ -246,6 +245,7 @@ private:
     unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<SceneManager> _sceneManager;
     unique_ptr<WorldManager> _worldManager;
+    unique_ptr<ApplicationLoop> _loop;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
@@ -253,6 +253,7 @@ private:
     bool _multithreaded{false};
     std::atomic_bool _exitRequested{false};
     bool _processingFlightCompletions{false};
+    bool _shuttingDown{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
 };
 

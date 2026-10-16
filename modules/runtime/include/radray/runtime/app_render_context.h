@@ -1,7 +1,8 @@
 #pragma once
 
 #include <chrono>
-#include <cstdint>
+
+#include <radray/types.h>
 
 namespace radray {
 

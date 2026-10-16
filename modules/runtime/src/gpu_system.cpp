@@ -162,16 +162,44 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     for (uint32_t i = 0; i < _flights.size(); ++i)
         if (_flights[i]->Signal.IsValid() && _flights[i]->Signal.Value <= completedValue) completed.push_back(i);
     std::sort(completed.begin(), completed.end(), [this](uint32_t a, uint32_t b) { return _flights[a]->Signal.Value < _flights[b]->Signal.Value; });
-    for (auto i : completed) {
-        auto& done = *_flights[i];
-        done.CommandAllocator.ResetForReuse();
-        if (_frameProfiler) _frameProfiler->Resolve(i);
-        done.Signal = FenceSignal::Invalid();
-        done.FrameResources->CompleteEpoch();
-        _timeline->PublishCompletion({.FlightIndex = i, .OutputsExecuted = done.Rendered, .FrameSerial = done.FrameSerial});
-    }
+    for (auto i : completed) RetireFlight(i);
     return true;
 }
+
+void GpuSystem::RetireFlight(uint32_t flightIndex) {
+    auto& done = *_flights[flightIndex];
+    done.CommandAllocator.ResetForReuse();
+    if (_frameProfiler) _frameProfiler->Resolve(flightIndex);
+    done.Signal = FenceSignal::Invalid();
+    done.FrameResources->CompleteEpoch();
+    _timeline->PublishCompletion({.FlightIndex = flightIndex, .OutputsExecuted = done.Rendered, .FrameSerial = done.FrameSerial});
+}
+
+size_t GpuSystem::RetireSubmittedFlights(std::span<const SubmittedFlight> flights) {
+    RADRAY_ASSERT(std::this_thread::get_id() == _ownerThread);
+    if (flights.size() > _flights.size()) RADRAY_ABORT("Submitted prefix exceeds the flight capacity");
+    uint64_t previousSignal = 0;
+    for (const auto& identity : flights) {
+        if (identity.FlightIndex >= _flights.size() || identity.FrameSerial == 0)
+            RADRAY_ABORT("Invalid submitted flight prefix");
+        const auto& flight = *_flights[identity.FlightIndex];
+        if (flight.Recording || flight.FrameSerial != identity.FrameSerial || !flight.Signal.IsValid())
+            RADRAY_ABORT("Retirement requires an unretired CPU handoff with matching identity");
+        if (flight.Signal.Fence != _mainQueueTrack.Fence.get() || flight.Signal.Value <= previousSignal)
+            RADRAY_ABORT("Retirement requires final signals in submission order");
+        previousSignal = flight.Signal.Value;
+    }
+    size_t retired = 0;
+    for (const auto& identity : flights) {
+        const auto& signal = _flights[identity.FlightIndex]->Signal;
+        if (signal.Fence->GetCompletedValue() < signal.Value) break;
+        RetireFlight(identity.FlightIndex);
+        ++retired;
+    }
+    return retired;
+}
+
+void GpuSystem::WaitMainQueueIdle() { _mainQueue->Wait(); }
 
 bool GpuSystem::CompleteFlightIfReady(uint32_t flightIndex, bool wait) {
     if (flightIndex >= _flights.size()) {

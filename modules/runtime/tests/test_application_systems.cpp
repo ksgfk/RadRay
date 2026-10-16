@@ -69,6 +69,34 @@ void CheckEmptyFrameLoopAndExitFromInit() {
     }
 }
 
+class FirstFrameTimingApplication final : public Application {
+public:
+    bool Updated{false};
+
+protected:
+    void OnInit() override {
+        std::this_thread::sleep_for(std::chrono::milliseconds{50});
+        _initFinished = std::chrono::steady_clock::now();
+    }
+    void OnUpdate(const AppUpdateContext& context) override {
+        const auto sinceInit = std::chrono::steady_clock::now() - _initFinished;
+        // The first frame may include loop startup and S0, but never OnInit's work.
+        EXPECT_LE(context.DeltaTime, sinceInit + std::chrono::milliseconds{1});
+        EXPECT_GE(context.DeltaTime.count(), 0.0f);
+        Updated = true;
+        RequestExit();
+    }
+
+private:
+    std::chrono::steady_clock::time_point _initFinished{};
+};
+
+TEST(ApplicationSystems, FirstDeltaTimeExcludesInitialization) {
+    FirstFrameTimingApplication app;
+    EXPECT_EQ(app.Run(CpuOnly(std::nullopt, std::nullopt, std::nullopt)), 0);
+    EXPECT_TRUE(app.Updated);
+}
+
 class WorldOnlyApplication final : public Application {
 protected:
     void OnInit() override {

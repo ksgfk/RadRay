@@ -52,15 +52,27 @@ Nullable<unique_ptr<NativeWindow>> NativeWindow::Create(const NativeWindowCreate
         desc);
 }
 
-Nullable<unique_ptr<NativeEventPump>> NativeEventPump::Create(NativeWindowType type) noexcept {
+void NativeEventPump::PumpNativeEvents(uint32_t) noexcept { RADRAY_ABORT("Split event delivery is unsupported on this platform"); }
+void NativeEventPump::DispatchPendingEvents(const std::function<bool()>&) noexcept { RADRAY_ABORT("Deferred events are unsupported on this platform"); }
+void NativeEventPump::StopEventDelivery() noexcept { RADRAY_ABORT("Deferred events are unsupported on this platform"); }
+void NativeEventPump::DispatchCloseRequest(NativeWindow*) noexcept { RADRAY_ABORT("Deferred events are unsupported on this platform"); }
+void NativeEventPump::WaitEvents(uint32_t, std::span<void* const>) noexcept { RADRAY_ABORT("Event waiting is unsupported on this platform"); }
+void NativeEventPump::Wake() noexcept { RADRAY_ABORT("Event waking is unsupported on this platform"); }
+bool NativeEventPump::QuitRequested() const noexcept { return false; }
+
+Nullable<unique_ptr<NativeEventPump>> NativeEventPump::Create(NativeWindowType type, NativeEventDelivery delivery) noexcept {
 #if defined(RADRAY_PLATFORM_WINDOWS)
     if (type == NativeWindowType::Win32HWND) {
-        return make_unique<Win32EventPump>();
+        return make_unique<Win32EventPump>(delivery);
     } else {
         RADRAY_ERR_LOG("Unsupported NativeWindowType {}", type);
         return nullptr;
     }
 #elif defined(RADRAY_PLATFORM_MACOS)
+    if (delivery != NativeEventDelivery::Immediate) {
+        RADRAY_ERR_LOG("Cocoa deferred event delivery is not implemented");
+        return nullptr;
+    }
     if (type == NativeWindowType::CocoaNSWindow) {
         return make_unique<CocoaEventPump>();
     } else {

@@ -1,6 +1,6 @@
 > - 适用: Application、多 World、组件渲染连接、场景交付与共享渲染服务
 > - 权威: 本文描述 runtime 宿主与场景边界；GPU 帧与上传见 frame-and-gpu
-> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/include/radray/runtime/world_manager.h`, `modules/runtime/src/world_manager.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene_manager.h`, `modules/runtime/src/render_framework/scene_manager.cpp`, `modules/runtime/include/radray/runtime/components/scene_view_capture.h`, `modules/runtime/include/radray/runtime/game_framework/`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/render_framework/`
+> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/application_loop.h`, `modules/runtime/src/application_loop.cpp`, `modules/runtime/include/radray/runtime/world_manager.h`, `modules/runtime/src/world_manager.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene_manager.h`, `modules/runtime/src/render_framework/scene_manager.cpp`, `modules/runtime/include/radray/runtime/components/scene_view_capture.h`, `modules/runtime/include/radray/runtime/game_framework/`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/render_framework/`
 
 # Runtime 宿主、World 与渲染场景
 
@@ -27,18 +27,19 @@ runtime 按职责区分底层服务、通用资产与可选渲染框架，框架
 ## Application 与驱动边界
 
 `Application::Run` 按 `ApplicationRuntimeDescriptor` 的可选系统创建服务。Window、Gpu、Render、Scene、World、Asset 默认都启用；某个 `std::optional` 设为 `nullopt` 即关闭该系统。字段只放在所属选项里：后端、验证、多线程、交换链和帧 profiler 属于 `GpuOptions`，shader 根属于 `RenderOptions`，`SceneOptions` 控制场景服务，资产根属于 `AssetOptions`。`FlightDataCount` 是时间线槽位数，必须大于 0。必要时初始化窗口，然后调用 OnInit；默认不创建默认 World。各 getter 对未启用的系统返回空。`GetFrameTimeline()` 在初始化成功后始终有效。
-`RequestExit()` 可在没有窗口时结束循环。启动失败写在 `GetStartupResult()`，OnInit 之前返回。OnInit 返回后以 bootstrap S1
+`RequestExit()` 可跨线程请求结束并唤醒消息循环；调用者必须在宿主拆除前结束，在没有窗口时同样有效。启动失败写在 `GetStartupResult()`，OnInit 之前返回。OnInit 返回后以 bootstrap S1
 收束连接和销毁请求；初始数据等首个 writable flight 封包，不伪造发布或 GPU 完成。
 
 | 正常入口 | 责任 |
 |---|---|
-| S0 `ServiceFrameBoundaryGT` | 完成事实、框架 owner 释放、等待通知、资产结果与 scheduler；runner 的 PrepareFrame 同阶段执行窗口维护与 writable 背压 |
+| S0 `ServiceFrameBoundaryGT` | 完成事实、框架 owner 释放、等待通知、资产结果与 scheduler；ApplicationLoop 的 PrepareFrame 在此前非阻塞检查窗口维护与 writable 背压 |
 | S1 `FinalizeWorldAndSealGT` | Tick/World CPU 借用结束后，冻结生命周期请求、注销和连接，Collect 场景最终值、OnCollectRenderViews，再 Seal |
 | S2 `ApplySceneUpdatesRT` | BeginFrameRecord 后、OnRender 前，有序 Apply；先结束上一轮 CPU Scene 读者 |
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
-GPU 的单线程和双线程 runner 共用这些协议；ready 交接、CPU 提交完成计数与主队列 fence 是实际同步权威。
-不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 SceneManager 则在 Update 后同步发布并消费场景包，再发布 `OutputsExecuted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
+Application 持有内部 ApplicationLoop，统一普通帧、模态、维护与关停；未就绪时返回原生消息采集，只有准备完成的唯一帧身份可派发冻结输入并执行 Update。OnInit 尚未返回时不允许模态入口提前推进。
+GPU 单线程直接录制，双线程交给 RT；ready 交接、CPU 提交完成计数与真实 GPU fence 是实际同步权威。只等待复用的最旧槽位，保留 GT/RT 重叠。
+不启用 Gpu 时，同一协调器使用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 SceneManager 则在 Update 后同步发布并消费场景包，再发布 `OutputsExecuted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
 普通组件不得自行驱动这些入口或调用 WaitIdle；未使用 Application runner 的 CPU 测试显式调用 World 的
 `Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
 托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
@@ -428,7 +429,7 @@ GT SceneId 与 writer 保留到删除包完成。Actor 在 S1 析构，不受 GP
 真实完成通过匹配 FrameSerial 释放；未发布 owner 只允许终止模式 abandon。覆盖当前有序主队列，增加独立队列前
 需要扩展完成依赖。StaticMesh 与 TextureAsset 均在使用者保活结束、零引用后直接卸载；默认材质纹理、override 与手工 SRV 的责任见[资产系统](asset-system.md#gpu-使用者保活)。
 
-关停先进入 Stopping，排空已发布包和 CPU/GPU 使用，消费真实 completion，再 terminal abandon 未发布包。
+关停先停止新帧和普通输入，关闭窗口操作，让 RT 消费已发布包并退出，然后系统进入 Stopping。临时线程排空 GPU/队列，GT 消费真实 completion，再 terminal abandon 未发布包。
 普通窗口维护 drain 不执行 abandon。终止后禁止恢复发布。显式拆除顺序为
 WorldManager → SceneManager → GPU 帧参数资源 → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
 初始化失败使用同一显式 teardown，但没有提交时不等不存在的 fence。
@@ -480,8 +481,8 @@ Application 使用 `GpuSystem::TryCreate` 创建 GPU 系统，借用已有的 Fr
 初始化失败和窗口或交换链创建失败均走 `DestroyRuntime` 清理路径。
 RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等释放缓存。
 
-正常关停先关闭窗口协程入口并取消等待者，再停止 runner、等待 GPU idle、消费完成消息并取消应用调度任务，由 `DestroyRuntime`
-按固定顺序释放对象。WindowManager 借用的 RenderSystem 引用在后者销毁前清空；AssetManager
+正常关停持续泵原生消息，观察 RT 与临时排空线程实际退出后才 join；安全点交付真实关闭通知一次，再调用 OnShutdown、取消应用调度任务，由 `DestroyRuntime`
+回到外层循环按固定顺序释放对象，禁止在嵌套消息栈内最终拆除。停止派发会取消托管窗口的系统模态状态；Run 的作用域清理保证调用栈展开前先排空借用线程。WindowManager 借用的 RenderSystem 引用在后者销毁前清空；AssetManager
 销毁并收束加载协程后才销毁 AssetDatabase；交换链释放后才断开窗口与 GPU 的双向引用并销毁 device。
 借用引用的提供者必须活过消费者的清理，完整时序见[帧与 GPU](frame-and-gpu.md#关停顺序)。
 

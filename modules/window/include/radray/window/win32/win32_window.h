@@ -9,18 +9,64 @@
 
 namespace radray {
 
+class Win32Window;
+
+struct Win32WindowEvent {
+    enum class Kind { Resize,
+                      Touch,
+                      Keyboard,
+                      Wheel,
+                      Text,
+                      Focus,
+                      Close,
+                      Move,
+                      Leave,
+                      Scroll,
+                      CaptureLost,
+                      DisplayChanged };
+    Kind Type;
+    int X{0}, Y{0};
+    MouseButton Button{};
+    KeyCode Key{};
+    Action InputAction{};
+    float ScrollX{0}, ScrollY{0};
+    string Text{};
+};
+
 class Win32EventPump final : public NativeEventPump {
 public:
-    ~Win32EventPump() noexcept override = default;
+    explicit Win32EventPump(NativeEventDelivery delivery = NativeEventDelivery::Immediate) noexcept;
+    ~Win32EventPump() noexcept override;
 
     void DispatchEvents() noexcept override;
     bool Register(NativeWindow* window) noexcept override;
     void Unregister(NativeWindow* window) noexcept override;
     sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept override;
+    void PumpNativeEvents(uint32_t limit = 256) noexcept override;
+    void DispatchPendingEvents(const std::function<bool()>& canDispatch = {}) noexcept override;
+    void StopEventDelivery() noexcept override;
+    void DispatchCloseRequest(NativeWindow* window) noexcept override;
+    void WaitEvents(uint32_t timeoutMs, std::span<void* const> threadHandles = {}) noexcept override;
+    void Wake() noexcept override;
+    bool QuitRequested() const noexcept override;
+    void Enqueue(Win32Window* window, Win32WindowEvent event) noexcept;
 
 private:
+    struct PendingEvent {
+        uint64_t Sequence;
+        uint64_t Registration;
+        Win32WindowEvent Event;
+    };
     vector<NativeWindow*> _windows;
+    deque<PendingEvent> _pending;
     sigslot::signal<NativeWindow*> _eventModalLoopTick;
+    HANDLE _wake;
+    NativeEventDelivery _delivery;
+    uint64_t _nextRegistration{1};
+    uint64_t _nextSequence{1};
+    bool _acceptEvents{true};
+    bool _dispatching{false};
+    bool _quitRequested{false};
 };
 
 class WndClassRAII {
@@ -104,10 +150,15 @@ public:
 
 public:
     void DestroyImpl() noexcept;
+    void EmitEvent(Win32WindowEvent event) noexcept;
+    void DeliverEvent(const Win32WindowEvent& event) noexcept;
 
     HWND _hwnd{nullptr};
     NativeCursor _cursor{NativeCursor::Arrow};
     Win32EventPump* _eventPump{nullptr};
+    uint64_t _registration{0};
+    bool _deferEvents{false};
+    bool _closeDelivered{false};
     HMONITOR _monitor{nullptr};
     std::atomic<RECT> _windowedRect{};
     POINT _lastClientPos{};

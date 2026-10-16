@@ -151,9 +151,9 @@ void AppWindow::SetBackBufferState(uint32_t backBufferIndex, render::TextureStat
     _backBufferViews[backBufferIndex].State = state;
 }
 
-WindowManager::WindowManager(const WindowManagerDescriptor& desc) : _type(desc.Type) {
+WindowManager::WindowManager(const WindowManagerDescriptor& desc) : _type(desc.Type), _eventDelivery(desc.EventDelivery) {
     NativeWindow::GlobalInit();
-    _eventPump = NativeEventPump::Create(desc.Type).Unwrap();
+    _eventPump = NativeEventPump::Create(desc.Type, desc.EventDelivery).Unwrap();
 }
 
 WindowManager::~WindowManager() noexcept {
@@ -335,7 +335,7 @@ const AppWindow* WindowManager::GetMainWindow() const noexcept {
 }
 
 bool WindowManager::ShouldExit() const noexcept {
-    return _mainWindowClosed || (_mainWindow != nullptr && _mainWindow->GetNativeWindow()->ShouldClose());
+    return _eventPump->QuitRequested() || _mainWindowClosed || (_mainWindow != nullptr && _mainWindow->GetNativeWindow()->ShouldClose());
 }
 
 render::TextureFormat WindowManager::GetMainBackBufferFormat(render::TextureFormat fallback) const noexcept {
@@ -538,6 +538,8 @@ task<WindowOperationStatus> WindowManager::SetTopMost(WindowHandle window, bool 
 }
 
 void WindowManager::DispatchEvents() noexcept {
+    if (_eventDelivery == NativeEventDelivery::Deferred)
+        RADRAY_ABORT("Application owns deferred event dispatch at the prepared frame boundary");
     if (_eventPump != nullptr) {
         _eventPump->DispatchEvents();
     }

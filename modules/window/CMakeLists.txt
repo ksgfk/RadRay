@@ -24,3 +24,7 @@ target_link_libraries(radraywindow PUBLIC
 radray_default_compile_flags(radraywindow)
 radray_optimize_flags_library(radraywindow)
 radray_set_build_path(radraywindow)
+
+if (RADRAY_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

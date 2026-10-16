@@ -91,12 +91,15 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 | [材质和实例化验收](../history/2026-10-13-material-instancing-performance.md) | 双后端 CPU/GPU、churn 和内存对照，含回退项及图表 |
 | [GPU 生命周期输入计划](../history/2026-10-13-gpu-lifecycle-plan-vulkan12-per-flight.md) | 7a807 基线的迁移目标与验收矩阵，已执行且后续 API 有变化 |
 | [GPU 生命周期实施验收](../history/2026-10-13-gpu-lifecycle-implementation.md) | 2026-10-13–14 的实际覆盖、限制及性能证据；不替代当前 RHI |
+| [帧循环重构输入计划](../history/2026-10-16-frame-loop-refactor-plan.md) | 93a8117 基线的旧等待关系、职责与确认后的重构契约 |
+| [帧循环重构实施验收](../history/2026-10-16-frame-loop-refactor-validation.md) | 消息/进度状态机、延迟输入、GPU 排空的测试与性能证据及限制 |
 
 ## 关键代码入口
 
 | 关注点 | 入口 | 文件 |
 |---|---|---|
 | 主循环 | `Application::Run` / `StartLoop` | `modules/runtime/src/application.cpp` |
+| 帧推进、消息与排空 | `ApplicationLoop` | `modules/runtime/src/application_loop.cpp` |
 | GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
 | 帧时间线 | `FrameTimeline` | `modules/runtime/src/frame_timeline.cpp` |
 | flight 与提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |

@@ -127,8 +127,10 @@ Tracy 中从 `Stress::Update`（样例制造负载）与 `World::Tick` 开始，
 RT 看 `SceneManager::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::PrepareObjects` /
 `SceneGpuData::Prepare`、`Stress::DrawObjects`，提交看 `GpuSystem::SubmitFrame`。
 `Application::ServiceFrameBoundaryGT` 包含完成回收、资产和 scheduler 泵。
-`PrepareFrame`、`WaitWritableSlot`、`WaitReadySlot`、`GpuSystem::WaitFlightFence` 是帧准备或等待区域，
-应展开查看，不能将整个等待时间归因于框架执行成本。
+`PrepareFrame` 现在是非阻塞检查与 S0；`ApplicationLoop::WaitProgress` 等待消息或 CPU/排空进度，
+`WaitReadySlot` 是 RT 等待发布，`GpuSystem::WaitFlightFence` 是 GT 的有限 GPU 等待片段。
+应展开查看，不能将等待时间归因于框架执行成本。比较旧 runner 时优先使用共同的 S0、Update、RenderFrame
+及提交 zones，同时查看 GT 开始间隔、GT/RT 重叠和进程 CPU 时间；新旧 PrepareFrame 包含的等待范围不同。
 
 `Stress/Objects` 表示配置对象数。upload 与 `--legacy-draw` 路径的 `Stress/ObjectUploadBytes`、`Stress/DrawCalls`
 分别表示当次对象准备的实际 host 写入字节和配置要求的逐对象 draw 数；上传统计不包含 ViewProjection 常量。

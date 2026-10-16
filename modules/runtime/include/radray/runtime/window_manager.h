@@ -36,6 +36,7 @@ struct SwapChainPresentResult;
 
 struct WindowManagerDescriptor {
     NativeWindowType Type;
+    NativeEventDelivery EventDelivery{NativeEventDelivery::Immediate};
 };
 
 struct WindowHandle {
@@ -195,6 +196,7 @@ public:
 
 private:
     friend class Application;
+    friend class ApplicationLoop;
 
     enum class WindowOperationPhase {
         WaitingForSafety,
@@ -261,6 +263,7 @@ private:
     std::optional<render::PresentMode> _desiredPresentMode;
     const std::thread::id _gameThread{std::this_thread::get_id()};
     NativeWindowType _type;
+    NativeEventDelivery _eventDelivery;
     ManualCoroutineScheduler<WindowOperationRecord> _operations;
     uint64_t _nextWindowId{1};
     bool _acceptOperations{true};

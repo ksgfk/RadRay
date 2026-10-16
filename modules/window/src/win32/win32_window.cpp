@@ -104,7 +104,7 @@ static void EmitTextInputUtf16(Win32Window* window, std::wstring_view text) noex
         return;
     }
 
-    window->_eventTextInput(std::string_view{utf8->c_str(), utf8->size()});
+    window->EmitEvent({.Type = Win32WindowEvent::Kind::Text, .Text = std::move(*utf8)});
 }
 
 static void EmitTextInputCodepoint(Win32Window* window, uint32_t codepoint) noexcept {
@@ -292,26 +292,124 @@ static void EmitWindowPosChanged(Win32Window* window, bool forceResized) noexcep
     RememberClientState(window, pos, width, height);
 
     if (moved) {
-        window->_eventMoved(pos.x, pos.y);
+        window->EmitEvent({.Type = Win32WindowEvent::Kind::Move, .X = pos.x, .Y = pos.y});
     }
     if (!resized && !forceResized) {
         return;
     }
 
-    if (window->_inModalLoop > 0) {
+    if (window->_inModalLoop > 0 && !window->_deferEvents) {
         window->_sizeMoveResized = true;
     } else {
-        window->_eventResized(width, height);
+        window->EmitEvent({.Type = Win32WindowEvent::Kind::Resize, .X = width, .Y = height});
     }
 }
 
-void Win32EventPump::DispatchEvents() noexcept {
-    MSG msg;
-    while (::PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-        ::TranslateMessage(&msg);
-        ::DispatchMessage(&msg);
+void Win32Window::EmitEvent(Win32WindowEvent event) noexcept {
+    if (_deferEvents) {
+        if (_eventPump != nullptr) _eventPump->Enqueue(this, std::move(event));
+    } else {
+        DeliverEvent(event);
     }
 }
+
+void Win32Window::DeliverEvent(const Win32WindowEvent& event) noexcept {
+    using Kind = Win32WindowEvent::Kind;
+    switch (event.Type) {
+        case Kind::Resize: _eventResized(event.X, event.Y); break;
+        case Kind::Touch: _eventTouch(event.X, event.Y, event.Button, event.InputAction); break;
+        case Kind::Keyboard: _eventKeyboard(event.Key, event.InputAction); break;
+        case Kind::Wheel: _eventMouseWheel(event.X); break;
+        case Kind::Text: _eventTextInput(std::string_view{event.Text.c_str(), event.Text.size()}); break;
+        case Kind::Focus: _eventFocused(event.X != 0); break;
+        case Kind::Close:
+            if (!_deferEvents || !_closeDelivered) {
+                _closeDelivered = true;
+                _eventCloseRequested();
+            }
+            break;
+        case Kind::Move: _eventMoved(event.X, event.Y); break;
+        case Kind::Leave: _eventMouseLeave(); break;
+        case Kind::Scroll: EventScroll()(event.ScrollX, event.ScrollY); break;
+        case Kind::CaptureLost: EventCaptureLost()(); break;
+        case Kind::DisplayChanged: EventDisplayChanged()(); break;
+    }
+}
+
+Win32EventPump::Win32EventPump(NativeEventDelivery delivery) noexcept
+    : _wake(::CreateEventW(nullptr, FALSE, FALSE, nullptr)), _delivery(delivery) {
+    if (_wake == nullptr) RADRAY_ABORT("Cannot create event pump wake handle");
+}
+
+Win32EventPump::~Win32EventPump() noexcept {
+    while (!_windows.empty()) Unregister(_windows.back());
+    ::CloseHandle(_wake);
+}
+
+void Win32EventPump::DispatchEvents() noexcept {
+    PumpNativeEvents(_delivery == NativeEventDelivery::Immediate ? std::numeric_limits<uint32_t>::max() : 256);
+    if (_delivery == NativeEventDelivery::Deferred) DispatchPendingEvents();
+}
+
+void Win32EventPump::PumpNativeEvents(uint32_t limit) noexcept {
+    MSG msg{};
+    for (uint32_t i = 0; i < limit && ::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE); ++i) {
+        if (msg.message == WM_QUIT) {
+            _quitRequested = true;
+            continue;
+        }
+        ::TranslateMessage(&msg);
+        ::DispatchMessageW(&msg);
+    }
+}
+
+void Win32EventPump::Enqueue(Win32Window* window, Win32WindowEvent event) noexcept {
+    if (_acceptEvents && window->_registration != 0)
+        _pending.push_back({_nextSequence++, window->_registration, std::move(event)});
+}
+
+void Win32EventPump::DispatchPendingEvents(const std::function<bool()>& canDispatch) noexcept {
+    if (_dispatching || !_acceptEvents) return;
+    _dispatching = true;
+    const uint64_t boundary = _nextSequence;
+    while (!_pending.empty() && _pending.front().Sequence < boundary && (!canDispatch || canDispatch())) {
+        auto pending = std::move(_pending.front());
+        _pending.pop_front();
+        auto found = std::ranges::find_if(_windows, [&](NativeWindow* window) {
+            return static_cast<Win32Window*>(window)->_registration == pending.Registration;
+        });
+        if (found != _windows.end()) static_cast<Win32Window*>(*found)->DeliverEvent(pending.Event);
+    }
+    _dispatching = false;
+}
+
+void Win32EventPump::StopEventDelivery() noexcept {
+    _acceptEvents = false;
+    _pending.clear();
+    // Let native menu/move loops unwind; final host destruction belongs to the outer loop.
+    for (auto* registered : _windows) {
+        auto* window = static_cast<Win32Window*>(registered);
+        if (window->_inModalLoop != 0) ::SendMessageW(window->_hwnd, WM_CANCELMODE, 0, 0);
+    }
+}
+
+void Win32EventPump::DispatchCloseRequest(NativeWindow* window) noexcept {
+    if (std::ranges::find(_windows, window) != _windows.end() && window->ShouldClose())
+        static_cast<Win32Window*>(window)->DeliverEvent({.Type = Win32WindowEvent::Kind::Close});
+}
+
+void Win32EventPump::WaitEvents(uint32_t timeoutMs, std::span<void* const> threadHandles) noexcept {
+    if (threadHandles.size() + 1 >= MAXIMUM_WAIT_OBJECTS) RADRAY_ABORT("Too many event wait handles");
+    array<HANDLE, MAXIMUM_WAIT_OBJECTS> handles{};
+    handles[0] = _wake;
+    std::copy(threadHandles.begin(), threadHandles.end(), handles.begin() + 1);
+    if (::MsgWaitForMultipleObjectsEx(static_cast<DWORD>(threadHandles.size() + 1), handles.data(), timeoutMs,
+                                      QS_ALLINPUT, MWMO_INPUTAVAILABLE) == WAIT_FAILED)
+        RADRAY_ABORT("Event pump wait failed");
+}
+
+void Win32EventPump::Wake() noexcept { ::SetEvent(_wake); }
+bool Win32EventPump::QuitRequested() const noexcept { return _quitRequested; }
 
 bool Win32EventPump::Register(NativeWindow* window) noexcept {
     if (window == nullptr || window->GetType() != NativeWindowType::Win32HWND) {
@@ -321,7 +419,11 @@ bool Win32EventPump::Register(NativeWindow* window) noexcept {
         return true;
     }
     _windows.push_back(window);
-    static_cast<Win32Window*>(window)->_eventPump = this;
+    auto* native = static_cast<Win32Window*>(window);
+    if (native->_eventPump != nullptr) RADRAY_ABORT("Window already registered with another event pump");
+    native->_eventPump = this;
+    native->_registration = _nextRegistration++;
+    native->_deferEvents = _delivery == NativeEventDelivery::Deferred;
     return true;
 }
 
@@ -335,6 +437,8 @@ void Win32EventPump::Unregister(NativeWindow* window) noexcept {
             win32Window->_sizeMoveResized = false;
         }
         win32Window->_eventPump = nullptr;
+        const auto registration = std::exchange(win32Window->_registration, 0);
+        std::erase_if(_pending, [registration](const auto& event) { return event.Registration == registration; });
         _windows.erase(iter);
     }
 }
@@ -428,10 +532,10 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                     RememberClientState(window, pos, width, height);
 
                     if (moved) {
-                        window->_eventMoved(pos.x, pos.y);
+                        window->EmitEvent({.Type = Win32WindowEvent::Kind::Move, .X = pos.x, .Y = pos.y});
                     }
                     if (resized || sizeMoveResized) {
-                        window->_eventResized(width, height);
+                        window->EmitEvent({.Type = Win32WindowEvent::Kind::Resize, .X = width, .Y = height});
                     }
                 }
             }
@@ -468,31 +572,31 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             const auto* rect = reinterpret_cast<const RECT*>(lParam);
             ::SetWindowPos(hWnd, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window) window->EventDisplayChanged()();
+            if (window) window->EmitEvent({.Type = Win32WindowEvent::Kind::DisplayChanged});
             return 0;
         }
         case WM_DISPLAYCHANGE:
         case WM_SETTINGCHANGE: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window && (uMsg == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)) window->EventDisplayChanged()();
+            if (window && (uMsg == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)) window->EmitEvent({.Type = Win32WindowEvent::Kind::DisplayChanged});
             break;
         }
         case WM_CAPTURECHANGED: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window && reinterpret_cast<HWND>(lParam) != hWnd) window->EventCaptureLost()();
+            if (window && reinterpret_cast<HWND>(lParam) != hWnd) window->EmitEvent({.Type = Win32WindowEvent::Kind::CaptureLost});
             break;
         }
         case WM_MOUSEHWHEEL: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window) window->EventScroll()(-float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA), 0.0f);
+            if (window) window->EmitEvent({.Type = Win32WindowEvent::Kind::Scroll, .ScrollX = -float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA)});
             return 0;
         }
         case WM_MOUSEWHEEL: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-                window->_eventMouseWheel(delta);
-                window->EventScroll()(0.0f, float(delta) / float(WHEEL_DELTA));
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Wheel, .X = delta});
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Scroll, .ScrollY = float(delta) / float(WHEEL_DELTA)});
             }
             return 0;
         }
@@ -533,7 +637,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
         case WM_SETFOCUS: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
-                window->_eventFocused(true);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Focus, .X = 1});
             }
             return 0;
         }
@@ -541,13 +645,14 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_highSurrogate = 0;
-                window->_eventFocused(false);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Focus, .X = 0});
             }
             return 0;
         }
         case WM_DESTROY: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
+                if (window->_eventPump != nullptr) window->_eventPump->Unregister(window);
                 window->_hwnd = nullptr;
             }
             ::RemoveProp(hWnd, RADRAY_WIN32_WINDOW_PROP);
@@ -557,7 +662,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_closeRequested = true;
-                window->_eventCloseRequested();
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Close});
             }
             return 0;
         }
@@ -567,7 +672,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             if (window) {
                 KeyCode code = MapWin32VKToKeyCode(wParam, lParam);
                 Action action = ((lParam & (1 << 30)) == 0) ? Action::PRESSED : Action::REPEATED;
-                window->_eventKeyboard(code, action);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Keyboard, .Key = code, .InputAction = action});
             }
             return 0;
         }
@@ -576,7 +681,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 KeyCode code = MapWin32VKToKeyCode(wParam, lParam);
-                window->_eventKeyboard(code, Action::RELEASED);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Keyboard, .Key = code, .InputAction = Action::RELEASED});
             }
             return 0;
         }
@@ -607,7 +712,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                         ::ReleaseCapture();
                     }
                 }
-                window->_eventTouch(x, y, btn, action);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Touch, .X = x, .Y = y, .Button = btn, .InputAction = action});
             }
             if (uMsg == WM_XBUTTONDOWN || uMsg == WM_XBUTTONUP) return TRUE;
             return 0;
@@ -635,7 +740,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 int x = static_cast<short>(LOWORD(lParam));
                 int y = static_cast<short>(HIWORD(lParam));
                 MouseButton btn = mapMKBUTTON(wParam);
-                window->_eventTouch(x, y, btn, Action::REPEATED);
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Touch, .X = x, .Y = y, .Button = btn, .InputAction = Action::REPEATED});
             };
             return 0;
         }
@@ -643,7 +748,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 window->_trackingMouseLeave = false;
-                window->_eventMouseLeave();
+                window->EmitEvent({.Type = Win32WindowEvent::Kind::Leave});
             }
             return 0;
         }
@@ -845,6 +950,7 @@ void Win32Window::Destroy() noexcept {
 }
 
 void Win32Window::DestroyImpl() noexcept {
+    if (_eventPump != nullptr) _eventPump->Unregister(this);
     if (_hwnd) {
         EventBeforeSurfaceChange()();
         ::DestroyWindow(_hwnd);
