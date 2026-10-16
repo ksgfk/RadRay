@@ -32,7 +32,6 @@ struct FrameworkStressOptions {
     bool Multithreaded{true};
     bool Validation{false};
     bool GpuProfiler{true};
-    bool LegacyDraw{false};
     render::RenderBackend Backend{render::RenderBackend::D3D12};
 };
 
@@ -68,7 +67,6 @@ private:
     Nullable<SceneComponent*> _parent{nullptr};
     StreamingAssetRef<StaticMesh> _mesh;
     vector<StaticMeshComponent*> _objects;
-    unique_ptr<SceneDraw> _draw;
     unique_ptr<UnlitRenderPipeline> _pipeline;
     vector<FrameResources> _frames;
     std::chrono::steady_clock::time_point _captureStart{};

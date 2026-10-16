@@ -5,6 +5,8 @@
 #include <radray/basic_math.h>
 #include <radray/runtime/frame_timeline.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_framework/renderer.h>
+#include <radray/runtime/render_system.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/render_framework/scene_manager.h>
 #ifdef RADRAY_ENABLE_VULKAN
@@ -523,7 +525,11 @@ TEST(GpuSystemAttachment, SameThreadSceneAssetAndGpuPhasesRetainOwnersUntilTheCo
     EXPECT_EQ(gpu->GetMainQueue(), external.Queue);
     AssetManager assets;
 
+    RenderSystem services{gpu->GetDevice()};
+    ASSERT_TRUE(services.OnInitialize());
+    Renderer framework{*gpu, services};
     SceneManager scenes{2};
+    scenes.AttachRenderer(framework);
     uint32_t destroyed = 0;
     auto source = array<float, 9>{0, 0.8f, 0, -0.8f, -0.8f, 0, 0.8f, -0.8f, 0};
     const array<uint32_t, 3> indices{0, 1, 2};
@@ -561,8 +567,9 @@ TEST(GpuSystemAttachment, SameThreadSceneAssetAndGpuPhasesRetainOwnersUntilTheCo
     const auto retire = [&] {
         FlightCompletion completion;
         while (timeline.TryReadCompletion(completion)) {
-            scenes.OnFlightCompletedGT(completion);
             gpu->ReleaseFrameResourcesGT(completion);
+            framework.ProcessCompletions();
+            scenes.OnFlightCompletedGT(completion);
             serials[completion.FlightIndex] = 0;
         }
     };
@@ -574,6 +581,7 @@ TEST(GpuSystemAttachment, SameThreadSceneAssetAndGpuPhasesRetainOwnersUntilTheCo
                 gpu->CompleteFlightIfReady(flight, true);
             }
         retire();
+        framework.Shutdown();
         scenes.OnShutdown();
         assets.Pump();
         timeline.CleanupCompletedFlights();
@@ -587,7 +595,9 @@ TEST(GpuSystemAttachment, SameThreadSceneAssetAndGpuPhasesRetainOwnersUntilTheCo
     serials[0] = frame.FrameSerial();
     auto sampled = scenes.GetSceneRT(scene)->GetStaticMesh(shape);
     ASSERT_TRUE(sampled);
-    auto objects = scenes.PrepareSceneGpuRT(scene, frame);
+    auto builder = framework.BeginFrame(frame);
+    ASSERT_TRUE(builder);
+    auto objects = framework.GetScenes().Prepare(scenes.GetRendererSceneKey(scene), *scenes.GetSceneRT(scene), frame, *builder);
     ASSERT_TRUE(objects);
     render::Fence* waits[]{gate.get()};
     uint64_t values[]{1};

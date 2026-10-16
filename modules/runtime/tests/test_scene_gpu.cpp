@@ -5,6 +5,9 @@
 #include <gtest/gtest.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/scene_manager.h>
+#include <radray/runtime/render_framework/renderer.h>
+#include <radray/runtime/render_system.h>
+#include "gpu_test_fixture.h"
 #include <radray/scope_guard.h>
 
 namespace radray::test {
@@ -41,7 +44,11 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
     auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
+    RenderSystem services{gpu->GetDevice()};
+    ASSERT_TRUE(services.OnInitialize());
+    Renderer framework{*gpu, services};
     SceneManager renderer{flights};
+    renderer.AttachRenderer(framework);
     auto scene = renderer.CreateSceneGT();
     auto* writer = renderer.GetSceneWriterGT(scene).Get();
     auto id = writer->CreateShape();
@@ -73,6 +80,7 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
         while (timeline.TryReadCompletion(completion)) {
             renderer.OnFlightCompletedGT(completion);
             gpu->ReleaseFrameResourcesGT(completion);
+            framework.ProcessCompletions();
             const auto index = completion.FlightIndex;
             if (serials[index] != completion.FrameSerial) continue;
             ScopedBufferMap map{readbacks[index].get(), {0, 128}};
@@ -108,20 +116,22 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
             auto frame = gpu->BeginFrameRecord(f, {}, {}, false);
             serials[f] = frame.FrameSerial();
             renderer.ConsumeRenderUpdates(f, frame.FrameSerial());
+            auto builder = framework.BeginFrame(frame);
+            ASSERT_TRUE(builder);
             if (delayed && step == flights * 6 - 1) {
                 auto* wait = gate.get();
                 uint64_t value = 1;
                 frame.ReturnCommandBuffers({.WaitFences = std::span{&wait, 1}, .WaitValues = std::span{&value, 1}});
             }
             const auto previousBytes = frame.GetHostWrites().GetStats().CommittedBytes;
-            auto objects = renderer.PrepareSceneGpuRT(scene, frame);
+            auto objects = framework.GetScenes().Prepare(renderer.GetRendererSceneKey(scene), *renderer.GetSceneRT(scene), frame, *builder);
             ASSERT_TRUE(objects);
-            auto again = renderer.PrepareSceneGpuRT(scene, frame);
+            auto again = framework.GetScenes().Prepare(renderer.GetRendererSceneKey(scene), *renderer.GetSceneRT(scene), frame, *builder);
             ASSERT_TRUE(again);
             EXPECT_EQ(objects->Objects.Target, again->Objects.Target);
             if (physical[f]) EXPECT_EQ(physical[f], objects->Objects.Target);
             physical[f] = objects->Objects.Target;
-            auto otherObjects = renderer.PrepareSceneGpuRT(second, frame);
+            auto otherObjects = framework.GetScenes().Prepare(renderer.GetRendererSceneKey(second), *renderer.GetSceneRT(second), frame, *builder);
             ASSERT_TRUE(otherObjects);
             EXPECT_NE(objects->Objects.Target, otherObjects->Objects.Target);
             const auto stats = frame.GetHostWrites().GetStats();
@@ -193,10 +203,16 @@ TEST(SceneGpuLifetime, VulkanDeletionWaitsForCoveringFence) { RunObjectBuffers(r
 
 class AllocationProbe final : public test::RuntimeTestDevice {
 public:
-    explicit AllocationProbe(render::Device* device) : Device(device) {}
+    explicit AllocationProbe(render::Device* device) : Device(device) { Capabilities = device->GetCapabilities(); }
+    render::RenderBackend GetBackend() noexcept override { return Device->GetBackend(); }
+    render::DeviceDetail GetDetail() const noexcept override { return Device->GetDetail(); }
+    Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType type, uint32_t index = 0) noexcept override { return Device->GetCommandQueue(type, index); }
+    Nullable<unique_ptr<render::CommandAllocator>> CreateCommandAllocator(render::CommandQueue* queue) noexcept override { return Device->CreateCommandAllocator(queue); }
+    Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandAllocator* allocator) noexcept override { return Device->CreateCommandBuffer(allocator); }
+    Nullable<unique_ptr<render::Fence>> CreateFence() noexcept override { return Device->CreateFence(); }
     Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& descriptor) noexcept override {
-        ++Calls;
-        return Fail ? Nullable<unique_ptr<render::Buffer>>{nullptr} : Device->CreateBuffer(descriptor);
+        if (descriptor.Memory == render::MemoryType::Device) ++Calls;
+        return Fail && descriptor.Memory == render::MemoryType::Device ? Nullable<unique_ptr<render::Buffer>>{nullptr} : Device->CreateBuffer(descriptor);
     }
     render::Device* Device;
     bool Fail{true};
@@ -205,20 +221,18 @@ public:
 
 void RunAllocationRecovery(render::RenderBackend backend) {
     test::RuntimeLogCapture logs;
-    const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
-    GpuSystemDescriptor descriptor{.FlightDataCount = 1, .EnableFrameProfiler = false};
-    if (backend == render::RenderBackend::Vulkan) {
-        render::VulkanDeviceDescriptor vk;
-        vk.Queues = std::span{&queue, 1};
-        descriptor.Device = vk;
-    }
+    render::test::DeviceContext native;
+    ASSERT_TRUE(render::test::TryCreateDevice(backend, native)) << native.Reason;
+    auto probe = make_shared<AllocationProbe>(native.Device.get());
+    auto& allocator = *probe;
     RuntimeStartupResult startup;
     FrameTimeline timeline{1};
-    auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
-    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    auto gpu = GpuSystem::TryAttachDevice({probe, 0, 3, 1, false}, timeline, startup);
     ASSERT_TRUE(gpu) << startup.Reason;
-    AllocationProbe allocator{gpu->GetDevice()};
-    SceneGpuData mirror{&allocator, 1};
+    RenderSystem services{gpu->GetDevice()};
+    ASSERT_TRUE(services.OnInitialize());
+    Renderer framework{*gpu, services};
+    SceneGpuData mirror{framework, 1};
     RenderScene scene;
     radray::SceneApplyChanges changes;
     SceneUpdateBatch batch;
@@ -242,12 +256,14 @@ void RunAllocationRecovery(render::RenderBackend backend) {
         }
         allocator.Fail = step == 0 || step == 3;
         auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+        auto builder = framework.BeginFrame(frame);
+        ASSERT_TRUE(builder);
         const auto bytes = frame.GetHostWrites().GetStats().CommittedBytes;
         const auto ranges = frame.GetHostWrites().GetStats().CommitCount;
         const auto calls = allocator.Calls;
-        auto view = mirror.Prepare(scene, frame);
+        auto view = mirror.Prepare(scene, frame, *builder);
         EXPECT_EQ(view.has_value(), !allocator.Fail);
-        auto again = mirror.Prepare(scene, frame);
+        auto again = mirror.Prepare(scene, frame, *builder);
         EXPECT_EQ(view.has_value(), again.has_value());
         EXPECT_LE(allocator.Calls - calls, 1u);
         if (view) {
@@ -306,20 +322,26 @@ void RunInstanceParameters(render::RenderBackend backend) {
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_TRUE(gpu);
     RenderScene scene;
-    SceneGpuData mirror{gpu->GetDevice(), 1};
+    RenderSystem services{gpu->GetDevice()};
+    ASSERT_TRUE(services.OnInitialize());
+    Renderer framework{*gpu, services};
+    SceneGpuData mirror{framework, 1};
     radray::SceneApplyChanges changes;
     InstanceParameterLayout layout{"Tint", 16, {{"Color", 0, 16, 0, 1, 1, 4}}};
     SceneUpdateBatch update;
     ShapeId id{3, 0}, high{8, 0};
     update.CreateShapes = {id, high};
     update.MeshStates = {{.Id = id}, {.Id = high}};
-    update.Parameters = {{id, layout, vector<byte>(16, byte{7})}, {high, layout, vector<byte>(16, byte{8})}};
+    ASSERT_TRUE(update.SetInstanceParameters(id, layout, vector<byte>(16, byte{7})));
+    ASSERT_TRUE(update.SetInstanceParameters(high, layout, vector<byte>(16, byte{8})));
     scene.Apply(update, &changes);
     mirror.ApplyChanges(changes);
     for (uint32_t step = 0; step < 6; ++step) {
         if (step == 2) {
             update.Clear();
-            update.Parameters = {{high, layout, vector<byte>(16, byte{10})}, {id, layout, vector<byte>(16, byte{9})}};
+            update.Parameters.clear();
+            ASSERT_TRUE(update.SetInstanceParameters(high, layout, vector<byte>(16, byte{10})));
+            ASSERT_TRUE(update.SetInstanceParameters(id, layout, vector<byte>(16, byte{9})));
             scene.Apply(update, &changes);
             EXPECT_TRUE(changes.Updated.empty());
             mirror.ApplyChanges(changes);
@@ -330,21 +352,24 @@ void RunInstanceParameters(render::RenderBackend backend) {
             id.Generation = 1;
             update.CreateShapes = {id};
             update.MeshStates = {{.Id = id}};
-            update.Parameters = {{id, layout, vector<byte>(16, byte{12})}};
+            update.Parameters.clear();
+            ASSERT_TRUE(update.SetInstanceParameters(id, layout, vector<byte>(16, byte{12})));
             scene.Apply(update, &changes);
             mirror.ApplyChanges(changes);
         }
         gpu->BeginUpdateForFlight(0);
         auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+        auto builder = framework.BeginFrame(frame);
+        ASSERT_TRUE(builder);
         const auto before = frame.GetHostWrites().GetStats().CommittedBytes;
-        auto first = mirror.Prepare(scene, frame);
+        auto first = mirror.Prepare(scene, frame, *builder);
         ASSERT_TRUE(first);
         ASSERT_EQ(first->Parameters.size(), 1u);
         const auto after = frame.GetHostWrites().GetStats().CommittedBytes;
         EXPECT_EQ(after - before, step == 0 ? 160u : step == 4 ? 80u
                                                  : step == 2   ? 32u
                                                                : 0u);
-        auto second = mirror.Prepare(scene, frame);
+        auto second = mirror.Prepare(scene, frame, *builder);
         ASSERT_TRUE(second);
         EXPECT_EQ(first->Parameters[0].Values, second->Parameters[0].Values);
         EXPECT_EQ(frame.GetHostWrites().GetStats().CommittedBytes, after);

@@ -86,14 +86,15 @@ TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhilePara
     ShapeId id{4, 0};
     update.CreateShapes = {id};
     update.MeshStates = {{.Id = id, .Mesh = {{}, &first}}};
-    update.Materials = {{id, {{{}, &red}}}};
+    update.SetMaterials(id, vector<MaterialBinding>{{{}, &red}});
     scene.Apply(update);
     auto records = scene.GetDrawPrimitives(id);
     ASSERT_EQ(records.size(), 1u);
     EXPECT_EQ(records[0].Binding.Data.Get(), &red);
     const auto before = *scene.GetDrawRevision(id);
     update.Clear();
-    update.Materials = {{id, {{{}, &blue}}}};
+    update.Materials.clear();
+    update.SetMaterials(id, vector<MaterialBinding>{{{}, &blue}});
     scene.Apply(update);
     records = scene.GetDrawPrimitives(id);
     ASSERT_EQ(records.size(), 1u);
@@ -102,7 +103,7 @@ TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhilePara
     update.Clear();
     update.DrawStates = {{id, {2, 3, 7}}};
     InstanceParameterLayout layout{"Tint", 16, {{"Color", 0, 16, 0, 1, 1, 4}}};
-    update.Parameters = {{id, layout, vector<byte>(16)}};
+    ASSERT_TRUE(update.SetInstanceParameters(id, layout, vector<byte>(16)));
     scene.Apply(update);
     EXPECT_EQ(scene.GetDrawRevision(id)->Geometry, before.Geometry);
     EXPECT_EQ(scene.GetDrawState(id)->Order, 7u);

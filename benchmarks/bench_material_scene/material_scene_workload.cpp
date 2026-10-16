@@ -40,13 +40,14 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         _error = "RenderSystem initialization failed";
         return;
     }
+    _framework = make_unique<Renderer>(*_gpu, *_renderer);
     auto cube = example::CreateCube(*_gpu);
     if (!cube) {
         _error = "Cube upload failed";
         return;
     }
     _mesh = _assets.AddReady<StaticMesh>({1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(cube));
-    MaterialPass pass;
+    MaterialTemplateDescriptor pass;
     pass.Name = "Unlit";
     pass.Program.SourceName = mode == 0 ? "pressure.hlsl" : mode == 3 ? "pressure_tint_instanced.hlsl"
                                                                       : "pressure_instanced.hlsl";
@@ -60,12 +61,12 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         pass.AllowAutomaticInstancing = mode == 1;
         pass.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
     }
-    const auto program = pass.ResolveProgram(*_renderer);
+    const auto program = _renderer->GetOrCreateShaderProgram(pass.Program);
     if (!program) {
         _error = "Pressure shader compilation failed";
         return;
     }
-    pass.RegisteredProgram = program;
+    pass.RegisteredProgram = program->GetId();
     pass.Program = {};
     if (mode == 3) {
         const auto layout = ReflectInstanceParameterLayout(program->GetArtifact().Generic(), "MaterialData", "InstanceTint");
@@ -77,14 +78,15 @@ MaterialSceneWorkload::MaterialSceneWorkload(render::RenderBackend backend, uint
         pass.ParameterLayouts = {*layout};
         pass.Inputs.push_back({"InstanceTint", MaterialInputSource::InstanceParameters});
     }
-    const auto definition = make_shared<const MaterialPass>(std::move(pass));
+    const auto definition = std::move(pass);
     for (uint32_t i = 0; i < materials; ++i) {
         const array<float, 4> tint{0.5f + float(i % 7) / 14, 0.8f, 0.6f, 1};
         const auto bytes = std::as_bytes(std::span{tint});
-        auto asset = make_unique<Material>(vector{MaterialPass{definition}}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())});
+        auto asset = make_unique<Material>(vector{definition}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())});
         _materials.push_back(_assets.AddReady<Material>({i + 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(asset)));
     }
     _scenes = make_unique<SceneManager>(flights);
+    _scenes->AttachRenderer(*_framework);
     _world = make_unique<World>();
     _world->RequestRenderConnection(_scenes.get());
     _world->FinalizeWorldGT();
@@ -181,8 +183,9 @@ void MaterialSceneWorkload::Complete(uint32_t flight) {
     _gpu->CompleteFlightIfReady(flight, true);
     FlightCompletion completion;
     while (_timeline.TryReadCompletion(completion)) {
-        _scenes->OnFlightCompletedGT(completion);
         _gpu->ReleaseFrameResourcesGT(completion);
+        _framework->ProcessCompletions();
+        _scenes->OnFlightCompletedGT(completion);
         _serials[completion.FlightIndex] = 0;
     }
     GpuMs += _gpu->GetLastGpuTimeMs();
@@ -256,7 +259,9 @@ AppFrameContext MaterialSceneWorkload::BeginRecord(uint32_t flight) {
 void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
     RADRAY_PROFILE_SCOPE_N("MaterialScene::PrepareAndRecord");
     const auto flight = frame.FlightIndex();
-    auto context = MakePipelineContext(*_renderer, frame, _scenes.get());
+    auto builder = _framework->BeginFrame(frame);
+    if (!builder) { _error = _framework->GetLastError(); return; }
+    auto context = MakePipelineContext(*_framework, *builder, frame, _scenes.get());
     if (!_uploadMeshes.empty()) {
         auto* command = context.Commands.Allocate();
         for (const auto* mesh : _uploadMeshes)
@@ -269,7 +274,7 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
         if (!_error.empty()) return;
     }
     const auto before = frame.GetHostWrites().GetStats().CommittedBytes;
-    const auto objects = _scenes->PrepareSceneGpuRT(*_world->GetRenderSceneId(), context);
+    const auto objects = _framework->GetScenes().Prepare(_scenes->GetRendererSceneKey(*_world->GetRenderSceneId()), *_scenes->GetSceneRT(*_world->GetRenderSceneId()), context);
     if (!objects) {
         _error = "Scene GPU prepare failed";
         return;
@@ -282,7 +287,7 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
     const auto info = ValidateRenderOutput(output, *frame.GetDevice());
     vector<PreparedSceneDraw> prepared;
     for (const auto& request : _views) {
-        auto item = _draw.Prepare(context, request, *objects, *info, "Unlit", nullptr, false);
+        auto item = _draw.Prepare(context, request, *objects, *info, "Unlit", std::nullopt, false);
         if (!item) {
             _error = "Scene draw prepare failed";
             return;
@@ -290,6 +295,7 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
         Draws += item->Draws.size();
         prepared.push_back(std::move(*item));
     }
+    if (!builder->Compile()) { _error = _framework->GetLastError(); return; }
     auto* commands = context.Commands.Allocate();
     const render::ColorClearValue clear{{0, 0, 0, 1}};
     commands->PushDebugGroup("MaterialSceneGPU");
@@ -302,7 +308,7 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
         _error = "Render encoder failed";
         return;
     }
-    for (const auto& item : prepared) item.Record(encoder.Get());
+    for (const auto& item : prepared) item.Record(*builder, encoder.Get());
     commands->EndRenderPass(encoder.Release());
     commands->PopDebugGroup();
     context.Commands.Return(std::span{&commands, 1});
@@ -326,6 +332,7 @@ void MaterialSceneWorkload::Drain() {
 MaterialSceneWorkload::~MaterialSceneWorkload() {
     if (!_gpu) return;
     Drain();
+    if (_framework) _framework->Shutdown();
     if (_world) _world->ShutdownWorld();
     if (_scenes) {
         _scenes->BeginStoppingGT();

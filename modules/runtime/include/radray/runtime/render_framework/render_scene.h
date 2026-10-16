@@ -75,6 +75,12 @@ public:
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
+    struct MaterialList {
+        vector<MaterialBinding> Values;
+        uint32_t Uses{0};
+    };
+    void SetMaterials(ShapeId id, std::span<const MaterialBinding> values);
+    void ReleaseMaterialList(uint32_t shape);
 
     struct TemplateKey {
         const StaticMeshRenderData* Mesh;
@@ -120,6 +126,8 @@ private:
     unordered_map<TemplateKey, DrawTemplate, TemplateHash> _drawTemplates;
     /// Allocated for drawable geometry; pointers into stable nodes are cleared before identity reuse.
     vector<Nullable<DrawTemplate*>> _shapeTemplates;
+    unordered_map<size_t, vector<unique_ptr<MaterialList>>> _materialLists;
+    vector<Nullable<MaterialList*>> _shapeMaterials;
 };
 
 }  // namespace radray

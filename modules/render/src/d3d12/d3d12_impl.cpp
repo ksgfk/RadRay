@@ -4621,6 +4621,54 @@ BindingHandle RootSigD3D12::FindBinding(std::string_view name) const noexcept {
         reinterpret_cast<uintptr_t>(this));
 }
 
+std::optional<ParameterGroupCompatibility> RootSigD3D12::GetParameterGroupCompatibility(uint32_t index) const noexcept {
+    const auto group = FindParameterGroup(index);
+    if (!group) return std::nullopt;
+    vector<vector<uint64_t>> tables, entries;
+    uint32_t resources = 0, samplers = 0, values = 0;
+    for (const auto& table : group->Tables) {
+        (table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? samplers : resources) += table.DescriptorCount;
+        vector<uint64_t> words{uint64_t(table.HeapType), uint64_t(table.Visibility), table.DescriptorCount, table.Ranges.size()};
+        for (const auto& range : table.Ranges)
+            words.insert(words.end(), {uint64_t(range.Type), range.Count, range.Binding, range.Space, range.Offset, uint64_t(range.Flags)});
+        words.push_back(table.Slots.size());
+        for (const auto& slot : table.Slots)
+            words.insert(words.end(), {slot.Offset, slot.Namespace, slot.Binding, slot.ArrayElement, uint64_t(slot.LogicalKind), uint64_t(slot.Placement)});
+        tables.push_back(std::move(words));
+    }
+    for (const auto& entry : group->Entries) {
+        if (entry.IsStaticSampler()) continue;
+        values += entry.Count;
+        entries.push_back({entry.Namespace, entry.Binding, uint64_t(entry.LogicalKind), uint64_t(entry.Placement), entry.Count});
+    }
+    std::sort(tables.begin(), tables.end());
+    std::sort(entries.begin(), entries.end());
+    vector<uint64_t> identity{uint64_t(RenderBackend::D3D12), reinterpret_cast<uintptr_t>(_device), tables.size()};
+    for (const auto& table : tables) {
+        identity.push_back(table.size());
+        identity.insert(identity.end(), table.begin(), table.end());
+    }
+    identity.push_back(entries.size());
+    for (const auto& entry : entries) identity.insert(identity.end(), entry.begin(), entry.end());
+    return MakeParameterGroupCompatibility(std::move(identity), values, resources, samplers);
+}
+std::optional<uint32_t> RootSigD3D12::GetParameterElementIndex(uint32_t groupIndex, BindingHandle binding, uint32_t element) const noexcept {
+    const auto record = FindBackendBindingRecord(_bindingNames, reinterpret_cast<uintptr_t>(this), binding);
+    const auto group = FindParameterGroup(groupIndex);
+    if (!record || !group || record->Kind != BackendBindingRecordKind::Descriptor || record->Location.Group != groupIndex) return std::nullopt;
+    uint32_t offset = 0;
+    bool found = false;
+    for (const auto& entry : group->Entries) {
+        if (entry.IsStaticSampler()) continue;
+        if (entry.Namespace < record->Namespace || (entry.Namespace == record->Namespace && entry.Binding < record->Location.Binding)) offset += entry.Count;
+        if (entry.Namespace == record->Namespace && entry.Binding == record->Location.Binding) {
+            if (element >= entry.Count) return std::nullopt;
+            found = true;
+        }
+    }
+    return found ? std::optional{offset + element} : std::nullopt;
+}
+
 GraphicsPsoD3D12::GraphicsPsoD3D12(
     DeviceD3D12* device,
     RootSigD3D12* layout,
@@ -4672,6 +4720,13 @@ SamplerD3D12::SamplerD3D12(
     : _device(device),
       _samplerView(std::move(heapView)),
       _desc(desc) {}
+
+vector<uint64_t> SamplerD3D12::GetBindingIdentity() const noexcept {
+    const auto bits = [](float value) -> uint64_t { return value == 0 ? 0 : std::bit_cast<uint32_t>(value); };
+    return {uint64_t(RenderBackend::D3D12), uint64_t(_desc.Filter), uint64_t(_desc.AddressU), uint64_t(_desc.AddressV), uint64_t(_desc.AddressW),
+        bits(_desc.MipLODBias), _desc.MaxAnisotropy, uint64_t(_desc.ComparisonFunc), bits(_desc.BorderColor[0]), bits(_desc.BorderColor[1]),
+        bits(_desc.BorderColor[2]), bits(_desc.BorderColor[3]), bits(_desc.MinLOD), bits(_desc.MaxLOD)};
+}
 
 bool SamplerD3D12::IsValid() const noexcept {
     return _samplerView.IsValid();

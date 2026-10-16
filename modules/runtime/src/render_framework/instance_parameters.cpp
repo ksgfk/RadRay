@@ -3,14 +3,6 @@
 #include <cstring>
 
 namespace radray {
-ShapeParameterUpdate::ShapeParameterUpdate(ShapeId id, const InstanceParameterLayout& layout, vector<byte> values)
-    : Id(id), Layout(make_shared<const InstanceParameterLayout>(layout)), Storage(make_shared<const vector<byte>>(std::move(values))), Size(static_cast<uint32_t>(Storage->size())) {}
-ShapeParameterUpdate::ShapeParameterUpdate(ShapeId id, shared_ptr<const InstanceParameterLayout> layout, shared_ptr<const vector<byte>> storage, uint32_t offset)
-    : Id(id), Layout(std::move(layout)), Storage(std::move(storage)), Offset(offset), Size(Layout->Stride) {}
-std::span<const byte> ShapeParameterUpdate::GetValues() const noexcept {
-    if (!Layout || !Storage || Offset > Storage->size() || Size > Storage->size() - Offset) return {};
-    return {Storage->data() + Offset, Size};
-}
 uint32_t SceneParameterStream::RowsPerPage() const noexcept { return std::max(1u, 16384u / Layout.Stride); }
 std::span<const byte> SceneParameterStream::GetValues(uint32_t slot) const noexcept {
     if (slot >= Rows.size() || !Rows[slot]) return {};

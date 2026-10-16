@@ -475,3 +475,15 @@ ctest --test-dir build_debug -C Debug --output-on-failure -R 'RenderScope|FrameT
 FrameTimeline 与 SceneGpu 覆盖 F=1/2/3/4；GpuRetainedResult 使用原生 gate 验证 CPU 取消和延迟消费，测试不用等待时长猜测完成。完整回归仍执行无 -R 的 ctest。旧 owner factories、registry、Scene Attempt、资产 GPU deferred 与 uploader flight 路由已移除。
 
 配对对照、完整压力覆盖与 Tracy 回归见[性能测量](performance.md#gpu-生命周期对照)。
+
+## Renderer 重构回归
+
+```powershell
+cmake --build build_debug --config Debug --target test_radray_runtime test_radray_render example_descriptor_reuse --parallel 4
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
+ctest --test-dir build_debug/modules/runtime/tests -C Debug --output-on-failure
+ctest --test-dir build_debug/modules/render/tests -C Debug --output-on-failure
+```
+
+快速定位使用 suite `RendererRegistry`、`SceneDraw`、`SceneGpu`、`RasterDraw`、`PipelineOutput`、`SceneAssets`。
+两后端必须实际执行，不能将缺失或跳过计为通过。样例全矩阵、原始数据冻结与计费口径见[性能测量](performance.md#descriptor-冗余离屏验收)。

@@ -29,7 +29,7 @@ void PrintUsage() {
         "  --d3d12 | --vulkan  [d3d12]\n"
         "  --multithread | --single-thread  [multithread]\n"
         "  --window  [otherwise offscreen, no swapchain or vsync]\n"
-        "  --no-gpu-profiler  --validation  --legacy-draw  --help\n"
+        "  --no-gpu-profiler  --validation  --help\n"
         "All modes use the same Application GPU runner and Ready cube asset.\n"
         "World leaves the World disconnected; sync adds CPU scene delivery;\n"
         "upload adds object buffers; draw adds the scene_sync unlit draw loop.\n"
@@ -52,8 +52,6 @@ bool ParseArguments(int argc, char** argv, FrameworkStressOptions& options) {
             options.Window = true;
         else if (argument == "--validation")
             options.Validation = true;
-        else if (argument == "--legacy-draw")
-            options.LegacyDraw = true;
         else if (argument == "--no-gpu-profiler")
             options.GpuProfiler = false;
         else {
@@ -187,8 +185,8 @@ StaticMeshComponent* FrameworkStressApp::SpawnObject(uint32_t index) {
 bool FrameworkStressApp::InitializeDrawing() {
     auto* device = GetGpuSystem()->GetDevice();
 
-    if (_options.Mode == StressMode::Draw && !_options.LegacyDraw) {
-        MaterialPass material;
+    if (_options.Mode == StressMode::Draw) {
+        MaterialTemplateDescriptor material;
         material.Name = "Unlit";
         material.Program.SourceName = "scene_sync_instanced.hlsl";
         material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots}};
@@ -196,13 +194,12 @@ bool FrameworkStressApp::InitializeDrawing() {
         material.SceneIndexField = "VisibleBase";
         material.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
         material.AllowAutomaticInstancing = true;
-        MaterialRenderData fallback;
-        fallback.Passes.push_back(std::move(material));
+        const auto definition = GetRenderer()->RegisterTemplate(material);
+        if (!definition) return false;
+        const auto fallback = GetRenderer()->RegisterMaterial({{*definition}, {}, {}, {}});
+        GetRenderer()->UnregisterTemplate(*definition);
+        if (!fallback) return false;
         _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});
-    }
-    if (_options.Mode == StressMode::Draw && _options.LegacyDraw) {
-        _draw = make_unique<SceneDraw>();
-        if (!_draw->Initialize(*GetRenderSystem().Get(), device, render::TextureFormat::BGRA8_UNORM, _options.Flights)) return false;
     }
     if (_options.Window) return true;
     for (auto& frame : _frames) {
@@ -291,13 +288,18 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
         target = frame.AcquireWindow(GetWindowManager()->GetMainWindow());
         if (!target) return;
     }
-    auto* renderer = GetRenderSystem().Get();
+    auto* renderer = GetRenderer().Get();
+    auto builder = renderer->BeginFrame(frame);
+    if (!builder) { Fail("frame admission failed"); return; }
     const auto views = GetSceneManager()->GetFrameViewsRT(frame.FlightIndex());
     if (_pipeline) {
-        auto context = MakePipelineContext(*renderer, frame, GetSceneManager());
+        auto context = MakePipelineContext(*renderer, *builder, frame, GetSceneManager());
         RenderOutput output;
         output.Colors.push_back({target ? target->BackBufferView : resources.View.get(), target ? target->Window->GetBackBufferState(target->BackBufferIndex) : resources.State, target ? render::TextureStates{render::TextureState::Present} : render::TextureStates{render::TextureState::RenderTarget}});
-        auto result = RecordRenderPipeline(*_pipeline, context, {views, std::move(output)});
+        const RenderPipelineRequest request{views, std::move(output)};
+        auto plan = _pipeline->Collect(context, request);
+        if (!builder->Compile()) Fail(renderer->GetLastError());
+        auto result = RecordRenderPipeline(plan.value_or(FramePreparationId{}), context, request);
         if (!target) resources.State = render::TextureState::RenderTarget;
         frame.RegisterClosedCommandBuffers({.CmdBuffers = result.Commands}, std::move(target));
         if (result.Status == PipelineRecordStatus::RecoverableFailure) Fail("pipeline recording failed");
@@ -308,7 +310,8 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
     if (_options.Mode == StressMode::Upload || _options.Mode == StressMode::Draw) {
         RADRAY_PROFILE_SCOPE_N("Stress::PrepareObjects");
         for (size_t i = 0; i < views.size(); ++i) {
-            objects[i] = GetSceneManager()->PrepareSceneGpuRT(views[i].Scene, frame);
+            const auto sceneData = GetSceneManager()->GetSceneRT(views[i].Scene);
+            objects[i] = sceneData ? renderer->GetScenes().Prepare(GetSceneManager()->GetRendererSceneKey(views[i].Scene), *sceneData, frame, *builder) : std::nullopt;
             if (!objects[i] && _options.Objects) {
                 const auto scene = GetSceneManager()->GetSceneRT(views[i].Scene);
                 Fail(fmt::format("object buffer preparation failed: serial={} view={}/{} scene={}:{} meshes={}", frame.FrameSerial(), i, views.size(), views[i].Scene.Index, views[i].Scene.Generation, scene ? scene->GetStaticMeshes().size() : 0));
@@ -332,12 +335,6 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
         const render::ColorClearValue clear{{0.025f, 0.035f, 0.055f, 1}};
         auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{target ? target->BackBufferView : resources.View.get(), render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, desc.Width, desc.Height, 1});
         if (encoder) {
-            if (_draw) {
-                RADRAY_PROFILE_SCOPE_N("Stress::DrawObjects");
-                for (uint32_t i = 0; i < views.size(); ++i) {
-                    if (objects[i] && !_draw->Draw(*GetSceneManager().Get(), frame, encoder.Get(), views[i], *objects[i], i, desc.Width, desc.Height)) Fail("draw recording failed");
-                }
-            }
             commands->EndRenderPass(encoder.Release());
         } else
             Fail("render pass recording failed");
@@ -353,7 +350,6 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
 void FrameworkStressApp::OnShutdown() {
     RADRAY_PROFILE_SCOPE_N("Stress::Shutdown");
     RADRAY_INFO_LOG("Framework stress finished: {} workload updates, {} render callbacks, failed={}", _updates, _renderCallbacks, Failed());
-    _draw.reset();
     _pipeline.reset();
     _frames.clear();
     _objects.clear();

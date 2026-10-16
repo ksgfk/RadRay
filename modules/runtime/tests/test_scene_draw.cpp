@@ -107,7 +107,7 @@ protected:
             GetGpuSystem()->GetMainQueue()->Wait();
             auto texture = GetAssetManager()->AddReady<TextureAsset>({91, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<TextureAsset>(device, "material white", std::move(image->Tex), std::move(srv)));
             for (uint32_t i = 0; i < 2; ++i) {
-                MaterialPass material;
+                MaterialTemplateDescriptor material;
                 material.Name = "Unlit";
                 material.Program.SourceName = Instanced ? "material_unlit_instanced.hlsl" : "material_unlit.hlsl";
                 material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"MaterialData", MaterialInputSource::MaterialConstants}, {"Albedo", MaterialInputSource::Texture}, {"AlbedoSampler", MaterialInputSource::Sampler}};
@@ -120,10 +120,9 @@ protected:
                     material.AllowAutomaticInstancing = !Manual;
                     material.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
                 }
-                MaterialPass unused = material;
+                MaterialTemplateDescriptor unused = material;
                 unused.Name = "Unused";
                 unused.ParameterLayouts = {{"UnusedParameters", 16, {{"Value", 0, 16, 2, 1, 1, 4}}}};
-                unused.Inputs.push_back({"UnusedParameters", MaterialInputSource::InstanceParameters});
                 const array<float, 4> tint{1, 1, i ? 0.5f : 1.0f, 1};
                 const auto bytes = std::as_bytes(std::span{tint});
                 render::SamplerDescriptor sampler{};
@@ -141,7 +140,7 @@ protected:
             }
         }
         _frames.resize(GetGpuSystem()->GetFlightDataCount());
-        MaterialPass materialPass;
+        MaterialTemplateDescriptor materialPass;
         materialPass.Name = DepthCase ? "DepthOnly" : "Unlit";
         materialPass.Program.SourceName = DepthCase ? "material_depth.hlsl" : "scene_sync.hlsl";
         materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
@@ -155,8 +154,11 @@ protected:
             materialPass.AllowAutomaticInstancing = !Manual;
             materialPass.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
         }
-        MaterialRenderData fallback;
-        fallback.Passes.push_back(std::move(materialPass));
+        const auto definition = GetRenderer()->RegisterTemplate(materialPass);
+        ASSERT_TRUE(definition) << GetRenderer()->GetLastError();
+        const auto fallback = GetRenderer()->RegisterMaterial({{*definition}, {}, {}, {}});
+        GetRenderer()->UnregisterTemplate(*definition);
+        ASSERT_TRUE(fallback);
         _draw = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.PassName = DepthCase ? "DepthOnly" : "Unlit", .Fallback = std::move(fallback), .DepthTest = DepthCase, .ClearColor = {{0, 0, 0, 1}}});
         _pitch = Align(uint64_t{Width()} * 4, device->GetDetail().TextureDataPitchAlignment);
         for (auto& frame : _frames) {
@@ -252,12 +254,14 @@ protected:
         frame.Serial = context.FrameSerial();
         frame.Points.clear();
         frame.PointBlues.clear();
+        auto builder = GetRenderer()->BeginFrame(context);
+        ASSERT_TRUE(builder);
         vector<std::optional<SceneGpuView>> objects(views.size());
         const auto beforeBytes = context.GetHostWrites().GetStats().CommittedBytes;
         for (uint32_t i = 0; i < views.size(); ++i) {
             EXPECT_TRUE(views[i].View.isApprox(frame.ExpectedView));
             EXPECT_EQ(views[i].Scene, frame.ExpectedScene);
-            objects[i] = GetSceneManager()->PrepareSceneGpuRT(views[i].Scene, context);
+            objects[i] = GetRenderer()->GetScenes().Prepare(GetSceneManager()->GetRendererSceneKey(views[i].Scene), *GetSceneManager()->GetSceneRT(views[i].Scene), context, *builder);
             ASSERT_TRUE(objects[i]);
             EXPECT_EQ(objects[0]->Objects.Target, objects[i]->Objects.Target);
             auto scene = GetSceneManager()->GetSceneRT(views[i].Scene);
@@ -276,14 +280,17 @@ protected:
             EXPECT_LE(context.GetHostWrites().GetStats().CommittedBytes - beforeBytes, 128u);
         else
             EXPECT_EQ(context.GetHostWrites().GetStats().CommittedBytes - beforeBytes, frame.ExpectStationaryObjects ? 0u : 64u);
-        auto pipelineContext = MakePipelineContext(*renderer, context, GetSceneManager());
+        auto pipelineContext = MakePipelineContext(*GetRenderer(), *builder, context, GetSceneManager());
         RenderOutput output;
         const RenderOutputAttachment attachment{frame.Image.View.get(), frame.Executed ? render::TextureState::CopySource : render::TextureState::Undefined, render::TextureState::CopySource};
         if (DepthCase)
             output.Depth = attachment;
         else
             output.Colors.push_back(attachment);
-        auto result = RecordRenderPipeline(*_draw, pipelineContext, {views, std::move(output)});
+        const RenderPipelineRequest request{views, std::move(output)};
+        auto plan = _draw->Collect(pipelineContext, request);
+        ASSERT_TRUE(builder->Compile()) << GetRenderer()->GetLastError();
+        auto result = RecordRenderPipeline(*plan, pipelineContext, request);
         ASSERT_NE(result.Status, PipelineRecordStatus::RecoverableFailure);
         EXPECT_GE(renderer->GetGraphicsPipelineCache().GetSize(), 1u);
         EXPECT_LE(renderer->GetGraphicsPipelineCache().GetSize(), 2u);

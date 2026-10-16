@@ -41,7 +41,7 @@ protected:
     void OnRender(AppFrameContext& frame) override {
         if (frame.FrameSerial() != 1 || !_pipeline || !_output || !_readback) return;
         auto* layout = _program->GetPipelineLayout();
-        auto parameters = frame.GetGpuFrameResources().AllocateParameters(layout, 0);
+        auto parameters = frame.GetDevice()->CreateShaderParameterSet({layout, 0});
         ASSERT_TRUE(parameters);
         ASSERT_TRUE(parameters->Set(layout->FindBinding("Output"), 0, render::ShaderBufferBinding{_output.get(), {0, sizeof(uint32_t)}, sizeof(uint32_t)}));
         ASSERT_TRUE(parameters->FlushWrites());
@@ -50,18 +50,21 @@ protected:
         const render::ResourceBarrierDescriptor begin[]{
             render::BarrierBufferDescriptor{_output.get(), render::BufferState::Undefined, render::BufferState::UnorderedAccess},
             render::BarrierBufferDescriptor{_readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination}};
-        command->ResourceBarrier(begin);
+        command->ResourceBarrier(std::span{begin}.first(frame.GetDevice()->GetBackend() == render::RenderBackend::Vulkan ? 2 : 1));
         auto encoder = command->BeginComputePass();
         ASSERT_TRUE(encoder);
         encoder->BindComputePipelineState(_pipeline.get());
         encoder->BindShaderParameterSet(0, parameters.Get());
         encoder->Dispatch(1, 1, 1);
+        frame.RetainGpuForFrameRT(parameters.Release());
         command->EndComputePass(encoder.Release());
         const render::ResourceBarrierDescriptor copy = render::BarrierBufferDescriptor{_output.get(), render::BufferState::UnorderedAccess, render::BufferState::CopySource};
         command->ResourceBarrier(std::span{&copy, 1});
         command->CopyBufferToBuffer(_readback.get(), 0, _output.get(), 0, sizeof(uint32_t));
-        const render::ResourceBarrierDescriptor end = render::BarrierBufferDescriptor{_readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead};
-        command->ResourceBarrier(std::span{&end, 1});
+        if (frame.GetDevice()->GetBackend() == render::RenderBackend::Vulkan) {
+            const render::ResourceBarrierDescriptor end = render::BarrierBufferDescriptor{_readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead};
+            command->ResourceBarrier(std::span{&end, 1});
+        }
         allocator.Return(std::span{&command, 1});
         frame.RegisterClosedCommandBuffers({.CmdBuffers = std::span{&command, 1}});
     }

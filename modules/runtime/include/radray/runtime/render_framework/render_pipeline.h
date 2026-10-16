@@ -5,6 +5,7 @@
 #include <radray/runtime/gpu_frame_resources.h>
 #include <radray/runtime/render_framework/scene_view.h>
 #include <radray/runtime/render_framework/render_output.h>
+#include <radray/runtime/render_framework/renderer.h>
 
 namespace radray {
 class RenderSystem;
@@ -17,7 +18,8 @@ struct PipelineFrameInfo {
     std::chrono::duration<float> DeltaTime;
 };
 struct PipelineContext {
-    RenderSystem& Renderer;
+    radray::Renderer& Renderer;
+    FrameBuilder& Builder;
     PipelineFrameInfo Frame;
     IGpuCmdAllocator& Commands;
     GpuFrameResources& Resources;
@@ -40,10 +42,29 @@ struct PipelineRecordResult {
 class RenderPipeline {
 public:
     virtual ~RenderPipeline() noexcept = default;
-    virtual PipelineRecordResult Record(PipelineContext& context, const RenderPipelineRequest& request) = 0;
+    class Plan : public FramePreparation {
+    public:
+        virtual ~Plan() noexcept = default;
+        virtual bool Admit(PipelineContext&) { return true; }
+        virtual bool PreparePipeline(PipelineContext&) { return true; }
+        virtual PipelineRecordResult Record(PipelineContext& context) = 0;
+        bool Prepare(FrameBuilder& builder) final;
+        static std::optional<FramePreparationId> Collect(unique_ptr<Plan> owner, PipelineContext& context);
+
+    private:
+        Nullable<Renderer*> _renderer{nullptr};
+        Nullable<IGpuCmdAllocator*> _commands{nullptr};
+        Nullable<GpuFrameResources*> _resources{nullptr};
+        Nullable<SceneManager*> _scenes{nullptr};
+        Nullable<IRequiredGpuWork*> _requiredWork{nullptr};
+        PipelineFrameInfo _frame{};
+    };
+    /// Collect every pipeline/output into the same builder before its single Compile call.
+    std::optional<FramePreparationId> Collect(PipelineContext& context, const RenderPipelineRequest& request);
+    virtual unique_ptr<Plan> CreatePlan(const RenderPipelineRequest& request) = 0;
 };
-PipelineContext MakePipelineContext(RenderSystem& renderer, AppFrameContext& frame, Nullable<SceneManager*> scenes = nullptr);
+PipelineContext MakePipelineContext(Renderer& renderer, FrameBuilder& builder, AppFrameContext& frame, Nullable<SceneManager*> scenes = nullptr);
 /// Complete the requested exit state, preserving every returned command on recoverable failure.
 /// The caller merges results and registers the batch with its acquired target, if any.
-PipelineRecordResult RecordRenderPipeline(RenderPipeline& pipeline, PipelineContext& context, const RenderPipelineRequest& request);
+PipelineRecordResult RecordRenderPipeline(FramePreparationId plan, PipelineContext& context, const RenderPipelineRequest& request);
 }  // namespace radray

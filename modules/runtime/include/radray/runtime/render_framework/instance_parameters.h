@@ -25,12 +25,8 @@ std::optional<InstanceParameterLayout> ReflectInstanceParameterLayout(const shad
                                                                       std::string_view declaration, string streamName);
 struct ShapeParameterUpdate {
     ShapeId Id;
-    shared_ptr<const InstanceParameterLayout> Layout;
-    shared_ptr<const vector<byte>> Storage;
+    InstanceSchemaId Schema;
     uint32_t Offset{0}, Size{0};
-    ShapeParameterUpdate(ShapeId id, const InstanceParameterLayout& layout, vector<byte> values);
-    ShapeParameterUpdate(ShapeId id, shared_ptr<const InstanceParameterLayout> layout, shared_ptr<const vector<byte>> storage, uint32_t offset);
-    std::span<const byte> GetValues() const noexcept;
 };
 struct SceneParameterChange {
     ShapeId Id;

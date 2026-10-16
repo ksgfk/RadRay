@@ -7,6 +7,7 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/render_framework/material.h>
 #include <radray/runtime/render_framework/instance_parameters.h>
+#include <radray/runtime/render_framework/render_asset_lifetime.h>
 
 namespace radray {
 
@@ -28,7 +29,7 @@ struct StaticMeshStateUpdate {
 
 struct ShapeMaterialUpdate {
     ShapeId Id;
-    MaterialBindings Materials;
+    SceneMaterialListId Materials;
 };
 
 struct ShapeTransformUpdate {
@@ -54,6 +55,7 @@ static_assert(sizeof(ShapeTransformUpdate) == 56);
 
 /// Sealed on GT together with asset retirements before the runner publishes the flight to RT.
 struct SceneUpdateBatch {
+    vector<AssetExitRequest> AssetExits;
     vector<TransformId> RemoveTransforms;
     vector<TransformCreate> CreateTransforms;
     vector<TransformParentUpdate> TransformParents;
@@ -64,13 +66,26 @@ struct SceneUpdateBatch {
     vector<ShapeTransformUpdate> Transforms;
     vector<ShapeMaterialUpdate> Materials;
     vector<ShapeParameterUpdate> Parameters;
+    vector<byte> ParameterBytes;
     vector<ShapeDrawUpdate> DrawStates;
     /// False preserves the RT light set; true replaces it, including with an empty list.
     bool LightsChanged{false};
     LightSceneData Lights;
 
     void Clear() noexcept;
-    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && Parameters.empty() && DrawStates.empty() && !LightsChanged && Lights.Empty(); }
+    SceneMaterialListId RegisterMaterials(std::span<const MaterialBinding> values);
+    std::optional<InstanceSchemaId> RegisterSchema(const InstanceParameterLayout& layout);
+    void SetMaterials(ShapeId id, std::span<const MaterialBinding> values);
+    bool SetInstanceParameters(ShapeId id, const InstanceParameterLayout& layout, std::span<const byte> values);
+    std::optional<std::span<const MaterialBinding>> GetMaterials(SceneMaterialListId id) const noexcept;
+    Nullable<const InstanceParameterLayout*> GetSchema(InstanceSchemaId id) const noexcept;
+    std::span<const byte> GetParameterValues(const ShapeParameterUpdate& update) const noexcept;
+    bool Empty() const noexcept { return AssetExits.empty() && RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && Parameters.empty() && DrawStates.empty() && !LightsChanged && Lights.Empty() && _materialLists.empty() && _schemas.empty(); }
+
+private:
+    Guid _identity{Guid::NewGuid()};
+    vector<vector<MaterialBinding>> _materialLists;
+    vector<InstanceParameterLayout> _schemas;
 };
 
 struct SceneFrameUpdate {

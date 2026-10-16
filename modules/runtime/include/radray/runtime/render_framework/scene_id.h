@@ -3,8 +3,19 @@
 #include <compare>
 #include <cstdint>
 #include <limits>
+#include <radray/guid.h>
 
 namespace radray {
+/// Local to one sealed packet. Consumers resolve it while reading, then retain their own representation.
+template <class Tag> struct ScenePacketId {
+    Guid Packet;
+    uint32_t Index{UINT32_MAX};
+    friend bool operator==(const ScenePacketId&, const ScenePacketId&) = default;
+};
+struct SceneMaterialListTag;
+struct SceneInstanceSchemaTag;
+using SceneMaterialListId = ScenePacketId<SceneMaterialListTag>;
+using InstanceSchemaId = ScenePacketId<SceneInstanceSchemaTag>;
 
 /// A local transform in one SceneId; independent of shape and light identities.
 struct TransformId {

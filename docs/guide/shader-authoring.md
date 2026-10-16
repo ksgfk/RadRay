@@ -151,7 +151,12 @@ kind/count、visibility、slot或push range；texture、typed texel buffer、sto
 placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
 group 的语义属于具体调用方，不是 shaderlib 全局规则；runtime 不硬编码 view/material/object 组号。
-SceneDraw 的实例寻址契约由 MaterialPass 显式声明：VisibleInstanceSlots 是 uint structured buffer，
+Renderer 的模板按输入来源强制分为 Scene/Frame、View/Pass、Material、Sampler 四个域；一个实际组不能混域。
+例如 object/instance stream 属于 Scene，view matrix 与 visible list 属于 View，材质常量与纹理属于 Material，sampler 单独分组。
+编号及布局仍来自 artifact 和 resolved layout，不建立平行 metadata。增加 view/pass/flight 不应改变静态 material/sampler 的组身份。
+旧 mixed-group shader 必须迁移 ABI；完整组复用不会合并不同完整组中的局部 D3D12 table。
+
+SceneDraw 的实例寻址契约由 MaterialTemplateDescriptor 显式声明：VisibleInstanceSlots 是 uint structured buffer，
 VisibleBase 映射到反射中的 uint push 字段，shader 用 VisibleBase+SV_InstanceID 读取实际对象 slot，draw 的 FirstInstance 为 0。
 按 slot 读取的矩阵 stride 为 64；自定义参数 stride/字段须与 InstanceParameterLayout 完全一致，
 像素阶段通过 nointerpolation varying 接收 slot。DirectObject 与自动合批许可独立；详见[实例绘制](instancing.md)。

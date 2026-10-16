@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <numeric>
 #include <radray/logger.h>
-#include <radray/runtime/render_system.h>
 
 namespace radray {
 GpuFrameResources::GpuFrameResources(render::Device* device)
@@ -132,53 +131,7 @@ MappedUploadPage::Reservation GpuFrameResources::AllocateStorage(uint64_t size, 
     return _storagePages.back()->Reserve(size, 1, _hostWrites);
 }
 
-Nullable<render::ShaderParameterSet*> GpuFrameResources::AllocateParameters(render::PipelineLayout* layout, uint32_t group, shared_ptr<RenderServiceGeneration> generation) {
-    if (!_epochOpen || (generation && !generation->Alive)) return nullptr;
-    auto& pool = _parameters[layout][group];
-    if (pool.Generation && pool.Generation != generation) {
-        if (pool.Used) {
-            RADRAY_ERR_LOG("Cannot replace a parameter layout service generation while this flight still borrows its sets");
-            return nullptr;
-        }
-        pool = {};
-    }
-    pool.Generation = std::move(generation);
-    if (pool.Used < pool.Sets.size()) return pool.Sets[pool.Used++].get();
-    auto set = _device->CreateShaderParameterSet({layout, group});
-    if (!set) return nullptr;
-    pool.Sets.push_back(set.Release());
-    return pool.Sets[pool.Used++].get();
-}
-
 void GpuFrameResources::ResetForReuse() {
-    for (auto it = _parameters.begin(); it != _parameters.end();) {
-        auto& groups = it->second;
-        for (auto item = groups.begin(); item != groups.end();) {
-            auto& pool = item->second;
-            if (pool.Generation && !pool.Generation->Alive) {
-                item = groups.erase(item);
-                continue;
-            }
-            if (pool.Used < pool.Sets.size() && pool.Used <= pool.Sets.size() / 2)
-                ++pool.Idle;
-            else
-                pool.Idle = 0;
-            if (pool.Idle >= 60) {
-                pool.Sets.resize(pool.Used);
-                pool.Idle = 0;
-            }
-            for (size_t index = 0; index < pool.Used; ++index) pool.Sets[index]->ResetBindingsForReuse();
-            pool.Used = 0;
-            if (pool.Sets.empty())
-                item = groups.erase(item);
-            else
-                ++item;
-        }
-        if (groups.empty())
-            it = _parameters.erase(it);
-        else
-            ++it;
-    }
     _constants.Reset();
     size_t used = 0;
     for (size_t i = 0; i < _storagePages.size(); ++i)

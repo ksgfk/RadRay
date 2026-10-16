@@ -14,6 +14,8 @@ namespace radray {
 
 class Application;
 class WorldRenderBridge;
+class Renderer;
+struct RendererSceneKey;
 struct FlightCompletion;
 
 /// Scene delivery and lifetime management. GT and RT registries communicate only through sealed flights.
@@ -26,6 +28,11 @@ public:
     SceneManager& operator=(const SceneManager&) = delete;
     SceneManager& operator=(SceneManager&&) = delete;
     ~SceneManager() noexcept;
+    /// Assemble before publication. The Renderer outlives this delivery connection.
+    void AttachRenderer(Renderer& renderer);
+    /// GT: consumes Renderer confirmations without modifying its registry.
+    void PumpAssetExitsGT();
+    RendererSceneKey GetRendererSceneKey(SceneId id) const noexcept;
 
     /// GT: Worlds disconnected, RT stopped, GPU idle, completions consumed; accepts partial initialization.
     void OnShutdown() noexcept;
@@ -48,8 +55,6 @@ public:
     void AbandonUnpublishedFramesGT();
     /// RT only, or after RT stops. Borrow ends at the next Apply or scene destruction.
     Nullable<const RenderScene*> GetSceneRT(SceneId id) const noexcept;
-    std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, AppFrameContext& frame);
-    std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, PipelineContext& context);
     std::span<const SceneViewRequest> GetFrameViewsRT(uint32_t flightIndex) const;
     /// RT only, or inspection after RT stops. Borrow expires at flight completion.
     std::span<const SceneFrameUpdate> GetFrameUpdatesRT(uint32_t flightIndex) const;
@@ -66,11 +71,11 @@ private:
         unique_ptr<SceneWriter> Writer;
         bool CreatePending{true};
         bool DestroySealed{false};
+        bool DestroyCompleted{false};
     };
     struct SceneSlotRT {
         uint32_t Generation{0};
         unique_ptr<RenderScene> Scene;
-        unique_ptr<SceneGpuData> Gpu;
     };
     enum class SceneFlightPhase : uint8_t {
         Writable,
@@ -85,15 +90,15 @@ private:
         uint64_t UpdateSequence{0};
         uint64_t FrameSerial{0};
         vector<SceneViewRequest> Views;
-        vector<unique_ptr<SceneGpuData>> RetiredGpu;
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
-    Nullable<SceneSlotRT*> PrepareSceneSlotRT(SceneId id, uint32_t flightIndex, uint64_t frameSerial, render::Device* device);
 
     vector<FrameUpdates> _frameUpdates;
     SparseSet<SceneRecord> _scenesGT;
     vector<SceneSlotRT> _scenesRT;
     SceneApplyChanges _applyChanges;
+    Guid _delivery{Guid::NewGuid()};
+    Nullable<Renderer*> _renderer{nullptr};
     // GT owns seal, publish, completion and stopping; RT owns consumption.
     uint64_t _nextUpdateSequence{1};
     uint64_t _lastPublishedSequence{0};

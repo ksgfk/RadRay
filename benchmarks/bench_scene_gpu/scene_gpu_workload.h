@@ -3,6 +3,8 @@
 #include <radray/runtime/frame_timeline.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/scene_manager.h>
+#include <radray/runtime/render_framework/renderer.h>
+#include <radray/runtime/render_system.h>
 
 namespace radray {
 class World;
@@ -44,6 +46,8 @@ private:
     void CreateObjects(uint32_t count);
     FrameTimeline _timeline;
     unique_ptr<GpuSystem> _gpu;
+    unique_ptr<RenderSystem> _services;
+    unique_ptr<Renderer> _framework;
     unique_ptr<SceneManager> _renderer;
     unique_ptr<World> _world;
     Nullable<SceneComponent*> _parent{nullptr};

@@ -9,34 +9,32 @@
 #include <radray/runtime/render_framework/raster_scene.h>
 
 namespace radray {
-size_t SceneDrawKeyHash::operator()(const SceneDrawKey& key) const noexcept {
-    HashCode hash;
-    hash.Add(key.Geometry);
-    hash.Add(key.Material);
-    return hash.ToHashCode();
-}
 std::optional<PreparedSceneDraw> SceneDraw::Prepare(
     PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
     const RenderOutputInfo& output, std::string_view passName,
-    Nullable<const MaterialRenderData*> fallback, bool depthTest, Nullable<MaterialGpuState*> fallbackGpu) {
+    std::optional<MaterialId> fallback, bool depthTest) {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Prepare");
     const auto resolved = ResolveSceneView(view, output.Width, output.Height, context.Resources.GetDevice()->GetBackend());
     const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
     if (!resolved || !scene) return std::nullopt;
     PreparedSceneDraw result{*resolved, {}, {}, {}};
     struct MaterialInfo {
-        const MaterialRenderData* Data;
-        Nullable<MaterialGpuState*> Gpu;
-        const MaterialPass* Pass;
-        const RasterMaterialPlan* Plan;
+        MaterialId Id;
+        TemplateId Template;
+        const MaterialTemplateDescriptor* Pass;
+        const CompiledMaterialTemplate* Plan;
         vector<const SceneParameterStream*> Streams;
     };
     vector<MaterialInfo> materials;
-    unordered_map<const MaterialRenderData*, size_t> materialIndices;
+    struct MaterialBindingHash {
+        size_t operator()(const MaterialBinding& binding) const noexcept { return std::hash<const MaterialRenderData*>{}(binding.Data.Get()); }
+    };
+    unordered_map<MaterialBinding, size_t, MaterialBindingHash> materialIndices;
     // All uniforms, layouts, viewport/scissor and scene/view/pass scope are fixed by one Prepare.
     // Geometry identity covers immutable vertex/index streams and topology; section ranges stay explicit.
     struct BatchKey {
         const GpuMesh::DrawData* Geometry;
+        AssetId Mesh;
         size_t Material;
         uint32_t Count, First;
         int32_t VertexOffset;
@@ -85,33 +83,47 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                 continue;
             }
             for (const auto& primitive : scene->GetDrawPrimitives(id)) {
-                const auto data = primitive.Binding.Data ? primitive.Binding.Data : fallback;
-                if (!data) {
+                const auto selection = primitive.Binding.Data ? primitive.Binding : MaterialBinding{};
+                if (!selection.Data && !fallback) {
                     ++result.Stats.MissingMaterial;
                     continue;
                 }
-                auto material = materialIndices.find(data.Get());
+                auto material = materialIndices.find(selection);
                 if (material == materialIndices.end()) {
-                    const auto selected = std::find_if(data->Passes.begin(), data->Passes.end(), [&](const auto& p) { return p.GetDefinition().Name == passName; });
-                    if (selected == data->Passes.end()) {
-                        materialIndices.emplace(data.Get(), SIZE_MAX);
+                    auto materialId = fallback;
+                    if (selection.Data) {
+                        const auto registered = context.Renderer.GetScenes().Material(context.Scenes->GetRendererSceneKey(view.Scene), selection.Id, *selection.Data);
+                        if (!registered) return std::nullopt;
+                        materialId = registered->Material;
+                    }
+                    const CompiledMaterialTemplate* plan = nullptr;
+                    TemplateId selected;
+                    for (const auto templateId : context.Renderer.GetMaterialTemplates(*materialId)) {
+                        const auto candidate = context.Renderer.GetTemplate(templateId);
+                        if (candidate && candidate->Descriptor.Name == passName) {
+                            plan = candidate.Get();
+                            selected = templateId;
+                            break;
+                        }
+                    }
+                    if (!plan) {
+                        materialIndices.emplace(selection, SIZE_MAX);
                         ++result.Stats.MissingPass;
                         continue;
                     }
-                    const auto plan = _draw.ResolveMaterial(context.Renderer, *selected);
-                    if (!plan || (plan->Push.IsValid() && !plan->SceneIndexOffset)) return std::nullopt;
-                    MaterialInfo info{data.Get(), primitive.Binding.Data ? primitive.Binding.Gpu : fallbackGpu, &selected->GetDefinition(), plan.Get(), {}};
-                    for (const auto& binding : selected->GetDefinition().Inputs) {
+                    if (plan->Push.IsValid() && !plan->SceneIndexOffset) return std::nullopt;
+                    MaterialInfo info{*materialId, selected, &plan->Descriptor, plan, {}};
+                    for (const auto& binding : plan->Descriptor.Inputs) {
                         if (binding.Source != MaterialInputSource::InstanceParameters) continue;
-                        if (binding.ValueIndex >= selected->GetDefinition().ParameterLayouts.size()) return std::nullopt;
-                        const auto& layout = selected->GetDefinition().ParameterLayouts[binding.ValueIndex];
+                        if (binding.ValueIndex >= plan->Descriptor.ParameterLayouts.size()) return std::nullopt;
+                        const auto& layout = plan->Descriptor.ParameterLayouts[binding.ValueIndex];
                         const auto stream = scene->GetParameterStreams().find(layout.Name);
                         if (stream == scene->GetParameterStreams().end() || stream->second.Layout != layout) return std::nullopt;
                         info.Streams.push_back(&stream->second);
                     }
                     const auto index = materials.size();
                     materials.push_back(std::move(info));
-                    material = materialIndices.emplace(data.Get(), index).first;
+                    material = materialIndices.emplace(selection, index).first;
                 }
                 if (material->second == SIZE_MAX) {
                     ++result.Stats.MissingPass;
@@ -120,7 +132,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                 const auto& info = materials[material->second];
                 for (const auto* stream : info.Streams)
                     if (id.Index >= stream->Rows.size() || !stream->Rows[id.Index] || stream->Rows[id.Index]->Id != id) return std::nullopt;
-                const bool visible = info.Plan->InstanceAddressing == MaterialInstanceAddressing::VisibleSlots;
+                const bool visible = info.Plan->Descriptor.InstanceAddressing == MaterialInstanceAddressing::VisibleSlots;
                 if (state->ExplicitInstancing && !visible) {
                     ++result.Stats.ExplicitUnsupported;
                     continue;
@@ -134,7 +146,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
                 else if (!merge)
                     ++result.Stats.AutomaticDisabled;
                 const auto& section = *primitive.Section;
-                candidates.push_back({{primitive.Draw, material->second, section.IndexCount, section.FirstIndex,
+                candidates.push_back({{primitive.Draw, columns.Bindings[row].MeshAssetId, material->second, section.IndexCount, section.FirstIndex,
                                        section.VertexOffset, state->SortGroup, state->Order, state->BatchDomain, bounds.ReverseCulling, state->ExplicitInstancing},
                                       id.Index,
                                       merge,
@@ -177,7 +189,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
         }
         uint64_t total = 0;
         for (auto& batch : batches) {
-            if (materials[batch.Key.Material].Plan->InstanceAddressing != MaterialInstanceAddressing::VisibleSlots) continue;
+            if (materials[batch.Key.Material].Plan->Descriptor.InstanceAddressing != MaterialInstanceAddressing::VisibleSlots) continue;
             if (total + batch.Count > UINT32_MAX) {
                 RADRAY_ERR_LOG("Visible instance list exceeds uint32 addressing");
                 return std::nullopt;
@@ -188,136 +200,129 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(
         slots.resize(static_cast<size_t>(total));
         for (size_t i = 0; i < candidates.size(); ++i) {
             auto& batch = batches[assignment[i]];
-            if (materials[batch.Key.Material].Plan->InstanceAddressing == MaterialInstanceAddressing::VisibleSlots)
+            if (materials[batch.Key.Material].Plan->Descriptor.InstanceAddressing == MaterialInstanceAddressing::VisibleSlots)
                 slots[batch.First + batch.Cursor++] = candidates[i].Slot;
             else
                 batch.First = candidates[i].Slot;
         }
     }
     if (batches.empty()) return result;
-    RasterMaterialValues values{.Objects = objects.Objects, .Parameters = objects.Parameters};
-    RasterFrameBindingCache sharedGroups;
-    values.SharedGroups = &sharedGroups;
-    vector<render::ShaderBufferBinding> viewBuffers;
-    {
-        RADRAY_PROFILE_SCOPE_N("SceneDraw::PrepareBindings");
-        auto viewAllocation = context.Resources.AllocateConstants(64);
-        if (!viewAllocation.IsValid()) return std::nullopt;
-        std::memcpy(viewAllocation.Data(), resolved->ViewProjection.data(), 64);
-        const auto viewSlice = viewAllocation.Commit(64);
-        viewBuffers.push_back({viewSlice.Target, {viewSlice.Offset, viewSlice.Size}, 0});
-        values.ViewBuffers = viewBuffers;
-        if (!slots.empty()) {
-            const uint64_t size = uint64_t{slots.size()} * 4;
-            auto allocation = context.Resources.AllocateStorage(size);
-            if (!allocation.IsValid()) return std::nullopt;
-            std::memcpy(allocation.Data(), slots.data(), static_cast<size_t>(size));
-            const auto slice = allocation.Commit(size);
-            values.VisibleSlots = render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 4};
-        }
-        result.Materials.reserve(materials.size());
-        for (const auto& info : materials) {
-            auto prepared = _draw.PrepareMaterial(context, *info.Plan, *info.Data, values, info.Gpu, info.Pass);
-            if (!prepared) return std::nullopt;
-            result.Materials.push_back(std::move(*prepared));
-        }
+    RendererViewDescriptor viewDescriptor;
+    const auto viewBytes = std::as_bytes(std::span{resolved->ViewProjection.data(), size_t{16}});
+    viewDescriptor.Constants.emplace_back(viewBytes.begin(), viewBytes.end());
+    viewDescriptor.VisibleSlots = std::move(slots);
+    const auto viewId = context.Builder.AddView(std::move(viewDescriptor));
+    if (!viewId) return std::nullopt;
+    vector<FramePassId> passes;
+    for (const auto& info : materials) {
+        const auto pass = context.Builder.AddPass({*viewId, info.Template, output, {}, {}, depthTest});
+        if (!pass) return std::nullopt;
+        passes.push_back(*pass);
+        result.Materials.push_back(info.Id);
     }
-    {
-        RADRAY_PROFILE_SCOPE_N("SceneDraw::PrepareDraws");
-        result.Draws.reserve(batches.size());
-        // Different section ranges share a pipeline, while retaining different batch keys above.
-        struct Geometry {
-            array<render::GraphicsPipelineState*, 2> Pipelines{};
-        };
-        unordered_map<SceneDrawKey, Geometry, SceneDrawKeyHash> geometry;
-        for (const auto& batch : batches) {
-            const auto& info = materials[batch.Key.Material];
-            const auto& draw = *batch.Key.Geometry;
-            auto& pipeline = geometry[{&draw, info.Data}].Pipelines[batch.Key.Reverse ? 1 : 0];
-            if (!pipeline) {
-                auto state = *info.Pass;
-                if (!state.DepthStencil && output.Depth) {
-                    state.DepthStencil = render::DepthStencilState::Default();
-                    state.DepthStencil->DepthTestEnable = depthTest;
-                    state.DepthStencil->DepthWriteEnable = depthTest;
-                }
-                const auto prepared = _draw.PreparePipeline(context, *info.Plan, state, draw.Layout, draw.Topology, output, batch.Key.Reverse);
-                if (!prepared) return std::nullopt;
-                pipeline = prepared.Get();
-            }
-            PreparedRasterDraw prepared;
-            prepared.Pipeline = pipeline;
-            prepared.Vertices = draw.VertexBuffers;
-            prepared.Indices = draw.Ibv;
-            prepared.Count = batch.Key.Count;
-            prepared.First = batch.Key.First;
-            prepared.VertexOffset = batch.Key.VertexOffset;
-            prepared.Instances = batch.Count;
-            prepared.FirstInstance = 0;
-            prepared.Viewport = resolved->Viewport;
-            prepared.Scissor = resolved->Scissor;
-            if (info.Plan->Push.IsValid()) {
-                prepared.Push = info.Pass->ScenePushValues;
-                if (prepared.Push.empty()) prepared.Push.resize(info.Plan->PushSize);
-                std::memcpy(prepared.Push.data() + *info.Plan->SceneIndexOffset, &batch.First, 4);
-            }
-            result.Draws.push_back({std::move(prepared), batch.Key.Material});
+    RendererDrawValues values;
+    values.Objects = objects.ObjectsResource;
+    values.Parameters = objects.ParameterResources;
+    for (const auto& batch : batches) {
+        const auto& info = materials[batch.Key.Material];
+        auto draw = context.Renderer.GetScenes().Geometry(context.Scenes->GetRendererSceneKey(view.Scene), batch.Key.Mesh, *batch.Key.Geometry);
+        if (!draw) return std::nullopt;
+        draw->Count = batch.Key.Count;
+        draw->First = batch.Key.First;
+        draw->VertexOffset = batch.Key.VertexOffset;
+        draw->Instances = batch.Count;
+        draw->Viewport = resolved->Viewport;
+        draw->Scissor = resolved->Scissor;
+        draw->ReverseCulling = batch.Key.Reverse;
+        if (info.Plan->Push.IsValid()) {
+            draw->Push = info.Pass->ScenePushValues;
+            if (draw->Push.empty()) draw->Push.resize(info.Plan->PushSize);
+            std::memcpy(draw->Push.data() + *info.Plan->SceneIndexOffset, &batch.First, 4);
         }
+        const auto admitted = context.Builder.AddDraw(passes[batch.Key.Material], info.Id, std::move(*draw), values);
+        if (!admitted) return std::nullopt;
+        result.Draws.push_back(*admitted);
     }
     return result;
 }
 
-void PreparedSceneDraw::Record(render::GraphicsCommandEncoder* encoder) const {
+bool PreparedSceneDraw::Record(FrameBuilder& frame, render::GraphicsCommandEncoder* encoder) const {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Draw");
-    for (const auto& item : Draws) item.Draw.Record(encoder, Materials[item.Material]);
+    return frame.Record(encoder, Draws);
 }
 
-UnlitRenderPipeline::UnlitRenderPipeline(ScenePipelineDescriptor descriptor) : _descriptor(std::move(descriptor)) {}
-PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const RenderPipelineRequest& request) {
-    PipelineRecordResult result;
-    if (!request.Output) return result;
-    const auto info = ValidateRenderOutput(*request.Output, *context.Resources.GetDevice());
-    if (!info) {
-        result.Status = PipelineRecordStatus::RecoverableFailure;
+namespace {
+class ScenePipelinePlan final : public RenderPipeline::Plan {
+public:
+    std::optional<RenderOutput> Output;
+    RenderOutputInfo Info;
+    ScenePipelineDescriptor Descriptor;
+    vector<SceneViewRequest> Views;
+    bool Admit(PipelineContext& context) override { return !Descriptor.Fallback || context.Builder.UseMaterial(*Descriptor.Fallback); }
+    bool PreparePipeline(PipelineContext& context) override;
+    vector<PreparedSceneDraw> Draws;
+    PipelineRecordStatus Status{PipelineRecordStatus::NoWork};
+    PipelineRecordResult Record(PipelineContext& context) override {
+        PipelineRecordResult result{Status};
+        if (!Output) return result;
+        result.OutputState = InitialRenderOutputState(*Output);
+        vector<render::RenderPassColorAttachment> colors;
+        for (const auto& color : Output->Colors) colors.push_back({color.View, render::LoadAction::Clear, render::StoreAction::Store, Descriptor.ClearColor});
+        std::optional<render::RenderPassDepthStencilAttachment> depth;
+        if (Output->Depth) depth = render::RenderPassDepthStencilAttachment{Output->Depth->View, render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::Clear, render::StoreAction::Store, false, {1, 0}};
+        auto* command = context.Commands.Allocate();
+        TransitionRenderOutput(command, *Output, *result.OutputState, false);
+        auto encoder = command->BeginRenderPass({colors, depth, Info.Width, Info.Height, 1, {}, "Scene pipeline"});
+        if (encoder) {
+            for (const auto& draw : Draws)
+                if (!draw.Record(context.Builder, encoder.Get())) result.Status = PipelineRecordStatus::RecoverableFailure;
+            command->EndRenderPass(encoder.Release());
+        } else
+            result.Status = PipelineRecordStatus::RecoverableFailure;
+        TransitionRenderOutput(command, *Output, *result.OutputState, true);
+        context.Commands.Return(std::span{&command, 1});
+        result.Commands.push_back(command);
         return result;
     }
-    result.OutputState = InitialRenderOutputState(*request.Output);
-    vector<render::RenderPassColorAttachment> colors;
-    for (const auto& color : request.Output->Colors) colors.push_back({color.View, render::LoadAction::Clear, render::StoreAction::Store, _descriptor.ClearColor});
-    std::optional<render::RenderPassDepthStencilAttachment> depth;
-    if (request.Output->Depth) depth = render::RenderPassDepthStencilAttachment{request.Output->Depth->View, render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::Clear, render::StoreAction::Store, false, {1, 0}};
-    vector<PreparedSceneDraw> prepared;
-    for (const auto& view : request.Views) {
-        const auto objects = context.Scenes ? context.Scenes->PrepareSceneGpuRT(view.Scene, context) : std::nullopt;
+};
+}  // namespace
+bool ScenePipelinePlan::PreparePipeline(PipelineContext& context) {
+    if (!Output) return true;
+    const auto info = ValidateRenderOutput(*Output, *context.Resources.GetDevice());
+    if (!info) {
+        Status = PipelineRecordStatus::RecoverableFailure;
+        return false;
+    }
+    Info = *info;
+    if (context.Scenes && context.Scenes->GetFrameSerial(context.Frame.FlightIndex) != context.Frame.FrameSerial) return false;
+    SceneDraw prepare;
+    for (const auto& view : Views) {
+        const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
+        const auto objects = scene ? context.Renderer.GetScenes().Prepare(context.Scenes->GetRendererSceneKey(view.Scene), *scene, context) : std::nullopt;
         if (!objects) {
-            const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
-            if (scene && !scene->GetStaticMeshes().empty()) result.Status = PipelineRecordStatus::RecoverableFailure;
+            if (scene && !scene->GetStaticMeshes().empty()) Status = PipelineRecordStatus::RecoverableFailure;
             continue;
         }
-        auto draw = _draw.Prepare(context, view, *objects, *info, _descriptor.PassName,
-                                  _descriptor.Fallback ? Nullable<const MaterialRenderData*>{&*_descriptor.Fallback} : nullptr, _descriptor.DepthTest, &_fallbackGpu);
+        auto draw = prepare.Prepare(context, view, *objects, *info, Descriptor.PassName, Descriptor.Fallback, Descriptor.DepthTest);
         if (!draw) {
-            result.Status = PipelineRecordStatus::RecoverableFailure;
+            Status = PipelineRecordStatus::RecoverableFailure;
             continue;
         }
         if (draw->Stats.ExplicitUnsupported) {
-            RADRAY_ERR_LOG("Scene pass {} does not support {} explicit instances", _descriptor.PassName, draw->Stats.ExplicitUnsupported);
-            result.Status = PipelineRecordStatus::RecoverableFailure;
+            RADRAY_ERR_LOG("Scene pass {} does not support {} explicit instances", Descriptor.PassName, draw->Stats.ExplicitUnsupported);
+            Status = PipelineRecordStatus::RecoverableFailure;
         }
-        prepared.push_back(std::move(*draw));
+        Draws.push_back(std::move(*draw));
     }
-    auto* command = context.Commands.Allocate();
-    TransitionRenderOutput(command, *request.Output, *result.OutputState, false);
-    auto encoder = command->BeginRenderPass({colors, depth, info->Width, info->Height, 1, {}, "Scene pipeline"});
-    if (encoder) {
-        for (const auto& draw : prepared) draw.Record(encoder.Get());
-        command->EndRenderPass(encoder.Release());
-    } else
-        result.Status = PipelineRecordStatus::RecoverableFailure;
-    TransitionRenderOutput(command, *request.Output, *result.OutputState, true);
-    context.Commands.Return(std::span{&command, 1});
-    result.Commands.push_back(command);
-    if (result.Status != PipelineRecordStatus::RecoverableFailure) result.Status = prepared.empty() ? PipelineRecordStatus::NoWork : PipelineRecordStatus::Recorded;
+    if (Status != PipelineRecordStatus::RecoverableFailure && !Draws.empty()) Status = PipelineRecordStatus::Recorded;
+    return Status != PipelineRecordStatus::RecoverableFailure;
+}
+UnlitRenderPipeline::UnlitRenderPipeline(ScenePipelineDescriptor descriptor) : _descriptor(std::move(descriptor)) {}
+unique_ptr<RenderPipeline::Plan> UnlitRenderPipeline::CreatePlan(const RenderPipelineRequest& request) {
+    auto result = make_unique<ScenePipelinePlan>();
+    result->Output = request.Output;
+    result->Descriptor = _descriptor;
+    result->Views.assign(request.Views.begin(), request.Views.end());
     return result;
 }
 }  // namespace radray

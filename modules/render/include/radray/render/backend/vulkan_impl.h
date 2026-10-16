@@ -1101,6 +1101,8 @@ public:
     void SetDebugName(std::string_view name) noexcept override;
 
     BindingHandle FindBinding(std::string_view name) const noexcept override;
+    std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept override;
+    std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1219,7 +1221,7 @@ class SamplerVulkan final : public Sampler {
 public:
     SamplerVulkan(
         DeviceVulkan* device,
-        VkSampler sampler) noexcept;
+        VkSampler sampler, const VulkanImmutableSamplerState& state) noexcept;
     ~SamplerVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -1227,12 +1229,14 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+    vector<uint64_t> GetBindingIdentity() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkSampler _sampler;
+    VulkanImmutableSamplerState _state;
 };
 
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);

@@ -19,6 +19,7 @@
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/render_framework/scene_manager.h>
+#include <radray/runtime/render_framework/renderer.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
@@ -97,6 +98,7 @@ Application::Application() noexcept = default;
 
 Application::~Application() noexcept {
     StopAndDrainRuntime();
+    if (_renderer && !_renderer->Shutdown()) RADRAY_ABORT("Application renderer still owns unfinished GPU epochs after drain");
     _scheduler.CancelAll();
     DestroyRuntime();
 }
@@ -149,9 +151,10 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
         completions.push_back(completion);
     }
     for (const auto& c : completions) {
-        if (_sceneManager != nullptr) _sceneManager->OnFlightCompletedGT(c);
         if (_gpuSystem != nullptr) _gpuSystem->ReleaseFrameResourcesGT(c);
+        if (_sceneManager != nullptr) _sceneManager->OnFlightCompletedGT(c);
     }
+    if (_sceneManager) _sceneManager->PumpAssetExitsGT();
     if (flightIndex) {
         _frameTimeline->PumpWaitFrame(*flightIndex);
         if (_gpuSystem != nullptr) _gpuSystem->BeginUpdateForFlight(*flightIndex);
@@ -244,6 +247,7 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     }
     _shuttingDown = true;
     StopAndDrainRuntime();
+    if (_renderer && !_renderer->Shutdown()) RADRAY_ABORT("Application renderer still owns unfinished GPU epochs after drain");
     if (_windowManager && _windowManager->GetMainWindow())
         _windowManager->_eventPump->DispatchCloseRequest(_windowManager->GetMainWindow()->GetNativeWindow());
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
@@ -260,6 +264,7 @@ void Application::DestroyRuntime() noexcept {
     if (_worldManager != nullptr) _worldManager->Shutdown();
     _worldManager.reset();
     _sceneManager.reset();
+    _renderer.reset();
     if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
     // Disconnect borrowed render services before destroying them.
     if (_windowManager != nullptr) {
@@ -395,6 +400,10 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     if (_renderSystem != nullptr && !_renderSystem->OnInitialize()) {
         DestroyRuntime();
         return fail(RuntimeStartupStatus::InitializationFailed, "RenderSystem initialization failed");
+    }
+    if (_renderSystem) {
+        _renderer = make_unique<Renderer>(*_gpuSystem, *_renderSystem);
+        if (_sceneManager) _sceneManager->AttachRenderer(*_renderer);
     }
 
     if (_windowManager != nullptr) {

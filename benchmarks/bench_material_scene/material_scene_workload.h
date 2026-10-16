@@ -33,6 +33,7 @@ private:
     FrameTimeline _timeline;
     unique_ptr<GpuSystem> _gpu;
     unique_ptr<RenderSystem> _renderer;
+    unique_ptr<Renderer> _framework;
     AssetManager _assets;
     unique_ptr<SceneManager> _scenes;
     unique_ptr<World> _world;

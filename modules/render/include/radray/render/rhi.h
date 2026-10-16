@@ -1596,6 +1596,22 @@ public:
     virtual ShaderStages GetStages() const noexcept = 0;
 };
 
+/// Opaque, device-local storage compatibility derived from the resolved native layout.
+/// It cannot be used to construct a pipeline layout. Equality compares the complete key.
+class ParameterGroupCompatibility {
+public:
+    size_t Hash() const noexcept;
+    uint32_t ValueCount() const noexcept { return _valueCount; }
+    uint32_t ResourceDescriptors() const noexcept { return _resources; }
+    uint32_t SamplerDescriptors() const noexcept { return _samplers; }
+    friend bool operator==(const ParameterGroupCompatibility&, const ParameterGroupCompatibility&) = default;
+
+private:
+    friend class PipelineLayout;
+    vector<uint64_t> _identity;
+    uint32_t _valueCount{0}, _resources{0}, _samplers{0};
+};
+
 class PipelineLayout : public RenderBase, public IDebugName {
 public:
     virtual ~PipelineLayout() noexcept = default;
@@ -1603,6 +1619,12 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
 
     virtual BindingHandle FindBinding(std::string_view name) const noexcept = 0;
+    virtual std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept;
+    /// Dense canonical element index within this group; rejects foreign handles and immutable bindings.
+    virtual std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept;
+
+protected:
+    ParameterGroupCompatibility MakeParameterGroupCompatibility(vector<uint64_t> identity, uint32_t values, uint32_t resources, uint32_t samplers) const noexcept;
 };
 
 class ShaderParameterSet : public RenderBase {
@@ -1644,7 +1666,13 @@ public:
     virtual ~Sampler() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
+    /// Canonical native state, independent of sampler object identity. Empty means unsupported.
+    virtual vector<uint64_t> GetBindingIdentity() const noexcept;
 };
+
+/// Normalize default buffer ranges, texture view descriptions and native sampler state.
+/// The identity borrows resource addresses; owners must retire dependent bindings before resource destruction.
+std::optional<vector<uint64_t>> GetShaderParameterValueIdentity(const ShaderParameterValue& value) noexcept;
 
 class InstanceVulkan : public RenderBase {
 public:

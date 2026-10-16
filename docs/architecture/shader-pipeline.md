@@ -311,3 +311,12 @@ artifact index 或 publisher 输出，也不代表 stock DXC 已提供 RadRay ex
 当前没有正式 shader artifact publisher、索引或安装导出层；fork SDK autobuild 只发布
 compiler package。runtime-only 的 compiler-free 验证消费版本控制的 raw golden bytecode/metadata
 fixture，证明 build-tree decoder/runtime boundary，不把这些 fixture 充当产品 artifact 发布链。
+
+## 框架完整组兼容性
+
+PipelineLayout::GetParameterGroupCompatibility 从已有 resolved layout 派生不透明比较值、可写元素数量及 descriptor 计费数量。
+D3D12 比较 table/range/slot/visibility 与 root descriptor 结构，忽略目的 root parameter 位置；Vulkan 使用同一 device 内的
+原生兼容 set layout 身份及有序类型。哈希只是索引，最终比较完整身份。GetParameterElementIndex 将本 layout 的 BindingHandle
+及 array element 规范化为组内值位置，拒绝跨 layout 的 handle。值身份包括 buffer 资源、base/range/stride、完整 view 与原生 sampler 状态。
+这些查询不提供可重建布局的另一套 schema。ShaderProgramId 是服务验证的非拥有身份，服务销毁后不能解引用旧 ID。
+Renderer 的绑定域与作者约束见 [Shader authoring](../guide/shader-authoring.md)。

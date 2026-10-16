@@ -960,6 +960,8 @@ public:
     BindingHandle FindBinding(std::string_view name) const noexcept override;
 
     Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(uint32_t groupIndex) const noexcept;
+    std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept override;
+    std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept override;
 
 public:
     DeviceD3D12* _device{nullptr};
@@ -1066,6 +1068,7 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+    vector<uint64_t> GetBindingIdentity() const noexcept override;
 
 public:
     DeviceD3D12* _device;

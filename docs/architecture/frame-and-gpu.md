@@ -10,7 +10,7 @@
 |---|---|---|
 | `FrameTimeline` | 游戏帧号、FrameSerial、完成通道、每 flight 等待表、帧延迟。有无 GPU 都在 | 设备、命令提交、画什么 |
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler。fence 完成后调用 `FrameTimeline::PublishCompletion` | 帧号、等待表、完成通道、画什么 |
-| `SceneManager` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休 | 底层 shader 缓存与 GPU 提交时序 |
+| `SceneManager` | 持久 CPU RenderScene、独占 per-flight 操作包与视图、资产退出交接 | 底层 shader 缓存与 GPU 提交时序 |
 | `RenderSystem` | program/artifact cache、GraphicsPipelineCache | 场景、World、Pipeline 与 GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` / 内部 `ApplicationLoop` | 固化帧序与关停顺序；协调原生消息和 CPU/GPU 进度；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | RHI 内部消息泵 |
@@ -22,8 +22,8 @@
 
 | 寿命 | 当前 owner 与示例 | 允许回收的条件 |
 |---|---|---|
-| 持久版本 | StaticMesh/TextureAsset、MaterialGpuState、SceneGpuData 的每 flight 镜像 | 逻辑 owner 不再使用，且所有已经接纳的录制和 GPU 使用结束 |
-| 帧内分配 | GpuFrameResources 的 staging、常量/storage 切片、临时参数集与 texture lease | 整个 flight 的 final fence 完成、旧 command epoch 结束，旧参数/视图借用已清理 |
+| 持久版本 | StaticMesh/TextureAsset、Renderer 的材质版本、Scene GPU 镜像 | 逻辑 owner 不再使用，且所有已经接纳的录制和 GPU 使用结束 |
+| 帧内分配 | GpuFrameResources 的 staging、原生常量/storage 切片与 texture lease | 整个 flight 的 final fence 完成、旧 command epoch 结束，旧参数/视图借用已清理 |
 | 跨帧保留的结果版本 | 调用方的 history/readback 过程 owner | 最后 producer/reader 的 GPU 使用结束，并且 CPU 消费或历史保留权结束 |
 
 池保留物理存储不等于上一逻辑版本仍有效；新 texture lease 的内容有效性必须重新建立。
@@ -353,7 +353,7 @@ PublishCompletion 的同一 CompletedSerial 账本负责完成与等待。WaitFr
 | `DynamicCBufferArena` | 帧内常量缓冲切片。从映射上传页线性子分配，按 flight reset |
 | `HostWriteBatch` + `ScopedBufferMap` | 直接写持久映射缓冲，收集写入范围后统一 flush |
 
-GpuFrameResources 每 flight 拥有一份 HostWriteBatch、单 epoch StagingBufferPool、借用它的 ResourceUploader、constants/storage 页与参数池。SealEpoch 要求所有 reservation 已 Commit，包括 Commit(0)；完成后先清参数旧借用，再归还 active staging。Uploader 不再内嵌 F 个 pending 容器。
+GpuFrameResources 每 flight 拥有 HostWriteBatch、单 epoch StagingBufferPool、ResourceUploader、原生调用方的 constants/storage 页和 texture pool。SealEpoch 要求所有 reservation 已 Commit，包括 Commit(0)；完成后归还 active staging。框架数据和绑定由 Renderer 独占，不使用此处的可重写切片缓存 descriptor。通用参数池已删除；原生调用方显式拥有参数集，并以 RetainGpuForFrameRT 或自身真实完成协议保活。
 `MappedUploadPage` 持久映射，`Reservation` 是仅可移动的映射切片，提交时记录实际写入范围。
 `HostWriteBatch::Flush` 在 runtime 按设备后端处理收集的范围：实现文件条件引入 Vulkan 后端头，
 原生 Vulkan 设备和 buffer 直接收集非 coherent allocation，并通过一次 `vmaFlushAllocations`
@@ -379,7 +379,16 @@ TODO：待后续上层 GPU 调度设计确定后恢复资产上传，包括复�
 RenderSystem 通过私有 ShaderProgramCache 拥有 JIT、artifact/program cache，并提供通用 GraphicsPipelineCache；调用方也可直接通过 RHI 创建和持有 PSO。
 program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
 
-帧常量、storage、参数版本仅借用至当前工作域完成。开启 [RHI 校验](render-rhi.md#可选-rhi-校验)时，参数集第一次 command binding 后由包装层封存，后续 Set 被拒绝；安全 ResetBindingsForReuse 清理 CPU 旧借用记录后才重新填写。Material 纯默认组保持持久版本，混合组和 override 走帧参数池。PersistentCBufferArena 的 Trim 只在 RT 分配边界执行。
+Renderer 的不可变常量和 storage 范围可跨帧复用，frame 只登记去重的使用集合。每个版本回收要求同时满足：
+没有持久登记依赖、没有已接纳但尚未结束的 command epoch、所有已提交使用的真实完成消息均已处理。
+BeginFrame 将仅可移动的 completion lease 交给 GpuSystem；只有真实 queue 完成并结束 command epoch 后，GT 才释放 payload，
+Renderer::ProcessCompletions 在拥有者安全点消费消息。录制完成、Present 返回、FrameSerial 和任务取消均不能代替此证明。
+不同宿主即使共享 Device，也不能互用完成消息。编译失败、输出丢弃保留已接纳资源和必要上传。
+
+BindingRegistry 创建并填满后封存原生参数集，录制不 Reset/Set/Flush。闲置预算和全组判等见
+[框架绑定契约](render-framework.md#pipeline材质与绘制)。外部资源必须 RequestResourceExit，等确认后才释放 owner；
+场景资产由 SceneManager 自动交接请求和确认。Renderer 只在串行拥有者安全点修改，GT 完成通知通过独立受锁消息队列进入，
+GT 不直接改 RT 登记表。停止并排空后才可将清理责任交回 GT。
 
 AppFrameTarget::OnOutput 在 Submit/Present 收尾时交付每个输出的 CommandsSubmitted 与 Presentation；命令执行安排、呈现返回与最后的 GPU completion 分别使用各自的事实。
 
@@ -425,12 +434,13 @@ ApplicationLoop 停止发布和输入派发、关闭窗口操作 → RT 消费�
 继续泵消息 → 观察 RT 实际退出并 join → 系统 BeginStopping（World/Scene/scheduler/加载）
 临时线程等待 final fence + 主队列 idle → GT 观察实际退出并 join → GT 退休并消费完成、释放 owner
 terminal abandon：释放未发布 Scene 包，不生成成功 completion
-安全点交付真实主窗口关闭一次 → OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager
-释放 GPU 帧参数资源和未发布 raw frame owner → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
+Renderer::Shutdown 处理完成并清除 GPU 表示、发出资产退出确认
+安全点交付真实主窗口关闭一次 → OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager → Renderer 对象
+释放 GPU 帧资源和未发布 raw frame owner → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
 ```
 
 AssetManager 只拥有加载 scope；取消加载不会释放框架已接纳的 GPU owner。
-Material 的持久 SPS 与常量 allocation 必须在 program/layout 服务退出前释放，因此 GPU drain 后先拆资产，再拆 RenderSystem。
+Renderer 的 SPS、常量 allocation 和 Scene GPU buffer 必须先于资产和 program/layout 服务清理。Application 的 OnShutdown 在 Renderer 已排空后运行，可以安全释放应用资产 owner。
 FrameTimeline 在 AssetManager 之后、GpuSystem 之前销毁：在飞 CPU/加载等待先在时间线仍存活时收束，剩余等待者取消时 device 仍在。
 普通窗口维护通过临时线程等待 GPU/队列，再由 GT 退休并发布完成，随后在帧边界释放 owner，
 不 abandon writer 状态；abandon 后不能恢复正常发布。

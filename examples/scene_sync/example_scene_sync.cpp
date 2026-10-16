@@ -100,9 +100,9 @@ void SceneSyncApp::OnRender(AppFrameContext& frame) {
     auto* window = GetWindowManager()->GetMainWindow();
     auto target = frame.AcquireWindow(window);
     if (!target) return;
-    auto* renderer = GetRenderSystem().Get();
+    auto* renderer = GetRenderer().Get();
     if (!_pipeline) {
-        MaterialPass materialPass;
+        MaterialTemplateDescriptor materialPass;
         materialPass.Name = "Unlit";
         materialPass.Program.SourceName = "scene_sync_instanced.hlsl";
         materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots}};
@@ -110,14 +110,22 @@ void SceneSyncApp::OnRender(AppFrameContext& frame) {
         materialPass.SceneIndexField = "VisibleBase";
         materialPass.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
         materialPass.AllowAutomaticInstancing = true;
-        MaterialRenderData fallback;
-        fallback.Passes.push_back(std::move(materialPass));
+        const auto definition = renderer->RegisterTemplate(materialPass);
+        if (!definition) { Failed = true; RequestExit(); return; }
+        const auto fallback = renderer->RegisterMaterial({{*definition}, {}, {}, {}});
+        renderer->UnregisterTemplate(*definition);
+        if (!fallback) { Failed = true; RequestExit(); return; }
         _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});
     }
-    auto context = MakePipelineContext(*renderer, frame, GetSceneManager());
+    auto builder = renderer->BeginFrame(frame);
+    if (!builder) { Failed = true; RequestExit(); return; }
+    auto context = MakePipelineContext(*renderer, *builder, frame, GetSceneManager());
     RenderOutput output;
     output.Colors.push_back({target->BackBufferView, window->GetBackBufferState(target->BackBufferIndex), render::TextureState::Present});
-    auto result = RecordRenderPipeline(*_pipeline, context, {GetSceneManager()->GetFrameViewsRT(frame.FlightIndex()), std::move(output)});
+    const RenderPipelineRequest request{GetSceneManager()->GetFrameViewsRT(frame.FlightIndex()), std::move(output)};
+    auto plan = _pipeline->Collect(context, request);
+    if (!builder->Compile()) { Failed = true; RequestExit(); }
+    auto result = RecordRenderPipeline(plan.value_or(FramePreparationId{}), context, request);
     frame.RegisterClosedCommandBuffers({.CmdBuffers = result.Commands}, std::move(target));
     if (result.Status == PipelineRecordStatus::RecoverableFailure) {
         Failed = true;

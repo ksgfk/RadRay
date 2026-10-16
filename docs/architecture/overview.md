@@ -13,12 +13,12 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 |---|---|
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
 | `modules/runtime/{include/radray/runtime,src}/` | 底层 GPU/上传、shader/PSO 服务、通用资产及 Application 装配 |
-| `modules/runtime/{include/radray/runtime,src}/render_framework/` | 可选的场景管理与交付、材质、视图、pipeline 与绘制 |
+| `modules/runtime/{include/radray/runtime,src}/render_framework/` | Renderer 集中所有权与帧编译、场景交付、材质、绑定复用、视图与绘制 |
 | `modules/runtime/{include/radray/runtime,src}/game_framework/`、`components/` | World/Actor、紧凑变换存储与业务组件 |
 | `shaderlib/` | HLSL 数学、BSDF、光照、阴影共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复、文档检查、编译数据库脚本和 raw shader compile CLI |
 | `benchmarks/` | 性能测量程序 |
-| `examples/` | scene_sync 可视样例与 framework_stress 持续采样入口 |
+| `examples/` | scene_sync 可视样例、framework_stress 持续采样与 descriptor_reuse 离屏验收 |
 | `cmake/` | 构建辅助函数 |
 | `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |
 | `docs/guide/` | 使用、开发、验证和文档维护方法 |
@@ -93,6 +93,9 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 | [GPU 生命周期实施验收](../history/2026-10-13-gpu-lifecycle-implementation.md) | 2026-10-13–14 的实际覆盖、限制及性能证据；不替代当前 RHI |
 | [帧循环重构输入计划](../history/2026-10-16-frame-loop-refactor-plan.md) | 93a8117 基线的旧等待关系、职责与确认后的重构契约 |
 | [帧循环重构实施验收](../history/2026-10-16-frame-loop-refactor-validation.md) | 消息/进度状态机、延迟输入、GPU 排空的测试与性能证据及限制 |
+| [Render Framework 重构输入](../history/2026-10-16-render-framework-refactor-plan.md) | f20c56f 与 sampler 工作区补丁的所有权快照、完整组复用目标与前后验收口径 |
+| [Render Framework 重构验收](../history/2026-10-16-render-framework-refactor-validation.md) | 双后端 descriptor 前后 42 项、真实完成与退出确认、完整回归、Release 性能回退及环境限制 |
+| [Render Framework 回退定位](../history/2026-10-16-render-framework-regression-diagnosis.md) | 未改生产代码的分段计时、CPU 完成清理与固定绑定值规模实验；定位重复请求展开与临时对象周转 |
 
 ## 关键代码入口
 

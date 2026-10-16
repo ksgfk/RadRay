@@ -221,6 +221,7 @@ public:
 
     uint32_t FlightIndex() const noexcept { return _flightIndex; }
     uint64_t FrameSerial() const noexcept;
+    bool IsRecording() const noexcept;
     std::chrono::duration<float> DeltaTime() const noexcept { return _deltaTime; }
     std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
     bool IsInModalLoop() const noexcept { return _isInModalLoop; }
@@ -325,6 +326,8 @@ public:
     /// [GT/RT，retire 阶段] 读取须与 retire、槽位复用互斥；函数本身不加锁。
     /// 仅在该 flight 已计入 rendered 之后读，与 Submit 后发布的 release 成对。
     GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
+    /// Recording owner only, or after producers stop. Validates the admitted command epoch identity.
+    bool IsRecordingFrame(uint32_t flightIndex, uint64_t serial) const noexcept;
     /// [GT] 当前 flight 已可写且尚未交给 RT；上一帧须先调用 ReleaseFrameResourcesGT。
     /// 只重置 HostWrites。等待者由 FrameTimeline::PumpWaitFrame 恢复。
     void BeginUpdateForFlight(uint32_t flightIndex);

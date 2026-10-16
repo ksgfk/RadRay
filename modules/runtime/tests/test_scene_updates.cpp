@@ -30,7 +30,7 @@ private:
 };
 task<AssetLoadResult> LoadSceneMaterial(SceneMaterialReadyGate& gate) {
     co_await gate.Wait();
-    MaterialPass pass;
+    MaterialTemplateDescriptor pass;
     pass.Name = "Unlit";
     pass.Program.SourceName = "ready.hlsl";
     co_return AssetLoadResult::Success(make_unique<Material>(vector{pass}, vector<vector<byte>>{}));
@@ -49,13 +49,13 @@ TEST(SceneUpdates, MaterialReadyAfterEmptyCapturePublishesTheFinalBinding) {
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     ASSERT_EQ(batch.Materials.size(), 1u);
-    EXPECT_FALSE(batch.Materials[0].Materials[0].Data);
+    EXPECT_FALSE(batch.GetMaterials(batch.Materials[0].Materials)->front().Data);
     gate.Resume();
     assets.Pump();
     ASSERT_TRUE(material.IsReady());
     test::CollectScene(world, render, batch);
     ASSERT_EQ(batch.Materials.size(), 1u);
-    EXPECT_EQ(batch.Materials[0].Materials[0].Data.Get(), &material->GetRenderData());
+    EXPECT_EQ(batch.GetMaterials(batch.Materials[0].Materials)->front().Data.Get(), &material->GetRenderData());
 }
 TEST(SceneUpdates, ManualCollectionKeepsOneComponentAndStableHandlesAcrossCompactionAndReconnect) {
     Application app;
@@ -155,7 +155,7 @@ TEST(SceneUpdates, ManualCollectionCaptureCancellationAndLateMaterialUseTheFinal
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     ASSERT_EQ(batch.Materials.size(), 1u);
-    EXPECT_EQ(batch.Materials[0].Materials[0].Data.Get(), &material->GetRenderData());
+    EXPECT_EQ(batch.GetMaterials(batch.Materials[0].Materials)->front().Data.Get(), &material->GetRenderData());
     EXPECT_TRUE(batch.MeshStates.empty());
 }
 

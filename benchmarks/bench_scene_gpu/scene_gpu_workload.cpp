@@ -28,7 +28,11 @@ SceneGpuWorkload::SceneGpuWorkload(render::RenderBackend backend, uint32_t fligh
         _error = startup.Reason;
         return;
     }
+    _services = make_unique<RenderSystem>(_gpu->GetDevice());
+    if (!_services->OnInitialize()) { _error = "Render services failed"; return; }
+    _framework = make_unique<Renderer>(*_gpu, *_services);
     _renderer = make_unique<SceneManager>(flights);
+    _renderer->AttachRenderer(*_framework);
     if (load == SceneGpuLoad::Parent) {
         _world = make_unique<World>();
         _world->RequestRenderConnection(_renderer.get());
@@ -92,6 +96,7 @@ SceneGpuWorkload::~SceneGpuWorkload() {
     _renderer->AbandonUnpublishedFramesGT();
     _timeline.CleanupCompletedFlights();
     _gpu->AbandonUnpublishedResourcesTerminalGT();
+    if (_framework) _framework->Shutdown();
     _renderer.reset();
 }
 void SceneGpuWorkload::Complete(uint32_t flight) {
@@ -99,8 +104,9 @@ void SceneGpuWorkload::Complete(uint32_t flight) {
     _gpu->CompleteFlightIfReady(flight, true);
     FlightCompletion completion;
     while (_timeline.TryReadCompletion(completion)) {
-        _renderer->OnFlightCompletedGT(completion);
         _gpu->ReleaseFrameResourcesGT(completion);
+        _framework->ProcessCompletions();
+        _renderer->OnFlightCompletedGT(completion);
         _serials[completion.FlightIndex] = 0;
     }
     GpuMilliseconds += _gpu->GetLastGpuTimeMs();
@@ -154,9 +160,11 @@ void SceneGpuWorkload::Consume(const AppFrameContext& frame) {
     _renderer->ConsumeRenderUpdates(frame.FlightIndex(), frame.FrameSerial());
 }
 void SceneGpuWorkload::Prepare(AppFrameContext& frame) {
+    auto builder = _framework->BeginFrame(frame);
+    if (!builder) { _error = _framework->GetLastError(); return; }
     const auto before = frame.GetHostWrites().GetStats();
     for (uint32_t i = 0; i < _views; ++i) {
-        const auto objects = _renderer->PrepareSceneGpuRT(_scene, frame);
+        const auto objects = _framework->GetScenes().Prepare(_renderer->GetRendererSceneKey(_scene), *_renderer->GetSceneRT(_scene), frame, *builder);
         if (!objects) {
             _error = "Object buffer preparation failed";
             continue;

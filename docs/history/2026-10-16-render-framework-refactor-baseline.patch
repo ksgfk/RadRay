@@ -1,0 +1,427 @@
+diff --git a/docs/architecture/render-framework.md b/docs/architecture/render-framework.md
+index cb830992..bc4b90b5 100644
+--- a/docs/architecture/render-framework.md
++++ b/docs/architecture/render-framework.md
+@@ -359,7 +359,13 @@ arena 在 RT Allocate 边界释放没有 allocation owner 的页，保留至多
+ 同一次 SceneDraw Prepare 中，纯场景/视图/帧 buffer 组按共享 plan 与实际 buffer 切片复用；混合材质组不参与此复用。
+ 每个 view 的矩阵只复制一次。GPU state 按共享定义的 pass 身份直接查表区分 pass/layout，同一不可变 pass 的 program 变化要求新的材质版本。
+ RasterMaterialValues 可提供 ConstantBuffers/ViewBuffers/FrameBuffers 覆盖对应 CPU bytes；这些已提交切片须满足反射大小并存活至当前 flight 完成。调用方可复用相同 view/style 的 arena 切片，避免每 draw 重复常量 copy，不另建上传 cache。
+-RasterDraw 不再拥有 sampler 参数集长期缓存；Device 的 sampler 对象复用保留。
++纯 sampler 默认组按同一 pipeline layout/group 与完整 binding、array element、sampler 对象映射共享；
++冷路径按 declaration 名字规范化输入顺序，材质/pass 身份和 ValueIndex 不参与缓存身份。
++RenderSystem 为当前 service generation 保存弱索引，MaterialGpuState 共同持有只读参数集；
++只在首次创建时 Set/FlushWrites，最后一个 owner 沿原有真实 GPU 完成边界退出后立即释放 descriptor。
++弱索引在后续缓存 miss 时清理过期项，service shutdown 时清空，不延长 GPU 参数集寿命。
++不同 layout/group 或 service generation 分开；混合组与 sampler override 保持独立 flight 版本，不改共享默认组。
++Device 的 sampler 对象复用保留。
+ 帧参数池在安全 flight reset 时移除已失效 service generation，并在连续 60 次低使用量复用后裁剪闲置容量。
+ 同一 layout 在当前 flight 已借出临时集时，切换其他 service generation 返回失败，保留原结果；只在完成后的复用边界替换池。
+ MaterialGpuState 首版接受一个活跃 RenderSystem generation；同一 owner 在活跃服务间切换明确失败。
+diff --git a/modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h b/modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h
+index b61fc620..a5c8d18e 100644
+--- a/modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h
++++ b/modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h
+@@ -18,7 +18,7 @@ private:
+     friend class RasterDraw;
+     struct Group {
+         uint32_t Index;
+-        unique_ptr<render::ShaderParameterSet> Parameters;
++        shared_ptr<render::ShaderParameterSet> Parameters;
+         vector<render::ShaderParameterDynamicOffset> Offsets;
+     };
+     struct Pass {
+diff --git a/modules/runtime/include/radray/runtime/render_system.h b/modules/runtime/include/radray/runtime/render_system.h
+index 6830f25b..8b832502 100644
+--- a/modules/runtime/include/radray/runtime/render_system.h
++++ b/modules/runtime/include/radray/runtime/render_system.h
+@@ -11,6 +11,12 @@ class ShaderProgramCache;
+ struct RenderServiceGeneration {
+     bool Alive{true};
+ };
++struct ImmutableSamplerBinding {
++    render::BindingHandle Binding;
++    uint32_t ArrayElement;
++    render::Sampler* Value;
++    friend bool operator==(const ImmutableSamplerBinding&, const ImmutableSamplerBinding&) = default;
++};
+ 
+ /// Device-scoped shader and graphics pipeline services.
+ class RenderSystem {
+@@ -37,8 +43,21 @@ public:
+     bool InvalidateShaderSource(std::string_view sourceName);
+     const shared_ptr<RenderServiceGeneration>& GetGeneration() const noexcept { return _generation; }
+     PersistentCBufferArena& GetPersistentConstants() const noexcept { return *_persistentConstants; }
++    /// RT only. Supply a complete pure-sampler group in canonical binding/array order.
++    /// Returned sets are immutable; their layout/device must outlive every shared owner.
++    Nullable<shared_ptr<render::ShaderParameterSet>> GetOrCreateImmutableSamplerParameters(
++        render::PipelineLayout* layout, uint32_t group, std::span<const ImmutableSamplerBinding> bindings);
+ 
+ private:
++    struct SamplerParametersKey {
++        render::PipelineLayout* Layout;
++        uint32_t Group;
++        vector<ImmutableSamplerBinding> Bindings;
++        friend bool operator==(const SamplerParametersKey&, const SamplerParametersKey&) = default;
++    };
++    struct SamplerParametersKeyHash {
++        size_t operator()(const SamplerParametersKey& key) const noexcept;
++    };
+     render::Device* _device;
+     std::filesystem::path _shaderSourceRoot;
+     vector<std::filesystem::path> _shaderIncludePaths;
+@@ -46,6 +65,7 @@ private:
+     unique_ptr<GraphicsPipelineCache> _graphicsPipelines;
+     shared_ptr<RenderServiceGeneration> _generation;
+     unique_ptr<PersistentCBufferArena> _persistentConstants;
++    unordered_map<SamplerParametersKey, weak_ptr<render::ShaderParameterSet>, SamplerParametersKeyHash> _immutableSamplerParameters;
+ };
+ 
+ template <>
+diff --git a/modules/runtime/src/render_framework/raster_draw.cpp b/modules/runtime/src/render_framework/raster_draw.cpp
+index 9954de08..72e830e6 100644
+--- a/modules/runtime/src/render_framework/raster_draw.cpp
++++ b/modules/runtime/src/render_framework/raster_draw.cpp
+@@ -203,6 +203,10 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
+         if (!info || info->Immutable) continue;
+         if (std::none_of(pass.Inputs.begin(), pass.Inputs.end(), [&](const auto& input) { return input.Name == *name; })) return nullptr;
+     }
++    for (auto& group : plan->Groups) {
++        if (std::all_of(group.Inputs.begin(), group.Inputs.end(), [&](size_t i) { return plan->Inputs[i].Source == MaterialInputSource::Sampler; }))
++            std::sort(group.Inputs.begin(), group.Inputs.end(), [&](size_t a, size_t b) { return plan->Inputs[a].Name < plan->Inputs[b].Name; });
++    }
+     auto* result = plan.get();
+     pass._nativePlan = std::move(plan);
+     return result;
+@@ -267,6 +271,10 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
+         }
+         vector<render::ShaderParameterValue> writes;
+         vector<render::ShaderBufferBinding> buffers;
++        const bool sharedSamplers = persistent && std::all_of(groupPlan.Inputs.begin(), groupPlan.Inputs.end(), [&](size_t i) {
++                                        return plan.Inputs[i].Source == MaterialInputSource::Sampler;
++                                    });
++        vector<ImmutableSamplerBinding> samplerBindings;
+         const bool shared = values.SharedGroups && std::none_of(groupPlan.Inputs.begin(), groupPlan.Inputs.end(), [&](size_t i) {
+                                 const auto source = plan.Inputs[i].Source;
+                                 return source == MaterialInputSource::MaterialConstants || source == MaterialInputSource::Texture || source == MaterialInputSource::Sampler;
+@@ -342,6 +350,7 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
+                         auto sampler = context.Resources.GetDevice()->GetOrCreateSampler(source[index]);
+                         if (!sampler) return std::nullopt;
+                         value = sampler.Get();
++                        if (sharedSamplers) samplerBindings.push_back({plan.Handles[i], element, sampler.Get()});
+                         break;
+                     }
+                     default: return std::nullopt;
+@@ -358,8 +367,15 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
+                 continue;
+             }
+         }
+-        unique_ptr<render::ShaderParameterSet> owned;
+         RADRAY_PROFILE_SCOPE_DYN(persistent ? std::string_view{"RasterDraw::InitializeStaticGroup"} : std::string_view{"RasterDraw::WriteFrameGroup"});
++        if (sharedSamplers) {
++            auto parameters = context.Renderer.GetOrCreateImmutableSamplerParameters(plan.Program->GetPipelineLayout(), groupPlan.Index, samplerBindings);
++            if (!parameters) return std::nullopt;
++            result.Groups.push_back({groupPlan.Index, parameters.Get(), {}});
++            cachedPass->Groups.push_back({groupPlan.Index, parameters.Release(), {}});
++            continue;
++        }
++        shared_ptr<render::ShaderParameterSet> owned;
+         Nullable<render::ShaderParameterSet*> parameters;
+         if (persistent) {
+             auto created = context.Resources.GetDevice()->CreateShaderParameterSet({plan.Program->GetPipelineLayout(), groupPlan.Index});
+diff --git a/modules/runtime/src/render_system.cpp b/modules/runtime/src/render_system.cpp
+index 5f8d8b25..7d73d141 100644
+--- a/modules/runtime/src/render_system.cpp
++++ b/modules/runtime/src/render_system.cpp
+@@ -1,6 +1,8 @@
+ #include <radray/runtime/render_system.h>
+ 
+ #include "shader_program_cache.h"
++#include <algorithm>
++#include <radray/hash.h>
+ #include <radray/logger.h>
+ 
+ namespace radray {
+@@ -11,6 +13,7 @@ RenderSystem::RenderSystem(render::Device* device, std::filesystem::path shaderS
+ RenderSystem::~RenderSystem() noexcept { OnShutdown(); }
+ void RenderSystem::OnShutdown() noexcept {
+     if (_generation) _generation->Alive = false;
++    _immutableSamplerParameters.clear();
+     _persistentConstants.reset();
+     _graphicsPipelines.reset();
+     _shaderCache.reset();
+@@ -36,4 +39,32 @@ size_t RenderSystem::GetShaderProgramCacheSize() const noexcept { return _shader
+ size_t RenderSystem::GetShaderArtifactCacheSize() const noexcept { return _shaderCache ? _shaderCache->GetArtifactCount() : 0; }
+ bool RenderSystem::InvalidateShaderSource(std::string_view sourceName) { return _shaderCache && _shaderCache->InvalidateSource(sourceName); }
+ 
++size_t RenderSystem::SamplerParametersKeyHash::operator()(const SamplerParametersKey& key) const noexcept {
++    HashCode hash;
++    hash.Add(std::hash<render::PipelineLayout*>{}(key.Layout));
++    hash.Add(key.Group);
++    for (const auto& binding : key.Bindings) {
++        hash.Add(binding.ArrayElement);
++        hash.Add(std::hash<render::Sampler*>{}(binding.Value));
++    }
++    return hash.ToHashCode();
++}
++Nullable<shared_ptr<render::ShaderParameterSet>> RenderSystem::GetOrCreateImmutableSamplerParameters(
++    render::PipelineLayout* layout, uint32_t group, std::span<const ImmutableSamplerBinding> bindings) {
++    if (!_generation || !_generation->Alive || bindings.empty()) return nullptr;
++    SamplerParametersKey key{layout, group, {bindings.begin(), bindings.end()}};
++    if (const auto found = _immutableSamplerParameters.find(key); found != _immutableSamplerParameters.end()) {
++        if (auto parameters = found->second.lock()) return parameters;
++    }
++    std::erase_if(_immutableSamplerParameters, [](const auto& entry) { return entry.second.expired(); });
++    auto created = _device->CreateShaderParameterSet({layout, group});
++    if (!created) return nullptr;
++    for (const auto& binding : bindings)
++        if (!created->Set(binding.Binding, binding.ArrayElement, binding.Value)) return nullptr;
++    if (!created->FlushWrites()) return nullptr;
++    shared_ptr<render::ShaderParameterSet> parameters{created.Release()};
++    _immutableSamplerParameters.emplace(std::move(key), parameters);
++    return parameters;
++}
++
+ }  // namespace radray
+diff --git a/modules/runtime/tests/test_raster_draw.cpp b/modules/runtime/tests/test_raster_draw.cpp
+index 923c606d..f36215ae 100644
+--- a/modules/runtime/tests/test_raster_draw.cpp
++++ b/modules/runtime/tests/test_raster_draw.cpp
+@@ -50,6 +50,7 @@ public:
+     render::DeviceDetail GetDetail() const noexcept override { return _native->GetDetail(); }
+     const render::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _native->GetCapabilities(); }
+     Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override { return _native->CreateBuffer(desc); }
++    Nullable<render::Sampler*> GetOrCreateSampler(const render::SamplerDescriptor& desc) noexcept override { return _native->GetOrCreateSampler(desc); }
+     Nullable<unique_ptr<render::ShaderParameterSet>> CreateShaderParameterSet(const render::ShaderParameterSetDescriptor& desc) noexcept override {
+         auto native = _native->CreateShaderParameterSet(desc);
+         if (!native) return nullptr;
+@@ -118,7 +119,7 @@ protected:
+         if (Gpu) Gpu->AbandonUnpublishedResourcesTerminalGT();
+         if (Window) DestroyWindow(Window);
+     }
+-    Nullable<ShaderProgram*> Program(bool textures, bool arrays = false, bool instances = false, bool pure = false, bool visible = false, bool scene = false, bool objectPush = false) {
++    Nullable<ShaderProgram*> Program(bool textures, bool arrays = false, bool instances = false, bool pure = false, bool visible = false, bool scene = false, bool objectPush = false, bool samplerArrays = false) {
+         string source = R"(
+ #ifdef __spirv__
+ #define BINDING(b,s) [[vk::binding(b,s)]]
+@@ -163,6 +164,16 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
+             replace("ImageA.Sample", "Images[0].Sample");
+             replace("ImageB.Sample", "Images[1].Sample");
+         }
++        if (samplerArrays) {
++            const auto replace = [&](std::string_view from, std::string_view to) {
++                const auto at = source.find(from);
++                if (at != string::npos) source.replace(at, from.size(), to);
++            };
++            replace("SamplerState SampleA : register(s0, space1);", "SamplerState Samples[2] : register(s0, space1);");
++            replace("BINDING(1,1) SamplerState SampleB : register(s1, space1);", "");
++            replace(".Sample(SampleA,", ".Sample(Samples[0],");
++            replace(".Sample(SampleB,", ".Sample(Samples[1],");
++        }
+         if (pure) {
+             const auto at = source.find("BINDING(1,0) ConstantBuffer<MaterialValues> Tint : register(b1);");
+             source.replace(at, string{"BINDING(1,0) ConstantBuffer<MaterialValues> Tint : register(b1);"}.size(),
+@@ -236,7 +247,7 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
+         EXPECT_FALSE(Renderer->GetOrCreateShaderProgram(bytes, wrong));
+         return Renderer->GetOrCreateShaderProgram(bytes, envelope.GpuArtifact);
+     }
+-    MaterialRenderData Material(ShaderProgram* program, bool textures, bool arrays = false) {
++    MaterialRenderData Material(ShaderProgram* program, bool textures, bool arrays = false, bool samplerArrays = false) {
+         MaterialPass pass;
+         pass.Name = "Raster";
+         pass.RegisteredProgram = program;
+@@ -249,8 +260,12 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
+                 pass.Inputs.push_back({"ImageA", MaterialInputSource::Texture, 0});
+                 pass.Inputs.push_back({"ImageB", MaterialInputSource::Texture, 1});
+             }
+-            pass.Inputs.push_back({"SampleA", MaterialInputSource::Sampler, 0});
+-            pass.Inputs.push_back({"SampleB", MaterialInputSource::Sampler, 1});
++            if (samplerArrays)
++                pass.Inputs.push_back({"Samples", MaterialInputSource::Sampler, 0});
++            else {
++                pass.Inputs.push_back({"SampleA", MaterialInputSource::Sampler, 0});
++                pass.Inputs.push_back({"SampleB", MaterialInputSource::Sampler, 1});
++            }
+         }
+         return {{std::move(pass)}, {vector<byte>(16)}, {}, {}};
+     }
+@@ -323,6 +338,7 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
+     void VisibleInstances();
+     void Batching();
+     void ProbePersistentGroups();
++    void SharedSamplerDefaults(bool arrays);
+     void RetainedMaterial();
+     void PushModes();
+     void PresentExternal(bool hide) {
+@@ -470,6 +486,11 @@ void RasterDraw::Mixed(bool arrays) {
+     RasterMaterialValues defaultValues{.Views = views};
+     auto original = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{defaults, defaultGpu}, defaultValues);
+     ASSERT_TRUE(original);
++    auto sharedDefaults = defaults;
++    MaterialGpuState sharedGpu;
++    auto shared = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{sharedDefaults, sharedGpu}, defaultValues);
++    ASSERT_TRUE(shared);
++    EXPECT_EQ(original->Groups.back().Parameters, shared->Groups.back().Parameters);
+     render::TextureView* greenImages[]{imageViews[1].get(), imageViews[1].get()};
+     auto textureValues = defaultValues;
+     textureValues.Textures = greenImages;
+@@ -492,7 +513,7 @@ void RasterDraw::Mixed(bool arrays) {
+     draw.Scissor = {5, 0, 5, 16};
+     draw.Record(encoder, *samplerOverride);
+     draw.Scissor = {10, 0, 6, 16};
+-    draw.Record(encoder, *restored);
++    draw.Record(encoder, *shared);
+     const auto defaultsPixels = Read(commands, encoder);
+     EXPECT_EQ(defaultsPixels[Pitch(16) * 8 + 2 * 4], 0);
+     EXPECT_EQ(defaultsPixels[Pitch(16) * 8 + 2 * 4 + 1], 255);
+@@ -806,6 +827,151 @@ void RasterDraw::ProbePersistentGroups() {
+ }
+ TEST_F(RasterDraw, ProbeShowsNoStaticGroupWritesAfterWarmupAndSafeServiceReplacement) { ProbePersistentGroups(); }
+ TEST_F(VulkanRasterDraw, ProbeShowsNoStaticGroupWritesAfterWarmupAndSafeServiceReplacement) { ProbePersistentGroups(); }
++void RasterDraw::SharedSamplerDefaults(bool arrays) {
++    ASSERT_TRUE(Program(true, false, false, false, false, false, false, arrays));
++    shader::WireMetadataEnvelope envelope{};
++    std::memcpy(&envelope, Metadata.data(), sizeof(envelope));
++    auto artifact = render::CreateBackendShaderArtifact(*Gpu->GetDevice(), Metadata, {Backend() == render::RenderBackend::Vulkan ? shader::ShaderTarget::SPIRV : shader::ShaderTarget::DXIL, envelope.GpuArtifact});
++    ASSERT_TRUE(artifact);
++    MaterialBindingProbe counts;
++    MaterialProbeDevice device{Gpu->GetDevice(), counts};
++    RenderSystem renderer{&device};
++    ASSERT_TRUE(renderer.OnInitialize());
++    ShaderProgram program{&device, std::move(*artifact), nullptr, {}, nullptr, {}, nullptr, {}};
++    auto view = Gpu->GetDevice()->CreateTextureView({Color.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::Resource});
++    ASSERT_TRUE(view);
++    auto defaults = Material(&program, true, false, arrays);
++    defaults.Textures = {view.Get(), view.Get()};
++    const render::SamplerDescriptor nearest{render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge, render::AddressMode::ClampToEdge,
++                                            render::FilterMode::Nearest, render::FilterMode::Nearest, render::FilterMode::Nearest, 0, 1};
++    auto linear = nearest;
++    linear.MinFilter = linear.MagFilter = render::FilterMode::Linear;
++    defaults.Samplers = {nearest, nearest};
++    vector<MaterialRenderData> versions(4096, defaults);
++    vector<unique_ptr<MaterialGpuState>> owners;
++    owners.reserve(versions.size());
++    radray::RasterDraw otherCore;
++    GpuFrameResources resources{&device};
++    Nullable<render::ShaderParameterSet*> shared{nullptr};
++    const array<float, 4> camera{.5f, 0, 0, 0};
++    const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
++    const auto samplerGroup = [](const PreparedRasterMaterial& material) -> Nullable<render::ShaderParameterSet*> {
++        const auto group = std::find_if(material.Groups.begin(), material.Groups.end(), [](const auto& entry) { return entry.Index == 1; });
++        EXPECT_NE(group, material.Groups.end());
++        if (group == material.Groups.end()) return nullptr;
++        return group->Parameters;
++    };
++    for (uint32_t frame = 0; frame < 3; ++frame) {
++        Begin(frame);
++        resources.BeginEpoch();
++        auto native = MakePipelineContext(renderer, *Frame);
++        PipelineContext context{renderer, native.Frame, native.Commands, resources};
++        if (frame == 0) {
++            for (size_t index = 0; index < versions.size(); ++index) {
++                auto& data = versions[index];
++                if (index % 2) std::reverse(data.Passes[0].Inputs.begin(), data.Passes[0].Inputs.end());
++                auto& core = index % 2 ? otherCore : Core;
++                auto plan = core.ResolveMaterial(renderer, data.Passes[0]);
++                ASSERT_TRUE(plan);
++                owners.push_back(make_unique<MaterialGpuState>());
++                auto prepared = core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{data, *owners.back()}, {.Views = views});
++                ASSERT_TRUE(prepared) << "material " << index;
++                const auto parameters = samplerGroup(*prepared);
++                ASSERT_TRUE(parameters);
++                if (!shared) shared = parameters;
++                EXPECT_EQ(parameters.Get(), shared.Get());
++            }
++        } else {
++            auto plan = Core.ResolveMaterial(renderer, versions[0].Passes[0]);
++            ASSERT_TRUE(plan);
++            for (uint32_t viewIndex = 0; viewIndex < 3; ++viewIndex) {
++                auto prepared = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{versions[0], *owners[0]}, {.Views = views});
++                ASSERT_TRUE(prepared);
++                EXPECT_EQ(samplerGroup(*prepared).Get(), shared.Get());
++            }
++        }
++        EXPECT_EQ(counts.Groups[1].Created, 1u);
++        EXPECT_EQ(counts.Groups[1].Set, 2u);
++        EXPECT_EQ(counts.Groups[1].Flush, 1u);
++        EXPECT_EQ(counts.Groups[1].Live, 1u);
++        if (frame == 2) {
++            auto variant = defaults;
++            variant.Samplers[1] = linear;
++            MaterialGpuState variantOwner;
++            auto plan = Core.ResolveMaterial(renderer, variant.Passes[0]);
++            ASSERT_TRUE(plan);
++            auto changed = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{variant, variantOwner}, {.Views = views});
++            ASSERT_TRUE(changed);
++            EXPECT_NE(samplerGroup(*changed).Get(), shared.Get());
++            auto remapped = variant;
++            remapped.Samplers = {linear, nearest};
++            MaterialGpuState remappedOwner;
++            auto different = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{remapped, remappedOwner}, {.Views = views});
++            ASSERT_TRUE(different);
++            EXPECT_NE(samplerGroup(*different).Get(), samplerGroup(*changed).Get());
++            EXPECT_NE(samplerGroup(*different).Get(), shared.Get());
++            auto invalid = defaults;
++            invalid.Samplers.pop_back();
++            MaterialGpuState invalidOwner;
++            EXPECT_FALSE(Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{invalid, invalidOwner}, {.Views = views}));
++            auto offset = defaults;
++            offset.Samplers.insert(offset.Samplers.begin(), linear);
++            for (auto& input : offset.Passes[0].Inputs)
++                if (input.Source == MaterialInputSource::Sampler) ++input.ValueIndex;
++            MaterialGpuState offsetOwner;
++            auto offsetPlan = Core.ResolveMaterial(renderer, offset.Passes[0]);
++            ASSERT_TRUE(offsetPlan);
++            auto sameValues = Core.PrepareMaterial(context, *offsetPlan.Get(), MaterialBindingView{offset, offsetOwner}, {.Views = views});
++            ASSERT_TRUE(sameValues);
++            EXPECT_EQ(samplerGroup(*sameValues).Get(), shared.Get());
++            EXPECT_EQ(counts.Groups[1].Created, 3u);
++            RenderSystem other{&device};
++            ASSERT_TRUE(other.OnInitialize());
++            auto foreign = defaults;
++            MaterialGpuState foreignOwner;
++            auto foreignPlan = otherCore.ResolveMaterial(other, foreign.Passes[0]);
++            ASSERT_TRUE(foreignPlan);
++            GpuFrameResources foreignResources{&device};
++            foreignResources.BeginEpoch();
++            PipelineContext foreignContext{other, native.Frame, native.Commands, foreignResources};
++            auto separated = otherCore.PrepareMaterial(foreignContext, *foreignPlan.Get(), MaterialBindingView{foreign, foreignOwner}, {.Views = views});
++            ASSERT_TRUE(separated);
++            EXPECT_NE(samplerGroup(*separated).Get(), shared.Get());
++            EXPECT_EQ(counts.Groups[1].Created, 4u);
++            foreignResources.SealEpoch();
++        }
++        resources.SealEpoch();
++        Complete();
++        resources.CompleteEpoch();
++    }
++    EXPECT_EQ(counts.Groups[1].Live, 1u);
++    Begin();
++    Frame->RetainGpuForFrameRT(std::move(owners.back()));
++    owners.clear();
++    EXPECT_EQ(counts.Groups[1].Live, 1u);
++    Complete();
++    EXPECT_EQ(counts.Groups[1].Live, 0u);
++    Begin();
++    resources.BeginEpoch();
++    auto native = MakePipelineContext(renderer, *Frame);
++    PipelineContext context{renderer, native.Frame, native.Commands, resources};
++    auto plan = Core.ResolveMaterial(renderer, versions[0].Passes[0]);
++    ASSERT_TRUE(plan);
++    auto owner = make_unique<MaterialGpuState>();
++    auto rebuilt = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{versions[0], *owner}, {.Views = views});
++    ASSERT_TRUE(rebuilt);
++    EXPECT_EQ(counts.Groups[1].Created, 5u);
++    EXPECT_EQ(counts.Groups[1].Live, 1u);
++    resources.SealEpoch();
++    Complete();
++    resources.CompleteEpoch();
++    owner.reset();
++    EXPECT_EQ(counts.Groups[1].Live, 0u);
++}
++TEST_F(RasterDraw, ImmutableSamplerDefaultsShareAcross4096VersionsAndFlights) { SharedSamplerDefaults(false); }
++TEST_F(VulkanRasterDraw, ImmutableSamplerDefaultsShareAcross4096VersionsAndFlights) { SharedSamplerDefaults(false); }
++TEST_F(RasterDraw, ImmutableSamplerArraysShareAcross4096VersionsAndFlights) { SharedSamplerDefaults(true); }
++TEST_F(VulkanRasterDraw, ImmutableSamplerArraysShareAcross4096VersionsAndFlights) { SharedSamplerDefaults(true); }
+ void RasterDraw::RetainedMaterial() {
+     auto program = Program(false, false, false, true);
+     ASSERT_TRUE(program);

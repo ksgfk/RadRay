@@ -27,6 +27,7 @@ class AppFrameContext;
 class AssetDatabase;
 class AssetManager;
 class RenderSystem;
+class Renderer;
 class SceneManager;
 class SceneViewCollector;
 class WorldManager;
@@ -176,6 +177,8 @@ public:
     Nullable<const AssetManager*> GetAssetManager() const noexcept { return _assetManager.get(); }
     Nullable<RenderSystem*> GetRenderSystem() noexcept { return _renderSystem.get(); }
     Nullable<const RenderSystem*> GetRenderSystem() const noexcept { return _renderSystem.get(); }
+    Nullable<Renderer*> GetRenderer() noexcept { return _renderer.get(); }
+    Nullable<const Renderer*> GetRenderer() const noexcept { return _renderer.get(); }
     Nullable<SceneManager*> GetSceneManager() noexcept { return _sceneManager.get(); }
     Nullable<const SceneManager*> GetSceneManager() const noexcept { return _sceneManager.get(); }
     ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
@@ -243,6 +246,7 @@ private:
     unique_ptr<AssetDatabase> _assetDatabase;
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<RenderSystem> _renderSystem;
+    unique_ptr<Renderer> _renderer;
     unique_ptr<SceneManager> _sceneManager;
     unique_ptr<WorldManager> _worldManager;
     unique_ptr<ApplicationLoop> _loop;

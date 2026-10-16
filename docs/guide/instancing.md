@@ -1,6 +1,6 @@
 > - 适用: SceneDraw 自动实例化、业务集合与 native 帧内绘制
 > - 权威: 当前公共接口用法；生命周期与兼容规则见 render-framework
-> - 锚点: `modules/runtime/include/radray/runtime/components/instanced_static_mesh_component.h`, `modules/runtime/include/radray/runtime/render_framework/raster_draw.h`, `benchmarks/bench_material_scene/`, `examples/scene_sync/scene_sync_instanced.hlsl`
+> - 锚点: `modules/runtime/include/radray/runtime/components/instanced_static_mesh_component.h`, `modules/runtime/include/radray/runtime/render_framework/renderer.h`, `benchmarks/bench_material_scene/`, `examples/scene_sync/scene_sync_instanced.hlsl`
 
 # 实例绘制
 
@@ -10,7 +10,7 @@
 ## Pass 与 shader
 
 ```cpp
-MaterialPass pass;
+MaterialTemplateDescriptor pass;
 pass.Name = "Unlit";
 pass.Program.SourceName = "scene_sync_instanced.hlsl";
 pass.Inputs = {{"Objects", MaterialInputSource::SceneObjects},
@@ -56,14 +56,14 @@ GetShapeId 只查询当前渲染连接，首次 capture 前或断连时为空，
 ## Native producer
 
 持久实例通过 SceneWriter 的 CreateShapes/SetStaticMeshes/SetTransforms/SetMaterials/SetInstanceParameters span 接口交付。
-只活一帧的数据用 PrepareRasterInstances，输入 CPU 矩阵、可见 slot 与可选 RasterFrameParameters；
-Prepared 状态的 RasterInstanceData 提供 Objects、VisibleSlots、Parameters 与 Visible 范围。
-将这些绑定填入 RasterMaterialValues，借用不可变 CPU 材质和其 MaterialGpuState，再调用 RasterDraw 的准备/录制入口。
+帧内数据通过 FrameBuilder::StoreData 复制矩阵和参数 bytes，返回 ResourceId；AddView 拥有可见 slot 数组。
+RendererDrawValues 指定 Objects、带完整 InstanceParameterLayout 的 Parameters；AddDraw 保存几何、push、实例数量与输入快照。
+所有请求收集后 Compile，再以 FrameDrawId 录制。输入 CPU 数组可在复制后释放。
 
-CPU 字节及 schema 在 Prepare 内复制，返回后可释放输入数组。外部 GPU buffer 重载验证 device/use/range/stride/alignment，
-调用方通过既有 frame owner 或资产退休机制保活到实际完成。两种入口都不接管 mesh、material 或外部 buffer 的所有权。
-多个 subrange 用各自 VisibleBase、Instances 和 FirstInstance=0；不能把业务序号直接当 sparse GPU slot。
-检查 NoWork/Unsupported/InvalidData/AllocationFailure，不把不支持显式实例化的 shader 静默重复绘制 N 次。
+外部 buffer 使用 Renderer::ImportBuffer/CreateBufferRange，owner 保留到 RequestResourceExit 确认。
+框架常量/storage 使用 Renderer 自身 arena，不能把会被 flight reset 重写的 buffer 切片挂进持久缓存。
+多个 subrange 由 draw 的 VisibleBase、Instances 和 FirstInstance=0 表达；业务 handle 不等于 sparse GPU slot。
+检查注册、AddDraw、Compile 和 Record 的结果，失败仍须完成已接纳工作及输出收尾。
 
 ## 压测与验收
 

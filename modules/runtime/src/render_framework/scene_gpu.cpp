@@ -6,11 +6,18 @@
 #include <radray/profiler.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/renderer.h>
 
 namespace radray {
 
-SceneGpuData::SceneGpuData(render::Device* device, uint32_t flightCount) : _device(device), _flights(flightCount) {}
+SceneGpuData::SceneGpuData(Renderer& renderer, uint32_t flightCount) : _renderer(renderer), _flights(flightCount) {}
+SceneGpuData::~SceneGpuData() noexcept {
+    for (const auto& flight : _flights) {
+        if (flight.Buffer.IsValid()) _renderer.RetireResource(flight.Buffer);
+        for (const auto& [name, parameters] : flight.Parameters)
+            if (parameters.Buffer.IsValid()) _renderer.RetireResource(parameters.Buffer);
+    }
+}
 
 void SceneGpuData::ObjectSet::Add(ShapeId id) {
     if (id.Index >= Positions.size()) Positions.resize(size_t{id.Index} + 1, UINT32_MAX);
@@ -45,8 +52,9 @@ void SceneGpuData::ApplyChanges(const SceneApplyChanges& changes) {
         for (const auto& change : changes.Parameters) flight.Parameters[change.Stream].Pending.Add(change.Id);
     }
 }
-std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, AppFrameContext& frame) {
-    return Prepare(scene, frame.FlightIndex(), frame.FrameSerial(), frame.GetCmdAllocator(), frame.GetUploader(), frame);
+std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, AppFrameContext& frame, FrameBuilder& builder) {
+    if (!builder.IsFor(frame)) return std::nullopt;
+    return Prepare(scene, frame.FlightIndex(), frame.FrameSerial(), frame.GetCmdAllocator(), frame.GetUploader(), frame, builder);
 }
 
 std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, PipelineContext& context) {
@@ -54,20 +62,22 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, Pipe
         RADRAY_ERR_LOG("Scene preparation requires a required-work registrar");
         return std::nullopt;
     }
-    return Prepare(scene, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Commands, context.Resources.GetUploader(), *context.RequiredWork);
+    return Prepare(scene, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Commands, context.Resources.GetUploader(), *context.RequiredWork, context.Builder);
 }
 
-std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, IRequiredGpuWork& requiredWork) {
+std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, IRequiredGpuWork& requiredWork, FrameBuilder& builder) {
     RADRAY_PROFILE_SCOPE_N("SceneGpuData::Prepare");
+    if (!builder.IsFor(_renderer, flightIndex, frameSerial)) return std::nullopt;
     auto& flight = _flights.at(flightIndex);
     const auto view = [&]() -> std::optional<SceneGpuView> {
         if (!flight.PreparedValid) return std::nullopt;
-        return SceneGpuView{{flight.Buffer.get(), {0, flight.Buffer->GetDesc().Size}, sizeof(SceneObjectGpuData)}, flight.Generation, flight.ParameterViews};
+        return SceneGpuView{{_renderer.GetBuffer(flight.Buffer).Get(), {0, _renderer.GetBuffer(flight.Buffer)->GetDesc().Size}, sizeof(SceneObjectGpuData)}, flight.Generation, flight.ParameterViews, flight.ObjectsResource, flight.ParameterResources};
     };
     if (flight.PreparedSerial == frameSerial) return view();
     flight.PreparedSerial = frameSerial;
     flight.PreparedValid = false;
     flight.ParameterViews.clear();
+    flight.ParameterResources.clear();
     _sorted.clear();
     if (!flight.Initialized) {
         const auto ids = scene.GetStaticMeshes();
@@ -77,19 +87,24 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
     }
     std::sort(_sorted.begin(), _sorted.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
     const uint64_t required = _sorted.empty() ? 0 : (uint64_t{_sorted.back().Index} + 1) * sizeof(SceneObjectGpuData);
-    if (!flight.Buffer || flight.Buffer->GetDesc().Size < required) {
+    if (!flight.Buffer.IsValid() || _renderer.GetBuffer(flight.Buffer)->GetDesc().Size < required) {
         if (scene.GetStaticMeshes().empty()) return std::nullopt;
-        uint64_t capacity = flight.Buffer ? flight.Buffer->GetDesc().Size : sizeof(SceneObjectGpuData);
+        uint64_t capacity = flight.Buffer.IsValid() ? _renderer.GetBuffer(flight.Buffer)->GetDesc().Size : sizeof(SceneObjectGpuData);
         while (capacity < required) capacity *= 2;
-        auto buffer = _device->CreateBuffer({.Size = capacity, .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Resource | render::BufferUse::CopyDestination | render::BufferUse::CopySource});
+        auto buffer = _renderer.CreateBuffer({.Size = capacity, .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Resource | render::BufferUse::CopyDestination | render::BufferUse::CopySource});
         if (!buffer) return std::nullopt;
-        flight.Buffer = buffer.Release();
+        if (flight.Buffer.IsValid()) _renderer.RetireResource(flight.Buffer);
+        flight.Buffer = *buffer;
         ++flight.Generation;
         flight.Initialized = false;
         const auto ids = scene.GetStaticMeshes();
         _sorted.assign(ids.begin(), ids.end());
         std::sort(_sorted.begin(), _sorted.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
     }
+    if (!builder.UseResource(flight.Buffer)) return std::nullopt;
+    const auto objectsResource = _renderer.CreateBufferRange(flight.Buffer, {0, render::BufferRange::All()}, sizeof(SceneObjectGpuData));
+    if (!objectsResource || !builder.UseResource(*objectsResource)) return std::nullopt;
+    flight.ObjectsResource = *objectsResource;
     RADRAY_PROFILE_PLOT("SceneGpu/UploadObjects", static_cast<int64_t>(_sorted.size()));
     if (_sorted.empty()) RADRAY_PROFILE_PLOT("SceneGpu/UploadRanges", int64_t{0});
     if (!_sorted.empty()) {
@@ -104,7 +119,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
                 if (!transform) RADRAY_ABORT("Stale object in upload set");
                 std::memcpy(_packed[i].LocalToWorld.data(), transform->data(), sizeof(SceneObjectGpuData));
             }
-            _uploads.push_back({.SrcData = std::as_bytes(std::span{_packed}.subspan(begin, end - begin)), .DstBuffer = flight.Buffer.get(), .DstOffset = uint64_t{_sorted[begin].Index} * sizeof(SceneObjectGpuData), .Before = state, .After = render::BufferState::ShaderRead});
+            _uploads.push_back({.SrcData = std::as_bytes(std::span{_packed}.subspan(begin, end - begin)), .DstBuffer = _renderer.GetBuffer(flight.Buffer).Get(), .DstOffset = uint64_t{_sorted[begin].Index} * sizeof(SceneObjectGpuData), .Before = state, .After = render::BufferState::ShaderRead});
             begin = end;
         }
         auto* commands = allocator.Allocate();
@@ -123,15 +138,20 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
             RADRAY_ERR_LOG("Scene parameter stream {} exceeds the 64 MiB global-slot buffer limit", name);
             return std::nullopt;
         }
-        if (!parameters.Buffer || parameters.Buffer->GetDesc().Size < bytes) {
-            uint64_t capacity = parameters.Buffer ? parameters.Buffer->GetDesc().Size : stream.Layout.Stride;
+        if (!parameters.Buffer.IsValid() || _renderer.GetBuffer(parameters.Buffer)->GetDesc().Size < bytes) {
+            uint64_t capacity = parameters.Buffer.IsValid() ? _renderer.GetBuffer(parameters.Buffer)->GetDesc().Size : stream.Layout.Stride;
             while (capacity < bytes) capacity *= 2;
-            auto buffer = _device->CreateBuffer({capacity, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::CopySource | render::BufferUse::CopyDestination});
+            auto buffer = _renderer.CreateBuffer({capacity, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::CopySource | render::BufferUse::CopyDestination});
             if (!buffer) return std::nullopt;
-            parameters.Buffer = buffer.Release();
+            if (parameters.Buffer.IsValid()) _renderer.RetireResource(parameters.Buffer);
+            parameters.Buffer = *buffer;
             ++parameters.Generation;
             parameters.Initialized = false;
         }
+        if (!builder.UseResource(parameters.Buffer)) return std::nullopt;
+        const auto parameterResource = _renderer.CreateBufferRange(parameters.Buffer, {0, render::BufferRange::All()}, stream.Layout.Stride);
+        if (!parameterResource || !builder.UseResource(*parameterResource)) return std::nullopt;
+        flight.ParameterResources.push_back({stream.Layout, *parameterResource});
         auto& dirty = parameters.Sorted;
         dirty.clear();
         if (!parameters.Initialized) {
@@ -152,7 +172,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
             if (!uploads.empty() && previous != UINT32_MAX && previous + 1 == id.Index)
                 uploads.back().SrcData = {uploads.back().SrcData.data(), uploads.back().SrcData.size() + values.size()};
             else
-                uploads.push_back({std::span<const byte>{parameters.Packed.data() + packed, values.size()}, parameters.Buffer.get(), uint64_t{id.Index} * stream.Layout.Stride,
+                uploads.push_back({std::span<const byte>{parameters.Packed.data() + packed, values.size()}, _renderer.GetBuffer(parameters.Buffer).Get(), uint64_t{id.Index} * stream.Layout.Stride,
                                    parameters.Initialized ? render::BufferState::ShaderRead : render::BufferState::Common, render::BufferState::ShaderRead});
             previous = id.Index;
             packed += values.size();
@@ -166,7 +186,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
             parameters.Initialized = true;
             parameters.Pending.Clear();
         }
-        flight.ParameterViews.push_back({&stream.Layout, {parameters.Buffer.get(), {0, parameters.Buffer->GetDesc().Size}, stream.Layout.Stride}});
+        flight.ParameterViews.push_back({&stream.Layout, {_renderer.GetBuffer(parameters.Buffer).Get(), {0, _renderer.GetBuffer(parameters.Buffer)->GetDesc().Size}, stream.Layout.Stride}});
     }
     flight.PreparedValid = flight.Initialized;
     return view();

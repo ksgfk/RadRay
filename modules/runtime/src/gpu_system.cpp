@@ -607,6 +607,10 @@ AppFrameContext::AppFrameContext(
       _isInModalLoop(isInModalLoop) {}
 
 uint64_t AppFrameContext::FrameSerial() const noexcept { return _frameSerial; }
+bool AppFrameContext::IsRecording() const noexcept { return _gpuSystem->IsRecordingFrame(_flightIndex, _frameSerial); }
+bool GpuSystem::IsRecordingFrame(uint32_t flightIndex, uint64_t serial) const noexcept {
+    return serial && flightIndex < _flights.size() && _flights[flightIndex]->Recording && _flights[flightIndex]->FrameSerial == serial;
+}
 
 GpuFlightSlot& AppFrameContext::GetRecordingFlight() const noexcept {
     auto& flight = *_gpuSystem->_flights[_flightIndex];

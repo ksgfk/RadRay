@@ -53,6 +53,7 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
         ReleaseDrawTemplate(id.Index);
+        ReleaseMaterialList(id.Index);
         for (auto& [name, stream] : _parameters) stream.Remove(id.Index);
         if (changes) changes->Removed.push_back(id);
         UnbindShape(id.Index);
@@ -120,24 +121,27 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     }
     for (const auto& update : batch.Materials) {
         if (!ContainsShape(update.Id) || _shapes[update.Id.Index].MeshIndex == kNoMesh) RADRAY_ABORT("Invalid shape material update");
-        _staticMeshes.SetMaterials(_shapes[update.Id.Index].MeshIndex, update.Materials);
+        const auto values = batch.GetMaterials(update.Materials);
+        if (!values) RADRAY_ABORT("Invalid material list packet id");
+        SetMaterials(update.Id, *values);
         ++_shapes[update.Id.Index].Revision.Materials;
     }
     for (const auto& update : batch.Parameters) {
-        const auto values = update.GetValues();
-        if (!ContainsShape(update.Id) || !update.Layout || !update.Layout->IsValid() || values.size() != update.Layout->Stride) RADRAY_ABORT("Invalid instance parameter update");
-        auto [it, inserted] = _parameters.try_emplace(update.Layout->Name);
+        const auto values = batch.GetParameterValues(update);
+        const auto layout = batch.GetSchema(update.Schema);
+        if (!ContainsShape(update.Id) || !layout || !layout->IsValid() || values.size() != layout->Stride) RADRAY_ABORT("Invalid instance parameter update");
+        auto [it, inserted] = _parameters.try_emplace(layout->Name);
         auto& stream = it->second;
         if (inserted)
-            stream.Layout = *update.Layout;
-        else if (stream.Layout != *update.Layout)
+            stream.Layout = *layout.Get();
+        else if (stream.Layout != *layout.Get())
             RADRAY_ABORT("Instance schema changed within a scene generation");
         if (update.Id.Index >= stream.Rows.size()) stream.Rows.resize(size_t{update.Id.Index} + 1);
         auto& row = stream.Rows[update.Id.Index];
         if (!row || row->Id != update.Id || !std::equal(values.begin(), values.end(), stream.GetValues(update.Id.Index).begin())) {
             stream.Set(update.Id, values);
             ++_shapes[update.Id.Index].Revision.Parameters;
-            if (changes) changes->Parameters.push_back({update.Id, update.Layout->Name});
+            if (changes) changes->Parameters.push_back({update.Id, layout->Name});
         }
     }
     for (const auto& update : batch.DrawStates) {
@@ -151,6 +155,11 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     // Repeated edits use the final table value; unchanged keys do not rebuild templates.
     for (const auto& update : batch.MeshStates) UpdateDrawTemplate(update.Id);
     for (const auto& update : batch.Materials) UpdateDrawTemplate(update.Id);
+    for (auto it = _materialLists.begin(); it != _materialLists.end();) {
+        std::erase_if(it->second, [](const auto& list) { return list->Uses == 0; });
+        if (it->second.empty()) it = _materialLists.erase(it);
+        else ++it;
+    }
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {
         for (auto shape = _transforms.GetFirstShape(row); shape != kNoMesh; shape = _shapes[shape].NextShape) {
@@ -175,6 +184,34 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     if (batch.LightsChanged || !changed.empty()) UpdateLights(batch);
 }
 
+void RenderScene::ReleaseMaterialList(uint32_t shape) {
+    if (shape < _shapeMaterials.size() && _shapeMaterials[shape]) {
+        --_shapeMaterials[shape]->Uses;
+        _shapeMaterials[shape] = nullptr;
+    }
+}
+void RenderScene::SetMaterials(ShapeId id, std::span<const MaterialBinding> values) {
+    HashCode hash;
+    for (const auto& value : values) {
+        hash.Add(value.Id);
+        hash.Add(value.Data.Get());
+    }
+    auto& bucket = _materialLists[hash.ToHashCode()];
+    Nullable<MaterialList*> entry{nullptr};
+    for (const auto& list : bucket)
+        if (std::ranges::equal(list->Values, values)) { entry = list.get(); break; }
+    if (!entry) {
+        auto list = make_unique<MaterialList>();
+        list->Values.assign(values.begin(), values.end());
+        entry = list.get();
+        bucket.push_back(std::move(list));
+    }
+    if (id.Index >= _shapeMaterials.size()) _shapeMaterials.resize(_shapes.size());
+    ReleaseMaterialList(id.Index);
+    ++entry->Uses;
+    _shapeMaterials[id.Index] = entry;
+    _staticMeshes.SetMaterials(_shapes[id.Index].MeshIndex, entry->Values);
+}
 size_t RenderScene::TemplateHash::operator()(const TemplateKey& key) const noexcept {
     HashCode h;
     h.Add(key.Mesh);

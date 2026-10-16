@@ -38,35 +38,63 @@ void RenderAssetLifetime::RemoveUse(AssetId id) {
     }
 }
 
-vector<StreamingAssetRefAny>& RenderAssetLifetime::GetRetiredAssets(uint32_t flightIndex) {
+vector<RenderAssetLifetime::Retirement>& RenderAssetLifetime::GetRetiredAssets(uint32_t flightIndex) {
     if (flightIndex >= _retiredAssets.size()) RADRAY_ABORT("Invalid asset retirement flight index");
     return _retiredAssets[flightIndex];
 }
 
-void RenderAssetLifetime::SealRetirements(uint32_t flightIndex) {
+vector<AssetExitRequest> RenderAssetLifetime::SealRetirements(uint32_t flightIndex, bool requireConfirmation, bool retireAll) {
     auto& retired = GetRetiredAssets(flightIndex);
     if (!retired.empty()) RADRAY_ABORT("Asset retirement flight is still occupied");
+    if (retireAll) {
+        _retirementCandidates.clear();
+        for (auto& [id, use] : _uses) {
+            use.Count = 0;
+            _retirementCandidates.push_back(id);
+        }
+    }
+    vector<AssetExitRequest> requests;
     for (const auto id : _retirementCandidates) {
         const auto it = _uses.find(id);
         auto& use = it->second;
         if (use.Count == 0) {
-            retired.push_back(std::move(use.Owner));
+            if (_nextToken == UINT64_MAX) RADRAY_ABORT("Asset exit token exhausted");
+            const auto token = _nextToken++;
+            retired.push_back({std::move(use.Owner), token, !requireConfirmation});
+            if (requireConfirmation) requests.push_back({id, token});
             _uses.erase(it);
         } else {
             use.RetirementQueued = false;
         }
     }
     _retirementCandidates.clear();
+    return requests;
 }
 
 void RenderAssetLifetime::ReleaseFlight(uint32_t flightIndex) {
-    GetRetiredAssets(flightIndex).clear();
+    auto& retired = GetRetiredAssets(flightIndex);
+    for (auto& entry : retired)
+        if (!entry.Confirmed) _awaitingConfirmation.push_back(std::move(entry));
+    retired.clear();
+}
+
+void RenderAssetLifetime::ConfirmExit(uint64_t token) {
+    for (auto& flight : _retiredAssets)
+        for (auto& entry : flight)
+            if (entry.Token == token) { entry.Confirmed = true; return; }
+    std::erase_if(_awaitingConfirmation, [&](const auto& entry) { return entry.Token == token; });
+}
+bool RenderAssetLifetime::HasPendingExits() const noexcept {
+    if (!_awaitingConfirmation.empty()) return true;
+    for (const auto& flight : _retiredAssets) if (!flight.empty()) return true;
+    return false;
 }
 
 void RenderAssetLifetime::Clear() noexcept {
     _uses.clear();
     _retirementCandidates.clear();
     for (auto& retired : _retiredAssets) retired.clear();
+    _awaitingConfirmation.clear();
 }
 
 }  // namespace radray

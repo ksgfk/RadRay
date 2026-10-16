@@ -496,6 +496,58 @@ TEST_F(SceneAssets, LifetimeAcceptsDifferentAssetTypesAndRetiresOnlyTheLastUse) 
     EXPECT_EQ(meshLife->Destroyed, 1u);
 }
 
+TEST_F(SceneAssets, RendererExitAndGpuCompletionAreIndependentAndFlightCanBeReused) {
+    for (const bool confirmationFirst : {false, true}) {
+        auto life = make_shared<Lifetime>();
+        auto asset = Ready(71 + uint32_t(confirmationFirst), life);
+        const auto id = asset.GetAssetId();
+        AssetLifetime.AddUse(asset.AsAny());
+        asset.Reset();
+        AssetLifetime.RemoveUse(id);
+        const auto exits = AssetLifetime.SealRetirements(0, true);
+        ASSERT_EQ(exits.size(), 1u);
+        if (confirmationFirst) AssetLifetime.ConfirmExit(exits[0].Token);
+        Assets.Pump();
+        EXPECT_EQ(life->Destroyed, 0u);
+        AssetLifetime.ReleaseFlight(0);
+        // The reusable flight no longer owns an unconfirmed exit; the separate pending queue does.
+        EXPECT_TRUE(AssetLifetime.SealRetirements(0, true).empty());
+        AssetLifetime.ReleaseFlight(0);
+        Assets.Pump();
+        EXPECT_EQ(life->Destroyed, confirmationFirst ? 1u : 0u);
+        if (!confirmationFirst) {
+            EXPECT_TRUE(AssetLifetime.HasPendingExits());
+            AssetLifetime.ConfirmExit(exits[0].Token);
+            Assets.Pump();
+            EXPECT_EQ(life->Destroyed, 1u);
+        }
+        EXPECT_FALSE(AssetLifetime.HasPendingExits());
+    }
+}
+TEST_F(SceneAssets, RendererExitTokenCannotRetireReboundAssetVersion) {
+    auto life = make_shared<Lifetime>();
+    auto asset = Ready(73, life);
+    AssetLifetime.AddUse(asset.AsAny());
+    AssetLifetime.RemoveUse(asset.GetAssetId());
+    const auto old = AssetLifetime.SealRetirements(0, true);
+    ASSERT_EQ(old.size(), 1u);
+    AssetLifetime.AddUse(asset.AsAny());
+    AssetLifetime.RemoveUse(asset.GetAssetId());
+    const auto next = AssetLifetime.SealRetirements(1, true);
+    ASSERT_EQ(next.size(), 1u);
+    EXPECT_NE(old[0].Token, next[0].Token);
+    asset.Reset();
+    AssetLifetime.ReleaseFlight(0);
+    AssetLifetime.ReleaseFlight(1);
+    AssetLifetime.ConfirmExit(old[0].Token);
+    AssetLifetime.ConfirmExit(old[0].Token);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    AssetLifetime.ConfirmExit(next[0].Token);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
 TEST_F(SceneAssets, RepeatedZeroUseTransitionsMergeBeforeSealAndCanRetireAgainLater) {
     auto life = make_shared<Lifetime>();
     auto asset = Ready(1, life);

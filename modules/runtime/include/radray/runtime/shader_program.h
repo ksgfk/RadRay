@@ -3,12 +3,17 @@
 #include <optional>
 
 #include <radray/nullable.h>
+#include <radray/guid.h>
 #include <radray/render/backend_shader_artifact.h>
 #include <radray/render/pipeline_layout_types.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/types.h>
 
 namespace radray {
+struct ShaderProgramId {
+    Guid Value;
+    friend bool operator==(const ShaderProgramId&, const ShaderProgramId&) = default;
+};
 
 /// 一个 shader program 请求。它显式拥有决定身份的全部输入: 逻辑源名、结构化 defines、keyword
 /// assignments、完整 compile policy 与按 target 分开的 layout recipe。discovery 与 compile 都由同一个
@@ -43,6 +48,7 @@ public:
     const render::BackendShaderArtifact& GetArtifact() const noexcept { return _artifact; }
     render::PipelineLayout* GetPipelineLayout() const noexcept { return _artifact.Layout.get(); }
     render::Device* GetDevice() const noexcept { return _device; }
+    ShaderProgramId GetId() const noexcept { return _id; }
     // True when the named buffer declaration takes its offset at bind time. Dynamic-ness is a
     // property of one declaration, not of a whole descriptor group.
     bool IsBufferDynamic(std::string_view declarationName) const noexcept;
@@ -58,6 +64,7 @@ public:
         string computeEntry) noexcept;
 
 private:
+    ShaderProgramId _id{Guid::NewGuid()};
     render::Device* _device;
     render::BackendShaderArtifact _artifact;
     unique_ptr<render::Shader> _vertexShader;

@@ -115,7 +115,7 @@ void SceneWriter::RemoveShapeState(ShapeId id, ShapeState& state) {
             _pending.Parameters[index] = std::move(_pending.Parameters.back());
             auto& moved = _pending.Parameters[index];
             auto& indices = GetShape(moved.Id).ParameterUpdateIndices;
-            const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Layout == moved.Layout.get(); });
+            const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Schema == moved.Schema; });
             found->Index = index;
         }
         _pending.Parameters.pop_back();
@@ -228,7 +228,7 @@ void SceneWriter::SetMaterials(std::span<const ShapeId> ids, std::span<const Str
         const auto& reference = materials[index];
         const auto asset = reference.Get();
         const bool ready = asset && asset->IsValid();
-        return MaterialBinding{reference.GetAssetId(), ready ? &asset->GetRenderData() : nullptr, ready ? &asset->GetGpuState() : nullptr};
+        return MaterialBinding{reference.GetAssetId(), ready ? &asset->GetRenderData() : nullptr};
     };
     const auto same = [&](const MaterialBindings& bindings) {
         if (bindings.size() != materials.size()) return false;
@@ -248,7 +248,6 @@ void SceneWriter::SetMaterials(std::span<const ShapeId> ids, std::span<const Str
         const auto binding = bindingAt(i);
         hash.Add(binding.Id);
         hash.Add(binding.Data.Get());
-        hash.Add(binding.Gpu.Get());
     }
     const auto code = hash.ToHashCode();
     auto& bucket = _materialBindings[code];
@@ -279,7 +278,7 @@ void SceneWriter::SetMaterials(std::span<const ShapeId> ids, std::span<const Str
         auto& state = GetShape(id);
         ReleaseMaterials(state);
         state.BoundMaterials = use;
-        ShapeMaterialUpdate update{id, use->Bindings};
+        ShapeMaterialUpdate update{id, _pending.RegisterMaterials(use->Bindings)};
         if (state.MaterialUpdateIndex == kNotQueued) {
             state.MaterialUpdateIndex = _pending.Materials.size();
             _pending.Materials.push_back(std::move(update));
@@ -326,9 +325,9 @@ void SceneWriter::SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld) 
 }
 
 void SceneWriter::ReclaimParameter(const ShapeParameterUpdate& update) {
-    auto& payload = _parameterPayloads.at(update.Layout.get());
-    if (size_t{update.Offset} + update.Layout->Stride == payload.Bytes->size())
-        payload.Bytes->resize(update.Offset);
+    auto& payload = _parameterPayloads.at(update.Schema.Index);
+    if (size_t{update.Offset} + update.Size == _pending.ParameterBytes.size())
+        _pending.ParameterBytes.resize(update.Offset);
     else
         payload.Free.push_back(update.Offset);
 }
@@ -341,33 +340,33 @@ bool SceneWriter::SetInstanceParameters(std::span<const ShapeId> ids, const Inst
         if (!GetShape(id).HasMesh) return false;
     auto [it, inserted] = _parameterSchemas.try_emplace(layout.Name);
     if (inserted)
-        it->second = make_shared<const InstanceParameterLayout>(layout);
-    else if (*it->second != layout)
+        it->second = layout;
+    else if (it->second != layout)
         return false;
-    const auto schema = it->second;
-    auto& payload = _parameterPayloads[schema.get()];
-    if (!payload.Bytes) payload.Bytes = make_shared<vector<byte>>();
-    if (values.size() > UINT32_MAX - payload.Bytes->size()) return false;
-    ReserveAppend(*payload.Bytes, values.size());
+    const auto schema = _pending.RegisterSchema(it->second);
+    if (!schema) return false;
+    auto& payload = _parameterPayloads[schema->Index];
+    if (values.size() > UINT32_MAX - _pending.ParameterBytes.size()) return false;
+    ReserveAppend(_pending.ParameterBytes, values.size());
     ReserveAppend(_pending.Parameters, ids.size());
     size_t source = 0;
     for (auto id : ids) {
         auto& indices = GetShape(id).ParameterUpdateIndices;
-        const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Layout == schema.get(); });
+        const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Schema == *schema; });
         uint32_t offset;
         if (found == indices.end()) {
             if (payload.Free.empty()) {
-                offset = static_cast<uint32_t>(payload.Bytes->size());
-                payload.Bytes->resize(size_t{offset} + layout.Stride);
+                offset = static_cast<uint32_t>(_pending.ParameterBytes.size());
+                _pending.ParameterBytes.resize(size_t{offset} + layout.Stride);
             } else {
                 offset = payload.Free.back();
                 payload.Free.pop_back();
             }
-            indices.push_back({schema.get(), _pending.Parameters.size()});
-            _pending.Parameters.emplace_back(id, schema, payload.Bytes, offset);
+            indices.push_back({*schema, _pending.Parameters.size()});
+            _pending.Parameters.push_back({id, *schema, offset, layout.Stride});
         } else
             offset = _pending.Parameters[found->Index].Offset;
-        std::memcpy(payload.Bytes->data() + offset, values.data() + source, layout.Stride);
+        std::memcpy(_pending.ParameterBytes.data() + offset, values.data() + source, layout.Stride);
         source += layout.Stride;
     }
     return true;
@@ -467,7 +466,7 @@ void SceneWriter::SetLight(LightId id, const LightData& light) {
     _pending.LightsChanged = true;
 }
 
-void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
+void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex, bool requireExitConfirmation) {
     RADRAY_PROFILE_SCOPE_N("SceneWriter::Flush");
     if (!batch.Empty()) RADRAY_ABORT("Scene batch must be empty before collection");
     for (const auto& value : _pending.CreateTransforms) {
@@ -494,7 +493,7 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     if (_pending.LightsChanged) _pending.Lights.Assign(_lights);
     std::swap(batch, _pending);
     _parameterPayloads.clear();
-    _assets.SealRetirements(flightIndex);
+    batch.AssetExits = _assets.SealRetirements(flightIndex, requireExitConfirmation, _closing);
     RADRAY_PROFILE_PLOT("SceneTransforms", static_cast<int64_t>(batch.Transforms.size()));
     RADRAY_PROFILE_PLOT("SceneMeshStates", static_cast<int64_t>(batch.MeshStates.size()));
 }

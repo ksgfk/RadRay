@@ -1,5 +1,7 @@
 #include <radray/render/rhi.h>
 
+#include <radray/hash.h>
+
 #include "rhi_validation.h"
 
 #include <algorithm>
@@ -17,6 +19,64 @@
 #endif
 
 namespace radray::render {
+
+size_t ParameterGroupCompatibility::Hash() const noexcept {
+    HashCode hash;
+    for (const auto word : _identity) hash.Add(word);
+    hash.Add(_valueCount);
+    hash.Add(_resources);
+    hash.Add(_samplers);
+    return hash.ToHashCode();
+}
+ParameterGroupCompatibility PipelineLayout::MakeParameterGroupCompatibility(vector<uint64_t> identity, uint32_t values, uint32_t resources, uint32_t samplers) const noexcept {
+    ParameterGroupCompatibility result;
+    result._identity = std::move(identity);
+    result._valueCount = values;
+    result._resources = resources;
+    result._samplers = samplers;
+    return result;
+}
+std::optional<ParameterGroupCompatibility> PipelineLayout::GetParameterGroupCompatibility(uint32_t) const noexcept { return std::nullopt; }
+std::optional<uint32_t> PipelineLayout::GetParameterElementIndex(uint32_t, BindingHandle, uint32_t) const noexcept { return std::nullopt; }
+vector<uint64_t> Sampler::GetBindingIdentity() const noexcept { return {}; }
+std::optional<vector<uint64_t>> GetShaderParameterValueIdentity(const ShaderParameterValue& value) noexcept {
+    if (const auto* buffer = std::get_if<ShaderBufferBinding>(&value)) {
+        if (!buffer->Target) return std::nullopt;
+        const auto capacity = buffer->Target->GetDesc().Size;
+        if (buffer->Range.Offset >= capacity) return std::nullopt;
+        const auto size = buffer->Range.Size == UINT64_MAX ? capacity - buffer->Range.Offset : buffer->Range.Size;
+        if (!size || size > capacity - buffer->Range.Offset) return std::nullopt;
+        return vector<uint64_t>{0, reinterpret_cast<uintptr_t>(buffer->Target), buffer->Range.Offset, size, buffer->StructureByteStride};
+    }
+    if (const auto* buffer = std::get_if<ShaderTexelBufferBinding>(&value)) {
+        if (!buffer->Target) return std::nullopt;
+        const auto capacity = buffer->Target->GetDesc().Size;
+        if (buffer->Range.Offset >= capacity) return std::nullopt;
+        const auto size = buffer->Range.Size == UINT64_MAX ? capacity - buffer->Range.Offset : buffer->Range.Size;
+        if (!size || size > capacity - buffer->Range.Offset) return std::nullopt;
+        return vector<uint64_t>{1, reinterpret_cast<uintptr_t>(buffer->Target), buffer->Range.Offset, size, uint64_t(buffer->Format)};
+    }
+    if (const auto* view = std::get_if<TextureView*>(&value)) {
+        if (!*view) return std::nullopt;
+        const auto desc = (*view)->GetDesc();
+        if (!desc.Target) return std::nullopt;
+        const auto texture = desc.Target->GetDesc();
+        const auto layers = texture.Dim == TextureDimension::Dim3D ? 1 : texture.DepthOrArraySize;
+        if (desc.Range.BaseArrayLayer >= layers || desc.Range.BaseMipLevel >= texture.MipLevels) return std::nullopt;
+        const auto count = desc.Range.ArrayLayerCount == SubresourceRange::All ? layers - desc.Range.BaseArrayLayer : desc.Range.ArrayLayerCount;
+        const auto mips = desc.Range.MipLevelCount == SubresourceRange::All ? texture.MipLevels - desc.Range.BaseMipLevel : desc.Range.MipLevelCount;
+        if (!count || !mips || count > layers - desc.Range.BaseArrayLayer || mips > texture.MipLevels - desc.Range.BaseMipLevel) return std::nullopt;
+        return vector<uint64_t>{2, reinterpret_cast<uintptr_t>(desc.Target), uint64_t(desc.Dim), uint64_t(desc.Format),
+            desc.Range.BaseArrayLayer, count, desc.Range.BaseMipLevel, mips,
+            (desc.Range.Aspects == TextureAspect::Auto ? GetTextureFormatAspects(desc.Format) : desc.Range.Aspects).value(), uint64_t(desc.Usage)};
+    }
+    const auto sampler = std::get<Sampler*>(value);
+    if (!sampler) return std::nullopt;
+    auto identity = sampler->GetBindingIdentity();
+    if (identity.empty()) return std::nullopt;
+    identity.insert(identity.begin(), 3);
+    return identity;
+}
 
 AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc) {
     AttachmentSignature result{{}, {}, desc.MultiSample.Count};

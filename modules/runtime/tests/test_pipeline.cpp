@@ -1,6 +1,8 @@
 #include "scene_test_support.h"
 #include "upload_test_support.h"
 #include <gtest/gtest.h>
+#include <radray/runtime/gpu_system.h>
+#include "gpu_test_fixture.h"
 #include <radray/runtime/render_framework/material.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/graphics_pipeline_cache.h>
@@ -10,8 +12,8 @@
 
 namespace radray::test {
 namespace {
-MaterialPass TestMaterialPass() {
-    MaterialPass pass;
+MaterialTemplateDescriptor TestMaterialTemplateDescriptor() {
+    MaterialTemplateDescriptor pass;
     pass.Name = "Unlit";
     pass.Program.SourceName = "material.hlsl";
     pass.Inputs = {{"Tint", MaterialInputSource::MaterialConstants}};
@@ -53,6 +55,29 @@ TEST(PipelineMaterial, InstanceUpdatesCoalesceAndCancelOnRemoveWithoutDirtyingMa
     CompleteFrame(manager, 0);
     manager.OnShutdown();
 }
+TEST(PipelineMaterial, PacketDefinitionsRejectForeignIdsAndRtOwnsConsumedData) {
+    SceneUpdateBatch packet, foreign;
+    const ShapeId shape{0, 0};
+    const MaterialBinding material{{610, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, nullptr};
+    const auto materials = packet.RegisterMaterials(std::span{&material, 1});
+    EXPECT_FALSE(foreign.GetMaterials(materials));
+    InstanceParameterLayout layout{"Color", 16, {{"RGBA", 0, 16, 0, 1, 1, 4}}};
+    const auto schema = packet.RegisterSchema(layout);
+    ASSERT_TRUE(schema);
+    EXPECT_FALSE(foreign.GetSchema(*schema));
+    packet.CreateShapes = {shape};
+    packet.MeshStates = {{.Id = shape}};
+    packet.SetMaterials(shape, std::span{&material, 1});
+    ASSERT_TRUE(packet.SetInstanceParameters(shape, layout, vector<byte>(16, byte{7})));
+    RenderScene scene;
+    scene.Apply(packet);
+    packet.Clear();
+    EXPECT_FALSE(packet.GetSchema(*schema));
+    EXPECT_FALSE(packet.GetMaterials(materials));
+    ASSERT_TRUE(scene.GetStaticMesh(shape));
+    EXPECT_EQ(scene.GetStaticMesh(shape)->Materials.front(), material);
+    EXPECT_EQ(scene.GetParameterStreams().at("Color").GetValues(shape.Index)[0], byte{7});
+}
 TEST(PipelineMaterial, BulkBindingsAndPackedParametersKeepOnlyFinalValuesAndFreezeAtSeal) {
     AssetManager assets;
     SceneManager manager{2};
@@ -62,7 +87,7 @@ TEST(PipelineMaterial, BulkBindingsAndPackedParametersKeepOnlyFinalValuesAndFree
     ASSERT_TRUE(writer->CreateShapes(ids));
     vector<Eigen::Matrix4f> matrices(ids.size(), Eigen::Matrix4f::Identity());
     writer->SetStaticMeshes(ids, {}, matrices);
-    auto material = assets.AddReady<Material>({600, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}));
+    auto material = assets.AddReady<Material>({600, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(16)}));
     writer->SetMaterials(ids, std::span{&material, 1});
     InstanceParameterLayout layout{"Color", 16, {{"RGBA", 0, 16, 0, 1, 1, 4}}};
     vector<byte> bytes(ids.size() * 16, byte{1});
@@ -77,13 +102,13 @@ TEST(PipelineMaterial, BulkBindingsAndPackedParametersKeepOnlyFinalValuesAndFree
     const auto& sealed = SceneBatch(manager, scene, 0);
     ASSERT_EQ(sealed.Materials.size(), ids.size());
     ASSERT_EQ(sealed.Parameters.size(), ids.size());
-    EXPECT_EQ(sealed.Materials[0].Materials.data(), sealed.Materials[128].Materials.data());
-    EXPECT_EQ(sealed.Parameters[0].Layout.get(), sealed.Parameters[128].Layout.get());
-    EXPECT_EQ(sealed.Parameters[0].Storage.get(), sealed.Parameters[128].Storage.get());
-    EXPECT_EQ(sealed.Parameters[128].GetValues()[0], byte{15});
+    EXPECT_EQ(sealed.Materials[0].Materials, sealed.Materials[128].Materials);
+    EXPECT_EQ(sealed.Parameters[0].Schema, sealed.Parameters[128].Schema);
+    EXPECT_EQ(sealed.ParameterBytes.size(), ids.size() * layout.Stride);
+    EXPECT_EQ(sealed.GetParameterValues(sealed.Parameters[128])[0], byte{15});
     final[0] = byte{7};
     ASSERT_TRUE(writer->SetInstanceParameters(ids[128], layout, final));
-    EXPECT_EQ(sealed.Parameters[128].GetValues()[0], byte{15});
+    EXPECT_EQ(sealed.GetParameterValues(sealed.Parameters[128])[0], byte{15});
     ConsumeFrame(manager, 0);
     CompleteFrame(manager, 0);
     writer->RemoveShapes(std::span{ids}.subspan(10, 10));
@@ -104,14 +129,14 @@ TEST(PipelineMaterial, TypedUpdatesCoalesceAndDoNotDirtyObjectMatrices) {
     writer->SetStaticMesh(shape, {}, Eigen::Matrix4f::Identity());
     const AssetId firstId{510, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
     const AssetId secondId{511, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
-    auto first = assets.AddReady<Material>(firstId, make_unique<Material>(vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}));
-    auto second = assets.AddReady<Material>(secondId, make_unique<Material>(vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(32)}));
+    auto first = assets.AddReady<Material>(firstId, make_unique<Material>(vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(16)}));
+    auto second = assets.AddReady<Material>(secondId, make_unique<Material>(vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(32)}));
     ASSERT_TRUE(first.Get()->IsValid());
     writer->SetMaterials(shape, std::span{&first, 1});
     writer->SetMaterials(shape, std::span{&second, 1});
     renderer.SealFrameGT(0);
     ASSERT_EQ(SceneBatch(renderer, scene, 0).Materials.size(), 1u);
-    EXPECT_EQ(SceneBatch(renderer, scene, 0).Materials[0].Materials[0].Id, secondId);
+    EXPECT_EQ(SceneBatch(renderer, scene, 0).GetMaterials(SceneBatch(renderer, scene, 0).Materials[0].Materials)->front().Id, secondId);
     ConsumeFrame(renderer, 0);
     CompleteFrame(renderer, 0);
     Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
@@ -157,7 +182,7 @@ TEST(PipelineMaterial, ComponentMaterialChangeUsesItsOwnTypedUpdate) {
     auto* mesh = world.SpawnActor()->AddComponent<StaticMeshComponent>();
     SceneUpdateBatch initial;
     CollectScene(world, renderer, initial);
-    auto material = assets.AddReady<Material>({512, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}));
+    auto material = assets.AddReady<Material>({512, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(16)}));
     mesh->SetMaterials({material});
     PrepareScene(world, renderer, 0);
     const auto& batch = SceneBatch(renderer, scene, 0);
@@ -246,7 +271,7 @@ TEST(PipelineMaterial, SharedMaterialRetainsTextureUntilBothScenesRetire) {
         auto texture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 1, .Height = 1, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Usage = render::TextureUse::Resource}).Unwrap();
         auto view = device.CreateTextureView({texture.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::Resource}).Unwrap();
         auto image = assets.AddReady<TextureAsset>({520, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<TextureAsset>(&device, "retained", std::move(texture), std::move(view)));
-        auto pass = TestMaterialPass();
+        auto pass = TestMaterialTemplateDescriptor();
         pass.Inputs.push_back({"Albedo", MaterialInputSource::Texture});
         auto material = assets.AddReady<Material>({521, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{pass}, vector<vector<byte>>{vector<byte>(16)}, vector{image}));
         const auto first = renderer.CreateSceneGT(), second = renderer.CreateSceneGT();
@@ -293,10 +318,10 @@ TEST(PipelineMaterialDeathTest, StaleMaterialGenerationCannotOverwriteReusedShap
     replace.CreateShapes.push_back({0, 1});
     replace.MeshStates.push_back({{0, 1}, {}, Eigen::Matrix4f::Identity()});
     const MaterialBinding current{{530, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, nullptr};
-    replace.Materials.push_back({{0, 1}, {current}});
+    replace.SetMaterials({0, 1}, std::span{&current, 1});
     scene.Apply(replace);
     SceneUpdateBatch stale;
-    stale.Materials.push_back({{0, 0}, {}});
+    stale.SetMaterials({0, 0}, {});
     EXPECT_DEATH(scene.Apply(stale), "");
     auto object = scene.GetStaticMesh({0, 1});
     ASSERT_TRUE(object);
@@ -321,18 +346,19 @@ public:
         }
     }
 };
-class PipelineTestRecorder final : public RenderPipeline {
+class PipelineTestRecorder final : public RenderPipeline::Plan {
 public:
     bool Fail{false}, Produce{false};
-    PipelineRecordResult Record(PipelineContext& context, const RenderPipelineRequest& request) override {
+    std::optional<RenderOutput> Output;
+    PipelineRecordResult Record(PipelineContext& context) override {
         PipelineRecordResult result;
         result.Status = Fail ? PipelineRecordStatus::RecoverableFailure : PipelineRecordStatus::NoWork;
         if (Produce) {
             auto* first = context.Commands.Allocate();
             auto* second = context.Commands.Allocate();
-            if (request.Output) {
-                result.OutputState = InitialRenderOutputState(*request.Output);
-                TransitionRenderOutput(first, *request.Output, *result.OutputState, false);
+            if (Output) {
+                result.OutputState = InitialRenderOutputState(*Output);
+                TransitionRenderOutput(first, *Output, *result.OutputState, false);
             }
             context.Commands.Return(std::span{&second, 1});
             context.Commands.Return(std::span{&first, 1});
@@ -344,23 +370,50 @@ public:
 TEST(PipelineOutput, EmptyFailureAndNoScenePreserveRecordingOrderAndFinishAttachments) {
     Application app;
     UploadTestDevice device;
-    RenderSystem renderer{&device};
+    render::test::DeviceContext native;
+    ASSERT_TRUE(render::test::TryCreateDevice(render::RenderBackend::D3D12, native)) << native.Reason;
+    FrameTimeline timeline{1};
+    RuntimeStartupResult startup;
+    auto gpu = GpuSystem::TryAttachDevice({native.Device, 0, 3, 1, false}, timeline, startup);
+    ASSERT_TRUE(gpu);
+    RenderSystem services{native.Device.get()};
+    ASSERT_TRUE(services.OnInitialize());
+    Renderer renderer{*gpu, services};
+    auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+    auto builder = renderer.BeginFrame(frame);
+    ASSERT_TRUE(builder);
+    auto cleanup = MakeScopeGuard([&] {
+        frame.SubmitFrame(); gpu->WaitAndRetireFlights();
+        FlightCompletion completed;
+        while (timeline.TryReadCompletion(completed)) gpu->ReleaseFrameResourcesGT(completed);
+        renderer.ProcessCompletions();
+    });
     GpuFrameResources resources{&device};
     resources.BeginEpoch();
     PipelineTestAllocator allocator;
-    PipelineContext context{renderer, {0, 1, {}}, allocator, resources};
-    PipelineTestRecorder pipeline;
+    PipelineContext context{renderer, *builder, {0, 1, {}}, allocator, resources};
+
     auto texture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 64, .Height = 32, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Usage = render::TextureUse::RenderTarget}).Unwrap();
     auto view = device.CreateTextureView({.Target = texture.get(), .Dim = render::TextureDimension::Dim2D, .Format = render::TextureFormat::RGBA8_UNORM, .Range = {0, 1, 0, 1}, .Usage = render::TextureViewUsage::RenderTarget}).Unwrap();
     RenderOutput output{{{view.get(), render::TextureState::Undefined, render::TextureState::ShaderRead}}, {}};
-    auto empty = RecordRenderPipeline(pipeline, context, {{}, {}});
+    auto emptyPlan = make_unique<PipelineTestRecorder>();
+    auto clearPlan = make_unique<PipelineTestRecorder>();
+    auto failedPlan = make_unique<PipelineTestRecorder>();
+    failedPlan->Output = output;
+    failedPlan->Fail = true;
+    failedPlan->Produce = true;
+    auto emptyId = RenderPipeline::Plan::Collect(std::move(emptyPlan), context);
+    auto clearId = RenderPipeline::Plan::Collect(std::move(clearPlan), context);
+    auto failedId = RenderPipeline::Plan::Collect(std::move(failedPlan), context);
+    ASSERT_TRUE(emptyId && clearId && failedId);
+    EXPECT_TRUE(allocator.Commands.empty());
+    ASSERT_TRUE(builder->Compile());
+    auto empty = RecordRenderPipeline(*emptyId, context, {{}, {}});
     EXPECT_TRUE(empty.Commands.empty());
-    auto clear = RecordRenderPipeline(pipeline, context, {{}, output});
+    auto clear = RecordRenderPipeline(*clearId, context, {{}, output});
     ASSERT_EQ(clear.Commands.size(), 1u);
     EXPECT_TRUE(IsRenderOutputFinished(output, *clear.OutputState));
-    pipeline.Fail = true;
-    pipeline.Produce = true;
-    auto failed = RecordRenderPipeline(pipeline, context, {{}, output});
+    auto failed = RecordRenderPipeline(*failedId, context, {{}, output});
     ASSERT_EQ(failed.Commands.size(), 3u);
     EXPECT_EQ(failed.Status, PipelineRecordStatus::RecoverableFailure);
     EXPECT_EQ(failed.Commands[0], allocator.Commands[1].get());
@@ -399,14 +452,15 @@ TEST(FrameResources, ConstantSlicesStayDistinctAndAlignedAcrossPageGrowth) {
     }
 }
 
-TEST(PipelineMaterial, PublishedMaterialsShareOnePassDefinitionAndKeepIndependentDefaults) {
-    auto definition = make_shared<const MaterialPass>(TestMaterialPass());
-    Material a{{MaterialPass{definition}}, {{byte{1}}}};
-    Material b{{MaterialPass{definition}}, {{byte{2}}}};
+TEST(PipelineMaterial, CpuMaterialsOwnDefinitionSnapshotsAndIndependentDefaults) {
+    auto definition = TestMaterialTemplateDescriptor();
+    Material a{{definition}, {{byte{1}}}};
+    Material b{{definition}, {{byte{2}}}};
     ASSERT_TRUE(a.IsValid());
     ASSERT_TRUE(b.IsValid());
-    EXPECT_EQ(&a.GetRenderData().Passes[0].GetDefinition(), definition.get());
-    EXPECT_EQ(&b.GetRenderData().Passes[0].GetDefinition(), definition.get());
+    definition.Name = "Changed";
+    EXPECT_EQ(a.GetRenderData().Passes[0].Name, "Unlit");
+    EXPECT_EQ(b.GetRenderData().Passes[0].Name, "Unlit");
     EXPECT_EQ(a.GetRenderData().Constants[0][0], byte{1});
     EXPECT_EQ(b.GetRenderData().Constants[0][0], byte{2});
 }
@@ -414,10 +468,10 @@ TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings
     StaticMeshRenderData mesh;
     mesh.Mesh.Draws.resize(1);
     mesh.Sections.emplace_back(0, 0, 3, 0, 2);
-    Material first{vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}};
-    Material second{vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}};
-    const MaterialBindings firstBindings{vector<MaterialBinding>{{{}, &first.GetRenderData(), &first.GetGpuState()}}};
-    const MaterialBindings secondBindings{vector<MaterialBinding>{{{}, &second.GetRenderData(), &second.GetGpuState()}}};
+    Material first{vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(16)}};
+    Material second{vector{TestMaterialTemplateDescriptor()}, vector<vector<byte>>{vector<byte>(16)}};
+    const MaterialBindings firstBindings{vector<MaterialBinding>{{{}, &first.GetRenderData()}}};
+    const MaterialBindings secondBindings{vector<MaterialBinding>{{{}, &second.GetRenderData()}}};
     RenderScene scene;
     SceneUpdateBatch batch;
     const ShapeId a{0, 0}, b{1, 0};
@@ -428,7 +482,8 @@ TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings
     EXPECT_TRUE(scene.GetDrawPrimitives(b).empty());
     batch.Clear();
     batch.MeshStates = {{.Id = a, .Mesh = {{}, &mesh}}, {.Id = b, .Mesh = {{}, &mesh}}};
-    batch.Materials = {{a, firstBindings}, {b, firstBindings}};
+    batch.SetMaterials(a, firstBindings);
+    batch.SetMaterials(b, firstBindings);
     scene.Apply(batch);
     const auto original = scene.GetDrawPrimitives(a);
     ASSERT_EQ(original.size(), 1u);
@@ -440,10 +495,12 @@ TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings
     scene.Apply(batch);
     EXPECT_EQ(original.data(), scene.GetDrawPrimitives(a).data());
     batch.Clear();
-    batch.Materials = {{a, secondBindings}, {a, firstBindings}};
+    batch.SetMaterials(a, secondBindings);
+    batch.SetMaterials(a, firstBindings);
     scene.Apply(batch);
     EXPECT_EQ(original.data(), scene.GetDrawPrimitives(a).data());
-    batch.Materials = {{a, secondBindings}};
+    batch.Materials.clear();
+    batch.SetMaterials(a, secondBindings);
     scene.Apply(batch);
     EXPECT_EQ(original.data(), scene.GetDrawPrimitives(b).data());
     EXPECT_NE(original.data(), scene.GetDrawPrimitives(a).data());
@@ -457,7 +514,7 @@ TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings
     batch.RemoveShapes = {a};
     batch.CreateShapes = {{a.Index, 1}};
     batch.MeshStates = {{.Id = {a.Index, 1}, .Mesh = {{}, &mesh}}};
-    batch.Materials = {{{a.Index, 1}, firstBindings}};
+    batch.SetMaterials({a.Index, 1}, firstBindings);
     scene.Apply(batch);
     EXPECT_TRUE(scene.GetDrawPrimitives(a).empty());
     EXPECT_EQ(original.data(), scene.GetDrawPrimitives({a.Index, 1}).data());
@@ -466,7 +523,7 @@ TEST(PipelineMaterial, SceneTemplatesShareGeometryAndOnlyChangeWithFinalBindings
         const ShapeId extra{index, 0};
         batch.CreateShapes.push_back(extra);
         batch.MeshStates.push_back({.Id = extra, .Mesh = {{}, &mesh}});
-        batch.Materials.push_back({extra, MaterialBindings{vector<MaterialBinding>{{{}, &first.GetRenderData(), &first.GetGpuState()}}}});
+        batch.SetMaterials(extra, vector<MaterialBinding>{{{}, &first.GetRenderData()}});
     }
     scene.Apply(batch);
     // Unrelated shared-node insertion/rehash must not invalidate a borrowed primitive template.

@@ -90,8 +90,8 @@ GT/RT 分别发出 warmup complete 消息，`Stress/Warmup` plot 为 0 的渲染
 |---|---|
 | `world` | 创建并更新对象，但 World 不连接 renderer；仍运行相同 GPU runner 和空场景交付，作为无场景连接的参照 |
 | `sync` | 再连接 World，捕获视图并交付/应用 CPU RenderScene 更新，不准备对象 GPU buffer |
-| `upload` | 在 sync 上调用 `PrepareSceneGpuRT`，录制和提交对象参数上传，不发出 geometry draw |
-| `draw` | 通过 UnlitRenderPipeline/SceneDraw 剔除、合批并录制无光照绘制；负缩放按 winding 拆批，无深度测试。`--legacy-draw` 使用原逐对象 indexed draw 路径 |
+| `upload` | 在 sync 上通过 RendererScenes 准备 GPU 镜像，录制和提交对象参数上传，不发出 geometry draw |
+| `draw` | 通过 UnlitRenderPipeline/SceneDraw 剔除、合批并录制无光照绘制；负缩放按 winding 拆批，无深度测试 |
 
 | `--workload` | 每帧负载 |
 |---|---|
@@ -132,9 +132,8 @@ RT 看 `SceneManager::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::Pr
 应展开查看，不能将等待时间归因于框架执行成本。比较旧 runner 时优先使用共同的 S0、Update、RenderFrame
 及提交 zones，同时查看 GT 开始间隔、GT/RT 重叠和进程 CPU 时间；新旧 PrepareFrame 包含的等待范围不同。
 
-`Stress/Objects` 表示配置对象数。upload 与 `--legacy-draw` 路径的 `Stress/ObjectUploadBytes`、`Stress/DrawCalls`
-分别表示当次对象准备的实际 host 写入字节和配置要求的逐对象 draw 数；上传统计不包含 ViewProjection 常量。
-默认 draw 路径使用 `SceneDraw::CullAndSelect`、`BuildBatches`、`PrepareBindings`、`Draw` zones 和 `SceneGpu/UploadObjects` 观察。
+`Stress/Objects` 表示配置对象数。upload 路径的 `Stress/ObjectUploadBytes` 表示当次对象准备的实际 host 写入字节。
+draw 使用 Renderer 帧编译，观察 `SceneDraw::CullAndSelect`、`BuildBatches`、`Draw` 与 `SceneGpuData::Prepare`；旧 legacy-draw 已删除。
 多个视图共享对象 buffer，物理 flight
 则分别追赶自上次使用以来的变化，因此每帧上传对象数不必等于本次 GT changes。静止负载在各 flight 初始化后应为零上传。
 GT 的 `Stress/LastCompletedFrameLatencyMs` 和 `Stress/LastResolvedGpuMs` 分别记录最近完成帧的延迟及最近 resolve 的
@@ -283,7 +282,7 @@ build_release/_build/Release/bench_scene_gpu.exe --benchmark_filter='SceneGpu/.*
 `bench_command_allocator` 的 `CommandAllocator/` family 用相同 copy 录制比较共享 RHI storage 与每 command 独立 storage，
 覆盖 M=1/8/32/128、K=1/2/4。初始化与第一次 native 扩容在计时外，输出 native capacity、Reset 与 Record 微秒数。
 该合成基准不 Submit，因而没有 GPU 时间、运行中的存储占用或帧等待成本，不能当作帧率。
-真实窗口/离屏负载使用 `framework_stress --mode=draw`；`--legacy-draw` 切回固定 shader 基线，其他参数保持一致。
+真实窗口/离屏负载使用 `framework_stress --mode=draw`；重构前比较使用冻结的旧程序包，当前不保留旧执行分支。
 两条路径都使用当前 RHI allocator；这组 A/B 衡量公共 pipeline 的接入成本，不代表旧提交的 allocator 性能。
 用 `--no-gpu-profiler` 对照运行时 GPU profiler 开关；`--views=N` 不再限制为 1 或 3。
 native storage 字节数由驱动持有，无法直接测得；进程 working set 不能直接等同命令存储占用。
@@ -350,7 +349,7 @@ benchmark 初始化前检查所需容量，超预算样例报告不支持，不�
 
 ## GPU 生命周期对照
 
-MaterialScene 的 F2 基准名称保持兼容；F1/F3/F4 在同名末尾追加 /F1、/F3、/F4。场景矩阵包含 dirty=0/1/10/100、N=1k/10k/100k、V=1/3，以及 Direct/Manual/ManualTint 和 churn。共享 pass 定义只创建一次，默认参数仍按 Material 独立。性能运行与构建、测试和其他 GPU 负载串行进行。
+MaterialScene 的 F2 基准名称保持兼容；F1/F3/F4 在同名末尾追加 /F1、/F3、/F4。场景矩阵包含 dirty=0/1/10/100、N=1k/10k/100k、V=1/3，以及 Direct/Manual/ManualTint 和 churn。CPU 默认值随 Material 描述保存；GPU 完整参数组按兼容布局与最终值共享。性能运行与构建、测试和其他 GPU 负载串行进行。
 
 `bench_command_allocator` 还注册 `RenderScope/`（稳定、clear、load/store、尺寸版本、重建、预算）、`FlightSubmission/`（单批、多批、后续 gate）与 `WindowSubmission/`（F1–F4、1/3 个真实窗口、稳定、连续 resize、输出跳过）。窗口基准保留单独必要 copy，并在 drain 后回读核对；其输出跳过由真实 acquire 后的 presentability 谓词控制。RenderScope 只测 CPU 原生准备/编码，未提交；后两类分别报告 submit CPU、GPU 与完成延迟，gate 时间包含显式依赖间隔。窗口性能测量关闭 validation；[多窗口正确性回归](build-test.md#vulkan-多交换链同步验证已知问题)使用修复后的 validation/sync validation，结果分别报告。
 
@@ -363,3 +362,21 @@ python tools/run_material_scene_benchmark.py --exe build_release/_build/Release/
 `--baseline-bin` 目录需预先放置匹配版本的 `<target>.baseline.exe`；当前版本由 `--bin` 指定，默认 `build_release/_build/Release`。
 `C:/Tools/Tracy` 是示例路径，换成实际目录。comparison 默认交错启动三对独立进程；coverage 的 1x 只证明矩阵可运行，
 SceneSync/Lifecycle Frame 的 `KeepRunningBatch(256)` 会把小迭代请求补齐为整批。SceneGpu 冷启动／扩容和 Lifecycle 删除固定采样五次，场景重建在计时区间外；针对性删除复验可用固定 50x 与更多独立配对。不要用自适应 min-time 在这些场景上反复重建来估计稳态。原始 log、JSON、命令、二进制 SHA256 与配对区间留在输出目录，Tracy 以最后一条 warmup message 截断冷区间。默认 trace filter 用首尾锚点限定 F2，避免与追加 /F1、/F3、/F4 的用例混采；其他 F 对照也须使用同一 flight 数与完整名称。静态材质的分配和 Set/FlushWrites 零增量由已有 fixture probe 正确性测试验证。
+
+## Descriptor 冗余离屏验收
+
+构建 example_descriptor_reuse 后，串行运行独立进程并冻结程序、shader、artifact、源码 ZIP 和 SHA-256：
+
+```powershell
+cmake --build build_debug --config Debug --target example_descriptor_reuse --parallel 4
+python tools/run_descriptor_reuse.py --exe build_debug/_build/Debug/example_descriptor_reuse.exe --output build_descriptor_reuse/measurement
+```
+
+输出目录必须不存在。默认双后端各 21 个 case；快速排障加 `--quick`，不能代替完整验收。
+每 case 预热 2×F 帧，再运行 30 帧稳态；默认 128 对象、32 材质、3 视图、3 flight，目标 256×256。
+覆盖等价独立 pass、兼容不同 PSO、Color/Depth、同值/变化 override、不同可见顺序、规模扫描及视图数升降。
+probe 由样例持有，记录真实参数集 Create/Set/Flush、实际 D3D12 table 槽位（含空洞）、Vulkan set/类型数量，
+区分完整组原生绑定等价重复与同一语义数据的多个切片。Vk 数字不是驱动内部字节数。
+检查 GPU 读回、负载回落第 1/F/61×F 帧、drain 及注销后占用；缺后端或跳过不算通过。
+混合组迁移必须单列 ABI 配对，不与 shader 不变的 case 混算。保持 heap 容量一致。
+这个程序验证分配和正确性，不推导 FPS；耗时仍由 Google Benchmark 的 MaterialScene/SceneGpu 等基准测量。

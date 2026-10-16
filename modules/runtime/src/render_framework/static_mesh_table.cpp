@@ -43,7 +43,7 @@ void StaticMeshTable::Replace(size_t row, const StaticMeshStateUpdate& update, u
     _transformRows[row] = transformRow;
 }
 
-void StaticMeshTable::SetMaterials(size_t row, const MaterialBindings& materials) {
+void StaticMeshTable::SetMaterials(size_t row, std::span<const MaterialBinding> materials) {
     _materials[row] = materials;
 }
 

@@ -59,7 +59,7 @@ private:
         Nullable<MaterialUse*> BoundMaterials{nullptr};
         size_t MaterialUpdateIndex{kNotQueued};
         struct ParameterIndex {
-            const InstanceParameterLayout* Layout;
+            InstanceSchemaId Schema;
             size_t Index;
         };
         vector<ParameterIndex> ParameterUpdateIndices;
@@ -102,7 +102,6 @@ private:
     void EnableEditing();
     void ReleaseMaterials(ShapeState& state);
     struct ParameterPayload {
-        shared_ptr<vector<byte>> Bytes;
         vector<uint32_t> Free;
     };
     void ReclaimParameter(const ShapeParameterUpdate& update);
@@ -117,7 +116,7 @@ private:
     void GatherStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms);
     void GatherTransforms(std::span<const ShapeTransformUpdate> values);
     void WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld);
-    void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
+    void Flush(SceneUpdateBatch& batch, uint32_t flightIndex, bool requireExitConfirmation);
     void RemoveLightData(LightSlot& slot);
 
     SceneId _id;
@@ -131,8 +130,8 @@ private:
     LightSceneData _lights;
     RenderAssetLifetime _assets;
     unordered_map<size_t, vector<unique_ptr<MaterialUse>>> _materialBindings;
-    unordered_map<string, shared_ptr<const InstanceParameterLayout>> _parameterSchemas;
-    unordered_map<const InstanceParameterLayout*, ParameterPayload> _parameterPayloads;
+    unordered_map<string, InstanceParameterLayout> _parameterSchemas;
+    unordered_map<uint32_t, ParameterPayload> _parameterPayloads;
     bool _closing{false};
     bool _claimed{false};
     bool _editing{false};

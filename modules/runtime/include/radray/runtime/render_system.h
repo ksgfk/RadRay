@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/graphics_pipeline_cache.h>
 #include <radray/runtime_type.h>
@@ -8,10 +9,6 @@
 
 namespace radray {
 class ShaderProgramCache;
-struct RenderServiceGeneration {
-    bool Alive{true};
-};
-
 /// Device-scoped shader and graphics pipeline services.
 class RenderSystem {
 public:
@@ -27,6 +24,9 @@ public:
     void OnShutdown() noexcept;
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
+    Nullable<ShaderProgram*> ResolveShaderProgram(ShaderProgramId id) const;
+    /// Transfers a validated native program into the same service lifetime as cached programs.
+    Nullable<ShaderProgram*> AdoptShaderProgram(unique_ptr<ShaderProgram> program);
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(
         std::span<const byte> artifact,
         const shader::GpuArtifactHash& expectedIdentity,
@@ -35,8 +35,6 @@ public:
     size_t GetShaderProgramCacheSize() const noexcept;
     size_t GetShaderArtifactCacheSize() const noexcept;
     bool InvalidateShaderSource(std::string_view sourceName);
-    const shared_ptr<RenderServiceGeneration>& GetGeneration() const noexcept { return _generation; }
-    PersistentCBufferArena& GetPersistentConstants() const noexcept { return *_persistentConstants; }
 
 private:
     render::Device* _device;
@@ -44,8 +42,11 @@ private:
     vector<std::filesystem::path> _shaderIncludePaths;
     unique_ptr<ShaderProgramCache> _shaderCache;
     unique_ptr<GraphicsPipelineCache> _graphicsPipelines;
-    shared_ptr<RenderServiceGeneration> _generation;
-    unique_ptr<PersistentCBufferArena> _persistentConstants;
+    Nullable<ShaderProgram*> RememberProgram(Nullable<ShaderProgram*> program);
+    mutable std::mutex _programMutex;
+    unordered_map<Guid, ShaderProgram*> _programIds;
+    vector<unique_ptr<ShaderProgram>> _adoptedPrograms;
+
 };
 
 template <>

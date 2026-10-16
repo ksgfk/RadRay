@@ -93,11 +93,11 @@ TextureAsset::OnUnload 直接按子 views → 默认 SRV → shared texture 的�
 | `ImageAsset` | CPU 像素数据 | 无 |
 | `TextureAsset` | device-local texture、默认 SRV 和子 view 缓存 | `TextureView*` |
 | `StaticMesh` | CPU mesh，以及共享的 `StaticMeshRenderData`（GPU mesh、sections、局部 bounds） | `const StaticMeshRenderData&`、`const GpuMesh&` |
-| `Material` | 不可变 pass 定义、独立默认参数与纹理依赖、`MaterialGpuState` | RT 借用已封存的材质数据；具体契约见 [Pipeline、材质与绘制](render-framework.md#pipeline材质与绘制) |
+| `Material` | CPU 模板定义、默认参数与纹理依赖；GPU 表示归 Renderer | RT 借用已封存的材质数据；具体契约见 [Pipeline、材质与绘制](render-framework.md#pipeline材质与绘制) |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
 StaticMeshComponent 保存 mesh ref，SceneManager 中每个 SceneWriter 在 GT 为场景活跃资产持续持有类型无关的引用，
-最后解绑后转入删除/改绑帧的退休列表，直到该帧真实 GPU completion 才释放；生命周期与借用规则见 [render-framework](render-framework.md#交付退出与资产保活)。
+最后解绑后转入删除/改绑帧的退休列表，直到真实 GPU completion 且 Renderer 退出确认均收到才释放；CPU-only 场景仅需交付完成。生命周期与借用规则见 [render-framework](render-framework.md#交付退出与资产保活)。
 其他录制方须自行保存 owners 到 GPU 完成且 GT 可以安全释放的时刻。
 render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
 回收沿用零引用队列，不引入另一套资产引用计数。
@@ -116,7 +116,7 @@ OnUnload 直接先释放全部 views，再放开本资产的 texture shared owne
 WorldManager（全部 World）→ SceneManager → GPU 帧参数资源 → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem
 ```
 
-WorldManager 先销毁各 World，拆除组件与 asset ref，SceneManager 释放常驻及退休资产引用；GpuSystem 清理借用 shader layout 的帧参数资源后，AssetManager 释放借用 layout 的持久 MaterialGpuState，再由 RenderSystem 释放 shader/program 与 RHI 缓存。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
+GPU drain 与完成消息处理后先执行 Renderer::Shutdown，清除绑定和 GPU 表示并确认资产退出。WorldManager 拆除组件，SceneManager 释放常驻及退休资产引用；再拆 Renderer 对象、原生帧资源、AssetManager 和 RenderSystem。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
 完整时序见[关停顺序](frame-and-gpu.md#关停顺序)。
 关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。
 

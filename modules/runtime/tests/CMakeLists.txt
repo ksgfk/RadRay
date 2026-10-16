@@ -30,6 +30,7 @@ set(radray_runtime_test_sources
     test_pipeline.cpp
     test_raster_draw.cpp
     test_raster_graph.cpp
+    test_renderer_registry.cpp
     test_lifecycle_scale.cpp
     test_scene_apply_changes.cpp
     test_scene_assets.cpp

@@ -279,6 +279,18 @@ Debug abort，否则这些拒绝路径在唯一会跑测试的配置里无法验
 logical kind、group、数组 count、实际 stages、dynamic placement 与 immutable/static sampler；push 或
 未知名称返回空。它不暴露可供 caller 重建 layout 的 schema，Graph 参数准备只消费这份查询结果。
 
+`PipelineLayout::GetParameterGroupCompatibility` 从已有 resolved/native layout 派生完整组的 opaque 身份，
+只提供 hash、完整判等、值元素数和 descriptor 成本，不提供重建布局的平行 schema。
+D3D12 身份包含兼容 table/range、空洞、visibility 和 root descriptor 事实；Vulkan 使用同一 Device
+内的 interned set-layout 身份及 descriptor 类型数量。它们只在各自后端和 Device 内比较。
+`GetParameterElementIndex` 把本 layout 的 BindingHandle 与数组元素映射到规范顺序，拒绝其它 layout
+的 handle；兼容组复用不改变 handle 的所属关系。动态 offset 仍使用当前绑定目标 layout 的 handle。
+
+`GetShaderParameterValueIdentity` 规范化 buffer 的 All range、base offset、stride/format，texture view
+的实际子资源范围和 aspect，以及 sampler 的原生完整状态。hash 只定位候选，调用方须做完整值判等，
+并额外登记资源版本和寿命，不能用原生指针长期充当可复用的资源 ID。
+Render Framework 的完整组封存、缓存预算和真实完成回收见 [Renderer 绑定存储](render-framework.md)。
+
 logical resource kind 与 native placement 分开保存。CBuffer、typed/structured/raw buffers、texture/
 storage texture 与 sampler 决定 value/descriptor class；D3 Table/RootDescriptor 和 Vulkan
 Regular/Dynamic 只存在于 resolved records。logical kind 与 placement 是两个独立轴，两个后端的内部
