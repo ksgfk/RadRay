@@ -139,14 +139,34 @@ function(radray_optimize_flags_binary target)
     radray_link_flag_lto(${target})
 endfunction()
 
-# 把多个 .cpp 合成一批编译。不要全局设置 CMAKE_UNITY_BUILD。
+# 默认把多个 .cpp 合成一批编译；显式指定时遵从 CMAKE_UNITY_BUILD。
 function(radray_enable_unity_build target)
+    set(_unity_build ON)
+    if (DEFINED CMAKE_UNITY_BUILD)
+        set(_unity_build "${CMAKE_UNITY_BUILD}")
+    endif()
     set_target_properties(${target} PROPERTIES
-        UNITY_BUILD ON
+        UNITY_BUILD "${_unity_build}"
         UNITY_BUILD_BATCH_SIZE 32)
     if (MSVC)
         target_compile_options(${target} PRIVATE /bigobj)
     endif()
+endfunction()
+
+# Ninja/Makefile 配置完成后显式调用，不依赖任何 C++ 构建目标。
+function(radray_add_compile_commands_target)
+    if (NOT CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+        return()
+    endif()
+    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+    add_custom_target(radray_compile_commands
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/expand_unity_compile_commands.py"
+            "${CMAKE_BINARY_DIR}/compile_commands.json"
+            --output "${CMAKE_SOURCE_DIR}/.vscode/compile_commands.json"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Updating per-source compile commands for clangd"
+        VERBATIM
+        USES_TERMINAL)
 endfunction()
 
 # radray_add_test(<target> SOURCES <src...> [LINK_LIBS <libs...>] [DISCOVER_ARGS <args...>] [COMPILE_OPTIONS <opts...>] [NO_DISCOVER])

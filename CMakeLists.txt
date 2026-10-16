@@ -332,3 +332,5 @@ endif()
 if (RADRAY_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
+
+radray_add_compile_commands_target()

@@ -1,11 +1,11 @@
 > - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
 > - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
-> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/libjpeg.cmake`, `project_manifest.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
+> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/libjpeg.cmake`, `project_manifest.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
 
 # 构建与测试
 
 命令在仓库根执行。Windows Ninja 预设需要已配置 x64 C++ 工具链的终端，以及 CMake、Ninja、
-Python 和 Git；开启测试时要求 CMake >= 4.4.1。现有构建目录的 generator 以其 `CMakeCache.txt` 为准，不直接用另一 generator
+Python >= 3.10 和 Git；开启测试时要求 CMake >= 4.4.1。现有构建目录的 generator 以其 `CMakeCache.txt` 为准，不直接用另一 generator
 覆盖；需要切换时用 `-B` 指定独立构建目录。
 
 ## 恢复与构建
@@ -62,7 +62,15 @@ cmake --build build_clangcl --config Debug --parallel 24
 
 ### 预编译头与 Unity Build
 
-不设置全局 `CMAKE_UNITY_BUILD`。core 与 `test_inline_vector` 都不参与。
+项目不主动设置全局 `CMAKE_UNITY_BUILD`。未指定时，只有 `radray_enable_unity_build` 的目标默认启用，
+core 与 `test_inline_vector` 都不参与。显式传入 `-DCMAKE_UNITY_BUILD=OFF` 会关闭这些目标的 unity build；
+传入 `ON` 时遵循 CMake 的全局初始化行为，其他目标也可能参与。删除缓存项（`-U CMAKE_UNITY_BUILD`）可恢复项目默认。
+
+需要原始 `.cpp` 的编译数据库时，可使用独立的非 unity Ninja 配置，无需构建：
+
+```powershell
+cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
+```
 
 `radrayrender` 和 `test_radray_render` 只预编译 `<radray/render/rhi.h>`。D3D12 与 Vulkan 头不放进这份预编译头，因为一个目标只能有一份。
 
@@ -409,21 +417,50 @@ RHI 校验开关的开销、绑定吞吐与对象大小测量见[性能测量](p
 
 ## 编译数据库与文档检查
 
-Ninja 配置已开启 `CMAKE_EXPORT_COMPILE_COMMANDS`，直接让 clangd 指向构建目录，或复制到
-IDE 默认读取的 `.vscode/compile_commands.json`：
+Ninja/Makefile 配置已开启 `CMAKE_EXPORT_COMPILE_COMMANDS`。配置完成后，调用独立目标生成
+IDE 默认读取的 `.vscode/compile_commands.json`，不编译 C++：
 
 ```powershell
-New-Item -ItemType Directory -Force .vscode | Out-Null
-Copy-Item -LiteralPath build_debug/compile_commands.json -Destination .vscode/compile_commands.json
+cmake --build build_debug --config Debug --target radray_compile_commands
 ```
 
-Visual Studio/MSBuild 构建使用仓库脚本求值项目，不编译源码：
+该目标仅在 Ninja/Makefile 配置中创建，调用展开脚本，为 unity 中的原始 `.cpp` 生成独立条目，
+普通条目原样保留；原始构建数据库不被覆盖。
+
+VSCode 使用 CMake Tools 的 `postConfigureTask` 在每次成功配置后运行
+`cmake/UpdateCompileCommands.cmake`；它读取构建目录的 generator，仅为 Ninja/Makefile 调用该目标。
+Visual Studio/MSBuild 直接跳过。工作区关闭
+`copyCompileCommands` / `mergedCompileCommands`，避免插件再用原始数据库覆盖展开结果。
+本地设置和 task 示例见[开发环境](dev-env.md#编译数据库后处理)。
+这一步发生在 CMake generate 完成后；`execute_process` 或 `cmake_language(DEFER)` 仍处于
+configure 阶段，不能用来处理本次尚未生成的数据库。命令行 configure 后仍需显式运行上述目标。
+
+也可单独调用脚本：
+
+```powershell
+python tools/expand_unity_compile_commands.py build_debug
+```
+
+输入可为构建目录或数据库文件；默认输出 `.vscode/compile_commands.json`，可用 `-o <path>` 改写。
+支持 `command` 和 `arguments`，
+展开条目统一输出 `arguments`，普通条目原样保留。命令字符串默认按运行平台解码，
+可用 `--command-style windows|posix` 指定。展开条目去掉共享输出与 MSVC 二进制 PCH 参数，
+保留 `/FI` 等文本强制 include；不改变真实构建。
+
+脚本只处理 CMake 普通 C/C++ `Unity/unity_*.cxx` / `unity_*.c` 文件；相对 include 按 unity 文件目录
+和编译命令的 include 目录查找。自定义 unity 代码、宏注入、重复 include 或响应文件会报错，
+不会输出不完整的结果。原始源文件需要能独立解析，脚本不重现同批前序 `.cpp` 引入的声明或宏。
+新增源码或重新 configure 后需更新数据库；VSCode 的配置完成 task 自动执行，其他环境运行上述目标或脚本。
+
+本项目的 clang-cl 预设使用 Visual Studio/MSBuild，继续单独使用已有仓库脚本求值项目，
+不接入上述自动展开链路，不编译源码：
 
 ```powershell
 python tools/win_gen_compile_commands.py --build-dir build_clangcl --configuration Debug
 ```
 
-默认输出 `.vscode/compile_commands.json`。IDE 设置见 [开发环境](dev-env.md)。
+该脚本默认输出 `.vscode/compile_commands.json`。
+IDE 设置见 [开发环境](dev-env.md)。
 文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。
 
 ## GPU 生命周期回归
