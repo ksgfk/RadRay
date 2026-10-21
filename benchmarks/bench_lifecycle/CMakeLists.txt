@@ -1,0 +1,6 @@
+add_executable(bench_lifecycle bench_lifecycle.cpp "${CMAKE_SOURCE_DIR}/modules/runtime/tests/scene_sync_workload.cpp")
+target_include_directories(bench_lifecycle PRIVATE "${CMAKE_SOURCE_DIR}/modules/runtime/tests")
+target_link_libraries(bench_lifecycle PRIVATE radrayruntime benchmark::benchmark)
+radray_default_compile_flags(bench_lifecycle)
+radray_optimize_flags_binary(bench_lifecycle)
+radray_set_build_path(bench_lifecycle)

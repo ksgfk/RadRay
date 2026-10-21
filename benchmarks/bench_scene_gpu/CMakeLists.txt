@@ -1,0 +1,4 @@
+add_executable(bench_scene_gpu bench_scene_gpu.cpp bench_scene_gpu.h scene_gpu_workload.cpp scene_gpu_workload.h)
+target_link_libraries(bench_scene_gpu PRIVATE radrayruntime benchmark::benchmark)
+radray_default_compile_flags(bench_scene_gpu)
+radray_set_build_path(bench_scene_gpu)

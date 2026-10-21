@@ -1,0 +1,4743 @@
+#include <radray/render/backend/d3d12_impl.h>
+#include <radray/profiler.h>
+#include "pipeline_layout_cache_d3d12.h"
+#include "../texture_support_cache.h"
+
+#include <bit>
+#include <algorithm>
+#include <limits>
+#include <mutex>
+#include <dxgidebug.h>
+
+#include <radray/basic_math.h>
+#include <radray/scope_guard.h>
+#include <radray/text_encoding.h>
+#ifdef RADRAY_ENABLE_PROFILER
+#include <tracy/TracyD3D12.hpp>
+#endif
+
+// 章节索引。跳转: Grep "^// ==" 本文件。设计说明见 docs/architecture/render-rhi.md
+//
+//   == 命令签名与验证消息 ==
+//   == 适配器枚举与选择 ==
+//   == 描述符堆 ==
+//   == 描述符分配器 ==
+//   == DXGIFactory 与 DeviceD3D12 生命周期 ==
+//   == CreateDevice ==
+//   == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
+//   == Device: texture 与 texture view ==
+//   == Device: render pass / framebuffer / shader ==
+//   == 根签名映射与构建 ==
+//   == Device: pipeline layout 与 parameter set ==
+//   == parameter 描述符写入 ==
+//   == Device: PSO / sampler / fence ==
+//   == CmdQueue / Fence / CmdList 与 barrier ==
+//   == CmdList: 拷贝与 query ==
+//   == 编码器与 SwapChain ==
+//   == 各对象类实现 ==
+
+namespace radray::render::d3d12 {
+
+static void _DrainNativeValidationMessages(ID3D12Device* device) noexcept;
+static void _DrainNativeDxgiValidationMessages() noexcept;
+
+void IntrusivePtrAddRef(CachedPipelineLayoutD3D12* layout) noexcept {
+    RADRAY_ASSERT(!layout->_cache->IsClosed());
+    layout->AddRef();
+}
+
+void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept {
+    if (layout->ReleaseRef()) {
+        layout->_cache->Evict(layout);
+    }
+}
+
+static void _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
+    if (SUCCEEDED(hr)) return;
+    const HRESULT reason = device->_device->GetDeviceRemovedReason();
+    device->TryDrainValidationMessages();
+    RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
+                 operation, GetErrorName(hr), static_cast<uint32_t>(hr),
+                 GetErrorName(reason), static_cast<uint32_t>(reason));
+}
+
+static void _CheckD3D12DeviceStatus(DeviceD3D12* device, std::string_view operation) noexcept {
+    const HRESULT reason = device->_device->GetDeviceRemovedReason();
+    if (SUCCEEDED(reason)) return;
+    device->TryDrainValidationMessages();
+    RADRAY_ABORT("{} failed: device removed reason: {} {:#x}",
+                 operation, GetErrorName(reason), static_cast<uint32_t>(reason));
+}
+
+static void _CheckD3D12FenceResult(const FenceD3D12* fence, HRESULT hr, std::string_view operation) noexcept {
+    ComPtr<ID3D12Device> device;
+    const HRESULT parentHr = fence->_fence->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
+    if (FAILED(parentHr)) {
+        fence->_device->TryDrainValidationMessages();
+        RADRAY_ABORT("{} failed: {} {:#x}; fence GetDevice failed: {} {:#x}",
+                     operation, GetErrorName(hr), static_cast<uint32_t>(hr),
+                     GetErrorName(parentHr), static_cast<uint32_t>(parentHr));
+    }
+    _CheckD3D12Result(fence->_device, hr, operation);
+}
+
+// == 命令签名与验证消息 ==
+
+static ComPtr<ID3D12CommandSignature> _CreateIndirectCommandSignature(
+    ID3D12Device* device,
+    D3D12_INDIRECT_ARGUMENT_TYPE type,
+    uint32_t byteStride) noexcept {
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = type;
+    D3D12_COMMAND_SIGNATURE_DESC desc{};
+    desc.ByteStride = byteStride;
+    desc.NumArgumentDescs = 1;
+    desc.pArgumentDescs = &argument;
+    ComPtr<ID3D12CommandSignature> result;
+    if (HRESULT hr = device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(result.GetAddressOf()));
+        FAILED(hr)) {
+        _DrainNativeValidationMessages(device);
+        RADRAY_ERR_LOG("ID3D12Device::CreateCommandSignature failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return result;
+}
+
+static LogLevel _MapD3D12ValidationLogLevel(D3D12_MESSAGE_SEVERITY severity) noexcept {
+    switch (severity) {
+        case D3D12_MESSAGE_SEVERITY_CORRUPTION: return LogLevel::Critical;
+        case D3D12_MESSAGE_SEVERITY_ERROR: return LogLevel::Err;
+        case D3D12_MESSAGE_SEVERITY_WARNING: return LogLevel::Warn;
+        case D3D12_MESSAGE_SEVERITY_INFO: return LogLevel::Info;
+        case D3D12_MESSAGE_SEVERITY_MESSAGE: return LogLevel::Debug;
+        default: return LogLevel::Info;
+    }
+}
+
+static void _DispatchValidationMessage(Nullable<DeviceD3D12*> device, LogLevel level, std::string_view message) noexcept {
+    if (device && device.Get()->_logCallback) {
+        device.Get()->_logCallback.Get()(level, message, device.Get()->_logUserData.Get());
+        return;
+    }
+    switch (level) {
+        case LogLevel::Critical:
+        case LogLevel::Err: RADRAY_ERR_LOG("{}", message); break;
+        case LogLevel::Warn: RADRAY_WARN_LOG("{}", message); break;
+        case LogLevel::Info: RADRAY_INFO_LOG("{}", message); break;
+        case LogLevel::Debug: RADRAY_DEBUG_LOG("{}", message); break;
+        default: RADRAY_INFO_LOG("{}", message); break;
+    }
+}
+
+static void _LogD3D12ValidationMessage(
+    Nullable<DeviceD3D12*> device,
+    D3D12_MESSAGE_CATEGORY category,
+    D3D12_MESSAGE_SEVERITY severity,
+    D3D12_MESSAGE_ID id,
+    const char* description) noexcept {
+    const auto message = fmt::format("d3d12 validation message. category:{} id:{}\n{}",
+                                     category, static_cast<uint32_t>(id), description == nullptr ? "" : description);
+    _DispatchValidationMessage(device, _MapD3D12ValidationLogLevel(severity), message);
+}
+
+static void _LogDxgiValidationMessage(Nullable<DeviceD3D12*> device, const DXGI_INFO_QUEUE_MESSAGE& message) noexcept {
+    const auto text = fmt::format("dxgi validation message. category:{} id:{}\n{}",
+                                  static_cast<uint32_t>(message.Category), message.ID,
+                                  message.pDescription == nullptr ? "" : message.pDescription);
+    const auto severity = static_cast<D3D12_MESSAGE_SEVERITY>(message.Severity);
+    _DispatchValidationMessage(device, _MapD3D12ValidationLogLevel(severity), text);
+}
+
+static void _DrainNativeValidationMessages(ID3D12Device* device) noexcept {
+    ComPtr<ID3D12InfoQueue> queue;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(queue.GetAddressOf())))) return;
+    const auto count = queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    vector<byte> data;
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(queue->GetMessage(i, nullptr, &size)) || size < sizeof(D3D12_MESSAGE)) break;
+        data.resize(size);
+        if (FAILED(queue->GetMessage(i, reinterpret_cast<D3D12_MESSAGE*>(data.data()), &size))) break;
+        const auto* message = reinterpret_cast<const D3D12_MESSAGE*>(data.data());
+        _LogD3D12ValidationMessage(nullptr, message->Category, message->Severity, message->ID, message->pDescription);
+    }
+}
+
+static void _DrainNativeDxgiValidationMessages() noexcept {
+    ComPtr<IDXGIInfoQueue> queue;
+    if (FAILED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(queue.GetAddressOf())))) return;
+    const auto count = queue->GetNumStoredMessagesAllowedByRetrievalFilters(DXGI_DEBUG_DXGI);
+    vector<byte> data;
+    for (UINT64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(queue->GetMessage(DXGI_DEBUG_DXGI, i, nullptr, &size)) || size < sizeof(DXGI_INFO_QUEUE_MESSAGE)) break;
+        data.resize(size);
+        if (FAILED(queue->GetMessage(DXGI_DEBUG_DXGI, i, reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(data.data()), &size))) break;
+        _LogDxgiValidationMessage(nullptr, *reinterpret_cast<const DXGI_INFO_QUEUE_MESSAGE*>(data.data()));
+    }
+}
+
+static void WINAPI _D3D12ValidationMessageCallback(
+    D3D12_MESSAGE_CATEGORY category,
+    D3D12_MESSAGE_SEVERITY severity,
+    D3D12_MESSAGE_ID id,
+    LPCSTR pDescription,
+    void* pContext) noexcept {
+    auto* device = static_cast<DeviceD3D12*>(pContext);
+    if (!device->_isDebugLayerEnabled) {
+        return;
+    }
+    _LogD3D12ValidationMessage(device, category, severity, id, pDescription);
+}
+
+// == 适配器枚举与选择 ==
+
+struct AdapterInfoD3D12 {
+    ComPtr<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 desc;
+    DXGIAdapterInfo publicInfo;
+};
+
+static string _GetAdapterName(const DXGI_ADAPTER_DESC1& desc) {
+    wstring name{desc.Description};
+    return ToMultiByte(name).value_or("???");
+}
+
+static bool _IsD3D12Supported(IDXGIAdapter1* adapter) noexcept {
+    return SUCCEEDED(::D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr));
+}
+
+static DXGI_FORMAT _SwapChainStorageFormat(TextureFormat format) noexcept {
+    // Flip-model swapchains store UNORM; the requested sRGB interpretation belongs to the RTV.
+    if (format == TextureFormat::BGRA8_UNORM_SRGB) return DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (format == TextureFormat::RGBA8_UNORM_SRGB) return DXGI_FORMAT_R8G8B8A8_UNORM;
+    return MapType(format);
+}
+
+static bool _IsPresentableHwnd(HWND hwnd) noexcept {
+    if (hwnd == nullptr || ::IsWindow(hwnd) == 0 || ::IsIconic(hwnd) != 0 || ::IsWindowVisible(hwnd) == 0) {
+        return false;
+    }
+    RECT client{};
+    if (::GetClientRect(hwnd, &client) == 0) {
+        return false;
+    }
+    return client.right > client.left && client.bottom > client.top;
+}
+
+static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    if (HRESULT hr = swapChain->_swapchain->GetDesc1(&desc); FAILED(hr)) {
+        swapChain->_device->TryDrainValidationMessages();
+        RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
+        return false;
+    }
+
+    vector<SwapChainD3D12::Frame> frames;
+    frames.reserve(desc.BufferCount);
+    for (UINT i = 0; i < desc.BufferCount; i++) {
+        auto& frame = frames.emplace_back();
+        ComPtr<ID3D12Resource> rt;
+        if (HRESULT hr = swapChain->_swapchain->GetBuffer(i, IID_PPV_ARGS(rt.GetAddressOf()));
+            FAILED(hr)) {
+            swapChain->_device->TryDrainValidationMessages();
+            RADRAY_ERR_LOG("IDXGISwapChain1::GetBuffer failed: {} {}", GetErrorName(hr), hr);
+            return false;
+        }
+        auto name = fmt::format("SwapChain_BackBuffer_{}", i);
+        frame.image = make_unique<TextureD3D12>(swapChain->_device, std::move(rt), ComPtr<D3D12MA::Allocation>{});
+        frame.image->_name = name;
+        frame.image->_dimension = TextureDimension::Dim2D;
+        frame.image->_format = swapChain->_reqFormat;
+        frame.image->_memory = MemoryType::Device;
+        frame.image->_usage = TextureUse::CopySource | TextureUse::CopyDestination;
+        if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) {
+            frame.image->_usage |= TextureUse::RenderTarget;
+        }
+        if (!(frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
+            frame.image->_usage |= TextureUse::Resource;
+        }
+        frame.image->_hints = ResourceHint::External;
+        SetObjectName(name, frame.image->_tex.Get());
+    }
+
+    swapChain->_frames = std::move(frames);
+    return true;
+}
+
+static DXGIAdapterInfo _MakeAdapterInfo(const DXGI_ADAPTER_DESC1& desc, uint32_t index, bool isD3D12Supported) {
+    DXGIAdapterInfo info{};
+    info.Index = index;
+    info.Name = _GetAdapterName(desc);
+    info.Type = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 ? PhysicalDeviceType::Cpu : PhysicalDeviceType::Other;
+    info.VendorId = desc.VendorId;
+    info.DeviceId = desc.DeviceId;
+    info.DedicatedVideoMemoryBytes = desc.DedicatedVideoMemory;
+    info.DedicatedSystemMemoryBytes = desc.DedicatedSystemMemory;
+    info.SharedSystemMemoryBytes = desc.SharedSystemMemory;
+    info.IsSoftware = (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+    info.IsD3D12Supported = isD3D12Supported;
+    return info;
+}
+
+static vector<AdapterInfoD3D12> _EnumerateAdapterInfos(IDXGIFactory4* factory, bool logAdapters) noexcept {
+    vector<AdapterInfoD3D12> result;
+    if (factory == nullptr) {
+        RADRAY_ERR_LOG("DXGIFactory is null");
+        return result;
+    }
+
+    for (uint32_t index = 0;; ++index) {
+        ComPtr<IDXGIAdapter1> adapter;
+        HRESULT hr = factory->EnumAdapters1(index, adapter.GetAddressOf());
+        if (hr == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        if (FAILED(hr)) {
+            RADRAY_ERR_LOG("IDXGIFactory4::EnumAdapters1 failed: index={} {} {}", index, GetErrorName(hr), hr);
+            break;
+        }
+
+        DXGI_ADAPTER_DESC1 desc{};
+        if (HRESULT descHr = adapter->GetDesc1(&desc); FAILED(descHr)) {
+            RADRAY_WARN_LOG("IDXGIAdapter1::GetDesc1 failed: index={} {} {}", index, GetErrorName(descHr), descHr);
+            continue;
+        }
+
+        const bool d3d12Supported = _IsD3D12Supported(adapter.Get());
+        auto publicInfo = _MakeAdapterInfo(desc, index, d3d12Supported);
+        if (logAdapters && !publicInfo.IsSoftware) {
+            RADRAY_INFO_LOG("d3d12 find adapter: {}", publicInfo.Name);
+        }
+        result.emplace_back(AdapterInfoD3D12{std::move(adapter), desc, std::move(publicInfo)});
+    }
+    return result;
+}
+
+static std::optional<uint32_t> _FindAdapterIndexByLuid(std::span<const AdapterInfoD3D12> adapters, LUID luid) noexcept {
+    for (const auto& adapter : adapters) {
+        if (adapter.desc.AdapterLuid.HighPart == luid.HighPart && adapter.desc.AdapterLuid.LowPart == luid.LowPart) {
+            return adapter.publicInfo.Index;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<uint32_t> _SelectHighPerformanceAdapterIndex(IDXGIFactory4* factory, std::span<const AdapterInfoD3D12> adapters) noexcept {
+    if (adapters.empty()) {
+        return std::nullopt;
+    }
+
+    ComPtr<IDXGIFactory6> factory6;
+    if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(factory6.GetAddressOf())))) {
+        ComPtr<IDXGIAdapter1> adapter;
+        for (
+            uint32_t adapterIndex = 0;
+            factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.ReleaseAndGetAddressOf())) != DXGI_ERROR_NOT_FOUND;
+            ++adapterIndex) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (FAILED(adapter->GetDesc1(&desc))) {
+                continue;
+            }
+            if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || !_IsD3D12Supported(adapter.Get())) {
+                continue;
+            }
+            auto index = _FindAdapterIndexByLuid(adapters, desc.AdapterLuid);
+            if (index.has_value()) {
+                return index.value();
+            }
+        }
+    }
+
+    for (const auto& adapter : adapters) {
+        if (!adapter.publicInfo.IsSoftware && adapter.publicInfo.IsD3D12Supported) {
+            return adapter.publicInfo.Index;
+        }
+    }
+    return std::nullopt;
+}
+
+// == 描述符堆 ==
+
+DescriptorHeap::DescriptorHeap(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
+    : _device(device) {
+    if (HRESULT hr = _device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(_heap.GetAddressOf()));
+        FAILED(hr)) {
+        _DrainNativeValidationMessages(_device);
+        RADRAY_ABORT("ID3D12Device::CreateDescriptorHeap failed: {} {}", GetErrorName(hr), hr);
+    }
+    _desc = _heap->GetDesc();
+    _cpuStart = _heap->GetCPUDescriptorHandleForHeapStart();
+    _gpuStart = IsShaderVisible() ? _heap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{0};
+    _incrementSize = _device->GetDescriptorHandleIncrementSize(_desc.Type);
+    RADRAY_DEBUG_LOG(
+        "create DescriptorHeap. Type={}, IsShaderVisible={}, IncrementSize={}, Length={}, all={}(bytes)",
+        _desc.Type,
+        IsShaderVisible(),
+        _incrementSize,
+        _desc.NumDescriptors,
+        UINT64(_desc.NumDescriptors) * _incrementSize);
+}
+
+ID3D12DescriptorHeap* DescriptorHeap::Get() const noexcept {
+    return _heap.Get();
+}
+
+D3D12_DESCRIPTOR_HEAP_TYPE DescriptorHeap::GetHeapType() const noexcept {
+    return _desc.Type;
+}
+
+UINT DescriptorHeap::GetLength() const noexcept {
+    return _desc.NumDescriptors;
+}
+
+bool DescriptorHeap::IsShaderVisible() const noexcept {
+    return (_desc.Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleGpu(UINT index) const noexcept {
+    return {_gpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeap::HandleCpu(UINT index) const noexcept {
+    return {_cpuStart.ptr + UINT64(index) * UINT64(_incrementSize)};
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateUnorderedAccessView(resource, nullptr, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateShaderResourceView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(const D3D12_CONSTANT_BUFFER_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateConstantBufferView(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_RENDER_TARGET_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateRenderTargetView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(ID3D12Resource* resource, const D3D12_DEPTH_STENCIL_VIEW_DESC& desc, UINT index) noexcept {
+    _device->CreateDepthStencilView(resource, &desc, HandleCpu(index));
+}
+
+void DescriptorHeap::Create(const D3D12_SAMPLER_DESC& desc, UINT index) noexcept {
+    _device->CreateSampler(&desc, HandleCpu(index));
+}
+
+void DescriptorHeap::CopyTo(UINT start, UINT count, DescriptorHeap* dst, UINT dstStart) noexcept {
+    _device->CopyDescriptorsSimple(
+        count,
+        dst->HandleCpu(dstStart),
+        HandleCpu(start),
+        _desc.Type);
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeapView::HandleGpu() const noexcept {
+    return Heap->HandleGpu(Start);
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeapView::HandleCpu() const noexcept {
+    return Heap->HandleCpu(Start);
+}
+
+bool DescriptorHeapView::IsValid() const noexcept {
+    return Heap != nullptr;
+}
+
+// == 描述符分配器 ==
+
+CpuDescriptorAllocator::CpuDescriptorAllocator(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT basicSize,
+    UINT keepFreePages) noexcept
+    : _device(device),
+      _type(type),
+      _basicSize(basicSize),
+      _freePageKeepCount(keepFreePages) {}
+
+CpuDescriptorAllocator::Page::Page(
+    unique_ptr<DescriptorHeap> heap,
+    ComPtr<D3D12MA::VirtualBlock> allocator,
+    size_t capacity) noexcept
+    : Heap(std::move(heap)),
+      Allocator(std::move(allocator)),
+      Capacity(capacity) {}
+
+std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    if (count == 0) {
+        return std::nullopt;
+    }
+    const size_t request = static_cast<size_t>(count);
+    D3D12MA::VIRTUAL_ALLOCATION_DESC allocDesc{};
+    allocDesc.Size = static_cast<UINT64>(request);
+    allocDesc.Alignment = 1;
+    if (!_pages.empty()) {
+        const size_t n = _pages.size();
+        const size_t start = (_hint < n) ? _hint : 0;
+        for (size_t step = 0; step < n; step++) {
+            const size_t pageIndex = (start + step) % n;
+            Page& page = *_pages[pageIndex];
+            if (page.Capacity - page.Used < request) {
+                continue;
+            }
+            D3D12MA::VirtualAllocation vAlloc{};
+            UINT64 offset = 0;
+            if (FAILED(page.Allocator->Allocate(&allocDesc, &vAlloc, &offset))) {
+                continue;
+            }
+            if (offset > static_cast<UINT64>(std::numeric_limits<UINT>::max())) {
+                page.Allocator->FreeAllocation(vAlloc);
+                continue;
+            }
+            page.Used += request;
+            _hint = pageIndex;
+            return std::make_optional(Allocation{
+                .Heap = page.Heap.get(),
+                .Start = static_cast<UINT>(offset),
+                .Length = count,
+                .PagePtr = _pages[pageIndex].get(),
+                .Offset = static_cast<size_t>(offset),
+                .VirtualAlloc = vAlloc,
+            });
+        }
+    }
+    const size_t desired = std::max<size_t>(static_cast<size_t>(_basicSize), request);
+    const size_t pageCapacity = std::bit_ceil(desired);
+    if (pageCapacity > static_cast<size_t>(std::numeric_limits<UINT>::max())) {
+        return std::nullopt;
+    }
+    auto heap = make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            _type,
+            static_cast<UINT>(pageCapacity),
+            D3D12_DESCRIPTOR_HEAP_FLAG_NONE,
+            0});
+    D3D12MA::VIRTUAL_BLOCK_DESC blockDesc{};
+    blockDesc.Size = static_cast<UINT64>(pageCapacity);
+    blockDesc.Flags = D3D12MA::VIRTUAL_BLOCK_FLAG_NONE;
+    ComPtr<D3D12MA::VirtualBlock> block;
+    if (FAILED(D3D12MA::CreateVirtualBlock(&blockDesc, block.GetAddressOf()))) {
+        return std::nullopt;
+    }
+    auto newPage = make_unique<Page>(std::move(heap), std::move(block), pageCapacity);
+    Page* newPagePtr = newPage.get();
+    _pages.emplace_back(std::move(newPage));
+    const size_t pageIndex = _pages.size() - 1;
+    _hint = pageIndex;
+    Page& page = *_pages.back();
+    D3D12MA::VirtualAllocation vAlloc{};
+    UINT64 offset = 0;
+    if (FAILED(page.Allocator->Allocate(&allocDesc, &vAlloc, &offset)) ||
+        offset > static_cast<UINT64>(std::numeric_limits<UINT>::max())) {
+        if (vAlloc.AllocHandle != 0) {
+            page.Allocator->FreeAllocation(vAlloc);
+        }
+        _pages.pop_back();
+        return std::nullopt;
+    }
+    page.Used += request;
+    return std::make_optional(Allocation{
+        .Heap = page.Heap.get(),
+        .Start = static_cast<UINT>(offset),
+        .Length = count,
+        .PagePtr = newPagePtr,
+        .Offset = static_cast<size_t>(offset),
+        .VirtualAlloc = vAlloc,
+    });
+}
+
+void CpuDescriptorAllocator::Destroy(CpuDescriptorAllocator::Allocation view) noexcept {
+    if (view.PagePtr == nullptr) {
+        return;
+    }
+    auto* page = view.PagePtr;
+    RADRAY_ASSERT(page->Heap.get() == view.Heap);
+    page->Allocator->FreeAllocation(view.VirtualAlloc);
+    page->Used -= static_cast<size_t>(view.Length);
+    if (page->Used == 0) {
+        TryReleaseFreePages();
+    }
+}
+
+void CpuDescriptorAllocator::TryReleaseFreePages() noexcept {
+    if (_freePageKeepCount == std::numeric_limits<uint32_t>::max()) {
+        return;
+    }
+    size_t freeCount = 0;
+    for (const auto& page : _pages) {
+        freeCount += (page->Used == 0) ? 1 : 0;
+    }
+    while (freeCount > static_cast<size_t>(_freePageKeepCount) && !_pages.empty()) {
+        size_t victim = _pages.size();
+        for (size_t i = _pages.size(); i-- > 0;) {
+            if (_pages[i]->Used == 0) {
+                victim = i;
+                break;
+            }
+        }
+        if (victim == _pages.size()) {
+            return;
+        }
+        const size_t last = _pages.size() - 1;
+        if (victim != last) {
+            std::swap(_pages[victim], _pages[last]);
+            if (_hint == last) {
+                _hint = victim;
+            }
+        }
+        _pages.pop_back();
+        if (_hint >= _pages.size()) {
+            _hint = 0;
+        }
+        --freeCount;
+    }
+}
+
+GpuDescriptorAllocator::GpuDescriptorAllocator(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT size) noexcept
+    : _device(device),
+      _allocator(size) {
+    _heap = make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            type,
+            static_cast<UINT>(size),
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            0});
+}
+
+std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    const auto allocation = _allocator.Allocate(count);
+    if (!allocation.has_value()) {
+        return std::nullopt;
+    }
+    const auto& v = allocation.value();
+    return std::make_optional(GpuDescriptorAllocator::Allocation{_heap.get(), static_cast<UINT>(v.Start), count, v});
+}
+
+void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept {
+    _allocator.Destroy(allocation.ParentAllocation);
+}
+
+// == DXGIFactory 与 DeviceD3D12 生命周期 ==
+
+struct DeviceD3D12::ValidationMessages {
+    struct Cursor {
+        bool Initialized{false};
+        bool SkipExisting{false};
+        UINT64 Next{0};
+        UINT64 Discarded{0};
+        vector<uint32_t> FilterKey{};
+        vector<byte> Scratch{};
+    };
+    ComPtr<ID3D12InfoQueue> D3D12;
+    ComPtr<IDXGIInfoQueue> Dxgi;
+    Cursor D3D12Cursor;
+    Cursor DxgiCursor{.SkipExisting = true};
+    std::mutex Mutex;
+};
+
+template <typename Message, typename Filter, typename Cursor, typename GetFilter, typename GetCount, typename GetMessage, typename GetDiscarded, typename LogMessage>
+static void _DrainValidationQueue(DeviceD3D12* device, std::string_view name, Cursor& cursor,
+                                  GetFilter getFilter, GetCount getCount, GetMessage getMessage,
+                                  GetDiscarded getDiscarded, LogMessage logMessage) noexcept {
+    SIZE_T size = 0;
+    HRESULT hr = getFilter(static_cast<Filter*>(nullptr), &size);
+    if (FAILED(hr)) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation filter query failed: {} {}", name, GetErrorName(hr), hr));
+        return;
+    }
+    cursor.Scratch.resize(std::max(size, sizeof(Filter)));
+    size = cursor.Scratch.size();
+    auto* filter = reinterpret_cast<Filter*>(cursor.Scratch.data());
+    hr = getFilter(filter, &size);
+    if (FAILED(hr)) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation filter retrieval failed: {} {}", name, GetErrorName(hr), hr));
+        return;
+    }
+    vector<uint32_t> key;
+    const auto append = [&key](const auto& list) {
+        key.push_back(list.NumCategories);
+        for (UINT i = 0; i < list.NumCategories; ++i) key.push_back(static_cast<uint32_t>(list.pCategoryList[i]));
+        key.push_back(list.NumSeverities);
+        for (UINT i = 0; i < list.NumSeverities; ++i) key.push_back(static_cast<uint32_t>(list.pSeverityList[i]));
+        key.push_back(list.NumIDs);
+        for (UINT i = 0; i < list.NumIDs; ++i) key.push_back(static_cast<uint32_t>(list.pIDList[i]));
+    };
+    append(filter->AllowList);
+    append(filter->DenyList);
+    const UINT64 count = getCount();
+    const UINT64 discarded = getDiscarded();
+    if (!cursor.Initialized) {
+        cursor.Initialized = true;
+        cursor.FilterKey = std::move(key);
+        if (cursor.SkipExisting) {
+            cursor.Next = count;
+            cursor.Discarded = discarded;
+        }
+    } else if (key != cursor.FilterKey || count < cursor.Next) {
+        cursor.Next = 0;
+        cursor.FilterKey = std::move(key);
+    }
+    if (discarded > cursor.Discarded) {
+        _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} discarded {} validation messages due to its message count limit", name, discarded - cursor.Discarded));
+    }
+    cursor.Discarded = discarded;
+    for (; cursor.Next < count; ++cursor.Next) {
+        size = 0;
+        hr = getMessage(cursor.Next, static_cast<Message*>(nullptr), &size);
+        if (FAILED(hr) || size < sizeof(Message)) {
+            _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation message {} size query failed: {} {}; message retained", name, cursor.Next, GetErrorName(hr), hr));
+            return;
+        }
+        cursor.Scratch.resize(size);
+        auto* message = reinterpret_cast<Message*>(cursor.Scratch.data());
+        hr = getMessage(cursor.Next, message, &size);
+        if (FAILED(hr)) {
+            _DispatchValidationMessage(device, LogLevel::Err, fmt::format("{} validation message {} retrieval failed: {} {}; message retained", name, cursor.Next, GetErrorName(hr), hr));
+            return;
+        }
+        logMessage(*message);
+    }
+}
+
+DXGIFactoryImpl::DXGIFactoryImpl(
+    ComPtr<IDXGIFactory4> factory,
+    const DXGIFactoryDescriptor& desc,
+    bool validationEnabled) noexcept
+    : _factory(std::move(factory)),
+      _desc(desc),
+      _validationEnabled(validationEnabled) {}
+
+DXGIFactoryImpl::~DXGIFactoryImpl() noexcept {
+    DestroyImpl();
+}
+
+bool DXGIFactoryImpl::IsValid() const noexcept {
+    return _factory != nullptr;
+}
+
+void DXGIFactoryImpl::Destroy() noexcept {
+    DestroyImpl();
+}
+
+void DXGIFactoryImpl::DestroyImpl() noexcept {
+    _factory = nullptr;
+    _desc.LogCallback = nullptr;
+    _desc.LogUserData = nullptr;
+}
+
+vector<DXGIAdapterInfo> DXGIFactoryImpl::GetAdapters() const noexcept {
+    vector<DXGIAdapterInfo> result;
+    auto adapters = _EnumerateAdapterInfos(_factory.Get(), false);
+    result.reserve(adapters.size());
+    for (const auto& adapter : adapters) {
+        result.emplace_back(adapter.publicInfo);
+    }
+    return result;
+}
+
+std::optional<uint32_t> DXGIFactoryImpl::SelectHighPerformanceAdapter() const noexcept {
+    auto adapters = _EnumerateAdapterInfos(_factory.Get(), false);
+    return _SelectHighPerformanceAdapterIndex(_factory.Get(), adapters);
+}
+
+Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc) {
+    uint32_t dxgiFactoryFlags = 0;
+    bool validationEnabled = false;
+    if (desc.IsEnableDebugLayer) {
+        ComPtr<ID3D12Debug> debugController;
+        if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
+            debugController->EnableDebugLayer();
+            validationEnabled = true;
+            dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            if (desc.IsEnableGpuBasedValid) {
+                ComPtr<ID3D12Debug1> debug1;
+                if (SUCCEEDED(debugController.As(&debug1))) {
+                    debug1->SetEnableGPUBasedValidation(true);
+                } else {
+                    RADRAY_WARN_LOG("ID3D12Debug::As<ID3D12Debug1> failed: {}", "cannot enable gpu based validation");
+                }
+            }
+        } else {
+            RADRAY_WARN_LOG("D3D12GetDebugInterface failed: {}", "cannot enable gpu based validation");
+        }
+    }
+
+    ComPtr<IDXGIFactory4> factory;
+    if (HRESULT hr = ::CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(factory.GetAddressOf()));
+        FAILED(hr)) {
+        _DrainNativeDxgiValidationMessages();
+        RADRAY_ERR_LOG("CreateDXGIFactory2 failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<DXGIFactoryImpl>(factory, desc, validationEnabled);
+}
+
+DeviceD3D12::DeviceD3D12(
+    ComPtr<ID3D12Device> device,
+    ComPtr<IDXGIFactory4> dxgiFactory,
+    ComPtr<IDXGIAdapter1> dxgiAdapter,
+    ComPtr<D3D12MA::Allocator> mainAlloc,
+    const DXGIFactoryDescriptor& diagnostics) noexcept
+    : _device(std::move(device)),
+      _dxgiFactory(std::move(dxgiFactory)),
+      _dxgiAdapter(std::move(dxgiAdapter)),
+      _mainAlloc(std::move(mainAlloc)),
+      _samplerCache(this) {
+    _isDebugLayerEnabled = diagnostics.IsEnableDebugLayer;
+    _logCallback = diagnostics.LogCallback;
+    _logUserData = diagnostics.LogUserData;
+    if (_isDebugLayerEnabled) {
+        _validationMessages = make_unique<ValidationMessages>();
+        if (SUCCEEDED(_device.As(&_validationMessages->D3D12))) {
+            const HRESULT hr = _validationMessages->D3D12->SetMessageCountLimit(std::numeric_limits<UINT64>::max());
+            if (FAILED(hr)) RADRAY_WARN_LOG("D3D12 validation message count limit setup failed: {} {}", GetErrorName(hr), hr);
+        }
+        if (SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(_validationMessages->Dxgi.GetAddressOf())))) {
+            const HRESULT hr = _validationMessages->Dxgi->SetMessageCountLimit(DXGI_DEBUG_DXGI, std::numeric_limits<UINT64>::max());
+            if (FAILED(hr)) RADRAY_WARN_LOG("DXGI validation message count limit setup failed: {} {}", GetErrorName(hr), hr);
+        }
+        ComPtr<ID3D12InfoQueue1> queue;
+        if (SUCCEEDED(_device.As(&queue))) {
+            DWORD cookie = 0;
+            const HRESULT hr = queue->RegisterMessageCallback(&_D3D12ValidationMessageCallback, D3D12_MESSAGE_CALLBACK_FLAG_NONE, this, &cookie);
+            if (SUCCEEDED(hr))
+                _infoQueueCallbackCookie = cookie;
+            else
+                RADRAY_WARN_LOG("D3D12 validation callback registration failed: {} {}; using polling", GetErrorName(hr), hr);
+        }
+        TryDrainValidationMessages();
+    }
+    _drawIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(DrawIndirectArguments));
+    _drawIndexedIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(DrawIndexedIndirectArguments));
+    _dispatchIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(DispatchIndirectArguments));
+    _cpuResAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 512, 1);
+    _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128, 1);
+    _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128, 1);
+    _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 128, 1);
+    _gpuResHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
+    _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE);
+    _features.Init(_device.Get());
+    _pipelineLayoutCache = make_unique<PipelineLayoutCacheD3D12>(this);
+    TryDrainValidationMessages();
+}
+
+DeviceD3D12::~DeviceD3D12() noexcept {
+    DestroyImpl();
+}
+
+bool DeviceD3D12::IsValid() const noexcept {
+    return _device != nullptr && _dxgiAdapter != nullptr && _dxgiFactory != nullptr;
+}
+
+void DeviceD3D12::Destroy() noexcept {
+    DestroyImpl();
+}
+
+void DeviceD3D12::DestroyImpl() noexcept {
+    if (!_device) return;
+    TryDrainValidationMessages();
+    for (auto& queues : _queues) queues.clear();
+    _pipelineLayoutCache.reset();
+    _samplerCache.Clear();
+    _gpuResHeap = nullptr;
+    _gpuSamplerHeap = nullptr;
+    _cpuResAlloc = nullptr;
+    _cpuRtvAlloc = nullptr;
+    _cpuDsvAlloc = nullptr;
+    _cpuSamplerAlloc = nullptr;
+    _drawIndirectSignature = nullptr;
+    _drawIndexedIndirectSignature = nullptr;
+    _dispatchIndirectSignature = nullptr;
+    _mainAlloc = nullptr;
+    TryDrainValidationMessages();
+    if (_infoQueueCallbackCookie.has_value()) {
+        ComPtr<ID3D12InfoQueue1> infoQueue1;
+        if (SUCCEEDED(_device.As(&infoQueue1))) {
+            infoQueue1->UnregisterMessageCallback(*_infoQueueCallbackCookie);
+        }
+    }
+    _infoQueueCallbackCookie.reset();
+    _validationMessages.reset();
+    _isDebugLayerEnabled = false;
+    _logCallback = nullptr;
+    _logUserData = nullptr;
+
+    _device = nullptr;
+    _dxgiAdapter = nullptr;
+    _dxgiFactory = nullptr;
+}
+
+// == CreateDevice ==
+
+Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
+    if (desc.Factory == nullptr || !desc.Factory->IsValid()) {
+        RADRAY_ERR_LOG("DXGIFactory is null or invalid");
+        return nullptr;
+    }
+
+    auto* factoryImpl = CastD3D12Object(desc.Factory);
+    ComPtr<IDXGIFactory4> dxgiFactory = factoryImpl->_factory;
+    auto adapters = _EnumerateAdapterInfos(dxgiFactory.Get(), true);
+    if (adapters.empty()) {
+        RADRAY_ERR_LOG("d3d12 cannot find available adapter");
+        return nullptr;
+    }
+
+    uint32_t selectedAdapterIndex = std::numeric_limits<uint32_t>::max();
+    if (desc.AdapterIndex.has_value()) {
+        selectedAdapterIndex = desc.AdapterIndex.value();
+    } else {
+        auto selected = _SelectHighPerformanceAdapterIndex(dxgiFactory.Get(), adapters);
+        if (!selected.has_value()) {
+            RADRAY_ERR_LOG("d3d12 cannot find available adapter");
+            return nullptr;
+        }
+        selectedAdapterIndex = selected.value();
+    }
+
+    ComPtr<IDXGIAdapter1> adapter;
+    for (const auto& adapterInfo : adapters) {
+        if (adapterInfo.publicInfo.Index == selectedAdapterIndex) {
+            adapter = adapterInfo.adapter;
+            break;
+        }
+    }
+    if (adapter == nullptr) {
+        RADRAY_ERR_LOG("d3d12 cannot find adapter: index={}", selectedAdapterIndex);
+        return nullptr;
+    }
+    ComPtr<ID3D12Device> device;
+    if (HRESULT hr = ::D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device.GetAddressOf()));
+        FAILED(hr)) {
+        _DrainNativeDxgiValidationMessages();
+        RADRAY_ERR_LOG("D3D12CreateDevice failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    {
+        DXGI_ADAPTER_DESC1 adapDesc{};
+        adapter->GetDesc1(&adapDesc);
+        wstring s{adapDesc.Description};
+        RADRAY_INFO_LOG("d3d12 select adapter: {}", ToMultiByte(s).value_or("???"));
+    }
+    ComPtr<D3D12MA::Allocator> alloc;
+    {
+        D3D12MA::ALLOCATOR_DESC allocDesc{};
+        allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
+        allocDesc.pDevice = device.Get();
+        allocDesc.pAdapter = adapter.Get();
+        allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED;
+        if (HRESULT hr = D3D12MA::CreateAllocator(&allocDesc, alloc.GetAddressOf());
+            FAILED(hr)) {
+            _DrainNativeValidationMessages(device.Get());
+            RADRAY_ERR_LOG("D3D12MA::CreateAllocator failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    }
+    auto diagnostics = factoryImpl->_desc;
+    diagnostics.IsEnableDebugLayer = factoryImpl->_validationEnabled;
+    auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc, diagnostics);
+    DeviceDetail& detail = result->_capabilities.Detail;
+    detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    detail.BufferCopyOffsetAlignment = 1;
+    detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    detail.TextureDataPlacementAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    detail.MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
+    {
+        DXGI_ADAPTER_DESC1 adapDesc{};
+        if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
+            wstring name{adapDesc.Description};
+            detail.GpuName = ToMultiByte(name).value_or("???");
+        }
+    }
+    {
+        ComPtr<IDXGIAdapter3> adapter3;
+        if (SUCCEEDED(adapter.As(&adapter3))) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO memInfo{};
+            if (HRESULT hr = adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo);
+                SUCCEEDED(hr)) {
+                detail.VramBudget = memInfo.Budget;
+            }
+        }
+    }
+    RADRAY_INFO_LOG("========== Feature ==========");
+    {
+        LARGE_INTEGER l;
+        HRESULT hr = adapter->CheckInterfaceSupport(IID_IDXGIDevice, &l);
+        if (SUCCEEDED(hr)) {
+            const int64_t mask = 0xFFFF;
+            auto quad = l.QuadPart;
+            auto ver = fmt::format(
+                "{}.{}.{}.{}",
+                quad >> 48,
+                (quad >> 32) & mask,
+                (quad >> 16) & mask,
+                quad & mask);
+            RADRAY_INFO_LOG("d3d12 driver Version: {}", ver);
+        } else {
+            RADRAY_WARN_LOG("IDXGIAdapter::CheckInterfaceSupport failed: {} {}", GetErrorName(hr), hr);
+        }
+    }
+    {
+        BOOL allowTearing = FALSE;
+        ComPtr<IDXGIFactory6> factory6;
+        if (SUCCEEDED(dxgiFactory.As(&factory6))) {
+            if (HRESULT hr = factory6->CheckFeatureSupport(
+                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                    &allowTearing,
+                    sizeof(allowTearing));
+                FAILED(hr)) {
+                RADRAY_WARN_LOG("IDXGIFactory6::CheckFeatureSupport failed: {} {}", GetErrorName(hr), hr);
+            }
+        }
+        RADRAY_INFO_LOG("Allow Tearing: {}", static_cast<bool>(allowTearing));
+        result->_isAllowTearing = allowTearing;
+    }
+    const CD3DX12FeatureSupport& fs = result->_features;
+    if (SUCCEEDED(fs.GetStatus())) {
+        RADRAY_INFO_LOG("Feature Level: {}", fs.MaxSupportedFeatureLevel());
+        RADRAY_INFO_LOG("Shader Model: {}", fs.HighestShaderModel());
+        RADRAY_INFO_LOG("Resource Binding Tier: {}", fs.ResourceBindingTier());
+        RADRAY_INFO_LOG("Resource Heap Tier: {}", fs.ResourceHeapTier());
+        RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
+        detail.IsUMA = static_cast<bool>(fs.UMA());
+        RADRAY_INFO_LOG("UMA: {}", detail.IsUMA);
+    } else {
+        RADRAY_WARN_LOG("CD3DX12FeatureSupport::GetStatus failed");
+    }
+    {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+        if (HRESULT hr = device->CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
+            SUCCEEDED(hr)) {
+            detail.IsLayeredRenderingFromVertexShaderSupported =
+                static_cast<bool>(options.VPAndRTArrayIndexFromAnyShaderFeedingRasterizerSupportedWithoutGSEmulation);
+            RADRAY_INFO_LOG(
+                "Layered Rendering From Vertex Shader: {}",
+                detail.IsLayeredRenderingFromVertexShaderSupported);
+        } else {
+            RADRAY_WARN_LOG(
+                "ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS) failed: {} {}",
+                GetErrorName(hr),
+                hr);
+        }
+    }
+    auto& caps = result->_capabilities;
+    caps.Limits = {
+        .MaxColorAttachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+        .MaxTexture1DDimension = D3D12_REQ_TEXTURE1D_U_DIMENSION,
+        .MaxTexture2DDimension = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+        .MaxTexture3DDimension = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
+        .MaxTextureArrayLayers = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
+        .MaxBufferSize = D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_A_TERM * uint64_t{1024 * 1024},
+        .MaxUniformBufferRange = D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * uint64_t{16},
+        .MaxPushConstantBytes = D3D12_MAX_ROOT_COST * 4,
+        .CBufferOffsetAlignment = detail.CBufferAlignment,
+        .StorageBufferOffsetAlignment = 4};
+    caps.Features = {
+        .TimestampQueries = true,
+        .IndirectDraw = true,
+        .IndirectDispatch = true,
+        .SubresourceBarriers = true,
+        .UavMemoryBarrier = true,
+        .UavWriteStages = render::ShaderStage::Pixel | render::ShaderStage::Compute};
+    if (SUCCEEDED(fs.GetStatus()) &&
+        fs.MaxSupportedFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) {
+        caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
+    }
+    DXGI_ADAPTER_DESC1 memoryDesc{};
+    if (SUCCEEDED(adapter->GetDesc1(&memoryDesc))) {
+        const uint64_t memory = memoryDesc.DedicatedVideoMemory != 0 ? memoryDesc.DedicatedVideoMemory : memoryDesc.SharedSystemMemory;
+        caps.Limits.MaxBufferSize = std::max(caps.Limits.MaxBufferSize,
+                                             std::min(uint64_t{D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_C_TERM} * 1024 * 1024, memory / 4));
+    }
+    if (!result->CreateQueues(desc.QueueCounts)) return nullptr;
+    result->_textureSupportCache = detail::CacheCommonTextureSupport(*result);
+    RADRAY_INFO_LOG("=============================");
+    return result;
+}
+
+// == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
+
+DeviceDetail DeviceD3D12::GetDetail() const noexcept {
+    return _capabilities.Detail;
+}
+
+Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
+    const size_t index = static_cast<size_t>(type);
+    if (index >= _queues.size() || slot >= _queues[index].size()) return nullptr;
+    return _queues[index][slot].get();
+}
+
+bool DeviceD3D12::CreateQueues(const array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)>& counts) noexcept {
+    for (size_t index = 0; index < counts.size(); ++index) {
+        for (uint32_t slot = 0; slot < counts[index]; ++slot) {
+            auto fence = CreateFenceD3D12(0);
+            if (!fence) return false;
+            ComPtr<ID3D12CommandQueue> queue;
+            D3D12_COMMAND_QUEUE_DESC desc{};
+            desc.Type = MapType(static_cast<QueueType>(index));
+            if (const HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf())); FAILED(hr)) {
+                TryDrainValidationMessages();
+                RADRAY_ERR_LOG("ID3D12Device::CreateCommandQueue failed: {} {}", GetErrorName(hr), hr);
+                return false;
+            }
+            auto instance = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, fence.Release());
+            SetObjectName(fmt::format("Queue-{}-{}", static_cast<QueueType>(index), slot), instance->_queue.Get());
+            _queues[index].push_back(std::move(instance));
+        }
+        _capabilities.Queues[index] = {counts[index], false};
+    }
+    return true;
+}
+
+TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
+    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
+        if (cachedQuery == query) return cachedSupport;
+    }
+    if (!IsValidTextureSupportQuery(query)) return {};
+    const DXGI_FORMAT format = MapType(query.Format);
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format, {}, {}};
+    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))) return {};
+    D3D12_FORMAT_SUPPORT1 dimension{};
+    switch (query.Dimension) {
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim1DArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE1D; break;
+        case TextureDimension::Dim2D:
+        case TextureDimension::Dim2DArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE2D; break;
+        case TextureDimension::Cube:
+        case TextureDimension::CubeArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURECUBE; break;
+        case TextureDimension::Dim3D: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE3D; break;
+        default: return {};
+    }
+    if ((support.Support1 & dimension) == 0) return {};
+    if (query.Usage.HasFlag(TextureUse::RenderTarget) && (support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0) return {};
+    if ((query.Usage & (TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) &&
+        (support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL) == 0) return {};
+    if (query.Usage.HasFlag(TextureUse::UnorderedAccess) &&
+        ((support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) == 0 ||
+         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) == 0 ||
+         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) == 0)) return {};
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT sampledSupport{MapShaderResourceType(query.Format), {}, {}};
+    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &sampledSupport, sizeof(sampledSupport)))) return {};
+    if (query.Usage.HasFlag(TextureUse::Resource) &&
+        (sampledSupport.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)) == 0) return {};
+    TextureSupport result{};
+    result.LinearFiltering = (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
+    result.Blending = (support.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE) != 0;
+    const bool is1D = query.Dimension == TextureDimension::Dim1D || query.Dimension == TextureDimension::Dim1DArray;
+    const bool is3D = query.Dimension == TextureDimension::Dim3D;
+    const auto& limits = _capabilities.Limits;
+    result.MaxWidth = is1D ? limits.MaxTexture1DDimension : is3D ? limits.MaxTexture3DDimension
+                                                                 : limits.MaxTexture2DDimension;
+    result.MaxHeight = is1D ? 1 : result.MaxWidth;
+    result.MaxDepth = is3D ? limits.MaxTexture3DDimension : 1;
+    result.MaxArrayLayers = is3D ? 1 : limits.MaxTextureArrayLayers;
+    result.MaxMipLevels = D3D12_REQ_MIP_LEVELS;
+    result.MaxResourceSize = limits.MaxBufferSize;
+    for (uint32_t samples = 1; samples <= 16; samples *= 2) {
+        if (samples > 1 && (query.Usage.HasFlag(TextureUse::UnorderedAccess) ||
+                            (query.Dimension != TextureDimension::Dim2D && query.Dimension != TextureDimension::Dim2DArray))) break;
+        if (samples > 1 && query.Usage.HasFlag(TextureUse::Resource) &&
+            (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD) == 0) continue;
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality{format, samples, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0};
+        if (SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality, sizeof(quality))) && quality.NumQualityLevels > 0) {
+            result.SampleCounts |= static_cast<SampleCount>(samples);
+        }
+    }
+    result.Supported = bool(result.SampleCounts);
+    return result;
+}
+
+Nullable<unique_ptr<CommandAllocator>> DeviceD3D12::CreateCommandAllocator(CommandQueue* queue_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    Nullable<CmdQueueD3D12*> queue = CastD3D12Object(queue_);
+    ComPtr<ID3D12CommandAllocator> allocator;
+    const HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
+    if (FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<CommandAllocatorD3D12>(this, queue.Get(), std::move(allocator));
+}
+
+Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllocator* allocator_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    Nullable<CommandAllocatorD3D12*> allocator = CastD3D12Object(allocator_);
+    auto* queue = allocator->_queue;
+    HRESULT hr;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12Device4> device4;
+    if (SUCCEEDED(_device.As(&device4))) {
+        hr = device4->CreateCommandList1(0, queue->_type, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(list.GetAddressOf()));
+    } else {
+        hr = _device->CreateCommandList(0, queue->_type, allocator->_native.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        if (SUCCEEDED(hr)) _CheckD3D12Result(this, list->Close(), "ID3D12GraphicsCommandList::Close");
+    }
+    if (FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type);
+}
+
+Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+    return this->CreateFenceD3D12(0);
+}
+
+Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    D3D12_QUERY_HEAP_DESC heapDesc{};
+    heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    heapDesc.Count = desc.Count;
+    heapDesc.NodeMask = 0;
+
+    ComPtr<ID3D12QueryHeap> heap;
+    if (HRESULT hr = _device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(heap.GetAddressOf()));
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("ID3D12Device::CreateQueryHeap failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+
+    auto result = make_unique<QueryPoolD3D12>(this, std::move(heap), desc.Type, desc.Count);
+    if (!desc.DebugName.empty()) {
+        result->SetDebugName(desc.DebugName);
+    }
+    return result;
+}
+
+Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
+    DXGI_SWAP_CHAIN_DESC1 scDesc{};
+    scDesc.Width = desc.Width;
+    scDesc.Height = desc.Height;
+    scDesc.Format = _SwapChainStorageFormat(desc.Format);
+    scDesc.Stereo = false;
+    scDesc.SampleDesc.Count = 1;
+    scDesc.SampleDesc.Quality = 0;
+    scDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    scDesc.BufferCount = desc.BackBufferCount;
+    scDesc.Scaling = DXGI_SCALING_STRETCH;
+    scDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scDesc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    scDesc.Flags = 0;
+    scDesc.Flags |= _isAllowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    scDesc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    auto queue = CastD3D12Object(desc.PresentQueue);
+    HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
+    ComPtr<IDXGISwapChain1> temp;
+    if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
+        FAILED(hr)) {
+        RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
+    }
+    ComPtr<IDXGISwapChain3> swapchain;
+    if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    constexpr uint32_t MaximumFrameLatency = 3;
+    if (HRESULT hr = swapchain->SetMaximumFrameLatency(MaximumFrameLatency); FAILED(hr)) {
+        RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency({}) failed: {} {}", MaximumFrameLatency, GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
+    result->_frameLatencyEvent = swapchain->GetFrameLatencyWaitableObject();
+    if (!_RefreshSwapChainBackBuffers(result.get())) {
+        return nullptr;
+    }
+    return result;
+}
+
+Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    BufferDescriptor desc = desc_;
+    const uint64_t logicalSize = desc.Size;
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    // Alignment must be 64KB (D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT) or 0, which is effectively 64KB.
+    // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_desc
+    resDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    // D3D12 要求 cbuffer 是 256 字节对齐
+    // https://github.com/d3dcoder/d3d12book/blob/master/Common/d3dUtil.h#L99
+    uint64_t allocSize = desc.Usage.HasFlag(BufferUse::CBuffer)
+                             ? Align(desc.Size, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT)
+                             : desc.Size;
+    resDesc.Width = allocSize;
+    resDesc.Height = 1;
+    resDesc.DepthOrArraySize = 1;
+    resDesc.MipLevels = 1;
+    resDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resDesc.SampleDesc.Count = 1;
+    resDesc.SampleDesc.Quality = 0;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (desc.Memory == MemoryType::ReadBack) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    }
+    UINT64 paddedSize;
+    _device->GetCopyableFootprints(&resDesc, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
+    if (paddedSize != UINT64_MAX) {
+        allocSize = paddedSize;
+        resDesc.Width = paddedSize;
+    }
+    D3D12_RESOURCE_STATES rawInitState = MapMemoryTypeToResourceState(desc.Memory);
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = MapType(desc.Memory);
+    allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+    ComPtr<ID3D12Resource> buffer;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    /**
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_heap_type
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
+     * upload 和 readback 只能以 GENERIC_READ 和 COPY_DEST 状态创建且不可转换。而 UAV 需要 UNORDERED_ACCESS 状态，需求冲突
+     * 利用 Custom 堆开启 L0 系统内存并设置 WRITE_COMBINE 可以绕开 Abstract 堆的限制
+     * L0 系统内存既可由 CPU 读写，NUMA 可由设备通过 PCIe 读写，UMA 更是能直接读写，可以同时满足 CPU 想 Mapped 读写，GPU 想 UAV 读写的需求
+     * WRITE_COMBINE 设置后 CPU 写入会合并到缓冲区批量提交，NUMA 通过 PCIe 上传到设备。但 CPU 读取会变慢
+     */
+    if (allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT && (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
+        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+        heapProps.VisibleNodeMask = 0;
+        heapProps.CreationNodeMask = 0;
+        if (rawInitState == D3D12_RESOURCE_STATE_GENERIC_READ) {
+            rawInitState = D3D12_RESOURCE_STATE_COMMON;
+        }
+        if (HRESULT hr = _device->CreateCommittedResource(
+                &heapProps,
+                allocDesc.ExtraHeapFlags,
+                &resDesc,
+                rawInitState,
+                nullptr,
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            TryDrainValidationMessages();
+            RADRAY_ERR_LOG("ID3D12Device::CreateCommittedResource failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    } else {
+        if (HRESULT hr = _mainAlloc->CreateResource(
+                &allocDesc,
+                &resDesc,
+                rawInitState,
+                nullptr,
+                allocRes.GetAddressOf(),
+                IID_PPV_ARGS(buffer.GetAddressOf()));
+            FAILED(hr)) {
+            TryDrainValidationMessages();
+            RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+    }
+    auto result = make_unique<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
+    result->_reqSize = logicalSize;
+    return result;
+}
+
+// == Device: texture 与 texture view ==
+
+Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    TextureDescriptor desc = desc_;
+    DXGI_FORMAT rawFormat = MapType(desc.Format);
+    D3D12_RESOURCE_DESC resDesc{};
+    resDesc.Dimension = MapType(desc.Dim);
+    resDesc.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+    resDesc.Width = desc.Width;
+    resDesc.Height = desc.Height;
+    resDesc.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
+    resDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
+    resDesc.Format = FormatToTypeless(rawFormat);
+    /**
+     * https://learn.microsoft.com/en-us/windows/win32/api/dxgicommon/ns-dxgicommon-dxgi_sample_desc
+     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_multisample_quality_levels
+     * https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules#multisample-anti-aliasing-rasterization-rules
+     * 无 MSAA 时 quality 必须为 0 或 1
+     * DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN 使用标准的 MSAA 模式, 避免厂商差异
+     * 使用前需要调用 CheckFeatureSupport 确定 Format 支持的 quality，或直接用 DXGI_STANDARD_MULTISAMPLE_QUALITY_PATTERN
+     */
+    resDesc.SampleDesc.Count = desc.SampleCount ? desc.SampleCount : 1;
+    resDesc.SampleDesc.Quality = 0;
+    resDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    }
+    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
+        resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
+    D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
+    // 优化 clear value 尚未接线: TextureDescriptor 不带 clear value, 故恒传 nullptr。
+    const D3D12_CLEAR_VALUE* clearPtr = nullptr;
+    D3D12MA::ALLOCATION_DESC allocDesc{};
+    allocDesc.HeapType = MapType(desc.Memory);
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+        allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
+    }
+    ComPtr<ID3D12Resource> texture;
+    ComPtr<D3D12MA::Allocation> allocRes;
+    if (HRESULT hr = _mainAlloc->CreateResource(
+            &allocDesc,
+            &resDesc,
+            startState,
+            clearPtr,
+            allocRes.GetAddressOf(),
+            IID_PPV_ARGS(texture.GetAddressOf()));
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = make_unique<TextureD3D12>(this, std::move(texture), std::move(allocRes));
+    result->_dimension = desc.Dim;
+    result->_format = desc.Format;
+    result->_memory = desc.Memory;
+    result->_usage = desc.Usage;
+    result->_hints = desc.Hints;
+    return result;
+}
+
+Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
+    // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
+    auto tex = CastD3D12Object(desc.Target);
+    const bool multisampled = tex->_rawDesc.SampleDesc.Count > 1;
+    auto requestedRange = desc.Range;
+    if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && requestedRange.ArrayLayerCount == SubresourceRange::All) requestedRange.ArrayLayerCount = 1;
+    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
+    const auto range = ResolveSubresourceRange(tex->GetDesc(), requestedRange);
+    CpuDescriptorHeapViewRAII heapView{};
+    DXGI_FORMAT dxgiFormat;
+    if (desc.Usage == TextureViewUsage::Resource) {
+        {
+            auto heap = _cpuResAlloc.get();
+            auto heapViewOpt = heap->Allocate(1);
+            if (!heapViewOpt.has_value()) {
+                RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate CBV descriptor");
+                return nullptr;
+            }
+            heapView = {heap, heapViewOpt.value()};
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = MapShaderResourceType(desc.Format);
+        if (range.Aspects == TextureAspect::Stencil) srvDesc.Format = desc.Format == TextureFormat::D24_UNORM_S8_UINT ? DXGI_FORMAT_X24_TYPELESS_G8_UINT : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+        srvDesc.Shader4ComponentMapping = range.Aspects == TextureAspect::Stencil
+                                              ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
+                                              : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        switch (desc.Dim) {
+            case TextureDimension::Dim1D:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
+                srvDesc.Texture1D.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture1D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                break;
+            case TextureDimension::Dim1DArray:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
+                srvDesc.Texture1DArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture1DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                srvDesc.Texture1DArray.FirstArraySlice = range.BaseArrayLayer;
+                srvDesc.Texture1DArray.ArraySize = range.ArrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                if (multisampled) {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MostDetailedMip = desc.Range.BaseMipLevel;
+                    srvDesc.Texture2D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                    srvDesc.Texture2D.PlaneSlice = range.Aspects == TextureAspect::Stencil ? 1 : 0;
+                }
+                break;
+            case TextureDimension::Dim2DArray:
+                if (multisampled) {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+                    srvDesc.Texture2DMSArray.FirstArraySlice = range.BaseArrayLayer;
+                    srvDesc.Texture2DMSArray.ArraySize = range.ArrayLayerCount;
+                } else {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    srvDesc.Texture2DArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                    srvDesc.Texture2DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                    srvDesc.Texture2DArray.FirstArraySlice = range.BaseArrayLayer;
+                    srvDesc.Texture2DArray.ArraySize = range.ArrayLayerCount;
+                    srvDesc.Texture2DArray.PlaneSlice = range.Aspects == TextureAspect::Stencil ? 1 : 0;
+                }
+                break;
+            case TextureDimension::Dim3D:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                srvDesc.Texture3D.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.Texture3D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                break;
+            case TextureDimension::Cube:
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                srvDesc.TextureCube.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.TextureCube.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                break;
+            case TextureDimension::CubeArray:
+                // https://learn.microsoft.com/zh-cn/windows/win32/api/d3d12/ns-d3d12-d3d12_texcube_array_srv
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+                srvDesc.TextureCubeArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                srvDesc.TextureCubeArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                srvDesc.TextureCubeArray.First2DArrayFace = range.BaseArrayLayer;
+                srvDesc.TextureCubeArray.NumCubes = range.ArrayLayerCount / 6;
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
+                return nullptr;
+        }
+        heapView.GetHeap()->Create(tex->_tex.Get(), srvDesc, heapView.GetStart());
+        dxgiFormat = srvDesc.Format;
+    } else if (desc.Usage == TextureViewUsage::RenderTarget) {
+        {
+            auto heap = _cpuRtvAlloc.get();
+            auto heapViewOpt = heap->Allocate(1);
+            if (!heapViewOpt.has_value()) {
+                RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate RTV descriptor");
+                return nullptr;
+            }
+            heapView = {heap, heapViewOpt.value()};
+        }
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = MapType(desc.Format);
+        switch (desc.Dim) {
+            case TextureDimension::Dim1D:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1D;
+                rtvDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
+                rtvDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                rtvDesc.Texture1DArray.FirstArraySlice = range.BaseArrayLayer;
+                rtvDesc.Texture1DArray.ArraySize = range.ArrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                if (multisampled) {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                    rtvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                    rtvDesc.Texture2D.PlaneSlice = 0;
+                }
+                break;
+            case TextureDimension::Dim2DArray:
+                if (multisampled) {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+                    rtvDesc.Texture2DMSArray.FirstArraySlice = range.BaseArrayLayer;
+                    rtvDesc.Texture2DMSArray.ArraySize = range.ArrayLayerCount;
+                } else {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                    rtvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                    rtvDesc.Texture2DArray.FirstArraySlice = range.BaseArrayLayer;
+                    rtvDesc.Texture2DArray.ArraySize = range.ArrayLayerCount;
+                    rtvDesc.Texture2DArray.PlaneSlice = 0;
+                }
+                break;
+            case TextureDimension::Dim3D:
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                rtvDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
+                rtvDesc.Texture3D.FirstWSlice = 0;
+                rtvDesc.Texture3D.WSize = static_cast<UINT>(-1);
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
+                return nullptr;
+        }
+        heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
+        dxgiFormat = rtvDesc.Format;
+    } else if (desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite) {
+        {
+            auto heap = _cpuDsvAlloc.get();
+            auto heapViewOpt = heap->Allocate(1);
+            if (!heapViewOpt.has_value()) {
+                RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate DSV descriptor");
+                return nullptr;
+            }
+            heapView = {heap, heapViewOpt.value()};
+        }
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = MapType(desc.Format);
+        dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+        const bool readOnlyDepth = desc.Usage == TextureViewUsage::DepthRead;
+        if (readOnlyDepth) {
+            dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_DEPTH);
+            if (IsStencilFormatDXGI(dsvDesc.Format)) {
+                dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_STENCIL);
+            }
+        }
+        switch (desc.Dim) {
+            case TextureDimension::Dim1D:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
+                dsvDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
+                dsvDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                dsvDesc.Texture1DArray.FirstArraySlice = range.BaseArrayLayer;
+                dsvDesc.Texture1DArray.ArraySize = range.ArrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                if (multisampled) {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                    dsvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                }
+                break;
+            case TextureDimension::Dim2DArray:
+                if (multisampled) {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+                    dsvDesc.Texture2DMSArray.FirstArraySlice = range.BaseArrayLayer;
+                    dsvDesc.Texture2DMSArray.ArraySize = range.ArrayLayerCount;
+                } else {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                    dsvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                    dsvDesc.Texture2DArray.FirstArraySlice = range.BaseArrayLayer;
+                    dsvDesc.Texture2DArray.ArraySize = range.ArrayLayerCount;
+                }
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
+                return nullptr;
+        }
+        heapView.GetHeap()->Create(tex->_tex.Get(), dsvDesc, heapView.GetStart());
+        dxgiFormat = dsvDesc.Format;
+    } else if (desc.Usage == TextureViewUsage::UnorderedAccess) {
+        {
+            auto heap = _cpuResAlloc.get();
+            auto heapViewOpt = heap->Allocate(1);
+            if (!heapViewOpt.has_value()) {
+                RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate UAV descriptor");
+                return nullptr;
+            }
+            heapView = {heap, heapViewOpt.value()};
+        }
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = MapShaderResourceType(desc.Format);
+        switch (desc.Dim) {
+            case TextureDimension::Dim1D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
+                uavDesc.Texture1D.MipSlice = desc.Range.BaseMipLevel;
+                break;
+            case TextureDimension::Dim1DArray:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+                uavDesc.Texture1DArray.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture1DArray.FirstArraySlice = range.BaseArrayLayer;
+                uavDesc.Texture1DArray.ArraySize = range.ArrayLayerCount;
+                break;
+            case TextureDimension::Dim2D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                uavDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture2D.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim2DArray:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                uavDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture2DArray.FirstArraySlice = range.BaseArrayLayer;
+                uavDesc.Texture2DArray.ArraySize = range.ArrayLayerCount;
+                uavDesc.Texture2DArray.PlaneSlice = 0;
+                break;
+            case TextureDimension::Dim3D:
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+                uavDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
+                uavDesc.Texture3D.FirstWSlice = 0;
+                uavDesc.Texture3D.WSize = static_cast<UINT>(-1);
+                break;
+            default:
+                RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
+                return nullptr;
+        }
+        heapView.GetHeap()->Create(tex->_tex.Get(), uavDesc, heapView.GetStart());
+        dxgiFormat = uavDesc.Format;
+    } else {
+        RADRAY_ERR_LOG("d3d12 invalid texture view usage: {}", desc.Usage);
+        return nullptr;
+    }
+    auto result = make_unique<TextureViewD3D12>(this, tex, std::move(heapView));
+    result->_desc = desc;
+    result->_rawFormat = dxgiFormat;
+    return result;
+}
+
+// == Device: render pass / framebuffer / shader ==
+
+Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& desc) noexcept {
+    return make_unique<Dxil>(desc.Source.begin(), desc.Source.end(), desc.Stages);
+}
+
+// == 根签名映射与构建 ==
+
+struct PipelineLayoutGroup {
+    uint32_t Index;
+    vector<ShaderParameterSetLayoutEntryD3D12> Entries;
+};
+
+// The bound only keeps a corrupt artifact from making the layout materialize an absurd number of
+// empty parameter groups; every shader this engine compiles stays far below it.
+
+// Register class of a binding, derived from the logical kind alone. The resolved placement decides
+// whether the binding lands in a table or in a root parameter, never which register class it
+// occupies, so the two axes are read separately everywhere below.
+static std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> MapDescriptorRangeType(
+    shader::ShaderBindingKind kind) noexcept {
+    switch (shader::GetWireBindingNamespace(static_cast<uint32_t>(kind))) {
+        case 0: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case 1: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case 2: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case 3: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        default: return std::nullopt;
+    }
+}
+
+static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapRootDescriptorParameterType(
+    shader::ShaderBindingKind kind) noexcept {
+    if (!shader::CanBeRootDescriptor(kind)) {
+        return std::nullopt;
+    }
+    switch (kind) {
+        case shader::ShaderBindingKind::CBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_CBV;
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_SRV;
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_UAV;
+        default:
+            return std::nullopt;
+    }
+}
+
+static std::optional<uint32_t> MapDescriptorRangeNamespace(
+    D3D12_DESCRIPTOR_RANGE_TYPE type) noexcept {
+    switch (type) {
+        case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: return 0;
+        case D3D12_DESCRIPTOR_RANGE_TYPE_SRV: return 1;
+        case D3D12_DESCRIPTOR_RANGE_TYPE_UAV: return 2;
+        case D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER: return 3;
+        default: return std::nullopt;
+    }
+}
+
+static std::optional<uint32_t> MapRootDescriptorNamespace(
+    D3D12_ROOT_PARAMETER_TYPE type) noexcept {
+    switch (type) {
+        case D3D12_ROOT_PARAMETER_TYPE_CBV: return 0;
+        case D3D12_ROOT_PARAMETER_TYPE_SRV: return 1;
+        case D3D12_ROOT_PARAMETER_TYPE_UAV: return 2;
+        default: return std::nullopt;
+    }
+}
+
+// Materializes the parameter groups from the resolved layout. Groups below the highest active one
+// may legitimately carry no binding at all; they still get an empty group, because dropping them
+// would make a caller's group index stop meaning the register space the shader was compiled
+// against. Resolution already sorted the bindings by (group, namespace, binding) and rejected
+// duplicates, so this only confirms the invariant instead of re-sorting behind the resolver's back.
+static void BuildParameterGroupsD3D12(const ResolvedD3D12Layout& layout, vector<PipelineLayoutGroup>& groups) noexcept {
+    uint32_t groupCount = 0;
+    for (const auto& binding : layout.Bindings) groupCount = std::max(groupCount, binding.Group + 1);
+    groups.resize(groupCount);
+    for (uint32_t index = 0; index < groupCount; ++index) groups[index].Index = index;
+    for (const auto& binding : layout.Bindings) {
+        groups[binding.Group].Entries.push_back({binding.Binding, binding.LogicalKind, binding.Placement,
+                                                 binding.Count, binding.Stages, shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
+    }
+}
+
+bool DescriptorTableBindingD3D12::IsStorageCompatible(const DescriptorTableBindingD3D12& other) const noexcept {
+    return HeapType == other.HeapType && Visibility == other.Visibility &&
+           DescriptorCount == other.DescriptorCount && Ranges == other.Ranges && Slots == other.Slots;
+}
+
+bool ShaderParameterGroupLayoutD3D12::MapTablesFrom(const ShaderParameterGroupLayoutD3D12& source, vector<uint32_t>& mapping) const noexcept {
+    mapping.clear();
+    if (Tables.size() != source.Tables.size()) {
+        return false;
+    }
+    mapping.reserve(Tables.size());
+    for (const auto& table : Tables) {
+        uint32_t index = 0;
+        for (; index < source.Tables.size(); ++index) {
+            if (std::find(mapping.begin(), mapping.end(), index) == mapping.end() &&
+                table.IsStorageCompatible(source.Tables[index])) {
+                break;
+            }
+        }
+        if (index == source.Tables.size()) {
+            mapping.clear();
+            return false;
+        }
+        mapping.push_back(index);
+    }
+    return true;
+}
+
+void DescriptorDirtyRangesD3D12::Add(uint32_t start, uint32_t count) noexcept {
+    RADRAY_ASSERT(count != 0 && count <= std::numeric_limits<uint32_t>::max() - start);
+    uint32_t end = start + count;
+    if (Ranges.empty() || Ranges.back().Start + Ranges.back().Count < start) {
+        Ranges.push_back({start, count});
+        return;
+    }
+    if (start >= Ranges.back().Start) {
+        auto& last = Ranges.back();
+        last.Count = std::max(last.Start + last.Count, end) - last.Start;
+        return;
+    }
+    auto first = Ranges.begin();
+    while (first != Ranges.end() && first->Start + first->Count < start) {
+        ++first;
+    }
+    auto last = first;
+    while (last != Ranges.end() && last->Start <= end) {
+        start = std::min(start, last->Start);
+        end = std::max(end, last->Start + last->Count);
+        ++last;
+    }
+    first = Ranges.erase(first, last);
+    Ranges.insert(first, {start, end - start});
+}
+
+std::optional<DescriptorDirtyRangeD3D12> DescriptorDirtyRangesD3D12::GetCopySpan(std::span<const uint8_t> initialized) const noexcept {
+    if (Ranges.empty()) {
+        return std::nullopt;
+    }
+    const uint64_t end = uint64_t{Ranges.back().Start} + Ranges.back().Count;
+    const uint64_t start = Ranges.front().Start;
+    if (end > initialized.size()) {
+        return std::nullopt;
+    }
+    uint64_t dirtyCount = 0;
+    for (const auto& range : Ranges) {
+        dirtyCount += range.Count;
+    }
+    if (Ranges.size() != 1 && Ranges.size() <= 16 && dirtyCount * 2 < end - start) {
+        return std::nullopt;
+    }
+    if (std::any_of(initialized.begin() + start, initialized.begin() + end, [](uint8_t value) { return value == 0; })) {
+        return std::nullopt;
+    }
+    return DescriptorDirtyRangeD3D12{static_cast<uint32_t>(start), static_cast<uint32_t>(end - start)};
+}
+
+static void BuildDescriptorTableSlotsD3D12(ShaderParameterGroupLayoutD3D12& group) noexcept {
+    for (size_t index = 0; index < group.Entries.size(); ++index) {
+        const auto& entry = group.Entries[index];
+        for (const auto& destination : group.Bindings[index].DescriptorDestinations) {
+            auto& table = group.Tables[destination.TableIndex];
+            const bool wholeArray = destination.ArrayElement == std::numeric_limits<uint32_t>::max();
+            const uint32_t count = wholeArray ? entry.Count : 1;
+            for (uint32_t element = 0; element < count; ++element) {
+                table.Slots.push_back({destination.TableLocalOffset + element, entry.Namespace, entry.Binding,
+                                       wholeArray ? element : destination.ArrayElement, entry.LogicalKind, entry.Placement});
+            }
+        }
+    }
+    for (auto& table : group.Tables) {
+        std::sort(table.Slots.begin(), table.Slots.end(), [](const auto& left, const auto& right) {
+            return std::tie(left.Offset, left.Namespace, left.Binding, left.ArrayElement) <
+                   std::tie(right.Offset, right.Namespace, right.Binding, right.ArrayElement);
+        });
+    }
+}
+
+// Locates the entry a (binding number, register class) pair names inside a group. Every lookup goes
+// through here so the register class is always part of the key: a group may legitimately hold b0,
+// t0 and u0 at once, and matching on the bare binding number would pick whichever came first.
+static Nullable<const ShaderParameterSetLayoutEntryD3D12*> FindGroupEntryD3D12(
+    const vector<ShaderParameterSetLayoutEntryD3D12>& entries,
+    uint32_t bindingNumber,
+    uint32_t nameSpace) noexcept {
+    for (const ShaderParameterSetLayoutEntryD3D12& entry : entries) {
+        if (entry.Namespace == nameSpace && entry.Binding == bindingNumber) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInternal(
+    const ResolvedD3D12Layout& layout_) noexcept {
+    const std::span<const byte> serialized = layout_.SerializedRootSignature;
+    if (serialized.empty() || serialized.size() > std::numeric_limits<UINT>::max()) {
+        RADRAY_ERR_LOG("d3d12 explicit root signature blob is invalid");
+        return nullptr;
+    }
+
+    ComPtr<ID3D12VersionedRootSignatureDeserializer> deserializer;
+    if (HRESULT hr = D3D12CreateVersionedRootSignatureDeserializer(
+            serialized.data(),
+            serialized.size(),
+            IID_PPV_ARGS(deserializer.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG(
+            "D3D12CreateVersionedRootSignatureDeserializer failed: {} {}",
+            GetErrorName(hr),
+            hr);
+        return nullptr;
+    }
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* source =
+        deserializer->GetUnconvertedRootSignatureDesc();
+    if (source == nullptr ||
+        (source->Version != D3D_ROOT_SIGNATURE_VERSION_1_0 &&
+         source->Version != D3D_ROOT_SIGNATURE_VERSION_1_1)) {
+        RADRAY_ERR_LOG("d3d12 explicit root signature has an unsupported version");
+        return nullptr;
+    }
+    const D3D12_ROOT_SIGNATURE_FLAGS sourceFlags =
+        source->Version == D3D_ROOT_SIGNATURE_VERSION_1_1
+            ? source->Desc_1_1.Flags
+            : source->Desc_1_0.Flags;
+    if ((sourceFlags & (D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE |
+                        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                        D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED)) != 0) {
+        RADRAY_ERR_LOG(
+            "d3d12 explicit root signature uses an unsupported local or directly-indexed flag");
+        return nullptr;
+    }
+
+    vector<PipelineLayoutGroup> groups;
+    BuildParameterGroupsD3D12(layout_, groups);
+
+    vector<D3D12_ROOT_PARAMETER1> rootParameters;
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> descriptorRanges;
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers;
+    auto layout = make_unique<RootSigD3D12>();
+    layout->_device = this;
+    layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
+    for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            binding.Name,
+            ShaderBindingLocation{binding.Group, binding.Binding},
+            shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
+    }
+    // Push blocks share the handle table with the descriptor bindings, so a caller reaches root
+    // constants by the same declaration name it uses for everything else. The record kind is what
+    // keeps them apart: a push handle names a root constant block, not a descriptor slot.
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            pushConstant.Name,
+            ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register},
+            0,
+            BackendBindingRecordKind::Push});
+    }
+
+    layout->_parameterGroups.reserve(groups.size());
+    for (PipelineLayoutGroup& group : groups) {
+        ShaderParameterGroupLayoutD3D12& parameterGroup =
+            layout->_parameterGroups.emplace_back();
+        parameterGroup.GroupIndex = group.Index;
+        parameterGroup.Entries = std::move(group.Entries);
+        parameterGroup.Bindings.resize(parameterGroup.Entries.size());
+        for (size_t entryIndex = 0; entryIndex < parameterGroup.Entries.size(); ++entryIndex) {
+            const ShaderParameterSetLayoutEntryD3D12& entry = parameterGroup.Entries[entryIndex];
+            parameterGroup.Bindings[entryIndex].CoveredElements.resize(entry.Count, 0);
+            if (entry.IsRootDescriptor()) {
+                parameterGroup.RootDescriptorOrder.push_back(static_cast<uint32_t>(entryIndex));
+            }
+        }
+    }
+
+    if (source->Version == D3D_ROOT_SIGNATURE_VERSION_1_1) {
+        const D3D12_ROOT_SIGNATURE_DESC1& desc = source->Desc_1_1;
+        if (desc.NumParameters != 0 && desc.pParameters == nullptr) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature has invalid parameter metadata");
+            return nullptr;
+        }
+        rootParameters.reserve(desc.NumParameters);
+        descriptorRanges.reserve(desc.NumParameters);
+        for (uint32_t index = 0; index < desc.NumParameters; ++index) {
+            const D3D12_ROOT_PARAMETER1& sourceParameter = desc.pParameters[index];
+            D3D12_ROOT_PARAMETER1 parameter = sourceParameter;
+            if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                if (sourceParameter.DescriptorTable.NumDescriptorRanges == 0 ||
+                    sourceParameter.DescriptorTable.pDescriptorRanges == nullptr) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature has an empty descriptor table");
+                    return nullptr;
+                }
+                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges.emplace_back();
+                ranges.assign(
+                    sourceParameter.DescriptorTable.pDescriptorRanges,
+                    sourceParameter.DescriptorTable.pDescriptorRanges +
+                        sourceParameter.DescriptorTable.NumDescriptorRanges);
+                parameter.DescriptorTable.pDescriptorRanges = nullptr;
+            }
+            rootParameters.push_back(parameter);
+        }
+        if (desc.NumStaticSamplers != 0 && desc.pStaticSamplers == nullptr) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature has invalid static sampler metadata");
+            return nullptr;
+        }
+        if (desc.NumStaticSamplers != 0) {
+            staticSamplers.assign(
+                desc.pStaticSamplers,
+                desc.pStaticSamplers + desc.NumStaticSamplers);
+        }
+    } else {
+        const D3D12_ROOT_SIGNATURE_DESC& desc = source->Desc_1_0;
+        if (desc.NumParameters != 0 && desc.pParameters == nullptr) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature has invalid parameter metadata");
+            return nullptr;
+        }
+        rootParameters.reserve(desc.NumParameters);
+        descriptorRanges.reserve(desc.NumParameters);
+        for (uint32_t index = 0; index < desc.NumParameters; ++index) {
+            const D3D12_ROOT_PARAMETER& sourceParameter = desc.pParameters[index];
+            D3D12_ROOT_PARAMETER1 parameter{};
+            parameter.ParameterType = sourceParameter.ParameterType;
+            parameter.ShaderVisibility = sourceParameter.ShaderVisibility;
+            if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                if (sourceParameter.DescriptorTable.NumDescriptorRanges == 0 ||
+                    sourceParameter.DescriptorTable.pDescriptorRanges == nullptr) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature has an empty descriptor table");
+                    return nullptr;
+                }
+                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges.emplace_back();
+                ranges.reserve(sourceParameter.DescriptorTable.NumDescriptorRanges);
+                for (uint32_t rangeIndex = 0;
+                     rangeIndex < sourceParameter.DescriptorTable.NumDescriptorRanges;
+                     ++rangeIndex) {
+                    const D3D12_DESCRIPTOR_RANGE& sourceRange =
+                        sourceParameter.DescriptorTable.pDescriptorRanges[rangeIndex];
+                    ranges.push_back({sourceRange.RangeType,
+                                      sourceRange.NumDescriptors,
+                                      sourceRange.BaseShaderRegister,
+                                      sourceRange.RegisterSpace,
+                                      D3D12_DESCRIPTOR_RANGE_FLAG_NONE,
+                                      sourceRange.OffsetInDescriptorsFromTableStart});
+                }
+            } else if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                parameter.Constants = {
+                    sourceParameter.Constants.ShaderRegister,
+                    sourceParameter.Constants.RegisterSpace,
+                    sourceParameter.Constants.Num32BitValues};
+            } else {
+                parameter.Descriptor = {
+                    sourceParameter.Descriptor.ShaderRegister,
+                    sourceParameter.Descriptor.RegisterSpace,
+                    D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
+            }
+            rootParameters.push_back(parameter);
+        }
+        if (desc.NumStaticSamplers != 0 && desc.pStaticSamplers == nullptr) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature has invalid static sampler metadata");
+            return nullptr;
+        }
+        if (desc.NumStaticSamplers != 0) {
+            staticSamplers.assign(
+                desc.pStaticSamplers,
+                desc.pStaticSamplers + desc.NumStaticSamplers);
+        }
+    }
+
+    struct ActiveBinding {
+        ShaderParameterGroupLayoutD3D12* Group{nullptr};
+        ShaderParameterBindingLayoutD3D12* Binding{nullptr};
+        ShaderParameterSetLayoutEntryD3D12* Entry{nullptr};
+        uint32_t ArrayElement{0};
+    };
+    const auto findActiveBinding = [&](uint32_t groupIndex,
+                                       uint32_t binding,
+                                       uint32_t nameSpace) noexcept {
+        ActiveBinding result;
+        for (ShaderParameterGroupLayoutD3D12& group : layout->_parameterGroups) {
+            if (group.GroupIndex != groupIndex) {
+                continue;
+            }
+            for (size_t index = 0; index < group.Entries.size(); ++index) {
+                if (binding >= group.Entries[index].Binding &&
+                    binding - group.Entries[index].Binding < group.Entries[index].Count &&
+                    group.Entries[index].Namespace == nameSpace) {
+                    result.Group = &group;
+                    result.Binding = &group.Bindings[index];
+                    result.Entry = &group.Entries[index];
+                    result.ArrayElement = binding - group.Entries[index].Binding;
+                    return result;
+                }
+            }
+        }
+        return result;
+    };
+    struct ExplicitTableInfo {
+        uint32_t RootParameterIndex{0};
+        uint32_t GroupIndex{std::numeric_limits<uint32_t>::max()};
+        bool Sampler{false};
+        uint32_t Size{0};
+        vector<DescriptorTableBindingD3D12::Range> Ranges;
+    };
+    vector<ExplicitTableInfo> tables;
+    size_t descriptorTableIndex = 0;
+    for (uint32_t rootParameterIndex = 0;
+         rootParameterIndex < rootParameters.size();
+         ++rootParameterIndex) {
+        const D3D12_ROOT_PARAMETER1& parameter = rootParameters[rootParameterIndex];
+        if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            if (descriptorTableIndex >= descriptorRanges.size()) {
+                RADRAY_ERR_LOG("d3d12 explicit root signature descriptor table metadata is invalid");
+                return nullptr;
+            }
+            ExplicitTableInfo table;
+            table.RootParameterIndex = rootParameterIndex;
+            const vector<D3D12_DESCRIPTOR_RANGE1>& ranges =
+                descriptorRanges[descriptorTableIndex++];
+            bool hasHeapKind = false;
+            uint32_t appendOffset = 0;
+            for (const D3D12_DESCRIPTOR_RANGE1& range : ranges) {
+                const std::optional<uint32_t> nameSpace = MapDescriptorRangeNamespace(range.RangeType);
+                if (!nameSpace.has_value() || range.NumDescriptors == 0 ||
+                    range.NumDescriptors == std::numeric_limits<uint32_t>::max()) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature contains an unsupported descriptor range");
+                    return nullptr;
+                }
+                const bool sampler = nameSpace.value() == 3;
+                if (hasHeapKind && table.Sampler != sampler) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature mixes sampler and resource ranges in one table");
+                    return nullptr;
+                }
+                table.Sampler = sampler;
+                hasHeapKind = true;
+                const uint32_t rangeOffset =
+                    range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                        ? appendOffset
+                        : range.OffsetInDescriptorsFromTableStart;
+                if (range.NumDescriptors > std::numeric_limits<uint32_t>::max() - rangeOffset) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature descriptor range overflows");
+                    return nullptr;
+                }
+                const uint32_t rangeEnd = rangeOffset + range.NumDescriptors;
+                table.Size = std::max(table.Size, rangeEnd);
+                table.Ranges.push_back({range.RangeType, range.NumDescriptors, range.BaseShaderRegister, range.RegisterSpace, rangeOffset, range.Flags});
+                appendOffset = rangeEnd;
+                for (uint32_t element = 0; element < range.NumDescriptors; ++element) {
+                    if (element > std::numeric_limits<uint32_t>::max() - range.BaseShaderRegister) {
+                        RADRAY_ERR_LOG("d3d12 explicit root signature register range overflows");
+                        return nullptr;
+                    }
+                    ActiveBinding active = findActiveBinding(
+                        range.RegisterSpace,
+                        range.BaseShaderRegister + element,
+                        nameSpace.value());
+                    if (active.Group == nullptr) {
+                        continue;
+                    }
+                    if (table.GroupIndex == std::numeric_limits<uint32_t>::max()) {
+                        table.GroupIndex = active.Group->GroupIndex;
+                    } else if (table.GroupIndex != active.Group->GroupIndex) {
+                        RADRAY_ERR_LOG("d3d12 explicit descriptor table spans multiple active parameter groups");
+                        return nullptr;
+                    }
+                    // A static sampler is declared by the carrier itself and a root descriptor
+                    // lives in a root parameter, so neither may also be claimed by a descriptor
+                    // range: that would give one declaration two contradictory homes.
+                    if (active.Entry->IsStaticSampler() || active.Entry->IsRootDescriptor() ||
+                        active.ArrayElement >= active.Entry->Count) {
+                        RADRAY_ERR_LOG("d3d12 explicit descriptor range is incompatible with an active binding");
+                        return nullptr;
+                    }
+                    const ShaderParameterBindingLayoutD3D12::DescriptorDestination destination{
+                        rootParameterIndex,
+                        rangeOffset + element,
+                        active.ArrayElement};
+                    if (std::find_if(
+                            active.Binding->DescriptorDestinations.begin(),
+                            active.Binding->DescriptorDestinations.end(),
+                            [&](const ShaderParameterBindingLayoutD3D12::DescriptorDestination& value) noexcept {
+                                return value == destination;
+                            }) == active.Binding->DescriptorDestinations.end()) {
+                        active.Binding->DescriptorDestinations.push_back(destination);
+                    }
+                    if (active.ArrayElement >= active.Binding->CoveredElements.size()) {
+                        RADRAY_ERR_LOG("d3d12 explicit descriptor range element metadata is invalid");
+                        return nullptr;
+                    }
+                    active.Binding->CoveredElements[active.ArrayElement] = 1;
+                }
+            }
+            if (!hasHeapKind || table.Size == 0) {
+                RADRAY_ERR_LOG("d3d12 explicit root signature contains an empty descriptor table");
+                return nullptr;
+            }
+            tables.push_back(table);
+            continue;
+        }
+        if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+            if (parameter.Constants.Num32BitValues == 0) {
+                RADRAY_ERR_LOG("d3d12 explicit root signature contains empty root constants");
+                return nullptr;
+            }
+            const auto constant = std::find_if(
+                layout_.PushConstants.begin(), layout_.PushConstants.end(),
+                [&](const ResolvedPushConstantBlock& value) noexcept {
+                    return value.RegisterSpace == parameter.Constants.RegisterSpace &&
+                           value.Register == parameter.Constants.ShaderRegister;
+                });
+            if (constant != layout_.PushConstants.end()) {
+                const uint32_t size = parameter.Constants.Num32BitValues * 4;
+                if (constant->Size != size) {
+                    RADRAY_ERR_LOG("d3d12 explicit root constants size does not match artifact metadata");
+                    return nullptr;
+                }
+                const ShaderBindingLocation location{constant->RegisterSpace, constant->Register};
+                auto existing = std::find_if(
+                    layout->_pushConstantBindings.begin(),
+                    layout->_pushConstantBindings.end(),
+                    [&](const PushConstantBindingD3D12& value) noexcept {
+                        return value.Location == location;
+                    });
+                if (existing == layout->_pushConstantBindings.end()) {
+                    PushConstantBindingD3D12 binding;
+                    binding.Location = location;
+                    binding.Num32BitValues = parameter.Constants.Num32BitValues;
+                    binding.RootParameterIndex = rootParameterIndex;
+                    binding.RootParameterIndices.push_back(rootParameterIndex);
+                    layout->_pushConstantBindings.push_back(std::move(binding));
+                } else if (std::find(
+                               existing->RootParameterIndices.begin(),
+                               existing->RootParameterIndices.end(),
+                               rootParameterIndex) == existing->RootParameterIndices.end()) {
+                    existing->RootParameterIndices.push_back(rootParameterIndex);
+                }
+            }
+            continue;
+        }
+        const std::optional<uint32_t> nameSpace = MapRootDescriptorNamespace(parameter.ParameterType);
+        if (!nameSpace.has_value()) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature contains an unsupported root parameter");
+            return nullptr;
+        }
+        ActiveBinding active = findActiveBinding(
+            parameter.Descriptor.RegisterSpace,
+            parameter.Descriptor.ShaderRegister,
+            nameSpace.value());
+        if (active.Group == nullptr) {
+            continue;
+        }
+        // The authored parameter type must agree with what the logical kind admits, and the
+        // resolved placement must already say root descriptor: the carrier is the authority on the
+        // topology, so a disagreement between the two is a contract violation rather than something
+        // to reconcile here.
+        const std::optional<D3D12_ROOT_PARAMETER_TYPE> expectedParameterType =
+            MapRootDescriptorParameterType(active.Entry->LogicalKind);
+        if (active.Entry->Count != 1 || !active.Entry->IsRootDescriptor() ||
+            !expectedParameterType.has_value() ||
+            expectedParameterType.value() != parameter.ParameterType) {
+            RADRAY_ERR_LOG("d3d12 explicit root descriptor is incompatible with an active binding");
+            return nullptr;
+        }
+        const ShaderParameterBindingLayoutD3D12::RootDescriptorDestination destination{
+            rootParameterIndex,
+            parameter.ParameterType};
+        if (std::find(
+                active.Binding->RootDescriptorDestinations.begin(),
+                active.Binding->RootDescriptorDestinations.end(),
+                destination) == active.Binding->RootDescriptorDestinations.end()) {
+            active.Binding->RootDescriptorDestinations.push_back(destination);
+        }
+        if (active.ArrayElement >= active.Binding->CoveredElements.size()) {
+            RADRAY_ERR_LOG("d3d12 explicit root descriptor element metadata is invalid");
+            return nullptr;
+        }
+        active.Binding->CoveredElements[active.ArrayElement] = 1;
+    }
+    if (descriptorTableIndex != descriptorRanges.size()) {
+        RADRAY_ERR_LOG("d3d12 explicit root signature descriptor table metadata is inconsistent");
+        return nullptr;
+    }
+
+    const auto isVisibleForStage = [](D3D12_SHADER_VISIBILITY visibility,
+                                      ShaderStage stage) noexcept {
+        switch (stage) {
+            case ShaderStage::Vertex:
+                return visibility == D3D12_SHADER_VISIBILITY_ALL ||
+                       visibility == D3D12_SHADER_VISIBILITY_VERTEX;
+            case ShaderStage::Pixel:
+                return visibility == D3D12_SHADER_VISIBILITY_ALL ||
+                       visibility == D3D12_SHADER_VISIBILITY_PIXEL;
+            case ShaderStage::Compute:
+                return visibility == D3D12_SHADER_VISIBILITY_ALL;
+            case ShaderStage::UNKNOWN:
+            case ShaderStage::Graphics:
+                return false;
+        }
+        return false;
+    };
+    const auto isRootAccessAllowed = [&](ShaderStage stage) noexcept {
+        switch (stage) {
+            case ShaderStage::Pixel:
+                return (sourceFlags & D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS) == 0;
+            case ShaderStage::Vertex:
+            case ShaderStage::Compute:
+                return true;
+            case ShaderStage::UNKNOWN:
+            case ShaderStage::Graphics:
+                return false;
+        }
+        return false;
+    };
+    const auto coversStage = [&](D3D12_SHADER_VISIBILITY visibility,
+                                 ShaderStage stage) noexcept {
+        return isRootAccessAllowed(stage) && isVisibleForStage(visibility, stage);
+    };
+    const auto rootParameterCoversStage = [&](uint32_t rootParameterIndex,
+                                              ShaderStage stage) noexcept {
+        return rootParameterIndex < rootParameters.size() &&
+               coversStage(
+                   rootParameters[rootParameterIndex].ShaderVisibility,
+                   stage);
+    };
+    const auto staticSamplerCoversStage = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
+                                              uint32_t groupIndex,
+                                              ShaderStage stage) noexcept {
+        return std::any_of(
+            staticSamplers.begin(), staticSamplers.end(),
+            [&](const D3D12_STATIC_SAMPLER_DESC& sampler) noexcept {
+                return sampler.ShaderRegister == entry.Binding &&
+                       sampler.RegisterSpace == groupIndex &&
+                       coversStage(sampler.ShaderVisibility, stage);
+            });
+    };
+    const auto entryStagesCovered = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
+                                        const ShaderParameterBindingLayoutD3D12& binding,
+                                        uint32_t groupIndex) noexcept {
+        const auto hasDestination = [&](uint32_t arrayElement, ShaderStage stage) noexcept {
+            if (std::any_of(
+                    binding.DescriptorDestinations.begin(),
+                    binding.DescriptorDestinations.end(),
+                    [&](const ShaderParameterBindingLayoutD3D12::DescriptorDestination& destination) noexcept {
+                        return (destination.ArrayElement == std::numeric_limits<uint32_t>::max() ||
+                                destination.ArrayElement == arrayElement) &&
+                               rootParameterCoversStage(destination.TableIndex, stage);
+                    })) {
+                return true;
+            }
+            return arrayElement == 0 && std::any_of(
+                                            binding.RootDescriptorDestinations.begin(),
+                                            binding.RootDescriptorDestinations.end(),
+                                            [&](const ShaderParameterBindingLayoutD3D12::RootDescriptorDestination& destination) noexcept {
+                                                return rootParameterCoversStage(destination.RootParameterIndex, stage);
+                                            });
+        };
+        const auto hasAllDestinations = [&](ShaderStage stage) noexcept {
+            if (!entry.Stages.HasFlag(stage)) {
+                return true;
+            }
+            for (uint32_t arrayElement = 0; arrayElement < entry.Count; ++arrayElement) {
+                if (!hasDestination(arrayElement, stage)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        return hasAllDestinations(ShaderStage::Vertex) &&
+               hasAllDestinations(ShaderStage::Pixel) &&
+               hasAllDestinations(ShaderStage::Compute) &&
+               entry.Stages != ShaderStage::UNKNOWN && groupIndex != std::numeric_limits<uint32_t>::max();
+    };
+    for (ShaderParameterGroupLayoutD3D12& group : layout->_parameterGroups) {
+        for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
+            const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
+            ShaderParameterBindingLayoutD3D12& binding = group.Bindings[entryIndex];
+            // A static sampler owns no descriptor slot, so its coverage comes from the carrier's
+            // static sampler array rather than from a table or root destination.
+            if (entry.IsStaticSampler()) {
+                const bool found =
+                    (!entry.Stages.HasFlag(ShaderStage::Vertex) ||
+                     staticSamplerCoversStage(entry, group.GroupIndex, ShaderStage::Vertex)) &&
+                    (!entry.Stages.HasFlag(ShaderStage::Pixel) ||
+                     staticSamplerCoversStage(entry, group.GroupIndex, ShaderStage::Pixel)) &&
+                    (!entry.Stages.HasFlag(ShaderStage::Compute) ||
+                     staticSamplerCoversStage(entry, group.GroupIndex, ShaderStage::Compute));
+                if (!found || entry.Stages == ShaderStage::UNKNOWN) {
+                    RADRAY_ERR_LOG("d3d12 explicit root signature is missing an active static sampler");
+                    return nullptr;
+                }
+            } else if (binding.CoveredElements.size() != entry.Count ||
+                       std::any_of(
+                           binding.CoveredElements.begin(),
+                           binding.CoveredElements.end(),
+                           [](uint8_t value) noexcept { return value == 0; })) {
+                RADRAY_ERR_LOG(
+                    "d3d12 explicit root signature does not cover active binding {} in group {}",
+                    entry.Binding,
+                    group.GroupIndex);
+                return nullptr;
+            }
+            if (!entry.IsStaticSampler() &&
+                !entryStagesCovered(entry, binding, group.GroupIndex)) {
+                RADRAY_ERR_LOG(
+                    "d3d12 explicit root signature visibility does not cover active binding {} in group {}",
+                    entry.Binding,
+                    group.GroupIndex);
+                return nullptr;
+            }
+        }
+    }
+    for (const ResolvedPushConstantBlock& constant : layout_.PushConstants) {
+        const ShaderBindingLocation location{constant.RegisterSpace, constant.Register};
+        const auto found = std::find_if(
+            layout->_pushConstantBindings.begin(),
+            layout->_pushConstantBindings.end(),
+            [&](const PushConstantBindingD3D12& value) noexcept {
+                return value.Location == location;
+            });
+        const auto psCoversStage = [&](ShaderStage stage) noexcept {
+            if (!constant.Stages.HasFlag(stage)) {
+                return true;
+            }
+            if (found == layout->_pushConstantBindings.end()) {
+                return false;
+            }
+            return std::any_of(
+                found->RootParameterIndices.begin(),
+                found->RootParameterIndices.end(),
+                [&](uint32_t rootParameterIndex) noexcept {
+                    return rootParameterCoversStage(rootParameterIndex, stage) &&
+                           rootParameterIndex < rootParameters.size() &&
+                           rootParameters[rootParameterIndex].ParameterType ==
+                               D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+                });
+        };
+        if (found == layout->_pushConstantBindings.end() ||
+            found->RootParameterIndices.empty() ||
+            constant.Stages == ShaderStage::UNKNOWN ||
+            !psCoversStage(ShaderStage::Vertex) ||
+            !psCoversStage(ShaderStage::Pixel) ||
+            !psCoversStage(ShaderStage::Compute)) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature does not cover active root constants");
+            return nullptr;
+        }
+    }
+
+    for (ExplicitTableInfo& table : tables) {
+        if (table.GroupIndex == std::numeric_limits<uint32_t>::max()) {
+            continue;
+        }
+        auto group = std::find_if(
+            layout->_parameterGroups.begin(), layout->_parameterGroups.end(),
+            [&](const ShaderParameterGroupLayoutD3D12& value) noexcept {
+                return value.GroupIndex == table.GroupIndex;
+            });
+        if (group == layout->_parameterGroups.end()) {
+            RADRAY_ERR_LOG("d3d12 explicit root signature table group is unavailable");
+            return nullptr;
+        }
+        DescriptorTableBindingD3D12 nativeTable;
+        nativeTable.HeapType = table.Sampler ? D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER : D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        nativeTable.Visibility = rootParameters[table.RootParameterIndex].ShaderVisibility;
+        nativeTable.RootParameterIndex = table.RootParameterIndex;
+        nativeTable.DescriptorCount = table.Size;
+        nativeTable.Ranges = std::move(table.Ranges);
+        for (auto& range : nativeTable.Ranges) {
+            if (range.Space == group->GroupIndex) {
+                range.Space = std::numeric_limits<uint32_t>::max();
+            }
+        }
+        group->Tables.push_back(std::move(nativeTable));
+    }
+    // Normalize each root-parameter reference exactly once, after all tables are known.
+    for (auto& group : layout->_parameterGroups) {
+        for (auto& binding : group.Bindings) {
+            for (auto& destination : binding.DescriptorDestinations) {
+                const auto table = std::find_if(group.Tables.begin(), group.Tables.end(), [&](const auto& value) {
+                    return value.RootParameterIndex == destination.TableIndex;
+                });
+                if (table == group.Tables.end()) {
+                    return nullptr;
+                }
+                destination.TableIndex = static_cast<uint32_t>(table - group.Tables.begin());
+            }
+        }
+        BuildDescriptorTableSlotsD3D12(group);
+    }
+
+    layout->_nativeLayout = _pipelineLayoutCache->GetOrCreate(serialized);
+    if (!layout->_nativeLayout) return nullptr;
+    return layout;
+}
+
+Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
+    const ResolvedD3D12Layout& layout_) noexcept {
+    if (layout_.HasExplicitCarrier()) {
+        return CreateExplicitRootSignatureInternal(layout_);
+    }
+    D3D12_FEATURE_DATA_ROOT_SIGNATURE rootSignatureFeature{};
+    rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (HRESULT hr = _device->CheckFeatureSupport(
+            D3D12_FEATURE_ROOT_SIGNATURE,
+            &rootSignatureFeature,
+            sizeof(rootSignatureFeature));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG(
+            "ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE) failed: {} {}",
+            GetErrorName(hr),
+            hr);
+        return nullptr;
+    }
+    if (rootSignatureFeature.HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_1) {
+        RADRAY_ERR_LOG(
+            "d3d12 root signature 1.1 is not supported; highest supported version is {}",
+            static_cast<uint32_t>(rootSignatureFeature.HighestVersion));
+        return nullptr;
+    }
+
+    vector<PipelineLayoutGroup> groups;
+    BuildParameterGroupsD3D12(layout_, groups);
+    vector<D3D12_ROOT_PARAMETER1> rootParameters;
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> descriptorRanges;
+    auto layout = make_unique<RootSigD3D12>();
+    layout->_device = this;
+    layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
+    for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            binding.Name,
+            ShaderBindingLocation{binding.Group, binding.Binding},
+            shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
+    }
+    // Push blocks share the handle table with the descriptor bindings, so a caller reaches root
+    // constants by the same declaration name it uses for everything else. The record kind is what
+    // keeps them apart: a push handle names a root constant block, not a descriptor slot.
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            pushConstant.Name,
+            ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register},
+            0,
+            BackendBindingRecordKind::Push});
+    }
+    layout->_parameterGroups.reserve(groups.size());
+    for (const PipelineLayoutGroup& group : groups) {
+        ShaderParameterGroupLayoutD3D12& parameterGroup =
+            layout->_parameterGroups.emplace_back();
+        parameterGroup.GroupIndex = group.Index;
+        parameterGroup.Entries = group.Entries;
+        parameterGroup.Bindings.resize(group.Entries.size());
+
+        for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
+            const auto& entry = group.Entries[entryIndex];
+            auto& binding = parameterGroup.Bindings[entryIndex];
+            if (entry.IsRootDescriptor()) {
+                parameterGroup.RootDescriptorOrder.push_back(static_cast<uint32_t>(entryIndex));
+                continue;
+            }
+            const auto heapType = entry.IsSampler() ? D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER : D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            const auto visibility = MapShaderStages(entry.Stages);
+            auto found = std::find_if(parameterGroup.Tables.begin(), parameterGroup.Tables.end(), [&](const auto& table) {
+                return table.HeapType == heapType && table.Visibility == visibility;
+            });
+            if (found == parameterGroup.Tables.end()) {
+                auto& table = parameterGroup.Tables.emplace_back();
+                table.HeapType = heapType;
+                table.Visibility = visibility;
+                found = parameterGroup.Tables.end() - 1;
+            }
+            if (entry.Count > std::numeric_limits<uint32_t>::max() - found->DescriptorCount) {
+                RADRAY_ERR_LOG("d3d12 descriptor table size overflows");
+                return nullptr;
+            }
+            binding.DescriptorDestinations.push_back({static_cast<uint32_t>(found - parameterGroup.Tables.begin()), found->DescriptorCount});
+            found->Ranges.push_back({MapDescriptorRangeType(entry.LogicalKind).value(), entry.Count, entry.Binding,
+                                     std::numeric_limits<uint32_t>::max(), found->DescriptorCount, D3D12_DESCRIPTOR_RANGE_FLAG_NONE});
+            found->DescriptorCount += entry.Count;
+        }
+        BuildDescriptorTableSlotsD3D12(parameterGroup);
+    }
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
+        const uint32_t rootParameterIndex =
+            static_cast<uint32_t>(rootParameters.size());
+        D3D12_ROOT_PARAMETER1 rootParameter{};
+        rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParameter.Constants.ShaderRegister = pushConstant.Register;
+        rootParameter.Constants.RegisterSpace = pushConstant.RegisterSpace;
+        rootParameter.Constants.Num32BitValues = pushConstant.Size / 4;
+        rootParameter.ShaderVisibility = MapShaderStages(pushConstant.Stages);
+        rootParameters.push_back(rootParameter);
+        PushConstantBindingD3D12 binding{};
+        binding.Location = ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register};
+        binding.Num32BitValues = rootParameter.Constants.Num32BitValues;
+        binding.RootParameterIndex = rootParameterIndex;
+        binding.RootParameterIndices.push_back(rootParameterIndex);
+        layout->_pushConstantBindings.push_back(std::move(binding));
+    }
+
+    for (size_t groupIndex = 0; groupIndex < groups.size(); ++groupIndex) {
+        const PipelineLayoutGroup& group = groups[groupIndex];
+        ShaderParameterGroupLayoutD3D12& parameterGroup =
+            layout->_parameterGroups[groupIndex];
+        // D3D12 static samplers only ever arrive inside a serialized root signature carrier, and
+        // that path never reaches this implicit builder, so there is nothing to emit here.
+
+        for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
+            const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
+            if (!entry.IsRootDescriptor()) {
+                continue;
+            }
+            const auto parameterType = MapRootDescriptorParameterType(entry.LogicalKind);
+            if (!parameterType.has_value()) {
+                RADRAY_ERR_LOG(
+                    "d3d12 root descriptor placement is illegal for this binding: group {} binding {}",
+                    group.Index,
+                    entry.Binding);
+                return nullptr;
+            }
+            // Recorded as a destination, exactly like an authored root CBV in the explicit path, so
+            // command time has one way to reach a root descriptor and the fan-out case needs no
+            // second code path.
+            parameterGroup.Bindings[entryIndex].RootDescriptorDestinations.push_back(
+                ShaderParameterBindingLayoutD3D12::RootDescriptorDestination{
+                    static_cast<uint32_t>(rootParameters.size()),
+                    parameterType.value()});
+            D3D12_ROOT_PARAMETER1 rootParameter{};
+            rootParameter.ParameterType = parameterType.value();
+            rootParameter.Descriptor.ShaderRegister = entry.Binding;
+            rootParameter.Descriptor.RegisterSpace = group.Index;
+            rootParameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
+            rootParameter.ShaderVisibility = MapShaderStages(entry.Stages);
+            rootParameters.push_back(rootParameter);
+        }
+
+        for (auto& table : parameterGroup.Tables) {
+            auto& ranges = descriptorRanges.emplace_back();
+            for (const auto& range : table.Ranges) {
+                ranges.push_back({range.Type, range.Count, range.Binding, group.Index, range.Flags, range.Offset});
+            }
+            table.RootParameterIndex = static_cast<uint32_t>(rootParameters.size());
+            D3D12_ROOT_PARAMETER1 parameter{};
+            parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            parameter.ShaderVisibility = table.Visibility;
+            parameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
+            rootParameters.push_back(parameter);
+        }
+    }
+
+    RADRAY_ASSERT(rootParameters.size() <= std::numeric_limits<uint32_t>::max());
+    size_t descriptorTableIndex = 0;
+    for (D3D12_ROOT_PARAMETER1& parameter : rootParameters) {
+        if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            continue;
+        }
+        RADRAY_ASSERT(descriptorTableIndex < descriptorRanges.size());
+        const vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges[descriptorTableIndex++];
+        parameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
+        parameter.DescriptorTable.pDescriptorRanges = ranges.empty() ? nullptr : ranges.data();
+    }
+    RADRAY_ASSERT(descriptorTableIndex == descriptorRanges.size());
+
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{};
+    desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    desc.Desc_1_1.NumParameters = static_cast<uint32_t>(rootParameters.size());
+    desc.Desc_1_1.pParameters = rootParameters.empty() ? nullptr : rootParameters.data();
+    desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                          D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                          D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                          D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+
+    ComPtr<ID3DBlob> rootSigBlob{};
+    ComPtr<ID3DBlob> errorBlob{};
+    if (HRESULT hr = ::D3D12SerializeVersionedRootSignature(
+            &desc,
+            rootSigBlob.GetAddressOf(),
+            errorBlob.GetAddressOf());
+        FAILED(hr)) {
+        const auto error = errorBlob != nullptr
+                               ? std::string_view{
+                                     static_cast<const char*>(errorBlob->GetBufferPointer()),
+                                     errorBlob->GetBufferSize()}
+                               : std::string_view{};
+        RADRAY_ERR_LOG("D3D12SerializeVersionedRootSignature failed: {} {}\\n{}", GetErrorName(hr), hr, error);
+        return nullptr;
+    }
+
+    layout->_nativeLayout = _pipelineLayoutCache->GetOrCreate({static_cast<const byte*>(rootSigBlob->GetBufferPointer()), rootSigBlob->GetBufferSize()});
+    if (!layout->_nativeLayout) return nullptr;
+    return layout;
+}
+
+// == Device: pipeline layout 与 parameter set ==
+
+Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
+    const shader::DxilShaderArtifactView& artifact,
+    const D3D12TargetLayoutOptions& options) noexcept {
+    const std::optional<ResolvedD3D12Layout> resolved = ResolveD3D12Layout(artifact, options);
+    if (!resolved.has_value()) {
+        return nullptr;
+    }
+    return CreatePipelineLayout(resolved.value());
+}
+
+Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
+    const ResolvedD3D12Layout& layout) noexcept {
+    auto rootSignature = CreateRootSignatureInternal(layout);
+    if (!rootSignature.HasValue()) {
+        return nullptr;
+    }
+    return unique_ptr<PipelineLayout>{rootSignature.Release()};
+}
+
+Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(
+    const ShaderParameterSetDescriptor& desc) noexcept {
+    auto* layout = CastD3D12Object(desc.Layout);
+    const auto group = layout->FindParameterGroup(desc.GroupIndex);
+
+    auto result = make_unique<ShaderParameterSetD3D12>();
+    result->_device = this;
+    result->_layout = layout;
+    result->_groupIndex = desc.GroupIndex;
+    result->_rootBindings.resize(group.Get()->RootDescriptorOrder.size());
+
+    result->_tables.reserve(group.Get()->Tables.size());
+    for (const auto& table : group.Get()->Tables) {
+        auto& storage = result->_tables.emplace_back();
+        auto* cpuAllocator = table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? _cpuSamplerAlloc.get() : _cpuResAlloc.get();
+        auto* gpuAllocator = table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? _gpuSamplerHeap.get() : _gpuResHeap.get();
+        const auto cpu = cpuAllocator->Allocate(table.DescriptorCount);
+        if (!cpu.has_value()) {
+            RADRAY_ERR_LOG("d3d12 CPU descriptor allocation failed (requested {})", table.DescriptorCount);
+            return nullptr;
+        }
+        storage.Mirror = CpuDescriptorHeapViewRAII{cpuAllocator, cpu.value()};
+        const auto gpu = gpuAllocator->Allocate(table.DescriptorCount);
+        if (!gpu.has_value()) {
+            RADRAY_ERR_LOG("d3d12 GPU descriptor allocation failed (requested {})", table.DescriptorCount);
+            return nullptr;
+        }
+        storage.Descriptors = GpuDescriptorHeapViewRAII{gpuAllocator, gpu.value()};
+        storage.InitializedSlots.resize(table.DescriptorCount, 0);
+    }
+    return result;
+}
+
+// == parameter descriptor 写入 ==
+
+struct ResolvedShaderBufferBindingD3D12 {
+    BufferD3D12* Buffer;
+    uint64_t Offset;
+    uint64_t Size;
+};
+
+static ResolvedShaderBufferBindingD3D12 ResolveShaderBufferBindingD3D12(
+    const ShaderBufferBinding& binding) noexcept {
+    auto* buffer = CastD3D12Object(binding.Target);
+    const uint64_t size = binding.Range.Size == BufferRange::All()
+                              ? buffer->_reqSize - binding.Range.Offset
+                              : binding.Range.Size;
+    return {buffer, binding.Range.Offset, size};
+}
+
+// Only ever called for table bindings: a root descriptor carries no descriptor, it takes a GPU
+// virtual address at command time.
+static void WriteShaderParameterValueD3D12(
+    CpuDescriptorHeapViewRAII& descriptors,
+    shader::ShaderBindingKind kind,
+    uint32_t descriptorIndex,
+    const ShaderParameterValue& value) noexcept {
+    switch (kind) {
+        case shader::ShaderBindingKind::CBuffer: {
+            const ShaderBufferBinding& binding = std::get<ShaderBufferBinding>(value);
+            const auto resolved = ResolveShaderBufferBindingD3D12(binding);
+            D3D12_CONSTANT_BUFFER_VIEW_DESC desc{};
+            desc.BufferLocation = resolved.Buffer->_gpuAddr + resolved.Offset;
+            desc.SizeInBytes = static_cast<UINT>(Align(
+                resolved.Size,
+                uint64_t{D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT}));
+            descriptors.GetHeap()->Create(
+                desc,
+                descriptors.GetStart() + descriptorIndex);
+            return;
+        }
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer: {
+            const ShaderBufferBinding& binding = std::get<ShaderBufferBinding>(value);
+            const auto resolved = ResolveShaderBufferBindingD3D12(binding);
+            const uint64_t elementSize =
+                binding.StructureByteStride == 0 ? 4 : binding.StructureByteStride;
+            if (!shader::IsWritableKind(kind)) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+                desc.Format = binding.StructureByteStride == 0
+                                  ? DXGI_FORMAT_R32_TYPELESS
+                                  : DXGI_FORMAT_UNKNOWN;
+                desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                desc.Buffer.FirstElement = resolved.Offset / elementSize;
+                desc.Buffer.NumElements = static_cast<UINT>(resolved.Size / elementSize);
+                desc.Buffer.StructureByteStride = binding.StructureByteStride;
+                desc.Buffer.Flags = binding.StructureByteStride == 0
+                                        ? D3D12_BUFFER_SRV_FLAG_RAW
+                                        : D3D12_BUFFER_SRV_FLAG_NONE;
+                descriptors.GetHeap()->Create(
+                    resolved.Buffer->_buf.Get(),
+                    desc,
+                    descriptors.GetStart() + descriptorIndex);
+            } else {
+                D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+                desc.Format = binding.StructureByteStride == 0
+                                  ? DXGI_FORMAT_R32_TYPELESS
+                                  : DXGI_FORMAT_UNKNOWN;
+                desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                desc.Buffer.FirstElement = resolved.Offset / elementSize;
+                desc.Buffer.NumElements = static_cast<UINT>(resolved.Size / elementSize);
+                desc.Buffer.StructureByteStride = binding.StructureByteStride;
+                desc.Buffer.CounterOffsetInBytes = 0;
+                desc.Buffer.Flags = binding.StructureByteStride == 0
+                                        ? D3D12_BUFFER_UAV_FLAG_RAW
+                                        : D3D12_BUFFER_UAV_FLAG_NONE;
+                descriptors.GetHeap()->Create(
+                    resolved.Buffer->_buf.Get(),
+                    desc,
+                    descriptors.GetStart() + descriptorIndex);
+            }
+            return;
+        }
+        case shader::ShaderBindingKind::TypedBuffer:
+        case shader::ShaderBindingKind::RWTypedBuffer: {
+            const ShaderTexelBufferBinding& binding =
+                std::get<ShaderTexelBufferBinding>(value);
+            ShaderBufferBinding bufferBinding{binding.Target, binding.Range, 0};
+            const auto resolved = ResolveShaderBufferBindingD3D12(bufferBinding);
+            const uint32_t elementSize = GetTextureFormatBytesPerPixel(binding.Format);
+            if (!shader::IsWritableKind(kind)) {
+                D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
+                desc.Format = MapType(binding.Format);
+                desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                desc.Buffer.FirstElement = resolved.Offset / elementSize;
+                desc.Buffer.NumElements = static_cast<UINT>(resolved.Size / elementSize);
+                desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+                descriptors.GetHeap()->Create(
+                    resolved.Buffer->_buf.Get(),
+                    desc,
+                    descriptors.GetStart() + descriptorIndex);
+            } else {
+                D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+                desc.Format = MapType(binding.Format);
+                desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                desc.Buffer.FirstElement = resolved.Offset / elementSize;
+                desc.Buffer.NumElements = static_cast<UINT>(resolved.Size / elementSize);
+                desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
+                descriptors.GetHeap()->Create(
+                    resolved.Buffer->_buf.Get(),
+                    desc,
+                    descriptors.GetStart() + descriptorIndex);
+            }
+            return;
+        }
+        case shader::ShaderBindingKind::Texture:
+        case shader::ShaderBindingKind::RWTexture: {
+            auto* view = CastD3D12Object(std::get<TextureView*>(value));
+            view->_heapView.CopyTo(0, 1, descriptors, descriptorIndex);
+            return;
+        }
+        case shader::ShaderBindingKind::Sampler: {
+            auto* sampler = CastD3D12Object(std::get<Sampler*>(value));
+            sampler->_samplerView.CopyTo(0, 1, descriptors, descriptorIndex);
+            return;
+        }
+    }
+}
+
+ShaderParameterSetD3D12::~ShaderParameterSetD3D12() noexcept = default;
+
+bool ShaderParameterSetD3D12::IsValid() const noexcept {
+    return _device != nullptr && _layout != nullptr;
+}
+
+void ShaderParameterSetD3D12::Destroy() noexcept {
+    _tables.clear();
+    _copySources.clear();
+    _copyDestinations.clear();
+    _copyCounts.clear();
+    _tableMapping.clear();
+    _rootBindings.clear();
+    _groupIndex = 0;
+    _layout = nullptr;
+    _device = nullptr;
+}
+
+void ShaderParameterSetD3D12::ResetBindingsForReuse() noexcept {}
+
+bool ShaderParameterSetD3D12::Set(
+    BindingHandle binding,
+    uint32_t arrayElement,
+    ShaderParameterValue value) noexcept {
+    Nullable<const BackendBindingName*> record = &_layout->_bindingNames[BindingHandleAccess::RecordIndex(binding)];
+    const uint32_t bindingNumber = record.Get()->Location.Binding;
+    const auto group = _layout->FindParameterGroup(_groupIndex);
+    const auto& entries = group.Get()->Entries;
+    const auto found = FindGroupEntryD3D12(entries, bindingNumber, record.Get()->Namespace);
+    const ShaderParameterSetLayoutEntryD3D12* entry = found.Get();
+
+    const size_t entryIndex = static_cast<size_t>(entry - entries.data());
+    const auto& destinations = group.Get()->Bindings[entryIndex].DescriptorDestinations;
+    if (entry->IsRootDescriptor()) {
+        const auto& order = group.Get()->RootDescriptorOrder;
+        const auto root = std::find(order.begin(), order.end(), entryIndex);
+        const auto& buffer = std::get<ShaderBufferBinding>(value);
+        _rootBindings[static_cast<size_t>(root - order.begin())] =
+            CastD3D12Object(buffer.Target)->_gpuAddr + buffer.Range.Offset;
+        return true;
+    }
+
+    uint32_t firstTable = std::numeric_limits<uint32_t>::max();
+    uint32_t firstOffset = 0;
+    for (const auto& destination : destinations) {
+        const bool wholeArray = destination.ArrayElement == std::numeric_limits<uint32_t>::max();
+        if (!wholeArray && destination.ArrayElement != arrayElement) {
+            continue;
+        }
+        const uint32_t offset = destination.TableLocalOffset + (wholeArray ? arrayElement : 0);
+        auto& storage = _tables[destination.TableIndex];
+        if (firstTable == std::numeric_limits<uint32_t>::max()) {
+            WriteShaderParameterValueD3D12(storage.Mirror, entry->LogicalKind, offset, value);
+            firstTable = destination.TableIndex;
+            firstOffset = offset;
+        } else if (firstTable != destination.TableIndex || firstOffset != offset) {
+            _tables[firstTable].Mirror.CopyTo(firstOffset, 1, storage.Mirror, offset);
+        }
+        storage.InitializedSlots[offset] = 1;
+        storage.Dirty.Add(offset);
+    }
+    return true;
+}
+
+bool ShaderParameterSetD3D12::FlushWrites() noexcept {
+    ScopeGuard drain([this] { _device->TryDrainValidationMessages(); });
+    for (auto& storage : _tables) {
+        if (storage.Dirty.Ranges.empty()) {
+            continue;
+        }
+        const auto span = storage.Dirty.GetCopySpan(storage.InitializedSlots);
+        if (span.has_value()) {
+            storage.Mirror.CopyTo(span->Start, span->Count, storage.Descriptors, span->Start);
+        } else {
+            _copySources.clear();
+            _copyDestinations.clear();
+            _copyCounts.clear();
+            for (const auto& range : storage.Dirty.Ranges) {
+                _copySources.push_back(storage.Mirror.GetHeap()->HandleCpu(storage.Mirror.GetStart() + range.Start));
+                _copyDestinations.push_back(storage.Descriptors.GetHeap()->HandleCpu(storage.Descriptors.GetStart() + range.Start));
+                _copyCounts.push_back(range.Count);
+            }
+            _device->_device->CopyDescriptors(static_cast<UINT>(_copyCounts.size()), _copyDestinations.data(), _copyCounts.data(),
+                                              static_cast<UINT>(_copyCounts.size()), _copySources.data(), _copyCounts.data(), storage.Mirror.GetHeap()->GetHeapType());
+        }
+        storage.Dirty.Ranges.clear();
+    }
+    return true;
+}
+
+// == Device: PSO / sampler / fence ==
+
+Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    auto [topoClass, topo] = MapType(desc.Primitive.Topology);
+    vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+    inputElements.reserve(desc.VertexInput.Attributes.size());
+    // D3D12_INPUT_ELEMENT_DESC::SemanticName 需要 null 结尾的 string, string_view 不能保证是 \0 结尾
+    vector<string> semanticNames;
+    semanticNames.reserve(desc.VertexInput.Attributes.size());
+    std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides{};
+    for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
+        vertexStrides[buffer.Binding] = buffer.ArrayStride;
+    }
+    for (const VertexAttribute& attribute : desc.VertexInput.Attributes) {
+        const auto buffer = std::ranges::find(
+            desc.VertexInput.Buffers,
+            attribute.BufferBinding,
+            &VertexBufferLayout::Binding);
+        const D3D12_INPUT_CLASSIFICATION inputClass = MapType(buffer->StepMode);
+        const string& semanticName = semanticNames.emplace_back(attribute.Semantic);
+        auto& inputElement = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
+        inputElement.SemanticName = semanticName.c_str();
+        inputElement.SemanticIndex = attribute.SemanticIndex;
+        inputElement.Format = MapType(attribute.Format);
+        inputElement.InputSlot = attribute.BufferBinding;
+        inputElement.AlignedByteOffset = attribute.Offset;
+        inputElement.InputSlotClass = inputClass;
+        inputElement.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
+    }
+    DepthBiasState depBias;
+    if (desc.DepthStencil.has_value()) {
+        depBias = desc.DepthStencil.value().DepthBias;
+    } else {
+        depBias = DepthBiasState{0, 0, 0};
+    }
+    D3D12_RASTERIZER_DESC rawRaster{};
+    rawRaster.FillMode = MapType(desc.Primitive.Poly).value();
+    rawRaster.CullMode = MapType(desc.Primitive.Cull);
+    rawRaster.FrontCounterClockwise = desc.Primitive.FaceClockwise == FrontFace::CCW;
+    rawRaster.DepthBias = depBias.Constant;
+    rawRaster.DepthBiasClamp = depBias.Clamp;
+    rawRaster.SlopeScaledDepthBias = depBias.SlopScale;
+    rawRaster.DepthClipEnable = !desc.Primitive.UnclippedDepth;
+    rawRaster.MultisampleEnable = desc.MultiSample.Count > 1;
+    rawRaster.AntialiasedLineEnable = false;
+    rawRaster.ForcedSampleCount = 0;
+    rawRaster.ConservativeRaster = desc.Primitive.Conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+    D3D12_BLEND_DESC rawBlend{};
+    rawBlend.AlphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable;
+    rawBlend.IndependentBlendEnable = false;
+    for (size_t i = 0; i < ArrayLength(rawBlend.RenderTarget); i++) {
+        D3D12_RENDER_TARGET_BLEND_DESC& rtb = rawBlend.RenderTarget[i];
+        if (i < desc.ColorTargets.size()) {
+            const ColorTargetState& ct = desc.ColorTargets[i];
+            rtb.BlendEnable = ct.Blend.has_value();
+            if (ct.Blend.has_value()) {
+                const auto& ctBlend = ct.Blend.value();
+                rtb.SrcBlend = MapBlendColor(ctBlend.Color.Src);
+                rtb.DestBlend = MapBlendColor(ctBlend.Color.Dst);
+                rtb.BlendOp = MapType(ctBlend.Color.Op);
+                rtb.SrcBlendAlpha = MapBlendAlpha(ctBlend.Alpha.Src);
+                rtb.DestBlendAlpha = MapBlendAlpha(ctBlend.Alpha.Dst);
+                rtb.BlendOpAlpha = MapType(ctBlend.Alpha.Op);
+            }
+            rtb.RenderTargetWriteMask = static_cast<UINT8>(MapColorWrites(ct.WriteMask).value());
+        } else {
+            rtb.BlendEnable = false;
+            rtb.LogicOpEnable = false;
+            rtb.LogicOp = D3D12_LOGIC_OP_CLEAR;
+            rtb.RenderTargetWriteMask = 0;
+        }
+    }
+    D3D12_DEPTH_STENCIL_DESC dsDesc{};
+    if (desc.DepthStencil.has_value()) {
+        const auto& ds = desc.DepthStencil.value();
+        const bool hardwareDepthEnable = ds.DepthTestEnable || ds.DepthWriteEnable;
+        dsDesc.DepthEnable = hardwareDepthEnable;
+        dsDesc.DepthWriteMask = ds.DepthWriteEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        dsDesc.DepthFunc = ds.DepthTestEnable ? MapType(ds.DepthCompare) : D3D12_COMPARISON_FUNC_ALWAYS;
+        dsDesc.StencilEnable = ds.Stencil.has_value();
+        if (ds.Stencil.has_value()) {
+            const auto& s = ds.Stencil.value();
+            auto ToDsd = [](StencilFaceState v) noexcept {
+                D3D12_DEPTH_STENCILOP_DESC result{};
+                result.StencilFailOp = MapType(v.FailOp);
+                result.StencilDepthFailOp = MapType(v.DepthFailOp);
+                result.StencilPassOp = MapType(v.PassOp);
+                result.StencilFunc = MapType(v.Compare);
+                return result;
+            };
+            dsDesc.StencilReadMask = (UINT8)s.ReadMask;
+            dsDesc.StencilWriteMask = (UINT8)s.WriteMask;
+            dsDesc.FrontFace = ToDsd(s.Front);
+            dsDesc.BackFace = ToDsd(s.Back);
+        }
+    } else {
+        dsDesc.DepthEnable = false;
+        dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        dsDesc.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        dsDesc.StencilEnable = false;
+        dsDesc.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+        dsDesc.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+        dsDesc.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        dsDesc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+        dsDesc.BackFace = dsDesc.FrontFace;
+    }
+    DXGI_SAMPLE_DESC sampleDesc{desc.MultiSample.Count, 0};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC rawPsoDesc{};
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
+    rawPsoDesc.VS = desc.VS ? CastD3D12Object(desc.VS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.PS = desc.PS ? CastD3D12Object(desc.PS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.DS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.HS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.GS = D3D12_SHADER_BYTECODE{};
+    rawPsoDesc.StreamOutput = D3D12_STREAM_OUTPUT_DESC{};
+    rawPsoDesc.BlendState = rawBlend;
+    rawPsoDesc.SampleMask = (UINT)desc.MultiSample.Mask;
+    rawPsoDesc.RasterizerState = rawRaster;
+    rawPsoDesc.DepthStencilState = dsDesc;
+    rawPsoDesc.InputLayout = {inputElements.data(), static_cast<uint32_t>(inputElements.size())};
+    rawPsoDesc.IBStripCutValue = desc.Primitive.StripIndexFormat.has_value() ? MapType(desc.Primitive.StripIndexFormat.value()) : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    rawPsoDesc.PrimitiveTopologyType = topoClass;
+    rawPsoDesc.NumRenderTargets = std::min(static_cast<uint32_t>(desc.ColorTargets.size()), (uint32_t)D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+    for (size_t i = 0; i < rawPsoDesc.NumRenderTargets; i++) {
+        rawPsoDesc.RTVFormats[i] = i < desc.ColorTargets.size() ? MapType(desc.ColorTargets[i].Format) : DXGI_FORMAT_UNKNOWN;
+    }
+    rawPsoDesc.DSVFormat = desc.DepthStencil.has_value() ? MapType(desc.DepthStencil.value().Format) : DXGI_FORMAT_UNKNOWN;
+    rawPsoDesc.SampleDesc = sampleDesc;
+    rawPsoDesc.NodeMask = 0;
+    rawPsoDesc.CachedPSO = D3D12_CACHED_PIPELINE_STATE{};
+    rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    ComPtr<ID3D12PipelineState> pso;
+    if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    auto result = make_unique<GraphicsPsoD3D12>(
+        this,
+        CastD3D12Object(desc.PipelineLayout),
+        std::move(pso),
+        std::move(vertexStrides),
+        topo);
+    return result;
+}
+
+Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
+    rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
+    rawPsoDesc.NodeMask = 0;
+    rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+    ComPtr<ID3D12PipelineState> pso;
+    if (HRESULT hr = _device->CreateComputePipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("ID3D12Device::CreateComputePipelineState failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return make_unique<ComputePsoD3D12>(
+        this,
+        CastD3D12Object(desc.PipelineLayout),
+        std::move(pso));
+}
+
+Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    D3D12_SAMPLER_DESC rawDesc{};
+    rawDesc.Filter = MapType(desc.MinFilter, desc.MagFilter, desc.MipmapFilter, desc.Compare.has_value(), desc.AnisotropyClamp);
+    rawDesc.AddressU = MapType(desc.AddressS);
+    rawDesc.AddressV = MapType(desc.AddressT);
+    rawDesc.AddressW = MapType(desc.AddressR);
+    rawDesc.MipLODBias = 0;
+    rawDesc.MaxAnisotropy = desc.AnisotropyClamp;
+    rawDesc.ComparisonFunc = desc.Compare.has_value() ? MapType(desc.Compare.value()) : D3D12_COMPARISON_FUNC_NEVER;
+    rawDesc.BorderColor[0] = 0;
+    rawDesc.BorderColor[1] = 0;
+    rawDesc.BorderColor[2] = 0;
+    rawDesc.BorderColor[3] = 0;
+    rawDesc.MinLOD = desc.LodMin;
+    rawDesc.MaxLOD = desc.LodMax;
+    auto alloc = this->_cpuSamplerAlloc.get();
+    CpuDescriptorHeapViewRAII heapView{};
+    {
+        auto opt = alloc->Allocate(1);
+        if (!opt.has_value()) {
+            RADRAY_ERR_LOG("CpuDescriptorAllocator::Allocate failed: {}", "cannot allocate Sampler descriptors");
+            return nullptr;
+        }
+        heapView = {alloc, opt.value()};
+    }
+    heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
+    return make_unique<SamplerD3D12>(this, std::move(heapView), rawDesc);
+}
+
+Nullable<Sampler*> DeviceD3D12::GetOrCreateSampler(
+    const SamplerDescriptor& desc) noexcept {
+    return _samplerCache.GetOrCreate(desc);
+}
+
+Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
+    ScopeGuard drain([this] { TryDrainValidationMessages(); });
+    ComPtr<ID3D12Fence> fence;
+    if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
+        FAILED(hr)) {
+        TryDrainValidationMessages();
+        RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    std::optional<Win32Event> e = Win32Event::Create();
+    if (!e.has_value()) {
+        return nullptr;
+    }
+    auto result = make_unique<FenceD3D12>(this, std::move(fence), std::move(e.value()));
+    result->_fenceValue = initValue + 1;
+    return result;
+}
+
+void DeviceD3D12::TryDrainValidationMessages() noexcept {
+    if (!_validationMessages) return;
+    auto& messages = *_validationMessages;
+    std::lock_guard lock(messages.Mutex);
+    if (messages.D3D12 && !_infoQueueCallbackCookie.has_value()) {
+        auto* queue = messages.D3D12.Get();
+        _DrainValidationQueue<D3D12_MESSAGE, D3D12_INFO_QUEUE_FILTER>(this, "D3D12", messages.D3D12Cursor, [queue](auto* filter, SIZE_T* size) { return queue->GetRetrievalFilter(filter, size); }, [queue] { return queue->GetNumStoredMessagesAllowedByRetrievalFilter(); }, [queue](UINT64 index, auto* message, SIZE_T* size) { return queue->GetMessage(index, message, size); }, [queue] { return queue->GetNumMessagesDiscardedByMessageCountLimit(); }, [this](const D3D12_MESSAGE& message) { _LogD3D12ValidationMessage(this, message.Category, message.Severity, message.ID, message.pDescription); });
+    }
+    if (messages.Dxgi) {
+        auto* queue = messages.Dxgi.Get();
+        _DrainValidationQueue<DXGI_INFO_QUEUE_MESSAGE, DXGI_INFO_QUEUE_FILTER>(this, "DXGI", messages.DxgiCursor, [queue](auto* filter, SIZE_T* size) { return queue->GetRetrievalFilter(DXGI_DEBUG_DXGI, filter, size); }, [queue] { return queue->GetNumStoredMessagesAllowedByRetrievalFilters(DXGI_DEBUG_DXGI); }, [queue](UINT64 index, auto* message, SIZE_T* size) { return queue->GetMessage(DXGI_DEBUG_DXGI, index, message, size); }, [queue] { return queue->GetNumMessagesDiscardedByMessageCountLimit(DXGI_DEBUG_DXGI); }, [this](const DXGI_INFO_QUEUE_MESSAGE& message) { _LogDxgiValidationMessage(this, message); });
+    }
+}
+
+// == CmdQueue / Fence / CmdList 与 barrier ==
+
+#ifdef RADRAY_ENABLE_PROFILER
+struct CmdListD3D12::ProfilerZoneStack {
+    // D3D12ZoneScope is not movable; keep them in a deque so pushes never relocate open zones.
+    deque<tracy::D3D12ZoneScope> Zones;
+};
+#endif
+
+CmdQueueD3D12::CmdQueueD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12CommandQueue> queue,
+    D3D12_COMMAND_LIST_TYPE type,
+    unique_ptr<FenceD3D12> fence) noexcept
+    : _device(device),
+      _queue(std::move(queue)),
+      _fence(std::move(fence)),
+      _type(type) {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_type != D3D12_COMMAND_LIST_TYPE_COPY && _queue != nullptr) {
+        _profilerContext = TracyD3D12Context(_device->_device.Get(), _queue.Get());
+        const auto name = fmt::format("D3D12 {}", GetQueueType());
+        TracyD3D12ContextName(static_cast<TracyD3D12Ctx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
+    }
+#endif
+}
+
+CmdQueueD3D12::~CmdQueueD3D12() noexcept {
+    Destroy();
+}
+
+bool CmdQueueD3D12::IsValid() const noexcept {
+    return _queue != nullptr;
+}
+
+void CmdQueueD3D12::Destroy() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_profilerContext != nullptr) {
+        TracyD3D12Destroy(static_cast<TracyD3D12Ctx>(_profilerContext));
+        _profilerContext = nullptr;
+    }
+#endif
+    _fence = nullptr;
+    _queue = nullptr;
+}
+
+void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
+    _CheckD3D12DeviceStatus(_device, "CommandQueue::Submit");
+    for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
+        auto* f = CastD3D12Object(desc.WaitFences[i]);
+        uint64_t waitValue = desc.WaitValues[i];
+        _CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait");
+    }
+
+    vector<ID3D12CommandList*> submits;
+    submits.reserve(desc.CmdBuffers.size());
+    for (auto& i : desc.CmdBuffers) {
+        auto* cmdList = CastD3D12Object(i);
+        submits.emplace_back(cmdList->_cmdList.Get());
+    }
+    if (!submits.empty()) {
+        _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
+        _device->TryDrainValidationMessages();
+        _CheckD3D12DeviceStatus(_device, "ID3D12CommandQueue::ExecuteCommandLists");
+#ifdef RADRAY_ENABLE_PROFILER
+        if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
+#endif
+    }
+
+    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
+        auto* f = CastD3D12Object(desc.SignalFences[i]);
+        uint64_t signalValue = desc.SignalValues[i];
+        _CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal");
+        if (signalValue + 1 > f->_fenceValue) {
+            f->_fenceValue = signalValue + 1;
+        }
+    }
+
+    _device->TryDrainValidationMessages();
+}
+
+void CmdQueueD3D12::Wait() noexcept {
+    _CheckD3D12Result(_device,
+                      _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal");
+    ++_fence->_fenceValue;
+    _fence->Wait();
+    _device->TryDrainValidationMessages();
+}
+
+QueueType CmdQueueD3D12::GetQueueType() const noexcept {
+    switch (_type) {
+        case D3D12_COMMAND_LIST_TYPE_DIRECT:
+            return QueueType::Direct;
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE:
+            return QueueType::Compute;
+        case D3D12_COMMAND_LIST_TYPE_COPY:
+            return QueueType::Copy;
+        default:
+            RADRAY_ABORT("invalid D3D12 command list type: {}", _type);
+            return QueueType::Direct;
+    }
+}
+
+TimestampClockCalibrationResult CmdQueueD3D12::GetTimestampClockCalibration() const noexcept {
+    using Status = TimestampClockCalibrationStatus;
+    if (_queue == nullptr) return {.Status = Status::InvalidQueue};
+    uint64_t frequency{}, gpu{}, cpu{};
+    const HRESULT frequencyResult = _queue->GetTimestampFrequency(&frequency);
+    if (FAILED(frequencyResult)) {
+        _device->TryDrainValidationMessages();
+        return {.Status = Status::ApiFailure, .NativeError = frequencyResult};
+    }
+    LARGE_INTEGER cpuFrequency{}, before{}, after{};
+    if (!QueryPerformanceFrequency(&cpuFrequency) || !QueryPerformanceCounter(&before))
+        return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
+    const HRESULT calibrationResult = _queue->GetClockCalibration(&gpu, &cpu);
+    if (FAILED(calibrationResult)) {
+        _device->TryDrainValidationMessages();
+        return {.Status = Status::ApiFailure, .NativeError = calibrationResult};
+    }
+    if (!QueryPerformanceCounter(&after))
+        return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
+    if (frequency == 0 || cpuFrequency.QuadPart <= 0 || before.QuadPart < 0 || after.QuadPart < before.QuadPart)
+        return {.Status = Status::InvalidSample};
+    return {.Status = Status::Success,
+            .CpuDomain = TimestampCpuClockDomain::QueryPerformanceCounter,
+            .GpuTick = gpu,
+            .GpuFrequencyHz = frequency,
+            .CpuTick = cpu,
+            .CpuFrequencyHz = static_cast<uint64_t>(cpuFrequency.QuadPart),
+            .CpuCallBeginTick = static_cast<uint64_t>(before.QuadPart),
+            .CpuCallEndTick = static_cast<uint64_t>(after.QuadPart)};
+}
+
+FenceD3D12::FenceD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Fence> fence,
+    Win32Event event) noexcept
+    : _device(device),
+      _fence(std::move(fence)),
+      _event(std::move(event)) {}
+
+bool FenceD3D12::IsValid() const noexcept {
+    return _fence != nullptr;
+}
+
+void FenceD3D12::Destroy() noexcept {
+    _fence = nullptr;
+    _event.Destroy();
+}
+
+void FenceD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _fence.Get());
+}
+
+void FenceD3D12::Wait() noexcept {
+    Wait(_fenceValue - 1);
+}
+
+void FenceD3D12::Wait(uint64_t value) noexcept {
+    if (!WaitFor(value, 30000)) {
+        _device->TryDrainValidationMessages();
+        RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
+    }
+}
+
+bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
+    ScopeGuard drain([this] { _device->TryDrainValidationMessages(); });
+    if (GetCompletedValue() >= value) return true;
+    if (timeoutMs == 0) return false;
+    const DWORD duration = static_cast<DWORD>(std::min<uint64_t>(timeoutMs, INFINITE - 1));
+    const uint64_t start = ::GetTickCount64();
+    const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
+    if (FAILED(hr)) _CheckD3D12FenceResult(this, hr, "ID3D12Fence::SetEventOnCompletion");
+    while (GetCompletedValue() < value) {
+        const uint64_t elapsed = ::GetTickCount64() - start;
+        if (elapsed >= duration) return GetCompletedValue() >= value;
+        const DWORD waitResult = ::WaitForSingleObject(_event.Get(), duration - static_cast<DWORD>(elapsed));
+        if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value;
+        if (waitResult != WAIT_OBJECT_0) {
+            const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
+            _CheckD3D12FenceResult(this, HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
+            RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
+        }
+        // An earlier timed-out registration or device removal can also wake it.
+    }
+    return true;
+}
+
+uint64_t FenceD3D12::GetCompletedValue() const noexcept {
+    const uint64_t value = _fence->GetCompletedValue();
+    if (value == std::numeric_limits<uint64_t>::max()) {
+        _CheckD3D12FenceResult(this, DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+    }
+    if (_device->_isDebugLayerEnabled) {
+        auto previous = _drainedCompletedValue.load(std::memory_order_relaxed);
+        while (value > previous) {
+            if (_drainedCompletedValue.compare_exchange_weak(previous, value, std::memory_order_relaxed)) {
+                _device->TryDrainValidationMessages();
+                break;
+            }
+        }
+    }
+    return value;
+}
+
+uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
+    return _fenceValue - 1;
+}
+
+CommandAllocatorD3D12::CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue, ComPtr<ID3D12CommandAllocator> allocator) noexcept
+    : _device(device), _queue(queue), _native(std::move(allocator)) {}
+
+CommandAllocatorD3D12::~CommandAllocatorD3D12() noexcept { Destroy(); }
+
+bool CommandAllocatorD3D12::IsValid() const noexcept { return _native != nullptr; }
+
+void CommandAllocatorD3D12::Destroy() noexcept {
+    _native.Reset();
+    _device = nullptr;
+}
+
+void CommandAllocatorD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _native.Get());
+}
+
+void CommandAllocatorD3D12::Reset() noexcept {
+    RADRAY_PROFILE_SCOPE_N("CommandAllocatorD3D12::Reset");
+    _CheckD3D12Result(_device, _native->Reset(), "ID3D12CommandAllocator::Reset");
+    _device->TryDrainValidationMessages();
+}
+
+CmdListD3D12::CmdListD3D12(
+    DeviceD3D12* device,
+    [[maybe_unused]] CmdQueueD3D12* queue,
+    CommandAllocatorD3D12* allocator,
+    ComPtr<ID3D12GraphicsCommandList> cmdList,
+    D3D12_COMMAND_LIST_TYPE type) noexcept
+    : _device(device),
+#ifdef RADRAY_ENABLE_PROFILER
+      _queue(queue),
+#endif
+      _allocator(allocator),
+      _cmdList(std::move(cmdList)),
+      _type(type)
+#ifdef RADRAY_ENABLE_PROFILER
+      ,
+      _profilerZones(make_unique<ProfilerZoneStack>())
+#endif
+{
+}
+
+CmdListD3D12::~CmdListD3D12() noexcept {
+    Destroy();
+}
+
+bool CmdListD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdListD3D12::Destroy() noexcept {
+    if (!_cmdList) return;
+#ifdef RADRAY_ENABLE_PROFILER
+    // Open zones would record end queries into a list that is being destroyed; drop them.
+    if (!_profilerZones->Zones.empty()) {
+        RADRAY_WARN_LOG("d3d12 command list destroyed with {} open profiler zones", _profilerZones->Zones.size());
+        _profilerZones->Zones.clear();
+    }
+    _deferredZonePops = 0;
+    _suppressedZonePushes = 0;
+    _inRenderPass = false;
+#endif
+    _renderPassList.Reset();
+    _cmdList = nullptr;
+}
+
+void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _cmdList.Get());
+}
+
+void CmdListD3D12::Begin() noexcept {
+    _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    _device->TryDrainValidationMessages();
+    if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
+        ID3D12DescriptorHeap* descriptorHeaps[] = {
+            _device->_gpuResHeap->GetNative(),
+            _device->_gpuSamplerHeap->GetNative(),
+        };
+        _cmdList->SetDescriptorHeaps(
+            static_cast<UINT>(std::size(descriptorHeaps)),
+            descriptorHeaps);
+    }
+}
+
+void CmdListD3D12::End() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Zone end queries must be recorded before Close(); unbalanced groups are closed here.
+    _profilerZones->Zones.clear();
+    _deferredZonePops = 0;
+    _suppressedZonePushes = 0;
+#endif
+    const HRESULT hr = _cmdList->Close();
+    _device->TryDrainValidationMessages();
+    _CheckD3D12Result(_device, hr, "ID3D12GraphicsCommandList::Close");
+}
+
+void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    vector<D3D12_RESOURCE_BARRIER> rawBarriers;
+    rawBarriers.reserve(barriers.size());
+    for (const auto& v : barriers) {
+        if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
+            auto buf = CastD3D12Object(bb->Target);
+            if (bb->Before.HasFlag(BufferState::HostRead) ||
+                bb->Before.HasFlag(BufferState::HostWrite) ||
+                bb->After.HasFlag(BufferState::HostRead) ||
+                bb->After.HasFlag(BufferState::HostWrite)) {
+                continue;
+            }
+            D3D12_RESOURCE_BARRIER raw{};
+            if (bb->Before == BufferState::UnorderedAccess && bb->After == BufferState::UnorderedAccess) {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = buf->_buf.Get();
+            } else {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = buf->_buf.Get();
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                raw.Transition.StateBefore = MapType(bb->Before);
+                raw.Transition.StateAfter = MapType(bb->After);
+                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                    continue;
+                }
+            }
+            rawBarriers.push_back(raw);
+        } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
+            auto tex = CastD3D12Object(tb->Target);
+            const auto textureDesc = tex->GetDesc();
+            const auto range = ResolveSubresourceRange(textureDesc, tb->Range);
+            D3D12_RESOURCE_BARRIER raw{};
+            if (tb->Before == TextureState::UnorderedAccess && tb->After == TextureState::UnorderedAccess) {
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.UAV.pResource = tex->_tex.Get();
+            } else {
+                if (tb->Before == tb->After) {
+                    continue;
+                }
+                raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+                raw.Transition.pResource = tex->_tex.Get();
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                raw.Transition.StateBefore = MapType(tb->Before);
+                raw.Transition.StateAfter = MapType(tb->After);
+                // D3D12 COMMON 和 PRESENT flag 完全一致
+                if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
+                    if (tb->Before == TextureState::Present || tb->After == TextureState::Present) {
+                        continue;
+                    }
+                }
+                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
+                    continue;
+                }
+                const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
+                const SubresourceRange allRange{0, layers, 0, tex->_rawDesc.MipLevels, GetTextureFormatAspects(textureDesc.Format)};
+                if (range != allRange) {
+                    const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
+                    for (uint32_t plane = 0; plane < planes; ++plane) {
+                        if (planes == 2 && !(range.Aspects.HasFlag(plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil))) continue;
+                        for (uint32_t layer = range.BaseArrayLayer; layer < range.BaseArrayLayer + range.ArrayLayerCount; ++layer) {
+                            for (uint32_t mip = range.BaseMipLevel; mip < range.BaseMipLevel + range.MipLevelCount; ++mip) {
+                                raw.Transition.Subresource = D3D12CalcSubresource(mip, layer, plane, tex->_rawDesc.MipLevels, layers);
+                                rawBarriers.push_back(raw);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            rawBarriers.push_back(raw);
+        } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
+            D3D12_RESOURCE_BARRIER raw{};
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            if (uav->Target->GetTag() == RenderObjectTag::Buffer) {
+                raw.UAV.pResource = CastD3D12Object(static_cast<Buffer*>(uav->Target))->_buf.Get();
+            } else if (uav->Target->GetTag() == RenderObjectTag::Texture) {
+                raw.UAV.pResource = CastD3D12Object(static_cast<Texture*>(uav->Target))->_tex.Get();
+            } else {
+                RADRAY_ABORT("D3D12 UAV barrier requires a buffer or texture");
+            }
+            rawBarriers.push_back(raw);
+        }
+    }
+    if (!rawBarriers.empty()) {
+        _cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
+    }
+}
+
+void CmdListD3D12::PushDebugGroup(std::string_view name) noexcept {
+    const auto wide = ToWideChar(name).value_or(L"RenderGraph");
+    _cmdList->BeginEvent(0, wide.c_str(), static_cast<UINT>((wide.size() + 1) * sizeof(wchar_t)));
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_inRenderPass) {
+        // Query resolution is illegal inside a render pass; this pass joins the zone opened by its raster group.
+        ++_suppressedZonePushes;
+        return;
+    }
+    if (_queue->_profilerContext != nullptr) {
+        _profilerZones->Zones.emplace_back(
+            static_cast<TracyD3D12Ctx>(_queue->_profilerContext), TracyLine, TracyFile, strlen(TracyFile), TracyFunction, strlen(TracyFunction),
+            name.data(), name.size(), _cmdList.Get(), true);
+    }
+#endif
+}
+
+void CmdListD3D12::PopDebugGroup() noexcept {
+    _cmdList->EndEvent();
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_suppressedZonePushes > 0) {
+        --_suppressedZonePushes;
+        return;
+    }
+    if (_inRenderPass) {
+        ++_deferredZonePops;
+        return;
+    }
+    if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
+#endif
+}
+
+Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_renderPassList) {
+        const HRESULT result = _cmdList->QueryInterface(IID_PPV_ARGS(_renderPassList.GetAddressOf()));
+        if (FAILED(result)) {
+            RADRAY_ERR_LOG("D3D12 render pass interface failed: {}", result);
+            return nullptr;
+        }
+    }
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> colors;
+    std::optional<D3D12_RENDER_PASS_DEPTH_STENCIL_DESC> depth;
+    std::optional<D3D12_RECT> area;
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rectClears;
+    D3D12_CLEAR_FLAGS depthClearFlags{};
+    D3D12_CLEAR_VALUE depthClear{};
+    if (desc.RenderArea && (desc.RenderArea->X || desc.RenderArea->Y || desc.RenderArea->Width != desc.Width || desc.RenderArea->Height != desc.Height)) {
+        const auto& rect = *desc.RenderArea;
+        area = {rect.X, rect.Y, rect.X + static_cast<LONG>(rect.Width), rect.Y + static_cast<LONG>(rect.Height)};
+    }
+    auto flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
+    for (const auto& color : desc.Colors) {
+        auto* view = CastD3D12Object(color.View);
+        D3D12_RENDER_PASS_RENDER_TARGET_DESC rt{};
+        rt.cpuDescriptor = view->_heapView.HandleCpu();
+        rt.BeginningAccess.Type = MapType(color.Load);
+        rt.EndingAccess.Type = MapType(color.Store);
+        rt.BeginningAccess.Clear.ClearValue.Format = view->_rawFormat;
+        for (uint32_t c = 0; c < 4; ++c) rt.BeginningAccess.Clear.ClearValue.Color[c] = color.Clear.Value[c];
+        if (area && color.Load == LoadAction::Clear) {
+            rectClears.push_back(rt);
+            rt.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+        }
+        colors.push_back(rt);
+    }
+    if (desc.DepthStencil) {
+        const auto& d = *desc.DepthStencil;
+        auto* view = CastD3D12Object(d.View);
+        D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
+        ds.cpuDescriptor = view->_heapView.HandleCpu();
+        ds.DepthBeginningAccess.Type = MapType(d.DepthLoad);
+        ds.DepthEndingAccess.Type = MapType(d.DepthStore);
+        ds.StencilBeginningAccess.Type = IsStencilFormatDXGI(view->_rawFormat) ? MapType(d.StencilLoad) : D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS;
+        ds.StencilEndingAccess.Type = IsStencilFormatDXGI(view->_rawFormat) ? MapType(d.StencilStore) : D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS;
+        D3D12_CLEAR_VALUE clear{};
+        clear.Format = view->_rawFormat;
+        clear.DepthStencil = {d.Clear.Depth, static_cast<UINT8>(d.Clear.Stencil)};
+        ds.DepthBeginningAccess.Clear.ClearValue = clear;
+        ds.StencilBeginningAccess.Clear.ClearValue = clear;
+        if (d.ReadOnly) {
+            flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
+            if (IsStencilFormatDXGI(view->_rawFormat)) flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
+        }
+        if (area) {
+            depthClear = clear;
+            if (d.DepthLoad == LoadAction::Clear) {
+                depthClearFlags |= D3D12_CLEAR_FLAG_DEPTH;
+                ds.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            }
+            if (IsStencilFormatDXGI(view->_rawFormat) && d.StencilLoad == LoadAction::Clear) {
+                depthClearFlags |= D3D12_CLEAR_FLAG_STENCIL;
+                ds.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            }
+        }
+        depth = ds;
+    }
+    auto encoder = make_unique<CmdRenderPassD3D12>(this);
+    if (area) {
+        for (const auto& clear : rectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*area);
+        if (depthClearFlags) _cmdList->ClearDepthStencilView(depth->cpuDescriptor, depthClearFlags,
+                                                             depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
+    }
+    _renderPassList->BeginRenderPass(static_cast<UINT>(colors.size()), colors.data(), depth ? &*depth : nullptr, flags);
+#ifdef RADRAY_ENABLE_PROFILER
+    _inRenderPass = true;
+#endif
+    return encoder;
+}
+
+void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
+    _renderPassList->EndRenderPass();
+#ifdef RADRAY_ENABLE_PROFILER
+    _inRenderPass = false;
+#endif
+    encoder.reset();
+#ifdef RADRAY_ENABLE_PROFILER
+    // Pops deferred while the render pass was recording close their zones now that query resolution is legal.
+    for (; _deferredZonePops > 0; --_deferredZonePops)
+        if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
+#endif
+}
+
+Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noexcept {
+    auto encoder = make_unique<CmdComputePassD3D12>(this);
+    return encoder;
+}
+
+void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    encoder.reset();
+}
+
+// == CmdList: 拷贝与 query ==
+
+void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
+    auto src = CastD3D12Object(src_);
+    auto dst = CastD3D12Object(dst_);
+    _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
+}
+
+bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
+    auto src = CastD3D12Object(desc.Source);
+    auto dst = CastD3D12Object(desc.Destination);
+    const auto& r = desc.Region;
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = src->_buf.Get();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint.Offset = r.SourceOffset;
+    from.PlacedFootprint.Footprint = {dst->_rawDesc.Format, r.Width, r.Height, 1, r.RowPitch};
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = dst->_tex.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.SubresourceIndex = D3D12CalcSubresource(r.MipLevel, r.ArrayLayer, 0, dst->_rawDesc.MipLevels, dst->_rawDesc.DepthOrArraySize);
+    _cmdList->CopyTextureRegion(&to, r.X, r.Y, 0, &from, nullptr);
+    return true;
+}
+
+void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
+    auto src = CastD3D12Object(src_);
+    auto dst = CastD3D12Object(dst_);
+    const D3D12_RESOURCE_DESC& dstDesc = dst->_rawDesc;
+
+    uint32_t mipLevels = dstRange.MipLevelCount;
+    uint32_t layerCount = dstRange.ArrayLayerCount;
+    uint32_t arraySize = dst->_dimension == TextureDimension::Dim3D ? 1u : dst->_rawDesc.DepthOrArraySize;
+
+    uint64_t bufferOffset = srcOffset;
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        uint32_t mipLevel = dstRange.BaseMipLevel + mip;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            uint32_t arrayLayer = dstRange.BaseArrayLayer + layer;
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, dst->_rawDesc.MipLevels, arraySize);
+
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 totalBytes = 0;
+            _device->_device->GetCopyableFootprints(&dstDesc, subres, 1, bufferOffset, &footprint, nullptr, nullptr, &totalBytes);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            srcLoc.pResource = src->_buf.Get();
+            srcLoc.PlacedFootprint = footprint;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dstLoc.pResource = dst->_tex.Get();
+            dstLoc.SubresourceIndex = subres;
+
+            _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+            bufferOffset = footprint.Offset + totalBytes;
+        }
+    }
+}
+
+void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
+    auto dst = CastD3D12Object(dst_);
+    auto src = CastD3D12Object(src_);
+    const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
+
+    uint32_t mipLevels = srcRange.MipLevelCount;
+    uint32_t layerCount = srcRange.ArrayLayerCount;
+    uint32_t arraySize = src->_dimension == TextureDimension::Dim3D ? 1u : src->_rawDesc.DepthOrArraySize;
+
+    uint64_t bufferOffset = dstOffset;
+    for (uint32_t mip = 0; mip < mipLevels; ++mip) {
+        uint32_t mipLevel = srcRange.BaseMipLevel + mip;
+        for (uint32_t layer = 0; layer < layerCount; ++layer) {
+            uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, src->_rawDesc.MipLevels, arraySize);
+
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT64 totalBytes = 0;
+            _device->_device->GetCopyableFootprints(&srcDesc, subres, 1, bufferOffset, &footprint, nullptr, nullptr, &totalBytes);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLoc{};
+            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            srcLoc.pResource = src->_tex.Get();
+            srcLoc.SubresourceIndex = subres;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLoc{};
+            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dstLoc.pResource = dst->_buf.Get();
+            dstLoc.PlacedFootprint = footprint;
+
+            _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+            bufferOffset = footprint.Offset + totalBytes;
+        }
+    }
+}
+
+void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
+    auto* src = CastD3D12Object(desc.Source);
+    auto* dst = CastD3D12Object(desc.Destination);
+    const bool is3D = src->_rawDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    const uint32_t srcArraySize = is3D ? 1u : src->_rawDesc.DepthOrArraySize;
+    const uint32_t dstArraySize = is3D ? 1u : dst->_rawDesc.DepthOrArraySize;
+    const bool multisampled = src->_rawDesc.SampleDesc.Count > 1;
+
+    D3D12_BOX sourceBox{
+        desc.SourceX,
+        desc.SourceY,
+        desc.SourceZ,
+        desc.SourceX + desc.Width,
+        desc.SourceY + desc.Height,
+        desc.SourceZ + desc.Depth};
+    for (uint32_t layer = 0; layer < desc.ArrayLayerCount; ++layer) {
+        D3D12_TEXTURE_COPY_LOCATION sourceLocation{};
+        sourceLocation.pResource = src->_tex.Get();
+        sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        sourceLocation.SubresourceIndex = D3D12CalcSubresource(
+            desc.SourceMipLevel,
+            desc.SourceArrayLayer + layer,
+            0,
+            src->_rawDesc.MipLevels,
+            srcArraySize);
+
+        D3D12_TEXTURE_COPY_LOCATION destinationLocation{};
+        destinationLocation.pResource = dst->_tex.Get();
+        destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destinationLocation.SubresourceIndex = D3D12CalcSubresource(
+            desc.DestinationMipLevel,
+            desc.DestinationArrayLayer + layer,
+            0,
+            dst->_rawDesc.MipLevels,
+            dstArraySize);
+        _cmdList->CopyTextureRegion(
+            &destinationLocation,
+            desc.DestinationX,
+            desc.DestinationY,
+            desc.DestinationZ,
+            &sourceLocation,
+            multisampled ? nullptr : &sourceBox);
+    }
+}
+
+void CmdListD3D12::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
+    auto* src = CastD3D12Object(desc.Source);
+    auto* dst = CastD3D12Object(desc.Destination);
+    const uint32_t srcArraySize = src->_rawDesc.DepthOrArraySize;
+    const uint32_t dstArraySize = dst->_rawDesc.DepthOrArraySize;
+
+    const DXGI_FORMAT format = MapType(src->_format);
+    for (uint32_t layer = 0; layer < desc.ArrayLayerCount; ++layer) {
+        const uint32_t sourceSubresource = D3D12CalcSubresource(
+            desc.SourceMipLevel,
+            desc.SourceArrayLayer + layer,
+            0,
+            src->_rawDesc.MipLevels,
+            srcArraySize);
+        const uint32_t destinationSubresource = D3D12CalcSubresource(
+            desc.DestinationMipLevel,
+            desc.DestinationArrayLayer + layer,
+            0,
+            dst->_rawDesc.MipLevels,
+            dstArraySize);
+        _cmdList->ResolveSubresource(
+            dst->_tex.Get(), destinationSubresource, src->_tex.Get(), sourceSubresource, format);
+    }
+}
+
+void CmdListD3D12::ResetQueryPool(QueryPool*, uint32_t, uint32_t) noexcept {}
+
+void CmdListD3D12::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
+    auto pool = CastD3D12Object(desc.Pool);
+    _cmdList->EndQuery(pool->_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, desc.Index);
+}
+
+void CmdListD3D12::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept {
+    auto pool = CastD3D12Object(desc.Pool);
+    auto dst = CastD3D12Object(desc.Destination);
+    _cmdList->ResolveQueryData(
+        pool->_heap.Get(),
+        D3D12_QUERY_TYPE_TIMESTAMP,
+        desc.FirstIndex,
+        desc.Count,
+        dst->_buf.Get(),
+        desc.DestinationOffset);
+}
+
+// == 编码器与 SwapChain ==
+
+CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
+    : _cmdList(cmdList) {}
+
+bool CmdRenderPassD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdRenderPassD3D12::Destroy() noexcept {
+    _boundRs = nullptr;
+    _boundPso = nullptr;
+    _cmdList = nullptr;
+}
+
+CommandBuffer* CmdRenderPassD3D12::GetCommandBuffer() const noexcept {
+    return _cmdList;
+}
+
+void CmdRenderPassD3D12::SetViewport(Viewport viewport) noexcept {
+    D3D12_VIEWPORT vp{};
+    vp.TopLeftX = viewport.X;
+    vp.TopLeftY = viewport.Y;
+    vp.Width = viewport.Width;
+    vp.Height = viewport.Height;
+    vp.MinDepth = viewport.MinDepth;
+    vp.MaxDepth = viewport.MaxDepth;
+    _cmdList->_cmdList->RSSetViewports(1, &vp);
+}
+
+void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
+    D3D12_RECT rect{};
+    rect.left = scissor.X;
+    rect.top = scissor.Y;
+    rect.right = scissor.X + scissor.Width;
+    rect.bottom = scissor.Y + scissor.Height;
+    _cmdList->_cmdList->RSSetScissorRects(1, &rect);
+}
+
+void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
+    if (bindings.empty()) return;
+    uint32_t lowest = UINT32_MAX, highest = 0;
+    for (const auto& binding : bindings) {
+        lowest = std::min(lowest, binding.Binding);
+        highest = std::max(highest, binding.Binding);
+    }
+    const uint32_t slotCount = highest - lowest + 1;
+    std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> rawViews{};
+    for (const VertexBufferBinding& binding : bindings) {
+        const std::optional<uint32_t>& stride = _boundPso->_vertexStrides[binding.Binding];
+        if (!stride.has_value()) {
+            continue;
+        }
+        const VertexBufferView& view = binding.View;
+        const BufferD3D12* buffer = CastD3D12Object(view.Target);
+        rawViews[binding.Binding - lowest] = D3D12_VERTEX_BUFFER_VIEW{
+            .BufferLocation = buffer->_gpuAddr + view.Offset,
+            .SizeInBytes = static_cast<UINT>(view.Size),
+            .StrideInBytes = stride.value()};
+    }
+    _cmdList->_cmdList->IASetVertexBuffers(lowest, slotCount, rawViews.data());
+}
+
+void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
+    auto buf = CastD3D12Object(ibv.Target);
+    D3D12_INDEX_BUFFER_VIEW view{};
+    view.BufferLocation = buf->_gpuAddr + ibv.Offset;
+    view.SizeInBytes = (UINT)buf->_rawDesc.Width - ibv.Offset;
+    view.Format = ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+    _cmdList->_cmdList->IASetIndexBuffer(&view);
+}
+
+void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
+    auto ps = CastD3D12Object(pso);
+    if (_boundPso == ps) {
+        return;
+    }
+    if (_boundRs != ps->_layout) {
+        _cmdList->_cmdList->SetGraphicsRootSignature(ps->_layout->GetNative());
+        _boundRs = ps->_layout;
+    }
+    _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
+    _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
+    _boundPso = ps;
+}
+
+static bool BindShaderParameterSetD3D12(
+    ID3D12GraphicsCommandList* cmdList,
+    RootSigD3D12* destinationLayout,
+    uint32_t groupIndex,
+    ShaderParameterSetD3D12* set,
+    std::span<const ShaderParameterDynamicOffset> dynamicOffsets,
+    bool graphics) noexcept {
+    const auto destinationGroup = destinationLayout->FindParameterGroup(groupIndex);
+    const auto sourceGroup = set->_layout->FindParameterGroup(set->_groupIndex);
+    const bool directTables = set->_layout == destinationLayout && set->_groupIndex == groupIndex;
+    if (!directTables) destinationGroup.Get()->MapTablesFrom(*sourceGroup.Get(), set->_tableMapping);
+    for (size_t index = 0; index < destinationGroup.Get()->Tables.size(); ++index) {
+        const auto& table = destinationGroup.Get()->Tables[index];
+        const auto sourceIndex = directTables ? index : set->_tableMapping[index];
+        const auto handle = set->_tables[sourceIndex].Descriptors.HandleGpu();
+        if (graphics) {
+            cmdList->SetGraphicsRootDescriptorTable(table.RootParameterIndex, handle);
+        } else {
+            cmdList->SetComputeRootDescriptorTable(table.RootParameterIndex, handle);
+        }
+    }
+
+    // Offsets name target declarations; source addresses use the matching source root binding.
+    const auto& sourceEntries = sourceGroup.Get()->Entries;
+    for (const auto& dynamicOffset : dynamicOffsets) {
+        Nullable<const BackendBindingName*> record = &destinationLayout->_bindingNames[BindingHandleAccess::RecordIndex(dynamicOffset.Binding)];
+        const auto destinationEntry = FindGroupEntryD3D12(
+            destinationGroup.Get()->Entries, record.Get()->Location.Binding, record.Get()->Namespace);
+        const auto sourceEntry = FindGroupEntryD3D12(
+            sourceEntries, record.Get()->Location.Binding, record.Get()->Namespace);
+        const auto& sourceOrder = sourceGroup.Get()->RootDescriptorOrder;
+        const auto root = std::find(sourceOrder.begin(), sourceOrder.end(), static_cast<size_t>(sourceEntry.Get() - sourceEntries.data()));
+        const auto address = set->_rootBindings[static_cast<size_t>(root - sourceOrder.begin())] + dynamicOffset.Offset;
+        const auto bindingIndex = static_cast<size_t>(destinationEntry.Get() - destinationGroup.Get()->Entries.data());
+        for (const auto& destination : destinationGroup.Get()->Bindings[bindingIndex].RootDescriptorDestinations) {
+            if (graphics) {
+                switch (destination.Type) {
+                    case D3D12_ROOT_PARAMETER_TYPE_CBV: cmdList->SetGraphicsRootConstantBufferView(destination.RootParameterIndex, address); break;
+                    case D3D12_ROOT_PARAMETER_TYPE_SRV: cmdList->SetGraphicsRootShaderResourceView(destination.RootParameterIndex, address); break;
+                    case D3D12_ROOT_PARAMETER_TYPE_UAV: cmdList->SetGraphicsRootUnorderedAccessView(destination.RootParameterIndex, address); break;
+                    default: Unreachable();
+                }
+            } else {
+                switch (destination.Type) {
+                    case D3D12_ROOT_PARAMETER_TYPE_CBV: cmdList->SetComputeRootConstantBufferView(destination.RootParameterIndex, address); break;
+                    case D3D12_ROOT_PARAMETER_TYPE_SRV: cmdList->SetComputeRootShaderResourceView(destination.RootParameterIndex, address); break;
+                    case D3D12_ROOT_PARAMETER_TYPE_UAV: cmdList->SetComputeRootUnorderedAccessView(destination.RootParameterIndex, address); break;
+                    default: Unreachable();
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void CmdRenderPassD3D12::BindShaderParameterSet(
+    uint32_t groupIndex,
+    ShaderParameterSet* set,
+    std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
+    BindShaderParameterSetD3D12(
+        _cmdList->_cmdList.Get(),
+        _boundRs,
+        groupIndex,
+        CastD3D12Object(set),
+        dynamicOffsets,
+        true);
+}
+
+static bool SetPushConstantsD3D12(
+    CmdListD3D12* commandBuffer,
+    RootSigD3D12* boundLayout,
+    BindingHandle binding,
+    std::span<const byte> data,
+    bool graphics) noexcept {
+    const auto& record = boundLayout->_bindingNames[BindingHandleAccess::RecordIndex(binding)];
+    const ShaderBindingLocation location = record.Location;
+    const auto pushConstant = std::find_if(
+        boundLayout->_pushConstantBindings.begin(),
+        boundLayout->_pushConstantBindings.end(),
+        [&](const PushConstantBindingD3D12& value) noexcept {
+            return value.Location == location;
+        });
+    const auto setRootConstants = [&](uint32_t rootParameterIndex) noexcept {
+        if (graphics) {
+            commandBuffer->_cmdList->SetGraphicsRoot32BitConstants(
+                rootParameterIndex,
+                pushConstant->Num32BitValues,
+                data.data(),
+                0);
+        } else {
+            commandBuffer->_cmdList->SetComputeRoot32BitConstants(
+                rootParameterIndex,
+                pushConstant->Num32BitValues,
+                data.data(),
+                0);
+        }
+    };
+    if (pushConstant->RootParameterIndices.empty()) {
+        setRootConstants(pushConstant->RootParameterIndex);
+    } else {
+        for (const uint32_t rootParameterIndex : pushConstant->RootParameterIndices) {
+            setRootConstants(rootParameterIndex);
+        }
+    }
+    return true;
+}
+
+bool CmdRenderPassD3D12::SetPushConstants(
+    BindingHandle binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsD3D12(
+        _cmdList,
+        _boundRs,
+        binding,
+        data,
+        true);
+}
+
+void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
+    _cmdList->_cmdList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept {
+    _cmdList->_cmdList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+void CmdRenderPassD3D12::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto* buffer = CastD3D12Object(argumentBuffer);
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_drawIndirectSignature.Get(),
+        drawCount,
+        buffer->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
+}
+
+void CmdRenderPassD3D12::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto* buffer = CastD3D12Object(argumentBuffer);
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_drawIndexedIndirectSignature.Get(),
+        drawCount,
+        buffer->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
+}
+
+CmdComputePassD3D12::CmdComputePassD3D12(CmdListD3D12* cmdList) noexcept
+    : _cmdList(cmdList) {}
+
+bool CmdComputePassD3D12::IsValid() const noexcept {
+    return _cmdList != nullptr;
+}
+
+void CmdComputePassD3D12::Destroy() noexcept {
+    _boundRs = nullptr;
+    _boundPso = nullptr;
+    _cmdList = nullptr;
+}
+
+CommandBuffer* CmdComputePassD3D12::GetCommandBuffer() const noexcept {
+    return _cmdList;
+}
+
+void CmdComputePassD3D12::BindComputePipelineState(ComputePipelineState* pso) noexcept {
+    auto ps = CastD3D12Object(pso);
+    if (_boundPso == ps) {
+        return;
+    }
+    if (_boundRs != ps->_layout) {
+        _cmdList->_cmdList->SetComputeRootSignature(ps->_layout->GetNative());
+        _boundRs = ps->_layout;
+    }
+    _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
+    _boundPso = ps;
+}
+
+void CmdComputePassD3D12::BindShaderParameterSet(
+    uint32_t groupIndex,
+    ShaderParameterSet* set,
+    std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
+    BindShaderParameterSetD3D12(
+        _cmdList->_cmdList.Get(),
+        _boundRs,
+        groupIndex,
+        CastD3D12Object(set),
+        dynamicOffsets,
+        false);
+}
+
+bool CmdComputePassD3D12::SetPushConstants(
+    BindingHandle binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsD3D12(
+        _cmdList,
+        _boundRs,
+        binding,
+        data,
+        false);
+}
+
+void CmdComputePassD3D12::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
+    _cmdList->_cmdList->Dispatch(groupCountX, groupCountY, groupCountZ);
+}
+
+void CmdComputePassD3D12::DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept {
+    auto* buffer = CastD3D12Object(argumentBuffer);
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_dispatchIndirectSignature.Get(),
+        1,
+        buffer->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
+}
+
+SwapChainD3D12::SwapChainD3D12(
+    DeviceD3D12* device,
+    ComPtr<IDXGISwapChain3> swapchain,
+    const SwapChainDescriptor& desc) noexcept
+    : _device(device),
+      _presentQueue(CastD3D12Object(desc.PresentQueue)),
+      _swapchain(std::move(swapchain)),
+      _nativeHandler(desc.NativeHandler),
+      _mode(desc.PresentMode),
+      _reqFormat(desc.Format) {}
+
+SwapChainD3D12::~SwapChainD3D12() noexcept {
+    _frames.clear();
+    _swapchain = nullptr;
+    if (_frameLatencyEvent) {
+        CloseHandle(_frameLatencyEvent);
+        _frameLatencyEvent = nullptr;
+    }
+}
+
+bool SwapChainD3D12::IsValid() const noexcept {
+    return _swapchain != nullptr;
+}
+
+void SwapChainD3D12::Destroy() noexcept {
+    _frames.clear();
+    _swapchain = nullptr;
+    if (_frameLatencyEvent) {
+        CloseHandle(_frameLatencyEvent);
+        _frameLatencyEvent = nullptr;
+    }
+}
+
+SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
+    SwapChainAcquireResult result{};
+    if (_requiresRecreateAfterDiscard) {
+        result.Status = SwapChainStatus::RequireRecreate;
+        return result;
+    }
+    if (_frameLatencyEvent == nullptr) {
+        return result;
+    }
+    const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
+    if (!_IsPresentableHwnd(hwnd)) {
+        result.Status = SwapChainStatus::RetryLater;
+        result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
+        return result;
+    }
+    DWORD milliseconds;
+    if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
+        milliseconds = INFINITE;
+    } else if (timeoutMs > static_cast<uint64_t>(INFINITE) - 1) {
+        milliseconds = INFINITE - 1;
+    } else {
+        milliseconds = static_cast<DWORD>(timeoutMs);
+    }
+    // A discarded/skipped frame did not enqueue DXGI Present. Keep its acquired
+    // readiness until a real Present, rather than consuming another wait slot.
+    const DWORD waitResult = _frameLatencyReady ? WAIT_OBJECT_0 : ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
+    if (waitResult == WAIT_OBJECT_0) {
+        _frameLatencyReady = true;
+        const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
+        ++_outstandingFrameToken;
+        SwapChainFrame frame = MakeFrame(
+            this,
+            _outstandingFrameToken,
+            _frames[curr].image.get(),
+            curr,
+            nullptr,
+            nullptr);
+        result.Status = SwapChainStatus::Success;
+        result.NativeStatusCode = 0;
+        result.Frame = std::move(frame);
+        return result;
+    } else if (waitResult == WAIT_TIMEOUT) {
+        result.Status = SwapChainStatus::RetryLater;
+        result.NativeStatusCode = static_cast<int64_t>(waitResult);
+        return result;
+    } else {
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = static_cast<int64_t>(waitResult);
+        return result;
+    }
+}
+
+SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
+    SwapChainPresentResult result{};
+    InvalidateFrame(frame);
+    const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
+    if (!_IsPresentableHwnd(hwnd)) {
+        RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
+        result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
+        result.Status = SwapChainStatus::RetryLater;
+        return result;
+    }
+    UINT syncInterval = 0;
+    UINT presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
+    switch (_mode) {
+        case PresentMode::FIFO: {
+            syncInterval = 1;
+            break;
+        }
+        case PresentMode::Mailbox: {
+            syncInterval = 0;
+            break;
+        }
+        case PresentMode::Immediate: {
+            syncInterval = 0;
+            if (_device->_isAllowTearing) presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
+            break;
+        }
+    }
+    const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+    _device->TryDrainValidationMessages();
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        result.NativeStatusCode = static_cast<int64_t>(hr);
+        result.Status = SwapChainStatus::RetryLater;
+        return result;
+    }
+    _CheckD3D12Result(_device, hr, "IDXGISwapChain::Present");
+    result.NativeStatusCode = static_cast<int64_t>(hr);
+    result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
+    if (hr != DXGI_STATUS_OCCLUDED) _frameLatencyReady = false;
+    return result;
+}
+
+SwapChainPresentResult SwapChainD3D12::DiscardAcquiredFrame(SwapChainFrame frame) noexcept {
+    InvalidateFrame(frame);
+    _requiresRecreateAfterDiscard = true;
+    return {.NativeStatusCode = 0, .Status = SwapChainStatus::Success};
+}
+
+bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    if (HRESULT hr = _swapchain->GetDesc1(&desc); FAILED(hr)) {
+        _device->TryDrainValidationMessages();
+        RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
+        return false;
+    }
+
+    const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
+    _frames.clear();
+    const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
+    _device->TryDrainValidationMessages();
+    _CheckD3D12Result(_device, hr, "IDXGISwapChain::ResizeBuffers");
+    _reqFormat = format;
+    _mode = presentMode;
+    if (!_RefreshSwapChainBackBuffers(this)) {
+        return false;
+    }
+    _requiresRecreateAfterDiscard = false;
+    return true;
+}
+
+uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
+    return static_cast<uint32_t>(_frames.size());
+}
+
+SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    _swapchain->GetDesc1(&desc);
+    SwapChainDescriptor result{};
+    result.PresentQueue = _presentQueue;
+    result.NativeHandler = _nativeHandler;
+    result.Width = desc.Width;
+    result.Height = desc.Height;
+    result.BackBufferCount = desc.BufferCount;
+    result.Format = _reqFormat;
+    result.PresentMode = _mode;
+    return result;
+}
+
+// == 各对象类实现 ==
+
+BufferD3D12::BufferD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Resource> buf,
+    ComPtr<D3D12MA::Allocation> alloc) noexcept
+    : _device(device),
+      _buf(std::move(buf)),
+      _alloc(std::move(alloc)) {
+    _rawDesc = _buf->GetDesc();
+    _gpuAddr = _buf->GetGPUVirtualAddress();
+}
+
+bool BufferD3D12::IsValid() const noexcept {
+    return _buf != nullptr;
+}
+
+void BufferD3D12::Destroy() noexcept {
+    if (_mappedData) {
+        Unmap();
+    }
+    _mappedData = nullptr;
+    _buf = nullptr;
+    _alloc = nullptr;
+}
+
+void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
+    if (_hints.HasFlag(ResourceHint::PersistentMap) && _mappedData != nullptr) {
+        return static_cast<byte*>(_mappedData) + offset;
+    }
+    const D3D12_RANGE readRange = _usage.HasFlag(BufferUse::MapRead)
+                                      ? D3D12_RANGE{offset, offset + size}
+                                      : D3D12_RANGE{0, 0};
+    void* ptr = nullptr;
+    if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
+        FAILED(hr)) {
+        _device->TryDrainValidationMessages();
+        RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
+    }
+    _mappedData = ptr;
+    return static_cast<byte*>(ptr) + offset;
+}
+
+void BufferD3D12::Unmap() noexcept {
+    const D3D12_RANGE noWriteRange{0, 0};
+    _buf->Unmap(0, _usage.HasFlag(BufferUse::MapWrite) ? nullptr : &noWriteRange);
+    _mappedData = nullptr;
+}
+
+void BufferD3D12::FlushMappedRange(BufferRange) noexcept {}
+
+void BufferD3D12::InvalidateMappedRange(BufferRange) noexcept {}
+
+void BufferD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    SetObjectName(name, _buf.Get(), _alloc.Get());
+}
+
+BufferDescriptor BufferD3D12::GetDesc() const noexcept {
+    return BufferDescriptor{
+        .Size = _reqSize,
+        .Memory = _memory,
+        .Usage = _usage,
+        .Hints = _hints};
+}
+
+QueryPoolD3D12::QueryPoolD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12QueryHeap> heap,
+    QueryType type,
+    uint32_t count) noexcept
+    : _device(device),
+      _heap(std::move(heap)),
+      _type(type),
+      _count(count) {}
+
+bool QueryPoolD3D12::IsValid() const noexcept {
+    return _heap != nullptr;
+}
+
+void QueryPoolD3D12::Destroy() noexcept {
+    _heap = nullptr;
+}
+
+void QueryPoolD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _heap.Get());
+}
+
+QueryType QueryPoolD3D12::GetType() const noexcept {
+    return _type;
+}
+
+uint32_t QueryPoolD3D12::GetCount() const noexcept {
+    return _count;
+}
+
+TimestampQueryCalibration QueryPoolD3D12::GetTimestampCalibration(CommandQueue* queue_) const noexcept {
+    auto queue = CastD3D12Object(queue_);
+    uint64_t frequency = 0;
+    if (HRESULT hr = queue->_queue->GetTimestampFrequency(&frequency);
+        FAILED(hr) || frequency == 0) {
+        RADRAY_ERR_LOG("ID3D12CommandQueue::GetTimestampFrequency failed: {} {}", GetErrorName(hr), hr);
+        return {};
+    }
+    return TimestampQueryCalibration{
+        .FrequencyHz = frequency,
+        .TickPeriodNs = 1'000'000'000.0 / static_cast<double>(frequency)};
+}
+
+TextureD3D12::TextureD3D12(
+    DeviceD3D12* device,
+    ComPtr<ID3D12Resource> tex,
+    ComPtr<D3D12MA::Allocation> alloc) noexcept
+    : _device(device),
+      _tex(std::move(tex)),
+      _alloc(std::move(alloc)) {
+    _rawDesc = _tex->GetDesc();
+}
+
+bool TextureD3D12::IsValid() const noexcept {
+    return _tex != nullptr;
+}
+
+void TextureD3D12::Destroy() noexcept {
+    _tex = nullptr;
+    _alloc = nullptr;
+}
+
+void TextureD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+    SetObjectName(name, _tex.Get(), _alloc.Get());
+}
+
+TextureDescriptor TextureD3D12::GetDesc() const noexcept {
+    return TextureDescriptor{
+        _dimension,
+        static_cast<uint32_t>(_rawDesc.Width),
+        static_cast<uint32_t>(_rawDesc.Height),
+        static_cast<uint32_t>(_rawDesc.DepthOrArraySize),
+        _rawDesc.MipLevels,
+        _rawDesc.SampleDesc.Count,
+        _format,
+        _memory,
+        _usage,
+        _hints};
+}
+
+TextureViewD3D12::TextureViewD3D12(
+    DeviceD3D12* device,
+    TextureD3D12* texture,
+    CpuDescriptorHeapViewRAII heapView) noexcept
+    : _device(device),
+      _texture(texture),
+      _heapView(std::move(heapView)) {}
+
+bool TextureViewD3D12::IsValid() const noexcept {
+    return _heapView.IsValid();
+}
+
+void TextureViewD3D12::Destroy() noexcept {
+    _heapView.Destroy();
+}
+
+void TextureViewD3D12::SetDebugName(std::string_view name) noexcept {
+    RADRAY_UNUSED(name);
+}
+
+bool Dxil::IsValid() const noexcept {
+    return !_dxil.empty();
+}
+
+void Dxil::Destroy() noexcept {
+    _dxil.clear();
+    _dxil.shrink_to_fit();
+    _stages = ShaderStage::UNKNOWN;
+}
+
+D3D12_SHADER_BYTECODE Dxil::ToByteCode() const noexcept {
+    return {_dxil.data(), _dxil.size()};
+}
+
+RootSigD3D12::~RootSigD3D12() noexcept {
+    Destroy();
+}
+
+ID3D12RootSignature* RootSigD3D12::GetNative() const noexcept {
+    return _nativeLayout->RootSignature.Get();
+}
+
+bool RootSigD3D12::IsValid() const noexcept {
+    return _nativeLayout.HasValue();
+}
+
+void RootSigD3D12::Destroy() noexcept {
+    _nativeLayout.Reset();
+    _parameterGroups.clear();
+    _bindingNames.clear();
+    _pushConstantBindings.clear();
+    _device = nullptr;
+}
+
+void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, GetNative());
+}
+
+Nullable<const ShaderParameterGroupLayoutD3D12*> RootSigD3D12::FindParameterGroup(
+    uint32_t groupIndex) const noexcept {
+    const auto group = std::lower_bound(
+        _parameterGroups.begin(),
+        _parameterGroups.end(),
+        groupIndex,
+        [](const ShaderParameterGroupLayoutD3D12& lhs, uint32_t rhs) noexcept {
+            return lhs.GroupIndex < rhs;
+        });
+    if (group == _parameterGroups.end() || group->GroupIndex != groupIndex) {
+        return nullptr;
+    }
+    return &*group;
+}
+
+BindingHandle RootSigD3D12::FindBinding(std::string_view name) const noexcept {
+    const auto binding = std::find_if(
+        _bindingNames.begin(),
+        _bindingNames.end(),
+        [&](const BackendBindingName& value) noexcept { return value.Name == name; });
+    if (binding == _bindingNames.end()) {
+        return {};
+    }
+    return BindingHandleAccess::Make(
+        static_cast<uint32_t>(std::distance(_bindingNames.begin(), binding)),
+        reinterpret_cast<uintptr_t>(this));
+}
+
+std::optional<ParameterGroupCompatibility> RootSigD3D12::GetParameterGroupCompatibility(uint32_t index) const noexcept {
+    const auto group = FindParameterGroup(index);
+    if (!group) return std::nullopt;
+    vector<vector<uint64_t>> tables, entries;
+    uint32_t resources = 0, samplers = 0, values = 0;
+    for (const auto& table : group->Tables) {
+        (table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? samplers : resources) += table.DescriptorCount;
+        vector<uint64_t> words{uint64_t(table.HeapType), uint64_t(table.Visibility), table.DescriptorCount, table.Ranges.size()};
+        for (const auto& range : table.Ranges)
+            words.insert(words.end(), {uint64_t(range.Type), range.Count, range.Binding, range.Space, range.Offset, uint64_t(range.Flags)});
+        words.push_back(table.Slots.size());
+        for (const auto& slot : table.Slots)
+            words.insert(words.end(), {slot.Offset, slot.Namespace, slot.Binding, slot.ArrayElement, uint64_t(slot.LogicalKind), uint64_t(slot.Placement)});
+        tables.push_back(std::move(words));
+    }
+    for (const auto& entry : group->Entries) {
+        if (entry.IsStaticSampler()) continue;
+        values += entry.Count;
+        entries.push_back({entry.Namespace, entry.Binding, uint64_t(entry.LogicalKind), uint64_t(entry.Placement), entry.Count});
+    }
+    std::sort(tables.begin(), tables.end());
+    std::sort(entries.begin(), entries.end());
+    vector<uint64_t> identity{uint64_t(RenderBackend::D3D12), reinterpret_cast<uintptr_t>(_device), tables.size()};
+    for (const auto& table : tables) {
+        identity.push_back(table.size());
+        identity.insert(identity.end(), table.begin(), table.end());
+    }
+    identity.push_back(entries.size());
+    for (const auto& entry : entries) identity.insert(identity.end(), entry.begin(), entry.end());
+    return MakeParameterGroupCompatibility(std::move(identity), values, resources, samplers);
+}
+std::optional<uint32_t> RootSigD3D12::GetParameterElementIndex(uint32_t groupIndex, BindingHandle binding, uint32_t element) const noexcept {
+    const auto record = FindBackendBindingRecord(_bindingNames, reinterpret_cast<uintptr_t>(this), binding);
+    const auto group = FindParameterGroup(groupIndex);
+    if (!record || !group || record->Kind != BackendBindingRecordKind::Descriptor || record->Location.Group != groupIndex) return std::nullopt;
+    uint32_t offset = 0;
+    bool found = false;
+    for (const auto& entry : group->Entries) {
+        if (entry.IsStaticSampler()) continue;
+        if (entry.Namespace < record->Namespace || (entry.Namespace == record->Namespace && entry.Binding < record->Location.Binding)) offset += entry.Count;
+        if (entry.Namespace == record->Namespace && entry.Binding == record->Location.Binding) {
+            if (element >= entry.Count) return std::nullopt;
+            found = true;
+        }
+    }
+    return found ? std::optional{offset + element} : std::nullopt;
+}
+
+GraphicsPsoD3D12::GraphicsPsoD3D12(
+    DeviceD3D12* device,
+    RootSigD3D12* layout,
+    ComPtr<ID3D12PipelineState> pso,
+    std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides,
+    D3D12_PRIMITIVE_TOPOLOGY topo) noexcept
+    : _device(device),
+      _layout(layout),
+      _pso(std::move(pso)),
+      _vertexStrides(std::move(vertexStrides)),
+      _topo(topo) {}
+
+bool GraphicsPsoD3D12::IsValid() const noexcept {
+    return _pso != nullptr;
+}
+
+void GraphicsPsoD3D12::Destroy() noexcept {
+    _pso = nullptr;
+}
+
+void GraphicsPsoD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _pso.Get());
+}
+
+ComputePsoD3D12::ComputePsoD3D12(
+    DeviceD3D12* device,
+    RootSigD3D12* layout,
+    ComPtr<ID3D12PipelineState> pso) noexcept
+    : _device(device),
+      _layout(layout),
+      _pso(std::move(pso)) {}
+
+bool ComputePsoD3D12::IsValid() const noexcept {
+    return _pso != nullptr;
+}
+
+void ComputePsoD3D12::Destroy() noexcept {
+    _pso = nullptr;
+}
+
+void ComputePsoD3D12::SetDebugName(std::string_view name) noexcept {
+    SetObjectName(name, _pso.Get());
+}
+
+SamplerD3D12::SamplerD3D12(
+    DeviceD3D12* device,
+    CpuDescriptorHeapViewRAII heapView,
+    const D3D12_SAMPLER_DESC& desc) noexcept
+    : _device(device),
+      _samplerView(std::move(heapView)),
+      _desc(desc) {}
+
+vector<uint64_t> SamplerD3D12::GetBindingIdentity() const noexcept {
+    const auto bits = [](float value) -> uint64_t { return value == 0 ? 0 : std::bit_cast<uint32_t>(value); };
+    return {uint64_t(RenderBackend::D3D12), uint64_t(_desc.Filter), uint64_t(_desc.AddressU), uint64_t(_desc.AddressV), uint64_t(_desc.AddressW),
+        bits(_desc.MipLODBias), _desc.MaxAnisotropy, uint64_t(_desc.ComparisonFunc), bits(_desc.BorderColor[0]), bits(_desc.BorderColor[1]),
+        bits(_desc.BorderColor[2]), bits(_desc.BorderColor[3]), bits(_desc.MinLOD), bits(_desc.MaxLOD)};
+}
+
+bool SamplerD3D12::IsValid() const noexcept {
+    return _samplerView.IsValid();
+}
+
+void SamplerD3D12::Destroy() noexcept {
+    _samplerView.Destroy();
+}
+
+void SamplerD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = string(name);
+}
+
+}  // namespace radray::render::d3d12

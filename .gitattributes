@@ -1,0 +1,7 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+cmake/MsBuildCompileCommandsJson/* linguist-generated
+
+# Metadata and bytecode golden fixtures are wire bytes, even when a particular sample is printable.
+modules/render/tests/data/shader_artifacts/** -text

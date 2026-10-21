@@ -1,0 +1,1267 @@
+#pragma once
+
+#ifdef RADRAY_ENABLE_VULKAN
+
+#include <array>
+#include <mutex>
+
+#include <radray/allocator.h>
+#include <radray/intrusive_ptr.h>
+#include <radray/render/backend/vulkan_helper.h>
+#include <radray/render/pipeline_layout_types.h>
+#include <radray/render/rhi.h>
+
+namespace radray::render::vulkan {
+
+class PipelineLayoutCacheVulkan;
+class CachedPipelineLayoutVulkan;
+void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept;
+void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept;
+
+using DeviceFuncTable = VolkDeviceTable;
+
+class InstanceVulkanImpl;
+class VMA;
+class DeviceVulkan;
+class QueueVulkan;
+class CommandAllocatorVulkan;
+class CommandBufferVulkan;
+class SimulateCommandEncoderVulkan;
+class LegacyFenceVulkan;
+class LegacySemaphoreVulkan;
+class FenceVulkan;
+class TimelineSemaphoreVulkan;
+class SurfaceVulkan;
+class SwapChainVulkan;
+class SwapChainSyncObjectVulkan;
+class BufferVulkan;
+class BufferViewVulkan;
+class ImageVulkan;
+class ImageViewVulkan;
+class PipelineLayoutVulkan;
+class ShaderParameterSetVulkan;
+class GraphicsPipelineVulkan;
+class ComputePipelineVulkan;
+class ShaderModuleVulkan;
+class SamplerVulkan;
+class QueryPoolVulkan;
+
+struct SamplerStateHashVulkan {
+    size_t operator()(const VulkanImmutableSamplerState& state) const noexcept;
+};
+
+struct QueueIndexInFamily {
+    uint32_t Family;
+    uint32_t IndexInFamily;
+};
+
+struct ExtFeaturesVulkan {
+    VkPhysicalDeviceVulkan11Features feature11;
+    VkPhysicalDeviceVulkan12Features feature12;
+};
+
+struct ExtPropertiesVulkan {
+    std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
+};
+
+class InstanceVulkanImpl final : public InstanceVulkan {
+public:
+    InstanceVulkanImpl(
+        VkInstance instance,
+        std::optional<VkAllocationCallbacks> allocCb,
+        vector<string> exts,
+        vector<string> layers) noexcept;
+
+    ~InstanceVulkanImpl() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    vector<VulkanPhysicalDeviceInfo> GetPhysicalDevices() const noexcept override;
+
+    std::optional<uint32_t> SelectHighPerformancePhysicalDevice() const noexcept override;
+
+    bool IsValidationEnabled() const noexcept override;
+
+    const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
+
+public:
+    void DestroyImpl() noexcept;
+
+    VkInstance _instance;
+    std::optional<VkAllocationCallbacks> _allocCb;
+    vector<string> _exts;
+    vector<string> _layers;
+
+    RenderLogCallback _logCallback{nullptr};
+    void* _logUserData{nullptr};
+    VkDebugUtilsMessengerEXT _debugMessenger{VK_NULL_HANDLE};
+};
+
+class VMA final : public RenderBase {
+public:
+    explicit VMA(VmaAllocator alloc) noexcept;
+
+    ~VMA() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    VmaAllocator _vma;
+};
+
+struct DescriptorSetLayoutCacheKeyVulkan {
+    struct BindingKey {
+        uint32_t Binding;
+        VkDescriptorType Type;
+        uint32_t Count;
+        VkShaderStageFlags Stages;
+        vector<VkSampler> ImmutableSamplers;
+
+        friend bool operator==(const BindingKey&, const BindingKey&) noexcept = default;
+    };
+
+    vector<BindingKey> Bindings;
+
+    friend bool operator==(const DescriptorSetLayoutCacheKeyVulkan&, const DescriptorSetLayoutCacheKeyVulkan&) noexcept = default;
+};
+
+}  // namespace radray::render::vulkan
+
+namespace std {
+
+template <>
+struct hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan> {
+    size_t operator()(const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept;
+};
+
+}  // namespace std
+
+namespace radray::render::vulkan {
+
+class DescriptorSetLayoutCacheVulkan;
+
+class DescriptorSetLayoutVulkan final {
+public:
+    DescriptorSetLayoutVulkan(
+        DescriptorSetLayoutCacheVulkan* cache,
+        DeviceVulkan* device,
+        VkDescriptorSetLayout layout) noexcept;
+    DescriptorSetLayoutVulkan(const DescriptorSetLayoutVulkan&) = delete;
+    DescriptorSetLayoutVulkan& operator=(const DescriptorSetLayoutVulkan&) = delete;
+    DescriptorSetLayoutVulkan(DescriptorSetLayoutVulkan&&) = delete;
+    DescriptorSetLayoutVulkan& operator=(DescriptorSetLayoutVulkan&&) = delete;
+
+    ~DescriptorSetLayoutVulkan() noexcept;
+
+    VkDescriptorSetLayout Get() const noexcept { return _layout; }
+    uint32_t GetRefCount() const noexcept { return _refCount; }
+
+private:
+    friend class DescriptorSetLayoutCacheVulkan;
+    friend void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
+    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
+    void DestroyImpl() noexcept;
+
+    DescriptorSetLayoutCacheVulkan* _cache;
+    const DescriptorSetLayoutCacheKeyVulkan* _key{nullptr};
+    DeviceVulkan* _device;
+    VkDescriptorSetLayout _layout;
+    uint32_t _refCount{0};
+};
+
+void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
+void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
+class DescriptorSetLayoutCacheVulkan final {
+public:
+    explicit DescriptorSetLayoutCacheVulkan(DeviceVulkan* device) noexcept;
+
+    ~DescriptorSetLayoutCacheVulkan() noexcept;
+
+    IntrusivePtr<DescriptorSetLayoutVulkan> GetOrCreate(std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
+
+    void Destroy() noexcept;
+
+    uint32_t GetLayoutCount() const noexcept {
+        return static_cast<uint32_t>(_layouts.size());
+    }
+
+private:
+    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
+    using Key = DescriptorSetLayoutCacheKeyVulkan;
+    using BindingKey = Key::BindingKey;
+
+    void Evict(DescriptorSetLayoutVulkan* layout) noexcept;
+
+    DeviceVulkan* _device;
+    unordered_map<Key, unique_ptr<DescriptorSetLayoutVulkan>> _layouts;
+};
+
+class DescriptorSetAllocatorVulkan final {
+public:
+    struct Page;
+
+    struct Request {
+        VkDescriptorSetLayout Layout{VK_NULL_HANDLE};
+        std::span<const VkDescriptorPoolSize> DescriptorCounts;
+    };
+
+    struct Allocation {
+        Page* PagePtr{nullptr};
+        VkDescriptorPool Pool{VK_NULL_HANDLE};
+        VkDescriptorSet Set{VK_NULL_HANDLE};
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+
+        constexpr bool IsValid() const noexcept {
+            return PagePtr != nullptr &&
+                   Pool != VK_NULL_HANDLE &&
+                   Set != VK_NULL_HANDLE;
+        }
+    };
+
+    explicit DescriptorSetAllocatorVulkan(DeviceVulkan* device) noexcept;
+
+    ~DescriptorSetAllocatorVulkan() noexcept;
+
+    std::optional<Allocation> Allocate(Request request) noexcept;
+
+    void Destroy(Allocation allocation) noexcept;
+
+    void Clear() noexcept;
+
+private:
+    DeviceVulkan* _device;
+    vector<unique_ptr<Page>> _pages;
+};
+
+static_assert(
+    is_allocator<
+        DescriptorSetAllocatorVulkan,
+        DescriptorSetAllocatorVulkan::Allocation,
+        DescriptorSetAllocatorVulkan::Request>,
+    "DescriptorSetAllocatorVulkan is not an allocator");
+
+class VulkanRenderPassCache;
+
+struct RenderPassColorAttachmentDescriptor {
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    uint32_t SampleCount{1};
+    LoadAction Load{LoadAction::DontCare};
+    StoreAction Store{StoreAction::Store};
+
+    friend bool operator==(const RenderPassColorAttachmentDescriptor&, const RenderPassColorAttachmentDescriptor&) noexcept = default;
+};
+
+struct RenderPassDepthStencilAttachmentDescriptor {
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    uint32_t SampleCount{1};
+    LoadAction DepthLoad{};
+    StoreAction DepthStore{};
+    LoadAction StencilLoad{};
+    StoreAction StencilStore{};
+    // Read-only depth/stencil requires Load/Store and a DepthRead framebuffer view.
+    bool ReadOnly{false};
+
+    friend bool operator==(const RenderPassDepthStencilAttachmentDescriptor&, const RenderPassDepthStencilAttachmentDescriptor&) noexcept = default;
+};
+
+struct RenderPassExecutionKeyVulkan {
+    vector<RenderPassColorAttachmentDescriptor> ColorAttachments;
+    std::optional<RenderPassDepthStencilAttachmentDescriptor> DepthStencilAttachment;
+    static RenderPassExecutionKeyVulkan Build(const RenderPassBeginDescriptor& scope, const AttachmentSignature& signature);
+    static RenderPassExecutionKeyVulkan Representative(const AttachmentSignature& signature);
+    friend bool operator==(const RenderPassExecutionKeyVulkan&, const RenderPassExecutionKeyVulkan&) noexcept = default;
+};
+
+struct FramebufferKeyVulkan {
+    AttachmentSignature Signature;
+    vector<uint64_t> Views;
+    uint32_t Width, Height, Layers;
+    friend bool operator==(const FramebufferKeyVulkan&, const FramebufferKeyVulkan&) noexcept = default;
+};
+
+struct RenderPassKeyHashVulkan {
+    size_t operator()(const RenderPassExecutionKeyVulkan& key) const noexcept;
+};
+
+struct FramebufferKeyHashVulkan {
+    size_t operator()(const FramebufferKeyVulkan& key) const noexcept;
+};
+
+struct NativeRenderPassVulkan {
+    VulkanRenderPassCache* Cache;
+    RenderPassExecutionKeyVulkan Key;
+    VkRenderPass Native{VK_NULL_HANDLE};
+    string Name;
+    uint32_t Uses{0};
+    std::optional<list<NativeRenderPassVulkan*>::iterator> Idle;
+};
+
+struct NativeFramebufferVulkan {
+    VulkanRenderPassCache* Cache;
+    FramebufferKeyVulkan Key;
+    VkFramebuffer Native{VK_NULL_HANDLE};
+    string Name;
+    uint32_t Uses{0};
+    std::optional<list<NativeFramebufferVulkan*>::iterator> Idle;
+};
+
+void IntrusivePtrAddRef(NativeRenderPassVulkan* entry) noexcept;
+void IntrusivePtrRelease(NativeRenderPassVulkan* entry) noexcept;
+void IntrusivePtrAddRef(NativeFramebufferVulkan* entry) noexcept;
+void IntrusivePtrRelease(NativeFramebufferVulkan* entry) noexcept;
+
+/// Owns native storage; command references count use, independently of cache residency.
+class VulkanRenderPassCache {
+public:
+    struct Budget {
+        size_t RenderPasses{256}, Framebuffers{1024};
+        size_t IdleRenderPasses{128}, IdleFramebuffers{256};
+    };
+    explicit VulkanRenderPassCache(DeviceVulkan* device) noexcept;
+    ~VulkanRenderPassCache() noexcept;
+    IntrusivePtr<NativeRenderPassVulkan> Acquire(const RenderPassExecutionKeyVulkan& key, std::string_view name = {});
+    IntrusivePtr<NativeFramebufferVulkan> Acquire(const FramebufferKeyVulkan& key, VkRenderPass pass, std::span<const VkImageView> views, std::string_view name = {});
+    uint64_t AllocateViewId();
+    /// Called before native view destruction; rejects outstanding command references.
+    void InvalidateView(uint64_t id);
+    void SetBudget(Budget budget);
+    void Trim();
+    void Clear();
+    void AddRef(NativeRenderPassVulkan* entry) noexcept;
+    void AddRef(NativeFramebufferVulkan* entry) noexcept;
+    void Release(NativeRenderPassVulkan* entry) noexcept;
+    void Release(NativeFramebufferVulkan* entry) noexcept;
+
+private:
+    VkRenderPass CreatePass(const RenderPassExecutionKeyVulkan& key);
+    void ErasePass(NativeRenderPassVulkan* entry);
+    void EraseFramebuffer(NativeFramebufferVulkan* entry);
+    void TrimLocked();
+    DeviceVulkan* _device;
+    std::mutex _mutex;
+    Budget _budget;
+    uint64_t _nextViewId{1};
+    unordered_map<RenderPassExecutionKeyVulkan, unique_ptr<NativeRenderPassVulkan>, RenderPassKeyHashVulkan> _passes;
+    unordered_map<FramebufferKeyVulkan, unique_ptr<NativeFramebufferVulkan>, FramebufferKeyHashVulkan> _framebuffers;
+    unordered_map<uint64_t, unordered_set<NativeFramebufferVulkan*>> _byView;
+    list<NativeRenderPassVulkan*> _idlePasses;
+    list<NativeFramebufferVulkan*> _idleFramebuffers;
+};
+
+class DeviceVulkan final : public Device, public detail::VulkanPipelineLayoutFactory {
+public:
+    DeviceVulkan(
+        InstanceVulkanImpl* instance,
+        VkPhysicalDevice physicalDevice,
+        VkDevice device) noexcept;
+
+    ~DeviceVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
+
+    DeviceDetail GetDetail() const noexcept override;
+
+    const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
+
+    TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+
+    Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
+
+    Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
+
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept override;
+
+    Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
+
+    Nullable<unique_ptr<QueryPool>> CreateQueryPool(const QueryPoolDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::SpirvShaderArtifactView& artifact, const VulkanTargetLayoutOptions& options = {}) noexcept;
+
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept override;
+
+    Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
+
+    Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept override;
+
+public:
+    Nullable<unique_ptr<LegacyFenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
+
+    Nullable<unique_ptr<LegacySemaphoreVulkan>> CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept;
+
+    Nullable<unique_ptr<TimelineSemaphoreVulkan>> CreateTimelineSemaphore(uint64_t initValue) noexcept;
+
+    Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
+
+    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const ResolvedVulkanLayout& layout) noexcept;
+
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
+
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
+
+    Nullable<SamplerVulkan*> GetOrCreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
+
+    const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
+
+    void SetObjectName(std::string_view name, VkObjectType type, void* vkObject) const noexcept;
+    template <class T>
+    void SetObjectName(std::string_view name, T vkObject) const noexcept {
+        SetObjectName(name, VulkanObjectTrait<T>::type, vkObject);
+    }
+
+    void DestroyImpl() noexcept;
+
+    InstanceVulkanImpl* _instance;
+    VkPhysicalDevice _physicalDevice;
+    VkDevice _device;
+    std::unique_ptr<VMA> _vma;
+    std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
+    DeviceFuncTable _ftb;
+    unique_ptr<VulkanRenderPassCache> _renderPassCache;
+    DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
+    unique_ptr<PipelineLayoutCacheVulkan> _pipelineLayoutCache;
+    DescriptorSetAllocatorVulkan _descriptorSetAllocator;
+    unordered_map<VulkanImmutableSamplerState, unique_ptr<SamplerVulkan>, SamplerStateHashVulkan> _samplerCache;
+    VkPhysicalDeviceFeatures _feature;
+    ExtFeaturesVulkan _extFeatures;
+    VkPhysicalDeviceProperties _properties;
+    ExtPropertiesVulkan _extProperties;
+    RenderDeviceCapabilities _capabilities;
+    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
+};
+
+class QueueVulkan final : public CommandQueue {
+public:
+    QueueVulkan(
+        DeviceVulkan* device,
+        VkQueue queue,
+        QueueIndexInFamily family,
+        QueueType type,
+        VkQueueFlags queueFlags) noexcept;
+
+    ~QueueVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void Submit(const CommandQueueSubmitDescriptor& desc) noexcept override;
+
+    void Wait() noexcept override;
+
+    QueueType GetQueueType() const noexcept override;
+
+    TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkQueue _queue;
+    QueueIndexInFamily _family;
+    QueueType _type;
+    VkQueueFlags _queueFlags{0};
+#ifdef RADRAY_ENABLE_PROFILER
+    // Profiler GPU timestamp context for this queue; null when unavailable.
+    void* _profilerContext{nullptr};
+#endif
+};
+
+class CommandAllocatorVulkan final : public CommandAllocator {
+public:
+    CommandAllocatorVulkan(
+        DeviceVulkan* device,
+        QueueVulkan* queue,
+        VkCommandPool cmdPool) noexcept;
+
+    ~CommandAllocatorVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void Reset() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    QueueVulkan* _queue;
+    VkCommandPool _cmdPool;
+    vector<CommandBufferVulkan*> _children;
+    bool _used{false};
+    bool _hasRenderScopes{false};
+};
+
+class CommandBufferVulkan final : public CommandBuffer {
+public:
+    CommandBufferVulkan(
+        DeviceVulkan* device,
+        QueueVulkan* queue,
+        CommandAllocatorVulkan* cmdPool,
+        VkCommandBuffer cmdBuffer) noexcept;
+
+    ~CommandBufferVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    void Begin() noexcept override;
+
+    void End() noexcept override;
+
+    void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
+
+    void PushDebugGroup(std::string_view name) noexcept override;
+
+    void PopDebugGroup() noexcept override;
+
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
+
+    void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
+
+    Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept override;
+
+    void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
+
+    void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
+
+    void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
+
+    bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
+
+    void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
+
+    void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept override;
+
+    void ResolveTexture(const TextureResolveDescriptor& desc) noexcept override;
+
+    void ResetQueryPool(QueryPool* pool, uint32_t firstIndex, uint32_t count) noexcept override;
+
+    void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override;
+
+    void ResolveQueryData(const QueryResolveDescriptor& desc) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+#ifdef RADRAY_ENABLE_PROFILER
+    QueueVulkan* _queue;
+#endif
+    CommandAllocatorVulkan* _cmdPool;
+    VkCommandBuffer _cmdBuffer;
+#ifdef RADRAY_ENABLE_PROFILER
+    // Profiler GPU zones opened by PushDebugGroup; timestamps are legal inside Vulkan render passes,
+    // so every debug group maps to one zone.
+    struct ProfilerZoneStack;
+    unique_ptr<ProfilerZoneStack> _profilerZones;
+#endif
+    vector<IntrusivePtr<NativeRenderPassVulkan>> _passPins;
+    vector<IntrusivePtr<NativeFramebufferVulkan>> _framebufferPins;
+};
+
+class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
+public:
+    SimulateCommandEncoderVulkan(
+        DeviceVulkan* device,
+        CommandBufferVulkan* cmdBuffer) noexcept;
+
+    ~SimulateCommandEncoderVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void SetViewport(Viewport vp) noexcept override;
+
+    void SetScissor(Rect rect) noexcept override;
+
+    void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept override;
+
+    void BindIndexBuffer(IndexBufferView ibv) noexcept override;
+
+    void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
+
+    void BindShaderParameterSet(
+        uint32_t groupIndex,
+        ShaderParameterSet* set,
+        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        BindingHandle binding,
+        std::span<const byte> data) noexcept override;
+
+    void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
+
+    void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
+
+    void DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
+    void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    CommandBufferVulkan* _cmdBuffer;
+    Nullable<NativeFramebufferVulkan*> _framebuffer{nullptr};
+    GraphicsPipelineVulkan* _boundPso{nullptr};
+    PipelineLayoutVulkan* _boundLayout{nullptr};
+};
+
+class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {
+public:
+    SimulateComputeEncoderVulkan(
+        DeviceVulkan* device,
+        CommandBufferVulkan* cmdBuffer) noexcept;
+
+    ~SimulateComputeEncoderVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    CommandBuffer* GetCommandBuffer() const noexcept override;
+
+    void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
+
+    void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
+
+    void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
+
+    void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    CommandBufferVulkan* _cmdBuffer;
+    ComputePipelineVulkan* _boundPso{nullptr};
+    PipelineLayoutVulkan* _boundLayout{nullptr};
+};
+
+class LegacyFenceVulkan final : public RenderBase {
+public:
+    LegacyFenceVulkan(
+        DeviceVulkan* device,
+        VkFence fence) noexcept;
+
+    ~LegacyFenceVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void Wait() noexcept;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkFence _fence;
+};
+
+class LegacySemaphoreVulkan final : public RenderBase {
+public:
+    LegacySemaphoreVulkan(
+        DeviceVulkan* device,
+        VkSemaphore semaphore) noexcept;
+
+    ~LegacySemaphoreVulkan() noexcept;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSemaphore _semaphore;
+};
+
+class FenceVulkan final : public Fence {
+public:
+    FenceVulkan(
+        DeviceVulkan* device,
+        unique_ptr<TimelineSemaphoreVulkan> timelineSemaphore) noexcept;
+
+    ~FenceVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    uint64_t GetCompletedValue() const noexcept override;
+
+    uint64_t GetLastSignaledValue() const noexcept override;
+
+    void Wait() noexcept override;
+
+    void Wait(uint64_t value) noexcept override;
+
+    bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    unique_ptr<TimelineSemaphoreVulkan> _fence;
+    uint64_t _fenceValue{0};
+};
+
+class TimelineSemaphoreVulkan final : public RenderBase {
+public:
+    TimelineSemaphoreVulkan(
+        DeviceVulkan* device,
+        VkSemaphore semaphore) noexcept;
+
+    ~TimelineSemaphoreVulkan() noexcept;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    uint64_t GetCompletedValue() const noexcept;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSemaphore _semaphore;
+};
+
+class SurfaceVulkan final : public RenderBase {
+public:
+    SurfaceVulkan(
+        DeviceVulkan* device,
+        VkSurfaceKHR surface) noexcept;
+
+    ~SurfaceVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSurfaceKHR _surface;
+};
+
+class SwapChainSyncObjectVulkan final : public SwapChainSyncObject {
+public:
+    explicit SwapChainSyncObjectVulkan(unique_ptr<LegacySemaphoreVulkan> semaphore) noexcept;
+
+    ~SwapChainSyncObjectVulkan() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool IsPendingQueueUseComplete() const noexcept;
+
+    void ClearPendingQueueUse() noexcept;
+
+    void WaitPendingQueueUse() noexcept;
+
+public:
+    unique_ptr<LegacySemaphoreVulkan> _semaphore{nullptr};
+    FenceVulkan* _pendingQueueFence{nullptr};
+    uint64_t _pendingQueueValue{0};
+};
+
+/// Acquire 信号量按消费它的队列 fence 回收；present 信号量按 swapchain image 索引。
+/// 重新 acquire 到同一 image 后，才能在后续提交中复用它的 present 信号量。
+class SwapChainVulkan final : public SwapChain {
+public:
+    SwapChainVulkan(
+        DeviceVulkan* device,
+        QueueVulkan* queue,
+        unique_ptr<SurfaceVulkan> surface,
+        VkSwapchainKHR swapchain,
+        const SwapChainDescriptor& desc) noexcept;
+
+    ~SwapChainVulkan() noexcept;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    SwapChainAcquireResult AcquireNext(uint64_t timeoutMs) noexcept override;
+
+    SwapChainPresentResult Present(SwapChainFrame frame) noexcept override;
+
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept override;
+
+    bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept override;
+
+    uint32_t GetBackBufferCount() const noexcept override;
+
+    SwapChainDescriptor GetDesc() const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+    Nullable<unique_ptr<SwapChainSyncObjectVulkan>> AcquireSyncObjectFromPool() noexcept;
+    void RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> syncObject) noexcept;
+
+    class Frame {
+    public:
+        unique_ptr<ImageVulkan> image;
+        unique_ptr<SwapChainSyncObjectVulkan> acquireSyncObject;
+        unique_ptr<SwapChainSyncObjectVulkan> readyToPresent;
+    };
+
+    class OutstandingAcquire {
+    public:
+        uint32_t imageIndex{std::numeric_limits<uint32_t>::max()};
+        SwapChainSyncObjectVulkan* waitToDraw{nullptr};
+        SwapChainSyncObjectVulkan* readyToPresent{nullptr};
+
+        bool IsValid() const noexcept {
+            return imageIndex != std::numeric_limits<uint32_t>::max() &&
+                   waitToDraw != nullptr &&
+                   readyToPresent != nullptr;
+        }
+
+        void Reset() noexcept {
+            imageIndex = std::numeric_limits<uint32_t>::max();
+            waitToDraw = nullptr;
+            readyToPresent = nullptr;
+        }
+    };
+
+    DeviceVulkan* _device;
+    QueueVulkan* _queue;
+    unique_ptr<SurfaceVulkan> _surface;
+    VkSwapchainKHR _swapchain;
+    const void* _nativeHandler;
+    vector<Frame> _frames;
+    vector<unique_ptr<SwapChainSyncObjectVulkan>> _recycledSyncObjects;
+    OutstandingAcquire _outstandingAcquire{};
+    uint64_t _outstandingFrameToken{0};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _backBufferCount{0};
+    TextureFormat _reqFormat{TextureFormat::UNKNOWN};
+    PresentMode _mode{PresentMode::FIFO};
+};
+
+class QueryPoolVulkan final : public QueryPool {
+public:
+    QueryPoolVulkan(
+        DeviceVulkan* device,
+        VkQueryPool pool,
+        QueryType type,
+        uint32_t count) noexcept;
+    ~QueryPoolVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    QueryType GetType() const noexcept override;
+
+    uint32_t GetCount() const noexcept override;
+
+    TimestampQueryCalibration GetTimestampCalibration(CommandQueue* queue) const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkQueryPool _pool{VK_NULL_HANDLE};
+    QueryType _type;
+    uint32_t _count;
+};
+
+class BufferVulkan final : public Buffer {
+public:
+    BufferVulkan(
+        DeviceVulkan* device,
+        VkBuffer buffer,
+        VmaAllocation allocation,
+        VmaAllocationInfo allocInfo) noexcept;
+
+    ~BufferVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void* Map(uint64_t offset, uint64_t size) noexcept override;
+
+    void Unmap() noexcept override;
+
+    void FlushMappedRange(BufferRange range) noexcept override;
+
+    void InvalidateMappedRange(BufferRange range) noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    BufferDescriptor GetDesc() const noexcept override;
+
+    Device* GetDevice() const noexcept override { return _device; }
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkBuffer _buffer;
+    VmaAllocation _allocation;
+    VmaAllocationInfo _allocInfo;
+    VkDeviceSize _reqSize;
+    string _name;
+    uint64_t _reqSizeLogical{0};
+    MemoryType _memory{};
+    BufferUses _usage{BufferUse::UNKNOWN};
+    ResourceHints _hints{};
+    bool _hostCoherent{false};
+};
+
+class BufferViewVulkan final : public RenderBase {
+public:
+    BufferViewVulkan(
+        DeviceVulkan* device,
+        VkBufferView view) noexcept;
+
+    ~BufferViewVulkan() noexcept override;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkBufferView _bufferView;
+};
+
+class ImageVulkan final : public Texture {
+public:
+    ImageVulkan(
+        DeviceVulkan* device,
+        VkImage image,
+        VmaAllocation allocation,
+        VmaAllocationInfo allocInfo) noexcept;
+
+    ~ImageVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    TextureDescriptor GetDesc() const noexcept override;
+
+    Device* GetDevice() const noexcept override { return _device; }
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkImage _image;
+    VmaAllocation _allocation;
+    VmaAllocationInfo _allocInfo;
+    string _name;
+    VkFormat _rawFormat;
+    TextureDimension _dim{TextureDimension::UNKNOWN};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _depthOrArraySize{0};
+    uint32_t _mipLevels{0};
+    uint32_t _sampleCount{0};
+    TextureFormat _format{TextureFormat::UNKNOWN};
+    MemoryType _memory{MemoryType::Device};
+    TextureUses _usage{TextureUse::UNKNOWN};
+    ResourceHints _hints{ResourceHint::None};
+    bool _isSwapchainImage{false};
+};
+
+class ImageViewVulkan final : public TextureView {
+public:
+    ImageViewVulkan(
+        DeviceVulkan* device,
+        ImageVulkan* image,
+        VkImageView view) noexcept;
+
+    ~ImageViewVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    TextureViewDescriptor GetDesc() const noexcept override { return _mdesc; }
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    ImageVulkan* _image;
+    VkImageView _imageView;
+    uint64_t _viewId{0};
+    TextureViewDescriptor _mdesc;
+    VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
+};
+
+// 由 ResolvedVulkanLayout 建立的 set binding metadata；logical kind 与 native placement 独立保存。
+struct ShaderParameterSetLayoutEntryVulkan {
+    uint32_t Binding{0};
+    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+    VulkanBufferDescriptorPlacement Placement{VulkanBufferDescriptorPlacement::Regular};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
+    // Index into the creation-time `ResolvedVulkanLayout::ImmutableSamplers`, or `shader::kShaderNoSampler`.
+    uint32_t ImmutableSamplerIndex{shader::kShaderNoSampler};
+    // 仅用于 typed buffer：本 binding 的数组元素在 parameter set 的 _texelBufferViews 中的起始下标。
+    size_t TexelBufferViewOffset{0};
+
+    bool IsDynamic() const noexcept {
+        return Placement == VulkanBufferDescriptorPlacement::Dynamic;
+    }
+
+    bool HasImmutableSampler() const noexcept {
+        return ImmutableSamplerIndex != shader::kShaderNoSampler;
+    }
+};
+
+class PipelineLayoutVulkan final : public PipelineLayout {
+public:
+    explicit PipelineLayoutVulkan(DeviceVulkan* device) noexcept;
+    VkPipelineLayout GetNative() const noexcept;
+    std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> GetSetLayouts() const noexcept;
+
+    ~PipelineLayoutVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+    BindingHandle FindBinding(std::string_view name) const noexcept override;
+    std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept override;
+    std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    IntrusivePtr<CachedPipelineLayoutVulkan> _nativeLayout;
+    vector<vector<ShaderParameterSetLayoutEntryVulkan>> _parameterSetLayouts;
+    // Dynamic descriptor order per set, as indices into `_parameterSetLayouts[set]`. Copied from
+    // `ResolvedVulkanLayout::DynamicOffsetOrder` rather than recomputed, so the order
+    // `vkCmdBindDescriptorSets` expects is the resolved order by construction.
+    vector<vector<uint32_t>> _dynamicEntryOrder;
+    vector<BackendBindingName> _bindingNames;
+    std::optional<VkPushConstantRange> _pushConstantRange;
+    std::optional<ShaderBindingLocation> _pushConstantLocation;
+};
+
+class ShaderParameterSetVulkan final : public ShaderParameterSet {
+public:
+    ShaderParameterSetVulkan() noexcept = default;
+    ~ShaderParameterSetVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool Set(
+        BindingHandle binding,
+        uint32_t arrayElement,
+        ShaderParameterValue value) noexcept override;
+
+    bool FlushWrites() noexcept override;
+
+    void ResetBindingsForReuse() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device{nullptr};
+    PipelineLayoutVulkan* _layout{nullptr};
+    uint32_t _groupIndex{0};
+    DescriptorSetAllocatorVulkan::Allocation _allocation;
+    // 仅持有 typed buffer descriptor 引用的原生 view；普通 buffer、texture、sampler 不占此数组。
+    vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
+};
+
+class GraphicsPipelineVulkan final : public GraphicsPipelineState {
+public:
+    GraphicsPipelineVulkan(
+        DeviceVulkan* device,
+        PipelineLayoutVulkan* layout,
+        VkPipeline pipeline) noexcept;
+
+    ~GraphicsPipelineVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    PipelineLayoutVulkan* _layout;
+    VkPipeline _pipeline;
+};
+
+class ComputePipelineVulkan final : public ComputePipelineState {
+public:
+    ComputePipelineVulkan(
+        DeviceVulkan* device,
+        PipelineLayoutVulkan* layout,
+        VkPipeline pipeline) noexcept;
+
+    ~ComputePipelineVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    PipelineLayoutVulkan* _layout;
+    VkPipeline _pipeline;
+};
+
+class ShaderModuleVulkan final : public Shader {
+public:
+    ShaderModuleVulkan(
+        DeviceVulkan* device,
+        VkShaderModule shaderModule,
+        ShaderStages stages) noexcept;
+
+    ~ShaderModuleVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    ShaderStages GetStages() const noexcept override { return _stages; }
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkShaderModule _shaderModule;
+    ShaderStages _stages{ShaderStage::UNKNOWN};
+};
+
+class SamplerVulkan final : public Sampler {
+public:
+    SamplerVulkan(
+        DeviceVulkan* device,
+        VkSampler sampler, const VulkanImmutableSamplerState& state) noexcept;
+    ~SamplerVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
+    vector<uint64_t> GetBindingIdentity() const noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device;
+    VkSampler _sampler;
+    VulkanImmutableSamplerState _state;
+};
+
+Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
+
+Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& desc);
+
+void ShutdownVulkanEnvImpl() noexcept;
+
+constexpr auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
+constexpr auto CastVkObject(CommandAllocator* p) noexcept { return static_cast<CommandAllocatorVulkan*>(p); }
+constexpr auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
+constexpr auto CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
+constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }
+constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
+constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
+constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
+constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+constexpr auto CastVkObject(PipelineLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+constexpr auto CastVkObject(ShaderParameterSet* p) noexcept { return static_cast<ShaderParameterSetVulkan*>(p); }
+constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
+constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
+constexpr auto CastVkObject(SwapChainSyncObject* p) noexcept { return static_cast<SwapChainSyncObjectVulkan*>(p); }
+constexpr auto CastVkObject(QueryPool* p) noexcept { return static_cast<QueryPoolVulkan*>(p); }
+
+}  // namespace radray::render::vulkan
+
+#endif

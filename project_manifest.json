@@ -1,0 +1,162 @@
+{
+    "Artifacts": [
+        {
+            "Name": "radray_dxc",
+            "Version": "1.9.2609.radray.1",
+            "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/latest/dxc-{Platform}-{Arch}-{Version}.zip",
+            "EnforceHash": true,
+            "Triplets": [
+                {
+                    "Platform": "windows",
+                    "Arch": "x64",
+                    "Hash": "e2135770465dd026f3211c10b6ab7a3e84ce599861d04dd78b8bfecf39aa78b7"
+                }
+            ]
+        }
+    ],
+    "ThirdParties": [
+        {
+            "Name": "fmt",
+            "Type": "git",
+            "Git": "https://github.com/fmtlib/fmt.git",
+            "Tag": "12.2.0"
+        },
+        {
+            "Name": "magic_enum",
+            "Type": "git",
+            "Git": "https://github.com/Neargye/magic_enum.git",
+            "Tag": "v0.9.8"
+        },
+        {
+            "Name": "spdlog",
+            "Type": "git",
+            "Git": "https://github.com/gabime/spdlog.git",
+            "Tag": "v1.17.0"
+        },
+        {
+            "Name": "eigen",
+            "Type": "git",
+            "Git": "https://gitlab.com/libeigen/eigen.git",
+            "Branch": "5.0"
+        },
+        {
+            "Name": "xxHash",
+            "Type": "git",
+            "Git": "https://github.com/Cyan4973/xxHash.git"
+        },
+        {
+            "Name": "yyjson",
+            "Type": "git",
+            "Git": "https://github.com/ibireme/yyjson.git",
+            "Tag": "0.13.0"
+        },
+        {
+            "Name": "sigslot",
+            "Type": "git",
+            "Git": "https://github.com/palacaze/sigslot.git",
+            "Tag": "v1.2.3"
+        },
+        {
+            "Name": "stdexec",
+            "Type": "git",
+            "Git": "https://github.com/NVIDIA/stdexec.git",
+            "Branch": "main"
+        },
+        {
+            "Name": "mimalloc",
+            "Type": "git",
+            "Git": "https://github.com/microsoft/mimalloc.git",
+            "Tag": "v3.5.3"
+        },
+        {
+            "Name": "pugixml",
+            "Type": "git",
+            "Git": "https://github.com/zeux/pugixml.git",
+            "Tag": "v1.16"
+        },
+        {
+            "Name": "zlib",
+            "Type": "git",
+            "Git": "https://github.com/madler/zlib.git",
+            "Tag": "v1.3.2"
+        },
+        {
+            "Name": "libpng",
+            "Type": "git",
+            "Git": "https://github.com/pnggroup/libpng.git",
+            "Tag": "v1.6.59"
+        },
+        {
+            "Name": "libjpeg",
+            "Type": "git",
+            "Git": "https://github.com/libjpeg-turbo/ijg.git",
+            "Tag": "jpeg-10"
+        },
+        {
+            "Name": "cgltf",
+            "Type": "git",
+            "Git": "https://github.com/jkuhlmann/cgltf.git",
+            "Tag": "v1.15"
+        },
+        {
+            "Name": "Vulkan-Headers",
+            "Type": "git",
+            "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+            "Tag": "vulkan-sdk-1.4.357.0"
+        },
+        {
+            "Name": "volk",
+            "Type": "git",
+            "Git": "https://github.com/zeux/volk.git",
+            "Tag": "vulkan-sdk-1.4.357.0"
+        },
+        {
+            "Name": "VulkanMemoryAllocator",
+            "Type": "git",
+            "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git",
+            "Tag": "v3.4.0"
+        },
+        {
+            "Name": "DirectX-Headers",
+            "Type": "git",
+            "Git": "https://github.com/microsoft/DirectX-Headers.git",
+            "Tag": "v1.619.5"
+        },
+        {
+            "Name": "D3D12MemoryAllocator",
+            "Type": "git",
+            "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
+            "Tag": "v3.2.0"
+        },
+        {
+            "Name": "freetype",
+            "Type": "git",
+            "Git": "https://github.com/freetype/freetype.git",
+            "Tag": "VER-2-15-0"
+        },
+        {
+            "Name": "imgui",
+            "Type": "git",
+            "Git": "https://github.com/ocornut/imgui.git",
+            "Tag": "v1.93.0-docking"
+        },
+        {
+            "Name": "googletest",
+            "Type": "git",
+            "Git": "https://github.com/google/googletest.git",
+            "Tag": "v1.18.0"
+        },
+        {
+            "Name": "googlebenchmark",
+            "Type": "git",
+            "Git": "https://github.com/google/benchmark.git",
+            "Tag": "v1.10.0"
+        },
+        {
+            "Name": "tracy",
+            "Type": "git",
+            "Git": "https://github.com/wolfpld/tracy.git",
+            "Tag": "v0.14.1"
+        }
+    ]
+}
