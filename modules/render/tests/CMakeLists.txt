@@ -1,5 +1,7 @@
 set(radray_render_test_sources
     test_pipeline_layout_cache.cpp
+    test_swapchain_retirement_vulkan.cpp
+    test_swapchain_wsi_vulkan.cpp
     test_radray_render_shader_artifact.cpp
     test_radray_shader_contract.cpp
     test_radray_render_shader_layout.cpp

@@ -615,19 +615,43 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 `Fence` 在 D3D12 是 `ID3D12Fence` + Win32 event（`_fenceValue` 表示"下一个可用值"）；
 在 Vulkan 是 timeline semaphore；设备创建时显式检查 `timelineSemaphore`，不支持则创建失败。
 
-`SwapChainVulkan` 的两个信号量按 Khronos 推荐拆分，**索引维度刻意不同**：
+`SwapChainVulkan` 使用无扩展的 acquire fence 回收方案，借鉴 Khronos
+[swapchain_recreation（b69afa54965d）](https://github.com/KhronosGroup/Vulkan-Samples/tree/b69afa54965dbfb18f04a4a0baccf98b88c6de37/samples/api/swapchain_recreation)。
+不启用 `VK_EXT/KHR_swapchain_maintenance1`，也不把调用方的 timeline fence 当作呈现完成证明。
 
-- **acquire 信号量按队列消费进度回收。** 传给 `vkAcquireNextImageKHR`，被一次 submit wait
-  消费。复用前必须证明那次 submit 已完成，故 `SwapChainSyncObjectVulkan` 记下 submit 的
-  timeline fence/value，回收池里按此等待或跳过——这是
-  VUID-vkAcquireNextImageKHR-semaphore-01779 的要求。
-- **present 信号量按 swapchain image 索引。** 核心 Vulkan 的 `vkQueuePresentKHR` 不给 fence，
-  submit fence 不能证明呈现已停止使用该信号量。重新 acquire 到同一 image 才是证明，
-  所以它存在 `Frame::readyToPresent` 上。
+- **acquire 信号量由后续同 image 的 acquire fence 证明可回收。** 每次成功 acquire 同时提交
+  binary semaphore 与原生 `VkFence`；返回 image index 本身不代表 fence 已完成。后续同 image
+  的 fence signal 后，才回收上一轮已被提交消费的 acquire semaphore。首次 acquire 的 fence
+  同样保活至完成。回收池只存已完成的对象，池空时分配，不在正常帧路径无限等待。
+  `Submit` 的 `SignalFences` 可以为空；调用方仍必须通过 `WaitToExecute` 等待 acquire，并让
+  `ReadyToPresent` 的 signal 依赖该等待及 backbuffer 工作。
+- **present 信号量按 swapchain image 索引。** 它存在 `Frame::readyToPresent` 上；再次 acquire
+  同一 image 后，后续提交等待 acquire semaphore，再 signal 此 present semaphore。
+- **旧链按代次退休。** 成功重建保留旧原生 swapchain 及其 frame/sync 资源。一旦后继代某次
+  成功 present 经同 image 的后续 acquire fence 证明完成，即可回收更早的退休代；每个旧代
+  还必须没有自身未完成的 acquire fence。不固定等待新链第一次呈现的 image，全部完成记录
+  都参与回收判定。未呈现的代不需要后继呈现证明，但仍等待其 acquire 操作完成。
 
-重建一旦尝试替换旧链，无论 native 创建还是 image 初始化失败，都清理旧链并保持
-无可 acquire 的状态；保留 surface 与请求的 buffer 数量，下一次从空链重试。绝不恢复或再次传入
-已退休的 `oldSwapchain`。surface 的 `maxImageCount == 0` 表示没有上限，只应用最小值限制。
+`Recreate` 前调用方必须终结 outstanding frame、等待所有使用旧 backbuffer 的 GPU 工作，
+并释放旧 view 与 command 引用。成功重建不执行 `WaitIdle`；旧 image/sync 的校验包装随重建
+失效，内部保活不延长调用方句柄有效期。连续重建可能积压多代资源，恢复呈现后回收，不以
+数量上限强制释放尚未获证明的对象。
+
+重建一旦尝试替换旧链，无论 native 创建还是 image 初始化失败，都通过故障清理排空设备、
+等待成功提交的 acquire fence，销毁新链和所有保留代，保持无可 acquire 的状态；保留 surface
+与请求配置，下一次从空链重试。绝不恢复或再次传入已退休的 `oldSwapchain`。
+surface 的 `maxImageCount == 0` 表示没有上限，只应用最小值限制。
+
+Acquire 的 `TIMEOUT` / `NOT_READY` / `OUT_OF_DATE` 不产生 frame 或完成证明；`SUBOPTIMAL`
+仍产生必须终结的 frame。Present 的 `SUCCESS` / `SUBOPTIMAL` 可提供后继呈现证明；
+`OUT_OF_DATE` / `SURFACE_LOST` 的排队等待仍保活，不能作为这种证明。Present OOM 不假定
+semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重建或关闭。
+`SURFACE_LOST` 要求重建交换链对象，`DEVICE_LOST` 要求设备恢复，不再等待无法完成的 fence。
+
+关闭与重建失败采用 `vkDeviceWaitIdle` 加已有 acquire fence 等待后清理，surface 最后销毁，
+重复 `Destroy` 安全。这是无扩展的实际清理方案；仍存在 Vulkan Guide 说明的
+[退出时呈现资源回收保证缺口](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html#_vk_ext_swapchain_maintenance1_extension)，
+不能把验证层无报错或普通队列 fence 完成当作补足该保证的证据。
 
 `QueueVulkan::Submit` 始终提交单个 `VkSubmitInfo`，不再为同步验证插入前置空批次。
 多交换链与同队列 timeline 串联的旧校验层问题、当时用例和校验层版本门槛见

@@ -811,20 +811,37 @@ public:
 
     void Destroy() noexcept override;
 
-    bool IsPendingQueueUseComplete() const noexcept;
-
-    void ClearPendingQueueUse() noexcept;
-
-    void WaitPendingQueueUse() noexcept;
-
 public:
     unique_ptr<LegacySemaphoreVulkan> _semaphore{nullptr};
-    FenceVulkan* _pendingQueueFence{nullptr};
-    uint64_t _pendingQueueValue{0};
 };
 
-/// Acquire 信号量按消费它的队列 fence 回收；present 信号量按 swapchain image 索引。
-/// 重新 acquire 到同一 image 后，才能在后续提交中复用它的 present 信号量。
+// Tracks one surface's serially replaced swapchains on one present queue.
+class SwapChainRetirementVulkan {
+public:
+    uint64_t BeginGeneration();
+    void Acquire(uint64_t generation) noexcept;
+    void CompleteAcquire(uint64_t generation, bool provesSuccessfulPresent) noexcept;
+    void QueuePresent(uint64_t generation) noexcept;
+    // The caller has completed all application GPU uses of this generation.
+    void Retire(uint64_t generation) noexcept;
+    vector<uint64_t> Collect();
+    void Clear() noexcept;
+
+private:
+    struct Generation {
+        uint64_t Id;
+        size_t PendingAcquires{0};
+        bool Presented{false};
+        bool Retired{false};
+    };
+    Generation& Find(uint64_t generation) noexcept;
+    vector<Generation> _generations;
+    uint64_t _nextGeneration{0};
+    uint64_t _completedPresentGeneration{0};
+};
+
+/// 同 image 的后续 acquire fence 完成后回收上一轮 acquire 信号量。
+/// Present 信号量按 image 保存；退休代必须等后继代的呈现完成证明。
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(
@@ -856,12 +873,30 @@ public:
     void DestroyImpl() noexcept;
     Nullable<unique_ptr<SwapChainSyncObjectVulkan>> AcquireSyncObjectFromPool() noexcept;
     void RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> syncObject) noexcept;
+    Nullable<unique_ptr<LegacyFenceVulkan>> AcquireFenceFromPool() noexcept;
+    void CollectRetired() noexcept;
+    void DrainAndClear() noexcept;
+    void RecordFailure(VkResult result) noexcept;
 
     class Frame {
     public:
         unique_ptr<ImageVulkan> image;
         unique_ptr<SwapChainSyncObjectVulkan> acquireSyncObject;
         unique_ptr<SwapChainSyncObjectVulkan> readyToPresent;
+        bool successfulPresent{false};
+    };
+
+    struct PendingAcquire {
+        uint64_t Generation;
+        unique_ptr<LegacyFenceVulkan> Fence;
+        unique_ptr<SwapChainSyncObjectVulkan> PreviousAcquire;
+        bool ProvesSuccessfulPresent;
+    };
+
+    struct RetiredGeneration {
+        uint64_t Generation;
+        VkSwapchainKHR Swapchain;
+        vector<Frame> Frames;
     };
 
     class OutstandingAcquire {
@@ -890,6 +925,13 @@ public:
     const void* _nativeHandler;
     vector<Frame> _frames;
     vector<unique_ptr<SwapChainSyncObjectVulkan>> _recycledSyncObjects;
+    vector<unique_ptr<LegacyFenceVulkan>> _recycledAcquireFences;
+    vector<PendingAcquire> _pendingAcquires;
+    vector<RetiredGeneration> _retiredGenerations;
+    unique_ptr<SwapChainRetirementVulkan> _retirement;
+    uint64_t _generation{0};
+    VkResult _terminalResult{VK_SUCCESS};
+    bool _requiresRecreate{false};
     OutstandingAcquire _outstandingAcquire{};
     uint64_t _outstandingFrameToken{0};
     uint32_t _width{0};

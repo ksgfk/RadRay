@@ -263,6 +263,7 @@ POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启
 |---|---|
 | `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler` |
 | `test_radray_render` | `RadRayRenderShaderArtifact`、`RadRayShaderContract`、`RadRayRenderShaderLayout`、`PipelineLayoutCacheTest`、`D3D12DeviceFixture`、`VulkanDeviceFixture` |
+| `test_radray_render`（Vulkan） | `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`；Win32 另含 `VulkanSwapChainWsiTest` |
 | `test_radray_window`（Win32） | 用 `ctest -N` 查看当前注册用例 |
 | `test_radray_shader` | `RadRayShaderDiagnostics`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayShaderLibPass` |
@@ -272,14 +273,27 @@ cmake --build --preset win-x64-debug --parallel 8
 ctest --preset win-x64-debug
 ```
 
-render 测试仅覆盖 shader artifact、契约、布局、binding、descriptor 与布局缓存；后端布局用例保留
-用于验证 offset、root constants 与 push constants 的 dispatch/读回，不覆盖通用 RHI 或完整 PSO smoke。
+render 测试覆盖 shader artifact、契约、布局、binding、descriptor、布局缓存及 Vulkan 交换链回收；
+后端布局用例保留用于验证 offset、root constants 与 push constants 的 dispatch/读回，
+不覆盖完整通用 RHI 或完整 PSO smoke。
 测试直接读取预生成 artifact，不依赖 shader compiler 或 DXC runtime。compiler 开启时额外构建
 `radray_shader_fixture_generator`，用于显式更新 fixture；普通构建与测试不运行生成器。
 GPU 用例区分后端未编译、无 adapter、缺验证层与初始化失败；可选后端不可用可跳过，
 原生资源、PSO、提交或读回错误必须失败。通过 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`
 将后端设为必测，`RADRAY_TEST_GPU_VALIDATION=1` 开启 GPU 验证。缺失与跳过必须单列，不能计为通过。
 部分 core 测试需要被忽略的 `assets/`，通过源码仓库外渠道准备。
+
+Vulkan 交换链的退休状态机与原生函数表故障测试不要求 GPU；Win32 WSI 用例使用真实设备与
+短暂的无激活测试窗口，覆盖连续呈现、resize、可用 present mode、双交换链、创建/部分初始化
+失败后重试，以及 RHI 校验包装。WSI 测试启用 Vulkan validation 和 synchronization validation，
+不启用 maintenance1。关闭时无验证错误不代表无扩展的呈现完成保证已补足，契约见
+[RHI 同步](../architecture/render-rhi.md#同步)。其他平台不注册 Win32 WSI 用例。
+
+```powershell
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'vulkan'
+cmake --build --preset win-x64-debug-clangcl --target test_radray_render --parallel 8
+ctest --preset win-x64-debug-clangcl -R VulkanSwapChain --output-on-failure --timeout 45
+```
 
 `tools/run_render_validation.py --help` 提供已构建配置的串行 CTest 与后端证据收集；它不负责构建。
 D3D12 descriptor 正确性由 `D3D12DeviceFixture` 与 `DescriptorDirtyRangesD3D12Test` 覆盖。

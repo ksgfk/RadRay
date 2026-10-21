@@ -1395,10 +1395,6 @@ public:
             }
             presentSync.push_back(native.Get());
         }
-        if (!waitSync.empty() && signals.empty() && Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
-            Context->Reject("Submit", "Vulkan acquire waits require a completion fence for semaphore recycling");
-            return;
-        }
         auto converted = desc;
         converted.CmdBuffers = commands;
         converted.WaitFences = waits;
