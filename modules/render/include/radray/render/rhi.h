@@ -1518,6 +1518,8 @@ public:
     // Validation failure or an unsupported backend aborts; the frame cannot be retried.
     virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept = 0;
 
+    /// Caller must finish the acquired frame, complete all GPU uses of old backbuffers,
+    /// and release their views/command references. A backend may invalidate old handles even on failure.
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;

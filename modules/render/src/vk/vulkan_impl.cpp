@@ -94,11 +94,14 @@ static VkSwapchainKHR _CreateVkSwapChain(
     SwapChainDescriptor& desc,
     VkSwapchainKHR oldSwapchain,
     VkExtent2D& swapchainSize,
-    VkFormat& rawFormat) noexcept {
+    VkFormat& rawFormat,
+    VkResult& result) noexcept {
+    result = VK_ERROR_INITIALIZATION_FAILED;
     VkSurfaceCapabilitiesKHR surfaceProperties;
     if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->_physicalDevice, surface->_surface, &surfaceProperties);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     const auto newValue = ResolveSwapChainImageCount(desc.BackBufferCount, surfaceProperties);
@@ -138,6 +141,7 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = EnumerateVectorFromVkFunc(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, device->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     auto needFormatIter = std::ranges::find_if(supportedFormats, [rawFormat](VkSurfaceFormatKHR i) { return i.format == rawFormat; });
@@ -150,6 +154,7 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = EnumerateVectorFromVkFunc(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, device->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -195,8 +200,10 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = device->_ftb.vkCreateSwapchainKHR(device->_device, &swapchianCreateInfo, device->GetAllocationCallbacks(), &swapchain);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
+    result = VK_SUCCESS;
     return swapchain;
 }
 
@@ -212,6 +219,8 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = frames.emplace_back();
         f.image = make_unique<ImageVulkan>(swapChain->_device, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        f.image->_hints = ResourceHint::External;
+        f.image->_isSwapchainImage = true;
         auto readyToPresentOpt = swapChain->AcquireSyncObjectFromPool();
         if (!readyToPresentOpt.HasValue()) {
             RADRAY_ERR_LOG("vk swapchain creation failed: cannot allocate present semaphore");
@@ -232,8 +241,6 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
         f.image->_format = format;
         f.image->_memory = MemoryType::Device;
         f.image->_usage = TextureUse::RenderTarget | TextureUse::Resource | TextureUse::CopySource;
-        f.image->_hints = ResourceHint::External;
-        f.image->_isSwapchainImage = true;
     }
     swapChain->_frames = std::move(frames);
     return true;
@@ -1370,7 +1377,8 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     auto presentQueue = CastVkObject(desc.PresentQueue);
     VkExtent2D swapchainSize{};
     VkFormat rawFormat = VK_FORMAT_UNDEFINED;
-    VkSwapchainKHR swapchain = _CreateVkSwapChain(this, surface.get(), desc, VK_NULL_HANDLE, swapchainSize, rawFormat);
+    VkResult createResult;
+    VkSwapchainKHR swapchain = _CreateVkSwapChain(this, surface.get(), desc, VK_NULL_HANDLE, swapchainSize, rawFormat, createResult);
     if (swapchain == VK_NULL_HANDLE) {
         return nullptr;
     }
@@ -3145,8 +3153,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<uint64_t> signalValues;
     vector<VkPipelineStageFlags> waitStages;
     bool useTimelineSubmit = false;
-    FenceVulkan* submitCompletionFence = nullptr;
-    uint64_t submitCompletionValue = 0;
 
     for (auto* syncObj : desc.WaitToExecute) {
         auto* waitSync = CastVkObject(syncObj);
@@ -3178,8 +3184,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         useTimelineSubmit = true;
         signalSemaphores.emplace_back(fenceObj->_fence->_semaphore);
         signalValues.emplace_back(signalValue);
-        submitCompletionFence = fenceObj;
-        submitCompletionValue = signalValue;
         if (signalValue + 1 > fenceObj->_fenceValue) {
             fenceObj->_fenceValue = signalValue + 1;
         }
@@ -3211,13 +3215,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
 
-    if (submitCompletionFence != nullptr) {
-        for (auto* syncObj : desc.WaitToExecute) {
-            auto* waitSync = CastVkObject(syncObj);
-            waitSync->_pendingQueueFence = submitCompletionFence;
-            waitSync->_pendingQueueValue = submitCompletionValue;
-        }
-    }
 }
 
 void QueueVulkan::Wait() noexcept {
@@ -4243,28 +4240,66 @@ bool SwapChainSyncObjectVulkan::IsValid() const noexcept {
 }
 
 void SwapChainSyncObjectVulkan::Destroy() noexcept {
-    this->ClearPendingQueueUse();
     _semaphore.reset();
 }
 
-bool SwapChainSyncObjectVulkan::IsPendingQueueUseComplete() const noexcept {
-    return _pendingQueueFence == nullptr ||
-           _pendingQueueFence->GetCompletedValue() >= _pendingQueueValue;
+// == SwapChain 与 QueryPool ==
+
+uint64_t SwapChainRetirementVulkan::BeginGeneration() {
+    RADRAY_ASSERT(_nextGeneration != UINT64_MAX);
+    const auto id = ++_nextGeneration;
+    _generations.push_back({id});
+    return id;
 }
 
-void SwapChainSyncObjectVulkan::ClearPendingQueueUse() noexcept {
-    _pendingQueueFence = nullptr;
-    _pendingQueueValue = 0;
+SwapChainRetirementVulkan::Generation& SwapChainRetirementVulkan::Find(uint64_t generation) noexcept {
+    const auto it = std::ranges::find(_generations, generation, &Generation::Id);
+    RADRAY_ASSERT(it != _generations.end());
+    return *it;
 }
 
-void SwapChainSyncObjectVulkan::WaitPendingQueueUse() noexcept {
-    if (_pendingQueueFence != nullptr) {
-        _pendingQueueFence->Wait(_pendingQueueValue);
-        this->ClearPendingQueueUse();
+void SwapChainRetirementVulkan::Acquire(uint64_t generation) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(!state.Retired);
+    ++state.PendingAcquires;
+}
+
+void SwapChainRetirementVulkan::CompleteAcquire(uint64_t generation, bool provesSuccessfulPresent) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(state.PendingAcquires != 0);
+    --state.PendingAcquires;
+    if (provesSuccessfulPresent) {
+        _completedPresentGeneration = std::max(_completedPresentGeneration, generation);
     }
 }
 
-// == SwapChain 与 QueryPool ==
+void SwapChainRetirementVulkan::QueuePresent(uint64_t generation) noexcept {
+    Find(generation).Presented = true;
+}
+
+void SwapChainRetirementVulkan::Retire(uint64_t generation) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(!state.Retired);
+    state.Retired = true;
+}
+
+vector<uint64_t> SwapChainRetirementVulkan::Collect() {
+    vector<uint64_t> ready;
+    std::erase_if(_generations, [&](const Generation& state) {
+        if (!state.Retired || state.PendingAcquires != 0 ||
+            (state.Presented && state.Id >= _completedPresentGeneration)) {
+            return false;
+        }
+        ready.push_back(state.Id);
+        return true;
+    });
+    return ready;
+}
+
+void SwapChainRetirementVulkan::Clear() noexcept {
+    _generations.clear();
+    _completedPresentGeneration = 0;
+}
 
 SwapChainVulkan::SwapChainVulkan(
     DeviceVulkan* device,
@@ -4277,18 +4312,21 @@ SwapChainVulkan::SwapChainVulkan(
       _surface(std::move(surface)),
       _swapchain(swapchain),
       _nativeHandler(desc.NativeHandler),
+      _retirement(make_unique<SwapChainRetirementVulkan>()),
       _width(desc.Width),
       _height(desc.Height),
       _backBufferCount(desc.BackBufferCount),
       _reqFormat(desc.Format),
-      _mode(desc.PresentMode) {}
+      _mode(desc.PresentMode) {
+    if (_swapchain != VK_NULL_HANDLE) _generation = _retirement->BeginGeneration();
+}
 
 SwapChainVulkan::~SwapChainVulkan() noexcept {
     this->DestroyImpl();
 }
 
 bool SwapChainVulkan::IsValid() const noexcept {
-    return _surface != nullptr && _swapchain != VK_NULL_HANDLE;
+    return _surface != nullptr && _swapchain != VK_NULL_HANDLE && _terminalResult == VK_SUCCESS;
 }
 
 void SwapChainVulkan::Destroy() noexcept {
@@ -4296,18 +4334,9 @@ void SwapChainVulkan::Destroy() noexcept {
 }
 
 Nullable<unique_ptr<SwapChainSyncObjectVulkan>> SwapChainVulkan::AcquireSyncObjectFromPool() noexcept {
-    for (auto it = _recycledSyncObjects.begin(); it != _recycledSyncObjects.end(); ++it) {
-        if ((*it)->IsPendingQueueUseComplete()) {
-            auto result = std::move(*it);
-            result->ClearPendingQueueUse();
-            _recycledSyncObjects.erase(it);
-            return result;
-        }
-    }
     if (!_recycledSyncObjects.empty()) {
-        auto result = std::move(_recycledSyncObjects.front());
-        _recycledSyncObjects.erase(_recycledSyncObjects.begin());
-        result->WaitPendingQueueUse();
+        auto result = std::move(_recycledSyncObjects.back());
+        _recycledSyncObjects.pop_back();
         return result;
     }
     auto semaphoreOpt = _device->CreateLegacySemaphore(0);
@@ -4321,20 +4350,104 @@ void SwapChainVulkan::RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> sy
     _recycledSyncObjects.emplace_back(std::move(syncObject));
 }
 
-void SwapChainVulkan::DestroyImpl() noexcept {
+Nullable<unique_ptr<LegacyFenceVulkan>> SwapChainVulkan::AcquireFenceFromPool() noexcept {
+    if (!_recycledAcquireFences.empty()) {
+        auto fence = std::move(_recycledAcquireFences.back());
+        _recycledAcquireFences.pop_back();
+        return fence;
+    }
+    return _device->CreateLegacyFence(0);
+}
+
+void SwapChainVulkan::RecordFailure(VkResult result) noexcept {
+    if (result == VK_ERROR_DEVICE_LOST ||
+        (result == VK_ERROR_SURFACE_LOST_KHR && _terminalResult != VK_ERROR_DEVICE_LOST)) {
+        _terminalResult = result;
+    }
+    if (result != VK_SUCCESS) _requiresRecreate = true;
+}
+
+void SwapChainVulkan::CollectRetired() noexcept {
+    if (_terminalResult == VK_ERROR_DEVICE_LOST) return;
+    for (auto it = _pendingAcquires.begin(); it != _pendingAcquires.end();) {
+        const VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, it->Fence->_fence);
+        if (status == VK_NOT_READY) {
+            ++it;
+            continue;
+        }
+        if (status != VK_SUCCESS) {
+            this->RecordFailure(status);
+            if (status != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
+            return;
+        }
+        _retirement->CompleteAcquire(it->Generation, it->ProvesSuccessfulPresent);
+        if (it->PreviousAcquire) this->RecycleSyncObject(std::move(it->PreviousAcquire));
+        const VkResult reset = _device->_ftb.vkResetFences(_device->_device, 1, &it->Fence->_fence);
+        if (reset != VK_SUCCESS) {
+            this->RecordFailure(reset);
+            if (reset != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkResetFences failed: {}", reset);
+            return;
+        }
+        _recycledAcquireFences.push_back(std::move(it->Fence));
+        it = _pendingAcquires.erase(it);
+    }
+    for (const uint64_t generation : _retirement->Collect()) {
+        const auto it = std::ranges::find(_retiredGenerations, generation, &RetiredGeneration::Generation);
+        RADRAY_ASSERT(it != _retiredGenerations.end());
+        it->Frames.clear();
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, it->Swapchain, _device->GetAllocationCallbacks());
+        _retiredGenerations.erase(it);
+    }
+}
+
+void SwapChainVulkan::DrainAndClear() noexcept {
+    const bool hasResources = _swapchain != VK_NULL_HANDLE || !_retiredGenerations.empty() || !_pendingAcquires.empty();
+    if (hasResources && _terminalResult != VK_ERROR_DEVICE_LOST) {
+        const VkResult idle = _device->_ftb.vkDeviceWaitIdle(_device->_device);
+        this->RecordFailure(idle);
+        if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkDeviceWaitIdle failed: {}", idle);
+        if (_terminalResult != VK_ERROR_DEVICE_LOST) {
+            for (const auto& acquire : _pendingAcquires) {
+                const VkResult wait = _device->_ftb.vkWaitForFences(_device->_device, 1, &acquire.Fence->_fence, VK_TRUE, UINT64_MAX);
+                this->RecordFailure(wait);
+                if (wait == VK_ERROR_DEVICE_LOST) break;
+                if (wait != VK_SUCCESS) RADRAY_ABORT("vkWaitForFences failed: {}", wait);
+            }
+        }
+    }
     _outstandingAcquire.Reset();
+    _pendingAcquires.clear();
+    _recycledAcquireFences.clear();
     _recycledSyncObjects.clear();
     _frames.clear();
+    for (auto& retired : _retiredGenerations) {
+        retired.Frames.clear();
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, retired.Swapchain, _device->GetAllocationCallbacks());
+    }
+    _retiredGenerations.clear();
     if (_swapchain != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
         _swapchain = VK_NULL_HANDLE;
     }
+    _retirement->Clear();
+    _generation = 0;
+    _requiresRecreate = true;
+}
+
+void SwapChainVulkan::DestroyImpl() noexcept {
+    this->DrainAndClear();
     _surface.reset();
 }
 
 SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
-    if (_swapchain == VK_NULL_HANDLE) {
+    this->CollectRetired();
+    if (_terminalResult != VK_SUCCESS) {
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = _terminalResult;
+        return result;
+    }
+    if (_swapchain == VK_NULL_HANDLE || _requiresRecreate) {
         result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = VK_ERROR_OUT_OF_DATE_KHR;
         return result;
@@ -4348,6 +4461,13 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
     }
 
     auto waitToDraw = waitToDrawOpt.Release();
+    auto acquireFenceOpt = this->AcquireFenceFromPool();
+    if (!acquireFenceOpt.HasValue()) {
+        this->RecycleSyncObject(std::move(waitToDraw));
+        result.Status = SwapChainStatus::Error;
+        return result;
+    }
+    auto acquireFence = acquireFenceOpt.Release();
 
     uint64_t nanoTimeout;
     if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
@@ -4363,13 +4483,13 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         _swapchain,
         nanoTimeout,
         waitToDraw->_semaphore->_semaphore,
-        VK_NULL_HANDLE,
+        acquireFence->_fence,
         &imageIndex);
     if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
         Frame& imageFrame = _frames[imageIndex];
-        if (imageFrame.acquireSyncObject != nullptr) {
-            this->RecycleSyncObject(std::move(imageFrame.acquireSyncObject));
-        }
+        _retirement->Acquire(_generation);
+        _pendingAcquires.push_back({_generation, std::move(acquireFence), std::move(imageFrame.acquireSyncObject), imageFrame.successfulPresent});
+        imageFrame.successfulPresent = false;
         imageFrame.acquireSyncObject = std::move(waitToDraw);
         _outstandingAcquire.imageIndex = imageIndex;
         _outstandingAcquire.waitToDraw = imageFrame.acquireSyncObject.get();
@@ -4387,21 +4507,22 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         result.Frame = std::move(frame);
         return result;
     }
+    // Failed acquisitions did not submit a signal operation.
+    _recycledAcquireFences.push_back(std::move(acquireFence));
+    this->RecycleSyncObject(std::move(waitToDraw));
     if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
-        this->RecycleSyncObject(std::move(waitToDraw));
         result.Status = SwapChainStatus::RetryLater;
         result.NativeStatusCode = vr;
         return result;
     }
+    this->RecordFailure(vr);
     if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
-        this->RecycleSyncObject(std::move(waitToDraw));
         result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return result;
     }
 
-    this->RecycleSyncObject(std::move(waitToDraw));
     result.NativeStatusCode = vr;
     result.Status = SwapChainStatus::Error;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
@@ -4410,6 +4531,7 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
 
 SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     SwapChainPresentResult result{};
+    this->CollectRetired();
 
     auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent));
     const VkSemaphore waitSem = readyToPresentSync->_semaphore->_semaphore;
@@ -4423,7 +4545,15 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &_outstandingAcquire.imageIndex;
     presentInfo.pResults = nullptr;
-    auto presentResult = _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    const auto presentResult = _terminalResult == VK_SUCCESS
+                                   ? _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo)
+                                   : _terminalResult;
+    _frames[_outstandingAcquire.imageIndex].successfulPresent = presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR;
+    // OOM does not enqueue the wait. Other non-device-lost failures may have done so.
+    if (presentResult != VK_ERROR_OUT_OF_HOST_MEMORY && presentResult != VK_ERROR_OUT_OF_DEVICE_MEMORY && presentResult != VK_ERROR_DEVICE_LOST) {
+        _retirement->QueuePresent(_generation);
+    }
+    this->RecordFailure(presentResult);
     _outstandingAcquire.Reset();
     InvalidateFrame(frame);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
@@ -4436,6 +4566,7 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
         result.Status = SwapChainStatus::Success;
     }
     result.NativeStatusCode = presentResult;
+    this->CollectRetired();
     return result;
 }
 
@@ -4446,38 +4577,51 @@ SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame fram
 }
 
 bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
+    this->CollectRetired();
+    if (!_surface || _terminalResult != VK_SUCCESS) return false;
     SwapChainDescriptor desc = this->GetDesc();
     desc.BackBufferCount = _backBufferCount;
     desc.Width = width;
     desc.Height = height;
     desc.Format = format;
     desc.PresentMode = presentMode;
+    _width = width;
+    _height = height;
+    _reqFormat = format;
+    _mode = presentMode;
 
     VkExtent2D swapchainSize{};
     VkFormat rawFormat = VK_FORMAT_UNDEFINED;
     VkSwapchainKHR oldSwapchain = _swapchain;
-    VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat);
+    VkResult createResult;
+    VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat, createResult);
     // Passing oldSwapchain retires it even when native creation fails.
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        _retirement->Retire(_generation);
+        _retiredGenerations.push_back({_generation, oldSwapchain, std::move(_frames)});
+    }
     _frames.clear();
     _swapchain = newSwapchain;
-    if (oldSwapchain != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroySwapchainKHR(_device->_device, oldSwapchain, _device->GetAllocationCallbacks());
-    }
+    _generation = 0;
     if (newSwapchain == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed during swapchain recreate");
+        this->RecordFailure(createResult);
+        this->DrainAndClear();
         return false;
     }
 
     if (!_RefreshSwapChainImages(this, swapchainSize, rawFormat, desc.Format)) {
-        _swapchain = VK_NULL_HANDLE;
-        _device->_ftb.vkDestroySwapchainKHR(_device->_device, newSwapchain, _device->GetAllocationCallbacks());
+        this->DrainAndClear();
         return false;
     }
 
+    _generation = _retirement->BeginGeneration();
+    _requiresRecreate = false;
     _width = desc.Width;
     _height = desc.Height;
     _reqFormat = desc.Format;
     _mode = desc.PresentMode;
+    this->CollectRetired();
     return true;
 }
 
