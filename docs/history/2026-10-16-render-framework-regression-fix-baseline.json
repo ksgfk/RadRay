@@ -5,7 +5,7 @@
     "benchmarks/bench_material_scene/bench_material_scene.cpp",
     "benchmarks/bench_material_scene/material_scene_workload.cpp",
     "benchmarks/bench_material_scene/material_scene_workload.h",
-    "docs/guide/performance.md",
+    "docs\/guide\/performance.md",
     "modules/runtime/src/render_framework/renderer.cpp",
     "docs/history/2026-10-16-render-framework-regression-fix-baseline.csv",
     "docs/history/2026-10-16-render-framework-regression-fix-baseline.json",

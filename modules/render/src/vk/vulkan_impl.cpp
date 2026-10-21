@@ -1714,7 +1714,7 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
         RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
-    return make_unique<SamplerVulkan>(this, sampler, state);
+    return make_unique<SamplerVulkan>(this, sampler);
 }
 
 Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
@@ -4812,38 +4812,6 @@ BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noe
         reinterpret_cast<uintptr_t>(this));
 }
 
-std::optional<ParameterGroupCompatibility> PipelineLayoutVulkan::GetParameterGroupCompatibility(uint32_t group) const noexcept {
-    if (group >= _parameterSetLayouts.size()) return std::nullopt;
-    // Native set-layout interning includes descriptor types, stages and immutable sampler states.
-    vector<uint64_t> identity{uint64_t(RenderBackend::Vulkan), reinterpret_cast<uintptr_t>(_device),
-        reinterpret_cast<uintptr_t>(GetSetLayouts()[group].Get())};
-    vector<vector<uint64_t>> entries;
-    uint32_t resources = 0, samplers = 0, values = 0;
-    for (const auto& entry : _parameterSetLayouts[group]) {
-        (entry.DescriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ? samplers : resources) += entry.Count;
-        if (!entry.HasImmutableSampler()) values += entry.Count;
-        entries.push_back({entry.Binding, uint64_t(entry.LogicalKind), uint64_t(entry.Placement), entry.Count});
-    }
-    std::sort(entries.begin(), entries.end());
-    for (const auto& entry : entries) identity.insert(identity.end(), entry.begin(), entry.end());
-    return MakeParameterGroupCompatibility(std::move(identity), values, resources, samplers);
-}
-std::optional<uint32_t> PipelineLayoutVulkan::GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept {
-    const auto record = FindBackendBindingRecord(_bindingNames, reinterpret_cast<uintptr_t>(this), binding);
-    if (!record || group >= _parameterSetLayouts.size() || record->Kind != BackendBindingRecordKind::Descriptor || record->Location.Group != group) return std::nullopt;
-    uint32_t offset = 0;
-    bool found = false;
-    for (const auto& entry : _parameterSetLayouts[group]) {
-        if (entry.HasImmutableSampler()) continue;
-        if (entry.Binding < record->Location.Binding) offset += entry.Count;
-        if (entry.Binding == record->Location.Binding) {
-            if (element >= entry.Count) return std::nullopt;
-            found = true;
-        }
-    }
-    return found ? std::optional{offset + element} : std::nullopt;
-}
-
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _nativeLayout.Reset();
     _parameterSetLayouts.clear();
@@ -4946,16 +4914,9 @@ void ShaderModuleVulkan::DestroyImpl() noexcept {
 
 SamplerVulkan::SamplerVulkan(
     DeviceVulkan* device,
-    VkSampler sampler, const VulkanImmutableSamplerState& state) noexcept
+    VkSampler sampler) noexcept
     : _device(device),
-      _sampler(sampler), _state(state) {}
-
-vector<uint64_t> SamplerVulkan::GetBindingIdentity() const noexcept {
-    const auto bits = [](float value) -> uint64_t { return value == 0 ? 0 : std::bit_cast<uint32_t>(value); };
-    return {uint64_t(RenderBackend::Vulkan), _state.MagFilter, _state.MinFilter, _state.MipmapMode, _state.AddressModeU, _state.AddressModeV,
-        _state.AddressModeW, bits(_state.MipLodBias), _state.AnisotropyEnable, bits(_state.MaxAnisotropy), _state.CompareEnable,
-        _state.CompareOp, bits(_state.MinLod), bits(_state.MaxLod), _state.BorderColor, _state.ReductionMode, _state.Flags};
-}
+      _sampler(sampler) {}
 
 SamplerVulkan::~SamplerVulkan() noexcept {
     this->DestroyImpl();

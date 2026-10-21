@@ -4,6 +4,7 @@
 AGENTS.md and README.md are entry documents; project skills are also checked.
 Only docs/architecture and docs/guide hold long-lived subsystem documentation.
 User-authorized development history belongs in docs/history, with dated filenames.
+History references describe their recorded baseline, not the current worktree.
 Code may carry at most one owning-document banner. Web links and Markdown
 section fragments are not validated. Run: python tools/check_docs.py
 """
@@ -53,9 +54,15 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
+def is_history(path: Path) -> bool:
+    return path.is_relative_to(DOCS_ROOT / "history")
+
+
 def check_doc_references(files: list[Path], errors: list[str]) -> int:
     count = 0
     for path in files:
+        if is_history(path):
+            continue
         for match in DOC_PATH_RE.finditer(read(path)):
             count += 1
             if not (REPO_ROOT / match.group(0)).is_file():
@@ -104,6 +111,8 @@ def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
         for key in HEADER_KEYS:
             if not re.search(rf"^>\s*-\s*{re.escape(key)}", head, re.MULTILINE):
                 errors.append(f"{rel}: header block is missing '{key}'")
+        if is_history(doc):
+            continue
         for anchors in ANCHOR_LINE_RE.findall(head):
             if anchors.strip() in NO_ANCHOR_TOKENS:
                 continue
@@ -133,7 +142,7 @@ def check_history_filenames(errors: list[str]) -> None:
 def check_internal_links(files: list[Path], errors: list[str]) -> int:
     count = 0
     for doc in files:
-        if doc.suffix.lower() != ".md":
+        if doc.suffix.lower() != ".md" or is_history(doc):
             continue
         for raw in MD_LINK_RE.findall(read(doc)):
             target = raw.strip()

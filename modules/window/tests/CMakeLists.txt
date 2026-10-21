@@ -1,6 +1,8 @@
 if (WIN32)
-    radray_add_test(test_radray_window
-        SOURCES test_event_pump.cpp
-        LINK_LIBS radraywindow
-        DISCOVER_ARGS PROPERTIES RUN_SERIAL TRUE TIMEOUT 15)
+    add_executable(test_radray_window test_event_pump.cpp)
+    target_link_libraries(test_radray_window PRIVATE radraywindow GTest::gtest_main)
+    radray_default_compile_flags(test_radray_window)
+    radray_optimize_flags_binary(test_radray_window)
+    radray_set_build_path(test_radray_window)
+    gtest_discover_tests(test_radray_window PROPERTIES RUN_SERIAL TRUE TIMEOUT 15)
 endif()

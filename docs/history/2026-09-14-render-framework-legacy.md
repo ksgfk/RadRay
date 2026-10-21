@@ -4,7 +4,7 @@
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
 > - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
-以下内容保存自基线的 `docs/architecture/render-framework.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
+以下内容保存自基线的 `docs/history/2026-10-21-runtime-render-framework-snapshot.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
@@ -236,7 +236,7 @@ Forward Lit 与 DepthOnly 的静态路径使用 `FrameDrawResources::PrepareInde
 
 `AsCBuffer<T>(bytes)` 是这条路径的类型视图：本质是 `reinterpret_cast`，Debug 下断言
 `bytes.size() == sizeof(T)` 只为防写穿，不做布局身份检查。生成器已经用 DXC type tree 把布局做对
-（见 [shader pipeline](../architecture/shader-pipeline.md)），运行时不再比 hash 或字段。空 bytes（DepthOnly 没有
+（见 [shader pipeline](2026-10-21-runtime-shader-pipeline-snapshot.md)），运行时不再比 hash 或字段。空 bytes（DepthOnly 没有
 材质 cbuffer）不要调 `As<T>`。`hlsl_math.h` 的 `float2/3/4`、`float4x4` 是生成头用的存储类型：
 只保证 size 与 HLSL 一致，没有 `alignas(16)`，除与对应 Eigen 类型隐式互转外没有任何方法，因此
 game 侧仍用 Eigen 计算再直接赋值。
@@ -288,7 +288,7 @@ AO、TAA 或 4x MSAA、Bloom 与多 view 输出。HDR 多相机时阴影图集�
 正常 runner 走 `Shutdown`；若初始化或游戏钩子的异常绕过正常路径，`Application` 析构仍调用同一
 幂等内部 teardown（不再调用游戏侧虚钩子），先断开窗口的非 owning 引用，再按下述服务顺序回收。
 
-**关停顺序是固定的**，理由见 [asset-system](../architecture/asset-system.md)：
+**关停顺序是固定的**，理由见 [asset-system](2026-10-21-runtime-asset-system-snapshot.md)：
 
 ```
 WaitAndCleanupCompletedFlights → OnShutdown → scheduler.CancelAll
@@ -323,7 +323,7 @@ DispatchEvents → BeginUpdateForFlight → Update
 
 **帧边界等待的恢复必须回到主线程**：flight 完成是渲染线程观察到的，
 在那里恢复就等于在渲染线程跑资产析构。引用计数与 manager 表只在 game thread 访问，
-因此渲染线程只标记完成，由主线程泵恢复；机制见[帧与 GPU](../architecture/frame-and-gpu.md)。
+因此渲染线程只标记完成，由主线程泵恢复；机制见[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)。
 
 Windows 下还有 `Win32ModalLoopVBlankRenderer`：模态循环（拖窗口、菜单）期间用 DXGI
 `WaitForVBlank` + 一个消息窗口驱动渲染线程补帧，避免界面冻住。

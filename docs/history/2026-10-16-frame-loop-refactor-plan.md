@@ -1,6 +1,9 @@
 > - 适用: 追溯 2026-10-16 帧循环、窗口事件和关停重构的输入设计
 > - 权威: 经用户确认的实施计划与重构前快照；不作为当前契约
-> - 锚点: `modules/runtime/src/application.cpp`, `modules/runtime/src/gpu_system.cpp`, `modules/window/src/win32/win32_window.cpp`
+> - 锚点: `modules/window/src/win32/win32_window.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/application.cpp`, `modules/runtime/src/gpu_system.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 帧循环重构计划与原设计快照
 
@@ -121,6 +124,6 @@ Debug/Release 相关回归和完整回归，保留已有 Vulkan validation layer
 旧测试记录不算本次验证，实际执行结果、偏差和限制在验收记录中填写。
 
 验收记录为同目录 `YYYY-MM-DD-frame-loop-refactor-validation.md`（使用实际记录日期）；
-必要附件使用所属记录日期和主题。实现后更新[帧与 GPU](../architecture/frame-and-gpu.md)、
-[Runtime 宿主](../architecture/render-framework.md)、测试指南与 overview 历史入口，
+必要附件使用所属记录日期和主题。实现后更新[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)、
+[Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md)、测试指南与 overview 历史入口，
 历史保留原语义；执行 `python tools/check_docs.py` 和 `git diff --check`。

@@ -1,6 +1,9 @@
 > - 适用: 2026-10-16 帧循环、事件派发和关停重构的实施验收
 > - 权威: 本次工作树的执行记录与覆盖边界；不作为当前契约
-> - 锚点: `modules/runtime/src/application_loop.h`, `modules/runtime/src/application_loop.cpp`, `modules/runtime/src/application.cpp`, `modules/runtime/src/gpu_system.cpp`, `modules/window/src/win32/win32_window.cpp`, `modules/runtime/tests/test_application_loop.cpp`, `modules/window/tests/test_event_pump.cpp`
+> - 锚点: `modules/window/src/win32/win32_window.cpp`, `modules/window/tests/test_event_pump.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/application_loop.h`, `modules/runtime/src/application_loop.cpp`, `modules/runtime/src/application.cpp`, `modules/runtime/src/gpu_system.cpp`, `modules/runtime/tests/test_application_loop.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 帧循环重构实施与验收
 
@@ -187,8 +190,8 @@ S0 函数体未变，调度和重叠已改变，这些不足 1 µs 的 Tracy zon
 
 ## 文档检查
 
-已同步[帧与 GPU](../architecture/frame-and-gpu.md)、[Runtime 宿主](../architecture/render-framework.md)、
-[构建与测试](../guide/build-test.md)及[性能测量](../guide/performance.md)。
+已同步[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)、[Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md)、
+[构建与测试](2026-10-21-runtime-build-test-snapshot.md)及[性能测量](2026-10-21-runtime-performance-snapshot.md)。
 `git diff --check` 通过。`python tools/check_docs.py` 检出 4 处本次未修改、被 Git 忽略的旧 artifacts 引用：
 
 - `artifacts/scene_sync_100k_20261006/verification.json` 和 `verify.py` 指向已移除的旧临时文档。

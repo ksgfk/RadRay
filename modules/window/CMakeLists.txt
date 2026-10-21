@@ -2,7 +2,11 @@ file(GLOB RADRAY_WINDOW_SRC CONFIGURE_DEPENDS "src/*.cpp")
 file(GLOB_RECURSE RADRAY_WINDOW_INC CONFIGURE_DEPENDS "include/*.h")
 
 add_library(radraywindow STATIC ${RADRAY_WINDOW_SRC} ${RADRAY_WINDOW_INC})
-target_include_directories(radraywindow PUBLIC include)
+add_library(RadRay::window ALIAS radraywindow)
+set_target_properties(radraywindow PROPERTIES EXPORT_NAME window)
+target_include_directories(radraywindow PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 if (WIN32)
     target_link_libraries(radraywindow PRIVATE imm32)
     file(GLOB_RECURSE RADRAY_WINDOW_WIN32_SRC CONFIGURE_DEPENDS "src/win32/*.cpp")
@@ -17,7 +21,7 @@ if (APPLE)
         "$<$<COMPILE_LANGUAGE:OBJC>:-fobjc-arc>"
         "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
     find_library(RADRAY_COCOA_FRAMEWORK Cocoa REQUIRED)
-    target_link_libraries(radraywindow PUBLIC ${RADRAY_COCOA_FRAMEWORK})
+    target_link_libraries(radraywindow PUBLIC "-framework Cocoa")
 endif()
 target_link_libraries(radraywindow PUBLIC
     radraycore)

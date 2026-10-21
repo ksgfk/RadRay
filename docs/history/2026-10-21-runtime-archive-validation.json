@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-21",
+  "status": "completed",
+  "archive_commit": "751aca4e6a70203e6a62f9de67893b33463b94fc",
+  "original_head": "ed23aef93b779082d3efab221bbe52d9f30051f0",
+  "tree": "5243d82568c806176dba9d9184146a41b887cb7d",
+  "toolchain": {
+    "os": "Windows x64",
+    "generator": "Ninja",
+    "cmake": "4.4.4",
+    "compiler": "MSVC 19.51.36260.0"
+  },
+  "debug": {
+    "on": {
+      "directory": "build_runtime_archive_debug",
+      "configure_exit_code": 0,
+      "build_exit_code": 0,
+      "ctest_exit_code": 0,
+      "registered": 314,
+      "passed": 313,
+      "failed": 0,
+      "skipped": [
+        {
+          "name": "Backends/NativeRenderScopeTest.VulkanNativeReusePinsBudgetAndLocalViewInvalidation/4-byte object <00-00 00-00>",
+          "reason": "Vulkan native cache: D3D12 parameter is not applicable"
+        }
+      ],
+      "junit_sha256": "b91d226cdf9401ba2f406f7209288ff8b748624d8bef726fca558d3d94156976"
+    },
+    "off": {
+      "directory": "build_runtime_archive_no_compiler",
+      "configure_exit_code": 0,
+      "build_exit_code": 0,
+      "ctest_exit_code": 0,
+      "registered": 270,
+      "passed": 269,
+      "failed": 0,
+      "skipped": [
+        {
+          "name": "Backends/NativeRenderScopeTest.VulkanNativeReusePinsBudgetAndLocalViewInvalidation/4-byte object <00-00 00-00>",
+          "reason": "Vulkan native cache: D3D12 parameter is not applicable"
+        }
+      ],
+      "junit_sha256": "cf316e57e643bc51a1f54e7730f0c0f19d74f48c14e41b986e0ebf7fa563e5e6"
+    }
+  },
+  "release": {
+    "targets": [
+      "bench_read_obj",
+      "bench_d3d12_descriptor"
+    ],
+    "build_exit_code": 0,
+    "benchmarks_executed": false
+  },
+  "logs": "build_runtime_archive_ops/ (local only; ignored by Git)"
+}

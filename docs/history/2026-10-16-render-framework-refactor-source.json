@@ -2,7 +2,7 @@
   "status": "pre-refactor workspace including user sampler changes",
   "base_commit": "f20c56fbf073154185ae792daac71982e5f6ab43",
   "git_status": [
-    " M docs/architecture/render-framework.md",
+    " M docs\/architecture\/render-framework.md",
     " M modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h",
     " M modules/runtime/include/radray/runtime/render_system.h",
     " M modules/runtime/src/render_framework/raster_draw.cpp",

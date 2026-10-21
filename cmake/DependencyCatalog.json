@@ -1,0 +1,382 @@
+[
+  {
+    "name": "fmt",
+    "package": "fmt",
+    "targets": [
+      "fmt::fmt"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "FMT_INSTALL": "ON",
+      "FMT_TEST": "OFF",
+      "FMT_DOC": "OFF",
+      "FMT_MODULE": "OFF"
+    },
+    "source": "fmt",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "magic_enum",
+    "package": "magic_enum",
+    "targets": [
+      "magic_enum::magic_enum"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "MAGIC_ENUM_OPT_INSTALL": "ON",
+      "MAGIC_ENUM_OPT_BUILD_TESTS": "OFF",
+      "MAGIC_ENUM_OPT_BUILD_EXAMPLES": "OFF"
+    },
+    "source": "magic_enum",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "eigen",
+    "package": "Eigen3",
+    "targets": [
+      "Eigen3::Eigen"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "EIGEN_BUILD_TESTING": "OFF",
+      "EIGEN_BUILD_BLAS": "OFF",
+      "EIGEN_BUILD_LAPACK": "OFF",
+      "EIGEN_BUILD_DOC": "OFF",
+      "EIGEN_BUILD_DOCS": "OFF",
+      "EIGEN_BUILD_CMAKE_PACKAGE": "ON"
+    },
+    "source": "eigen",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "sigslot",
+    "package": "PalSigslot",
+    "targets": [
+      "Pal::Sigslot"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "SIGSLOT_COMPILE_EXAMPLES": "OFF",
+      "SIGSLOT_COMPILE_TESTS": "OFF",
+      "SIGSLOT_ENABLE_INSTALL": "ON"
+    },
+    "source": "sigslot",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "stdexec",
+    "package": "stdexec",
+    "targets": [
+      "STDEXEC::stdexec"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {},
+    "source": "stdexec",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "spdlog",
+    "package": "spdlog",
+    "targets": [
+      "spdlog::spdlog"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [
+      "fmt"
+    ],
+    "options": {
+      "SPDLOG_INSTALL": "ON",
+      "SPDLOG_FMT_EXTERNAL": "ON",
+      "SPDLOG_WCHAR_SUPPORT": "${WIN32}",
+      "SPDLOG_NO_THREAD_ID": "ON",
+      "SPDLOG_DISABLE_DEFAULT_LOGGER": "ON",
+      "SPDLOG_BUILD_EXAMPLE": "OFF",
+      "SPDLOG_BUILD_TESTS": "OFF"
+    },
+    "source": "spdlog",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "xxHash",
+    "package": "xxHash",
+    "targets": [
+      "xxHash::xxhash"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "XXHASH_BUILD_XXHSUM": "OFF",
+      "DISPATCH": "ON",
+      "XXHASH_BUNDLED_MODE": "OFF"
+    },
+    "source": "xxHash/build/cmake",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "yyjson",
+    "package": "yyjson",
+    "targets": [
+      "yyjson::yyjson"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "YYJSON_DISABLE_UNALIGNED_MEMORY_ACCESS": "ON",
+      "YYJSON_INSTALL": "ON"
+    },
+    "source": "yyjson",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "pugixml",
+    "package": "pugixml",
+    "targets": [
+      "pugixml::static"
+    ],
+    "component": "core",
+    "when": "TRUE",
+    "requires": [],
+    "options": {
+      "PUGIXML_INSTALL": "ON",
+      "PUGIXML_NO_XPATH": "ON",
+      "PUGIXML_NO_EXCEPTIONS": "ON",
+      "PUGIXML_BUILD_TESTS": "OFF"
+    },
+    "source": "pugixml",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "mimalloc",
+    "package": "mimalloc",
+    "targets": [
+      "mimalloc-static"
+    ],
+    "component": "core",
+    "when": "RADRAY_ENABLE_MIMALLOC",
+    "requires": [],
+    "options": {
+      "MI_BUILD_OBJECT": "OFF",
+      "MI_BUILD_SHARED": "OFF",
+      "MI_BUILD_STATIC": "ON",
+      "MI_BUILD_TESTS": "OFF",
+      "MI_XMALLOC": "ON",
+      "MI_OVERRIDE": "ON",
+      "MI_OPT_ARCH": "OFF",
+      "MI_INSTALL_TOPLEVEL": "ON"
+    },
+    "source": "mimalloc",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "tracy",
+    "package": "Tracy",
+    "targets": [
+      "Tracy::TracyClient"
+    ],
+    "component": "core",
+    "when": "RADRAY_ENABLE_PROFILER",
+    "requires": [],
+    "options": {
+      "TRACY_ENABLE": "ON",
+      "TRACY_ON_DEMAND": "ON",
+      "TRACY_STATIC": "ON",
+      "TRACY_ONLY_LOCALHOST": "ON",
+      "TRACY_NO_BROADCAST": "ON",
+      "TRACY_NO_CRASH_HANDLER": "ON"
+    },
+    "source": "tracy",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "zlib",
+    "package": "ZLIB",
+    "targets": [
+      "ZLIB::ZLIB"
+    ],
+    "component": "core",
+    "when": "RADRAY_ENABLE_ZLIB",
+    "requires": [],
+    "options": {
+      "ZLIB_BUILD_SHARED": "OFF",
+      "ZLIB_BUILD_STATIC": "ON",
+      "ZLIB_INSTALL": "ON",
+      "ZLIB_BUILD_TESTING": "OFF"
+    },
+    "source": "zlib",
+    "mode": "MODULE"
+  },
+  {
+    "name": "libpng",
+    "package": "PNG",
+    "targets": [
+      "PNG::PNG"
+    ],
+    "component": "core",
+    "when": "RADRAY_ENABLE_LIBPNG",
+    "requires": [
+      "zlib"
+    ],
+    "options": {
+      "PNG_TESTS": "OFF",
+      "PNG_TOOLS": "OFF",
+      "PNG_SHARED": "OFF",
+      "PNG_STATIC": "ON"
+    },
+    "source": "libpng",
+    "mode": "MODULE"
+  },
+  {
+    "name": "libjpeg",
+    "package": "JPEG",
+    "targets": [
+      "JPEG::JPEG"
+    ],
+    "component": "core",
+    "when": "RADRAY_ENABLE_LIBJPEG",
+    "requires": [],
+    "options": {},
+    "source": "libjpeg",
+    "mode": "MODULE"
+  },
+  {
+    "name": "Vulkan-Headers",
+    "package": "VulkanHeaders",
+    "targets": [
+      "Vulkan::Headers"
+    ],
+    "component": "render",
+    "when": "RADRAY_ENABLE_VULKAN",
+    "requires": [],
+    "options": {
+      "VULKAN_HEADERS_ENABLE_INSTALL": "ON"
+    },
+    "source": "Vulkan-Headers",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "volk",
+    "package": "volk",
+    "targets": [
+      "volk::volk_headers"
+    ],
+    "component": "render",
+    "when": "RADRAY_ENABLE_VULKAN",
+    "requires": [
+      "Vulkan-Headers"
+    ],
+    "options": {
+      "VOLK_INSTALL": "ON",
+      "VOLK_PULL_IN_VULKAN": "OFF",
+      "VOLK_HEADERS_ONLY": "ON"
+    },
+    "source": "volk",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "VulkanMemoryAllocator",
+    "package": "VulkanMemoryAllocator",
+    "targets": [
+      "GPUOpen::VulkanMemoryAllocator"
+    ],
+    "component": "render",
+    "when": "RADRAY_ENABLE_VULKAN",
+    "requires": [],
+    "options": {
+      "VMA_ENABLE_INSTALL": "ON"
+    },
+    "source": "VulkanMemoryAllocator",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "DirectX-Headers",
+    "package": "directx-headers",
+    "targets": [
+      "Microsoft::DirectX-Headers",
+      "Microsoft::DirectX-Guids"
+    ],
+    "component": "graphics_headers",
+    "when": "RADRAY_ENABLE_D3D12 OR ( WIN32 AND RADRAY_BUILD_SHADER_COMPILER )",
+    "requires": [],
+    "options": {
+      "DXHEADERS_INSTALL": "ON",
+      "DXHEADERS_BUILD_TEST": "OFF",
+      "DXHEADERS_BUILD_GOOGLE_TEST": "OFF"
+    },
+    "source": "DirectX-Headers",
+    "mode": "CONFIG",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "name": "D3D12MemoryAllocator",
+    "package": "D3D12MemoryAllocator",
+    "targets": [
+      "GPUOpen::D3D12MemoryAllocator"
+    ],
+    "component": "render",
+    "when": "RADRAY_ENABLE_D3D12",
+    "requires": [
+      "DirectX-Headers"
+    ],
+    "options": {
+      "D3D12MA_BUILD_SAMPLE": "OFF"
+    },
+    "source": "D3D12MemoryAllocator",
+    "mode": "CONFIG",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "name": "googletest",
+    "package": "GTest",
+    "targets": [
+      "GTest::gtest_main"
+    ],
+    "component": "development",
+    "when": "RADRAY_BUILD_TESTS",
+    "requires": [],
+    "options": {
+      "gtest_force_shared_crt": "ON",
+      "BUILD_GMOCK": "OFF",
+      "INSTALL_GTEST": "ON"
+    },
+    "source": "googletest",
+    "mode": "CONFIG"
+  },
+  {
+    "name": "googlebenchmark",
+    "package": "benchmark",
+    "targets": [
+      "benchmark::benchmark",
+      "benchmark::benchmark_main"
+    ],
+    "component": "development",
+    "when": "RADRAY_BUILD_BENCHMARKS",
+    "requires": [],
+    "options": {
+      "BENCHMARK_ENABLE_TESTING": "OFF",
+      "BENCHMARK_ENABLE_INSTALL": "ON",
+      "BENCHMARK_INSTALL_DOCS": "OFF",
+      "BENCHMARK_INSTALL_TOOLS": "OFF",
+      "BENCHMARK_ENABLE_GTEST_TESTS": "OFF",
+      "BENCHMARK_USE_BUNDLED_GTEST": "OFF"
+    },
+    "source": "googlebenchmark",
+    "mode": "CONFIG"
+  }
+]

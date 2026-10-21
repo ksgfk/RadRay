@@ -98,11 +98,14 @@ bool HasDuplicateNames(const vector<KeywordAssignment>& values) noexcept {
     return false;
 }
 
-std::optional<CompileVariantRequest> CanonicalizeCompileVariantRequest(
+DiagnosticResult<CompileVariantRequest> CanonicalizeCompileVariantRequest(
     const CompileVariantRequest& request) {
-    if (!IsLogicalSourceName(request.SourceName) || request.Targets == ShaderTargetMask::None ||
+    if (!IsLogicalSourceName(request.SourceName)) {
+        return {std::nullopt, "SourceName must be a relative logical source path"};
+    }
+    if (request.Targets == ShaderTargetMask::None ||
         (static_cast<uint8_t>(request.Targets) & ~static_cast<uint8_t>(ShaderTargetMask::All)) != 0) {
-        return std::nullopt;
+        return {std::nullopt, "Targets must select DXIL, SPIR-V, or both"};
     }
     CompileVariantRequest canonical = request;
     std::sort(
@@ -117,10 +120,13 @@ std::optional<CompileVariantRequest> CanonicalizeCompileVariantRequest(
         [](const KeywordAssignment& lhs, const KeywordAssignment& rhs) {
             return std::tie(lhs.Name, lhs.Value) < std::tie(rhs.Name, rhs.Value);
         });
-    if (HasDuplicateNames(canonical.Defines) || HasDuplicateNames(canonical.Assignments)) {
-        return std::nullopt;
+    if (HasDuplicateNames(canonical.Defines)) {
+        return {std::nullopt, "Defines contains duplicate names"};
     }
-    return canonical;
+    if (HasDuplicateNames(canonical.Assignments)) {
+        return {std::nullopt, "Assignments contains duplicate keyword group names"};
+    }
+    return {std::move(canonical), {}};
 }
 
 namespace detail {
@@ -160,54 +166,64 @@ void AppendHash(vector<byte>& output, const Hash128& value) {
 
 }  // namespace detail
 
-std::optional<vector<byte>> EncodeCanonicalCompileVariantRequest(
+DiagnosticResult<vector<byte>> EncodeCanonicalCompileVariantRequest(
     const CompileVariantRequest& request) {
-    const std::optional<CompileVariantRequest> canonical = CanonicalizeCompileVariantRequest(request);
-    if (!canonical.has_value()) {
-        return std::nullopt;
+    const auto canonical = CanonicalizeCompileVariantRequest(request);
+    if (!canonical.Succeeded()) {
+        return {std::nullopt, canonical.Diagnostics};
     }
 
     vector<byte> bytes;
     bytes.reserve(128);
     detail::AppendU32LE(bytes, kShaderWireMagic);
     detail::AppendU16LE(bytes, kShaderWireSchemaVersion);
-    detail::AppendString(bytes, canonical->SourceName);
-    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical->RootSource.size()));
-    detail::AppendBytes(bytes, std::span<const byte>{canonical->RootSource});
-    detail::AppendByte(bytes, static_cast<uint8_t>(canonical->Targets));
-    detail::AppendU32LE(bytes, canonical->Policy.ShaderModel);
-    detail::AppendByte(bytes, canonical->Policy.Optimize);
-    detail::AppendByte(bytes, canonical->Policy.DebugInfo);
-    detail::AppendByte(bytes, canonical->Policy.AllResourcesBound);
-    detail::AppendByte(bytes, static_cast<uint8_t>(canonical->Policy.Warnings));
-    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical->Policy.SpirvTargetEnv));
-    detail::AppendU32LE(bytes, canonical->Policy.HlslVersion);
-    detail::AppendU32LE(bytes, canonical->Policy.Reserved);
-    detail::AppendHash(bytes, canonical->ExpectedContract);
+    detail::AppendString(bytes, canonical.Value->SourceName);
+    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical.Value->RootSource.size()));
+    detail::AppendBytes(bytes, std::span<const byte>{canonical.Value->RootSource});
+    detail::AppendByte(bytes, static_cast<uint8_t>(canonical.Value->Targets));
+    detail::AppendU32LE(bytes, canonical.Value->Policy.ShaderModel);
+    detail::AppendByte(bytes, canonical.Value->Policy.Optimize);
+    detail::AppendByte(bytes, canonical.Value->Policy.DebugInfo);
+    detail::AppendByte(bytes, canonical.Value->Policy.AllResourcesBound);
+    detail::AppendByte(bytes, static_cast<uint8_t>(canonical.Value->Policy.Warnings));
+    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical.Value->Policy.SpirvTargetEnv));
+    detail::AppendU32LE(bytes, canonical.Value->Policy.HlslVersion);
+    detail::AppendU32LE(bytes, canonical.Value->Policy.Reserved);
+    detail::AppendHash(bytes, canonical.Value->ExpectedContract);
 
-    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical->Defines.size()));
-    for (const Define& define : canonical->Defines) {
+    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical.Value->Defines.size()));
+    for (const Define& define : canonical.Value->Defines) {
         detail::AppendString(bytes, define.Name);
         detail::AppendString(bytes, define.Value);
     }
-    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical->Assignments.size()));
-    for (const KeywordAssignment& assignment : canonical->Assignments) {
+    detail::AppendU32LE(bytes, static_cast<uint32_t>(canonical.Value->Assignments.size()));
+    for (const KeywordAssignment& assignment : canonical.Value->Assignments) {
         detail::AppendString(bytes, assignment.Name);
         detail::AppendString(bytes, assignment.Value);
     }
-    return bytes;
+    return {std::move(bytes), {}};
 }
 
-std::optional<vector<byte>> EncodeSourceContractRequest(
+DiagnosticResult<vector<byte>> EncodeSourceContractRequest(
     const SourceContractRequest& request) {
-    if (!IsLogicalSourceName(request.SourceName) || request.RootSource.empty() ||
-        request.SourceName.size() > std::numeric_limits<uint32_t>::max() ||
-        request.RootSource.size() > std::numeric_limits<uint32_t>::max() ||
-        request.Defines.size() > std::numeric_limits<uint32_t>::max() ||
-        request.Targets == ShaderTargetMask::None ||
-        (static_cast<uint8_t>(request.Targets) &
-         ~static_cast<uint8_t>(ShaderTargetMask::All)) != 0) {
-        return std::nullopt;
+    if (!IsLogicalSourceName(request.SourceName)) {
+        return {std::nullopt, "SourceName must be a relative logical source path"};
+    }
+    if (request.RootSource.empty()) {
+        return {std::nullopt, "RootSource must not be empty"};
+    }
+    if (request.SourceName.size() > std::numeric_limits<uint32_t>::max()) {
+        return {std::nullopt, "SourceName exceeds the wire length limit"};
+    }
+    if (request.RootSource.size() > std::numeric_limits<uint32_t>::max()) {
+        return {std::nullopt, "RootSource exceeds the wire length limit"};
+    }
+    if (request.Defines.size() > std::numeric_limits<uint32_t>::max()) {
+        return {std::nullopt, "Defines exceeds the wire count limit"};
+    }
+    if (request.Targets == ShaderTargetMask::None ||
+        (static_cast<uint8_t>(request.Targets) & ~static_cast<uint8_t>(ShaderTargetMask::All)) != 0) {
+        return {std::nullopt, "Targets must select DXIL, SPIR-V, or both"};
     }
 
     SourceContractRequest canonical = request;
@@ -217,7 +233,7 @@ std::optional<vector<byte>> EncodeSourceContractRequest(
             return std::tie(lhs.Name, lhs.Value) < std::tie(rhs.Name, rhs.Value);
         });
     if (HasDuplicateNames(canonical.Defines))
-        return std::nullopt;
+        return {std::nullopt, "Defines contains duplicate names"};
 
     vector<byte> bytes;
     bytes.reserve(64 + canonical.SourceName.size() + canonical.RootSource.size());
@@ -240,7 +256,7 @@ std::optional<vector<byte>> EncodeSourceContractRequest(
         detail::AppendString(bytes, define.Name);
         detail::AppendString(bytes, define.Value);
     }
-    return bytes;
+    return {std::move(bytes), {}};
 }
 
 }  // namespace radray::shader

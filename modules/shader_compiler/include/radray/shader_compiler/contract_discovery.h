@@ -7,13 +7,7 @@
 
 namespace radray::shader_compiler {
 
-struct DiscoveryResult {
-    shader::CompileStatus Status{shader::CompileStatus::InvalidRequest};
-    shader::ShaderContract Contract{};
-    vector<shader::CompileDiagnostic> Diagnostics;
-
-    bool Succeeded() const noexcept { return Status == shader::CompileStatus::Success; }
-};
+using DiscoveryResult = shader::DiagnosticResult<shader::ShaderContract>;
 
 DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob);
 

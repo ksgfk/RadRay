@@ -960,8 +960,6 @@ public:
     BindingHandle FindBinding(std::string_view name) const noexcept override;
 
     Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(uint32_t groupIndex) const noexcept;
-    std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept override;
-    std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept override;
 
 public:
     DeviceD3D12* _device{nullptr};
@@ -1059,8 +1057,7 @@ class SamplerD3D12 final : public Sampler {
 public:
     SamplerD3D12(
         DeviceD3D12* device,
-        CpuDescriptorHeapViewRAII heapView,
-        const D3D12_SAMPLER_DESC& desc) noexcept;
+        CpuDescriptorHeapViewRAII heapView) noexcept;
     ~SamplerD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -1068,12 +1065,10 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
-    vector<uint64_t> GetBindingIdentity() const noexcept override;
 
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
-    D3D12_SAMPLER_DESC _desc;
     string _name;
 };
 

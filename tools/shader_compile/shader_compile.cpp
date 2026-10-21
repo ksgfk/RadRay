@@ -145,10 +145,8 @@ std::string_view TargetName(shader::ShaderTarget target) noexcept {
     return target == shader::ShaderTarget::DXIL ? "dxil" : "spirv";
 }
 
-void PrintDiagnostics(const vector<shader::CompileDiagnostic>& diagnostics) {
-    for (const shader::CompileDiagnostic& diagnostic : diagnostics) {
-        PrintError(fmt::format("{}: {}", diagnostic.Code, diagnostic.Message));
-    }
+void PrintDiagnostics(std::string_view diagnostics) {
+    if (!diagnostics.empty()) PrintError(diagnostics);
 }
 
 }  // namespace
@@ -176,34 +174,34 @@ int main(int argc, char** argv) {
         *source,
         shader::ShaderTarget::DXIL,
         args->IncludePaths);
+    PrintDiagnostics(discovery.Diagnostics);
     if (!discovery.Succeeded()) {
-        PrintDiagnostics(discovery.Diagnostics);
         return 1;
     }
 
-    const vector<shader::KeywordAssignment> assignments = DefaultAssignments(discovery.Contract);
-    if (assignments.size() != discovery.Contract.KeywordGroups.size()) {
+    const vector<shader::KeywordAssignment> assignments = DefaultAssignments(*discovery.Value);
+    if (assignments.size() != discovery.Value->KeywordGroups.size()) {
         PrintError("every keyword group must declare at least one value");
         return 1;
     }
 
     const shader::CompileVariantResult result = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = args->Source,
-        .RootSource = *source,
-        .Defines = {},
-        .Assignments = assignments,
-        .Targets = args->Targets,
-        .Policy = {},
-        .ExpectedContract = discovery.Contract.Hash},
-        args->IncludePaths);
+                                                                          .SourceName = args->Source,
+                                                                          .RootSource = *source,
+                                                                          .Defines = {},
+                                                                          .Assignments = assignments,
+                                                                          .Targets = args->Targets,
+                                                                          .Policy = {},
+                                                                          .ExpectedContract = discovery.Value->Hash},
+                                                                      args->IncludePaths);
     if (!result.Diagnostics.empty()) {
         PrintDiagnostics(result.Diagnostics);
     }
-    if (result.Status != shader::CompileStatus::Success) {
+    if (!result.Succeeded()) {
         return 1;
     }
 
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         const std::string suffix = fmt::format(".{}.bin", TargetName(lane.Target));
         std::filesystem::path output = args->OutputPrefix;
         output += suffix;

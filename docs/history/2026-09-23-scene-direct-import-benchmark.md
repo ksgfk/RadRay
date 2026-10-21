@@ -1,6 +1,9 @@
 > - 适用: 已回退的 World 变化 local 直接导入 Scene、独立全量求值实验及其测量结论
 > - 权威: 2026-09-23 历史实验与回退记录，不代表当前实现；长期接口以 render-framework 为准，不保证其他机器或实际游戏得到相同比例
-> - 锚点: `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/render_framework/scene_transform.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `tools/run_scene_sync_benchmark.py`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/render_framework/scene_transform.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `tools/run_scene_sync_benchmark.py`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # Scene 直接导入实验：未采纳，已回退
 
@@ -42,7 +45,7 @@
 - 创建记录、Shape/Light 参数和资产生命周期仍走原协议。Direct 省去的是既有节点逐项的 local/parent 值包，
   不代表没有内存访问。GT 仍处理通知、生命周期、队列排序及释放；RT 会跨线程读取组件。
 
-当前生命周期契约见 [Runtime 宿主](../architecture/render-framework.md#增量捕获与-rt-数据)，其中已移除上述实验机制。
+当前生命周期契约见 [Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md#增量捕获与-rt-数据)，其中已移除上述实验机制。
 
 ## 测量条件
 

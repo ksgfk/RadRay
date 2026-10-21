@@ -37,12 +37,13 @@
             "Name": "eigen",
             "Type": "git",
             "Git": "https://gitlab.com/libeigen/eigen.git",
-            "Branch": "5.0"
+            "Tag": "5.0.1"
         },
         {
             "Name": "xxHash",
             "Type": "git",
-            "Git": "https://github.com/Cyan4973/xxHash.git"
+            "Git": "https://github.com/Cyan4973/xxHash.git",
+            "Tag": "v0.8.4"
         },
         {
             "Name": "yyjson",
@@ -60,7 +61,7 @@
             "Name": "stdexec",
             "Type": "git",
             "Git": "https://github.com/NVIDIA/stdexec.git",
-            "Branch": "main"
+            "Tag": "nvhpc-26.05"
         },
         {
             "Name": "mimalloc",
@@ -91,12 +92,6 @@
             "Type": "git",
             "Git": "https://github.com/libjpeg-turbo/ijg.git",
             "Tag": "jpeg-10"
-        },
-        {
-            "Name": "cgltf",
-            "Type": "git",
-            "Git": "https://github.com/jkuhlmann/cgltf.git",
-            "Tag": "v1.15"
         },
         {
             "Name": "Vulkan-Headers",

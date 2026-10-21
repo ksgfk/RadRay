@@ -1,13 +1,16 @@
 > - 适用: 2026-10-13 GPU 生命周期实施任务的输入计划；历史快照
 > - 权威: 仅保留原始计划及 7a807 基线，不替代 architecture/guide 当前契约；执行证据见 [验收记录](2026-10-13-gpu-lifecycle-implementation.md)
-> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/src/vk/vulkan_impl.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # RadRay GPU 生命周期与架构收缩：完整实施计划
 
 状态：已执行计划的历史输入；正文保留 2026-10-13 的目标与验收设计，本文件不是当前待办或实现结果。
 实际执行范围见[验收记录](2026-10-13-gpu-lifecycle-implementation.md)。当前的
-[资源寿命与回收条件](../architecture/frame-and-gpu.md#资源寿命与回收条件)、
-[原生附件缓存](../architecture/render-rhi.md#直接附件与-vulkan-原生缓存)和[性能测量](../guide/performance.md)
+[资源寿命与回收条件](2026-10-21-runtime-frame-and-gpu-snapshot.md#资源寿命与回收条件)、
+[原生附件缓存](../architecture/render-rhi.md#直接附件与-vulkan-原生缓存)和[性能测量](2026-10-21-runtime-performance-snapshot.md)
 已独立维护；后续 RHI 已合并为直接 `BeginRenderPass(desc)`，不再提供本文设想的 Prepare token。
 日期：2026-10-13。
 仓库：ksgfk/RadRay。
@@ -654,7 +657,7 @@ Vulkan 1.2 原生 RP/FB 及 typed cache；每 flight Scene GPU 副本、dirty �
 
 每阶段遵守仓库 AGENTS.md：头/源对应、项目容器别名、Nullable、现有 profiler 宏、不增加未经批准的全局共享状态或异常结构、third_party/SDKs 只读。新增私有 helper 放最窄所属模块；不把 GPU 缓存业务上移或把资产/Scene 名称带进 RHI。
 
-长期合同更新到 docs/architecture/frame-and-gpu.md、render-rhi.md、render-framework.md、asset-system.md；用法和测试更新到相应 guide。只把执行状态/基线留在 docs/history，不维护相互矛盾的多份权威文档。
+长期合同更新到 docs/history/2026-10-21-runtime-frame-and-gpu-snapshot.md、render-rhi.md、render-framework.md、asset-system.md；用法和测试更新到相应 guide。只把执行状态/基线留在 docs/history，不维护相互矛盾的多份权威文档。
 
 完成标准不是新增生命周期类，而是：owner 不变得含糊，安全证明集中，重复状态确实删掉，Vulkan 1.2 主路径完整，每 flight Scene 镜像保持，失败/取消/跳帧/关停同一合同，性能有可重现的验证。
 

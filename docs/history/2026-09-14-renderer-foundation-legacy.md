@@ -4,7 +4,7 @@
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
 > - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
-以下内容保存自基线的 `docs/architecture/renderer-foundation.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
+以下内容保存自基线的 `docs/history/2026-10-21-runtime-renderer-foundation-snapshot.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
 > - 权威: 本文描述 renderer foundation 与内置 Forward 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
@@ -224,7 +224,7 @@ Cancelled。Recorded 仅说明命令进入 command buffer；当前 RHI Submit �
 调用返回，不能证明设备接受或执行成功。宿主将收据放入当前 flight，Submit 后提交已录前缀的状态，
 fence 后完成 tickets。未提交的收据析构或取消会取消其操作。encoder/回调失败时停止后续 pass，
 失败写内容失效，已录 barrier 状态仍作为 host fallback 的起点；整体失败不能推进 view history。
-完整提交和线程边界见 [帧与 GPU](../architecture/frame-and-gpu.md)。
+完整提交和线程边界见 [帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)。
 
 Graph 独占 setup 与本帧实例数据，借用不可变编译计划；完成收据不保留整个 Graph 实现。提交阶段只保存最终状态
 与有效位的写回快照，成功 Submit 后释放；完成阶段保存 tickets、显式 retained owners、readback 存储
@@ -472,7 +472,7 @@ Create 只从 primary program 取该 cbuffer 的**字节数**，用来分配 Mat
 
 之所以不做运行时校验：唯一能证明布局的事实来自 DXC type tree，而它已经在 AOT 生成 POD 时被
 用过一次，且两个 target lane 不一致时编译就会失败（见
-[shader pipeline](../architecture/shader-pipeline.md)）。运行时再验一遍既不能发现新问题，也挡不住调用方写错
+[shader pipeline](2026-10-21-runtime-shader-pipeline-snapshot.md)）。运行时再验一遍既不能发现新问题，也挡不住调用方写错
 `As<T>()` 的类型——那是调用方 bug。
 
 secondary pass 的 texture/sampler 必须是 primary 声明的子集，按名称、kind 和数组数量一致匹配；不得

@@ -1,5 +1,5 @@
 > - 适用: 新增或修改 HLSL 根 `.hlsl` pass、keyword domain、binding 或 target gate
-> - 权威: 本文是 schema 8 当前 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
+> - 权威: 本文是 schema 8 当前 HLSL authoring 契约；wire 与 compiler/RHI 边界见 shader pipeline 架构文档
 > - 锚点: `shaderlib/core/platform.hlsli`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
@@ -16,7 +16,7 @@ header；include 必须使用 root-relative、尖括号路径：
 
 不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统绝对路径作为 `SourceName`。
 `SourceName` 相对 caller 的 source root，它与 include root 可以不同；以 `shaderlib/` 为 source
-root 时使用相对此根的路径；例如以 `examples/scene_sync/` 为 source root 时，`scene_sync_instanced.hlsl`
+root 时使用相对此根的路径；例如以 `modules/shader_compiler/tests/data/` 为 source root 时，其中的 `.hlsl` 文件
 是有效逻辑名称，会进入诊断和 compile input identity。
 测试与示例专用 source 的归属与路径配置见 [Shaderlib](../architecture/shaderlib.md)。
 
@@ -43,7 +43,7 @@ entry。entry 不能被条件编译包围，也不能让 graphics 与 compute �
 写了它，graphics stages 必须解析为一致且覆盖全部 active resources 的合法 policy；额外的 D3
 stable-superset ranges/parameters/static samplers 可以保留。compiler 在 target lanes 之前解析一次
 policy：DXIL lane 发布 standard serialized Root Signature，SPIR-V lane 按同一 HLSL declaration
-identity 发布 Vulkan layout records。runtime 不解析 DXIL blob 来重建 Vulkan layout。
+identity 发布 Vulkan layout records。artifact 消费方不解析 DXIL blob 来重建 Vulkan layout。
 
 policy 一旦出现，就必须写在该 source 的**每个** entry 上，且各处文本逐字一致（惯用写法是
 `#define RS "..."` 后各 entry 写 `[RootSignature(RS)]`）。只写在部分 entry 上会让缺少 attribute
@@ -131,7 +131,7 @@ push block。一个SPIR-V Variant最多一条active logical push declaration。
 `vk::binding` 报 2113。检查发生在死资源剥除之后，未被使用的资源不受约束。
 
 不要在 pass 中手写 backend attribute、创建 numbered binding wrapper，或维护 sidecar metadata。
-HLSL declaration name 是 runtime lookup identity；render layout 会为当前 artifact 生成不透明
+HLSL declaration name 是 参数查询 identity；render layout 会为当前 artifact 生成不透明
 `BindingHandle`。descriptor与push declaration都通过`FindBinding(name)`取得handle；handle的group、
 binding、namespace或内部index都不是authoring ABI。
 
@@ -150,18 +150,8 @@ shader metadata。每个modifier只用“canonical declaration name + expected l
 kind/count、visibility、slot或push range；texture、typed texel buffer、storage image和push没有
 placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
-group 的语义属于具体调用方，不是 shaderlib 全局规则；runtime 不硬编码 view/material/object 组号。
-Renderer 的模板按输入来源强制分为 Scene/Frame、View/Pass、Material、Sampler 四个域；一个实际组不能混域。
-例如 object/instance stream 属于 Scene，view matrix 与 visible list 属于 View，材质常量与纹理属于 Material，sampler 单独分组。
-编号及布局仍来自 artifact 和 resolved layout，不建立平行 metadata。增加 view/pass/flight 不应改变静态 material/sampler 的组身份。
-旧 mixed-group shader 必须迁移 ABI；完整组复用不会合并不同完整组中的局部 D3D12 table。
-
-SceneDraw 的实例寻址契约由 MaterialTemplateDescriptor 显式声明：VisibleInstanceSlots 是 uint structured buffer，
-VisibleBase 映射到反射中的 uint push 字段，shader 用 VisibleBase+SV_InstanceID 读取实际对象 slot，draw 的 FirstInstance 为 0。
-按 slot 读取的矩阵 stride 为 64；自定义参数 stride/字段须与 InstanceParameterLayout 完全一致，
-像素阶段通过 nointerpolation varying 接收 slot。DirectObject 与自动合批许可独立；详见[实例绘制](instancing.md)。
+group 的语义属于具体调用方，不是 shaderlib 全局规则。
 数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
-旧 Forward ABI 与专用 POD 生成器已移除，历史设计见[历史快照](../history/2026-09-14-render-framework-design.md)。
 
 cbuffer 里避开非方阵、`bool` 和元素大小非 16 字节整数倍的 struct 数组：这三类构造两个 lane 的
 type payload 不一致，编译会 fail closed。原因见
@@ -169,7 +159,7 @@ type payload 不一致，编译会 fail closed。原因见
 
 调用方直接准备并上传常量 buffer 字节，必须保证数据与实际 GPU cbuffer 布局一致。
 固定功能状态由调用方写入 RHI pipeline descriptor。布局和参数契约见
-[Runtime shader](../architecture/render-framework.md#shader-program-与参数)。
+[Shader pipeline](../architecture/shader-pipeline.md)。
 
 ## 编译器测试
 
@@ -180,9 +170,9 @@ entry 数量、active binding、stage visibility 和 target-specific binding fac
 ## 验收命令
 
 ```powershell
-cmake --build build_debug --config Debug --parallel 24
-ctest --test-dir build_debug -C Debug -R "RadRayShaderLibPass" --output-on-failure
+cmake --build --preset win-x64-debug --parallel 24
+ctest --preset win-x64-debug -R "RadRayShaderLibPass"
 ```
 
-GPU runtime pass 由 `RadRayRuntimeShaderJit` 验证；没有可用 GPU 时测试可以 skip，但已创建设备
-后的资源、pipeline、提交或 readback 错误必须失败。
+render 侧的 shader 契约与布局测试使用预生成 artifact，并保留布局专用的 dispatch/读回验证，
+不覆盖完整 PSO smoke。测试入口及后端缺失、初始化失败与 skip 规则见[构建与测试](build-test.md#测试)。

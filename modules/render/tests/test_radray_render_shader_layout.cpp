@@ -70,7 +70,8 @@ TEST(RadRayRenderShaderLayout, ModifierOrderDoesNotChangeTheResolvedLayout) {
     const vector<byte> dxilBlob = ReadFixture("multiple_cbuffers", shader::ShaderTarget::DXIL);
     ASSERT_FALSE(dxilBlob.empty());
     const auto dxil = shader::DecodeDxilShaderArtifact(
-        dxilBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::DXIL));
+                          dxilBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::DXIL))
+                          .Value;
     ASSERT_TRUE(dxil.has_value());
 
     const D3D12BufferPlacementModifier first{
@@ -101,7 +102,8 @@ TEST(RadRayRenderShaderLayout, ModifierOrderDoesNotChangeTheResolvedLayout) {
     const vector<byte> spirvBlob = ReadFixture("multiple_cbuffers", shader::ShaderTarget::SPIRV);
     ASSERT_FALSE(spirvBlob.empty());
     const auto spirv = shader::DecodeSpirvShaderArtifact(
-        spirvBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::SPIRV));
+                           spirvBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::SPIRV))
+                           .Value;
     ASSERT_TRUE(spirv.has_value());
 
     const VulkanBufferDescriptorModifier firstDynamic{
@@ -144,9 +146,11 @@ TEST(RadRayRenderShaderLayout, OtherTargetOptionsDoNotChangeThisTargetsIdentity)
     ASSERT_FALSE(dxilBlob.empty());
     ASSERT_FALSE(spirvBlob.empty());
     const auto dxil = shader::DecodeDxilShaderArtifact(
-        dxilBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::DXIL));
+                          dxilBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::DXIL))
+                          .Value;
     const auto spirv = shader::DecodeSpirvShaderArtifact(
-        spirvBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::SPIRV));
+                           spirvBlob, FixtureOptions("multiple_cbuffers", shader::ShaderTarget::SPIRV))
+                           .Value;
     ASSERT_TRUE(dxil.has_value());
     ASSERT_TRUE(spirv.has_value());
 
@@ -183,9 +187,11 @@ TEST(RadRayRenderShaderLayout, ResolvedLayoutOutlivesTheArtifactItCameFrom) {
         ASSERT_FALSE(dxilBlob.empty());
         ASSERT_FALSE(spirvBlob.empty());
         const auto dxilArtifact = shader::DecodeDxilShaderArtifact(
-            dxilBlob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::DXIL));
+                                      dxilBlob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::DXIL))
+                                      .Value;
         const auto spirvArtifact = shader::DecodeSpirvShaderArtifact(
-            spirvBlob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV));
+                                       spirvBlob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV))
+                                       .Value;
         ASSERT_TRUE(dxilArtifact.has_value());
         ASSERT_TRUE(spirvArtifact.has_value());
         d3d12 = ResolveD3D12Layout(dxilArtifact.value());
@@ -222,7 +228,8 @@ TEST(RadRayRenderShaderLayout, ImmutableSamplerModifierReplacesThePublishedState
     const vector<byte> blob = ReadFixture("shadow_static_sampler", shader::ShaderTarget::SPIRV);
     ASSERT_FALSE(blob.empty());
     const auto artifact = shader::DecodeSpirvShaderArtifact(
-        blob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV));
+                              blob, FixtureOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV))
+                              .Value;
     ASSERT_TRUE(artifact.has_value());
 
     const auto published = ResolveVulkanLayout(artifact.value());

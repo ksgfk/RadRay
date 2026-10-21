@@ -1,19 +1,22 @@
 > - 适用: 2026-10-16 确认的 Render Framework 所有权、帧编译和 descriptor 复用重构
 > - 权威: 经用户授权保存的实施输入与删除前快照；不是当前接口契约
-> - 锚点: `modules/runtime/`, `modules/render/`, `examples/`, `docs/architecture/render-framework.md`
+> - 锚点: `modules/render/`, `docs/history/2026-10-21-runtime-render-framework-snapshot.md`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/`, `examples/`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # Render Framework 重构输入与基线
 
 状态：已执行。重构前后各 42 个双后端场景通过读回；最终生命周期、回归、性能结果与限制见[实施验收](2026-10-16-render-framework-refactor-validation.md)。下文保留重构前语义。
 基线提交：`f20c56fbf073154185ae792daac71982e5f6ab43`，包含执行开始时的未提交 sampler 修改。
-当前契约见 [Runtime 宿主](../architecture/render-framework.md) 和 [帧与 GPU](../architecture/frame-and-gpu.md)。
+当前契约见 [Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md) 和 [帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)。
 本记录由用户明确授权保存，后续不把未运行项目写成通过。
 
 ## 执行起点
 
 开始实施前的六个修改文件：
 
-- `docs/architecture/render-framework.md`
+- `docs/history/2026-10-21-runtime-render-framework-snapshot.md`
 - `modules/runtime/include/radray/runtime/render_framework/material_gpu_state.h`
 - `modules/runtime/include/radray/runtime/render_system.h`
 - `modules/runtime/src/render_framework/raster_draw.cpp`

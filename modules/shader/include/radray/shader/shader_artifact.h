@@ -10,26 +10,6 @@
 
 namespace radray::shader {
 
-enum class ShaderArtifactDecodeError : uint32_t {
-    None = 0,
-    TruncatedEnvelope,
-    InvalidEnvelope,
-    InvalidTarget,
-    ToolchainMismatch,
-    InvalidRecordRange,
-    InvalidEntry,
-    DuplicateEntry,
-    InvalidBinding,
-    DuplicateBinding,
-    InvalidTypeRecord,
-    InvalidRootConstant,
-    InvalidVertexInput,
-    InvalidRootSignature,
-    UnsupportedSchemaVersion,
-    InvalidSamplerRecord,
-    InvalidPlacement,
-};
-
 struct ShaderArtifactDecodeOptions {
     ShaderTarget Target{ShaderTarget::DXIL};
     GpuArtifactHash ExpectedGpuArtifact{};
@@ -73,10 +53,9 @@ private:
     vector<WireVertexInputRecord> _vertexInputs;
     vector<WireSamplerRecord> _samplers;
 
-    friend std::optional<ShaderArtifactView> DecodeShaderArtifact(
+    friend DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
         std::span<const byte>,
-        const ShaderArtifactDecodeOptions&,
-        ShaderArtifactDecodeError*) noexcept;
+        const ShaderArtifactDecodeOptions&);
 };
 
 class DxilShaderArtifactView final {
@@ -89,10 +68,9 @@ private:
 
     ShaderArtifactView _view;
 
-    friend std::optional<DxilShaderArtifactView> DecodeDxilShaderArtifact(
+    friend DiagnosticResult<DxilShaderArtifactView> DecodeDxilShaderArtifact(
         std::span<const byte>,
-        const ShaderArtifactDecodeOptions&,
-        ShaderArtifactDecodeError*) noexcept;
+        const ShaderArtifactDecodeOptions&);
 };
 
 class SpirvShaderArtifactView final {
@@ -105,25 +83,21 @@ private:
 
     ShaderArtifactView _view;
 
-    friend std::optional<SpirvShaderArtifactView> DecodeSpirvShaderArtifact(
+    friend DiagnosticResult<SpirvShaderArtifactView> DecodeSpirvShaderArtifact(
         std::span<const byte>,
-        const ShaderArtifactDecodeOptions&,
-        ShaderArtifactDecodeError*) noexcept;
+        const ShaderArtifactDecodeOptions&);
 };
 
-std::optional<ShaderArtifactView> DecodeShaderArtifact(
+DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
     std::span<const byte> blob,
-    const ShaderArtifactDecodeOptions& options,
-    ShaderArtifactDecodeError* error = nullptr) noexcept;
+    const ShaderArtifactDecodeOptions& options);
 
-std::optional<DxilShaderArtifactView> DecodeDxilShaderArtifact(
+DiagnosticResult<DxilShaderArtifactView> DecodeDxilShaderArtifact(
     std::span<const byte> blob,
-    const ShaderArtifactDecodeOptions& options,
-    ShaderArtifactDecodeError* error = nullptr) noexcept;
+    const ShaderArtifactDecodeOptions& options);
 
-std::optional<SpirvShaderArtifactView> DecodeSpirvShaderArtifact(
+DiagnosticResult<SpirvShaderArtifactView> DecodeSpirvShaderArtifact(
     std::span<const byte> blob,
-    const ShaderArtifactDecodeOptions& options,
-    ShaderArtifactDecodeError* error = nullptr) noexcept;
+    const ShaderArtifactDecodeOptions& options);
 
 }  // namespace radray::shader

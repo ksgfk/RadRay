@@ -12,7 +12,7 @@ namespace radray::shader_compiler {
 
 class Client {
 public:
-    explicit Client(std::string_view compilerLibraryName = "dxcompiler") noexcept;
+    explicit Client(std::string_view compilerLibraryName = "dxcompiler");
 
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;

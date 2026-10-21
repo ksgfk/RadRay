@@ -70,9 +70,9 @@ TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
                 .Policy = {}},
             includePaths);
         ASSERT_TRUE(discovery.Succeeded())
-            << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
-        EXPECT_EQ(discovery.Contract.Kind, pass.Kind);
-        EXPECT_EQ(discovery.Contract.EntryPoints.size(), pass.EntryCount);
+            << discovery.Diagnostics;
+        EXPECT_EQ(discovery.Value->Kind, pass.Kind);
+        EXPECT_EQ(discovery.Value->EntryPoints.size(), pass.EntryCount);
 
         shader::CompileVariantRequest request{
             .SourceName = string{pass.SourceName},
@@ -80,13 +80,13 @@ TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
             .Defines = {},
             .Assignments = {{string{pass.AssignmentName}, string{pass.AssignmentValue}}},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash};
+            .ExpectedContract = discovery.Value->Hash};
         if (pass.AssignmentName.empty()) request.Assignments.clear();
         const shader::CompileVariantResult result = client.CompileVariant(request, includePaths);
-        ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-            << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-        ASSERT_EQ(result.Lanes.size(), 2u);
-        for (const shader::CompileTargetLane& lane : result.Lanes) {
+        ASSERT_TRUE(result.Succeeded())
+            << result.Diagnostics;
+        ASSERT_EQ(result.Value->size(), 2u);
+        for (const shader::CompileTargetLane& lane : *result.Value) {
             EXPECT_EQ(lane.Stages.size(), pass.EntryCount);
             EXPECT_FALSE(lane.Bytecode.empty());
             ASSERT_GE(lane.Metadata.size(), sizeof(shader::WireMetadataEnvelope));

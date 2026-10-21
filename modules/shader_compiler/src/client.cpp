@@ -1,5 +1,7 @@
 #include <radray/shader_compiler/client.h>
 
+#include <fmt/format.h>
+
 #if defined(_WIN32)
 
 #include <radray/logger.h>
@@ -17,11 +19,30 @@
 #include <limits>
 #include <string_view>
 
+#endif
+
+namespace radray::shader_compiler {
+namespace {
+
+template <typename T>
+shader::DiagnosticResult<T> WithSourceContext(
+    shader::DiagnosticResult<T> result, std::string_view sourceName, std::string_view operation) {
+    if (!result.Diagnostics.empty()) {
+        result.Diagnostics = fmt::format("{} '{}':\n{}", operation, sourceName, result.Diagnostics);
+    }
+    return result;
+}
+
+}  // namespace
+}  // namespace radray::shader_compiler
+
+#if defined(_WIN32)
+
 namespace radray::shader_compiler {
 namespace {
 
 using std::string_view;
-using shader::CompileDiagnostic;
+using shader::AppendDiagnostic;
 using shader::CompileTargetLane;
 using shader::CompileVariantRequest;
 using shader::CompileVariantResult;
@@ -29,8 +50,6 @@ using shader::ContractHash;
 using shader::ShaderTarget;
 
 using Microsoft::WRL::ComPtr;
-
-void AddForkError(vector<CompileDiagnostic>& diagnostics, uint32_t code, string_view message);
 
 struct MarshaledIncludePaths {
     vector<string> Storage;
@@ -46,9 +65,9 @@ struct MarshaledIncludePaths {
 bool MarshalIncludePaths(
     std::span<const std::filesystem::path> includePaths,
     MarshaledIncludePaths& marshaled,
-    vector<CompileDiagnostic>& diagnostics) {
+    string& diagnostics) {
     if (includePaths.size() > std::numeric_limits<uint32_t>::max()) {
-        AddForkError(diagnostics, 2000, "include path list is too large");
+        AppendDiagnostic(diagnostics, "include path list is too large");
         return false;
     }
     marshaled.Storage.reserve(includePaths.size());
@@ -57,7 +76,7 @@ bool MarshalIncludePaths(
         const std::optional<string> encoded = ToMultiByte(std::wstring_view{path.native()});
         if (!encoded.has_value() || encoded->empty() || encoded->find('\0') != string::npos ||
             encoded->size() > std::numeric_limits<uint32_t>::max()) {
-            AddForkError(diagnostics, 2000, "include path is not a valid UTF-8 path");
+            AppendDiagnostic(diagnostics, "include path is not a valid UTF-8 path");
             return false;
         }
         marshaled.Storage.push_back(*encoded);
@@ -68,10 +87,6 @@ bool MarshalIncludePaths(
             static_cast<uint32_t>(path.size())});
     }
     return true;
-}
-
-void AddForkError(vector<CompileDiagnostic>& diagnostics, uint32_t code, string_view message) {
-    diagnostics.push_back({code, string{message}});
 }
 
 bool IsValidForkAbi(const shader::RadRayDxcAbiInfo& info) noexcept {
@@ -91,14 +106,16 @@ bool IsValidForkAbi(const shader::RadRayDxcAbiInfo& info) noexcept {
 bool AcquireForkCompiler(
     const DynamicLibrary& library,
     ComPtr<shader::IRadRayDxcCompiler>& compiler,
-    vector<CompileDiagnostic>* diagnostics = nullptr) {
+    string& diagnostics) {
+    if (!library.IsValid()) {
+        AppendDiagnostic(diagnostics, "RadRay DXC compiler library is unavailable");
+        return false;
+    }
     using DxcCreateInstanceFunction = decltype(&DxcCreateInstance);
     const DxcCreateInstanceFunction createInstance =
         library.GetFunction<DxcCreateInstanceFunction>("DxcCreateInstance");
     if (createInstance == nullptr) {
-        if (diagnostics != nullptr) {
-            AddForkError(*diagnostics, 2001, "RadRay DXC fork is missing DxcCreateInstance");
-        }
+        AppendDiagnostic(diagnostics, "RadRay DXC fork is missing DxcCreateInstance");
         return false;
     }
     ComPtr<shader::IRadRayDxcCompiler> candidate;
@@ -107,85 +124,66 @@ bool AcquireForkCompiler(
         shader::IID_IRadRayDxcCompiler,
         reinterpret_cast<void**>(candidate.GetAddressOf()));
     if (FAILED(createResult) || candidate == nullptr) {
-        if (diagnostics != nullptr) {
-            AddForkError(*diagnostics, 2002, "RadRay DXC fork rejected its extension CLSID");
-        }
+        AppendDiagnostic(diagnostics, "RadRay DXC fork rejected its extension CLSID");
         return false;
     }
     shader::RadRayDxcAbiInfo info{};
     if (FAILED(candidate->GetAbiInfo(&info)) || !IsValidForkAbi(info)) {
-        if (diagnostics != nullptr) {
-            AddForkError(*diagnostics, 2008, "RadRay DXC fork ABI or toolchain identity is invalid");
-        }
+        AppendDiagnostic(diagnostics, "RadRay DXC fork ABI or toolchain identity is invalid");
         return false;
     }
     compiler = std::move(candidate);
     return true;
 }
 
-void AppendForkDiagnostics(
+bool AppendForkDiagnostics(
     const ComPtr<shader::IRadRayDxcResult>& result,
-    vector<CompileDiagnostic>& diagnostics) {
-    if (result == nullptr) {
-        return;
-    }
+    string& diagnostics) {
     uint32_t count = 0;
-    if (FAILED(result->GetDiagnosticCount(&count))) {
-        AddForkError(diagnostics, 2008, "RadRay DXC result did not expose diagnostics");
-        return;
+    if (result == nullptr || FAILED(result->GetDiagnosticCount(&count))) {
+        AppendDiagnostic(diagnostics, "RadRay DXC result did not expose diagnostics");
+        return false;
     }
     for (uint32_t index = 0; index < count; ++index) {
         shader::RadRayDxcDiagnosticView diagnostic{};
-        if (FAILED(result->GetDiagnostic(index, &diagnostic))) {
-            AddForkError(diagnostics, 2008, "RadRay DXC result diagnostic access failed");
-            return;
+        if (FAILED(result->GetDiagnostic(index, &diagnostic)) ||
+            (diagnostic.MessageUtf8.Data == nullptr && diagnostic.MessageUtf8.Size != 0)) {
+            AppendDiagnostic(diagnostics, "RadRay DXC result diagnostic access failed");
+            return false;
         }
-        const char* data = reinterpret_cast<const char*>(diagnostic.MessageUtf8.Data);
-        diagnostics.push_back({
-            diagnostic.Code,
-            string{data == nullptr ? "" : data, diagnostic.MessageUtf8.Size}});
+        if (diagnostic.MessageUtf8.Size != 0) {
+            AppendDiagnostic(diagnostics, string_view{
+                                              reinterpret_cast<const char*>(diagnostic.MessageUtf8.Data), diagnostic.MessageUtf8.Size});
+        }
     }
-}
-
-shader::CompileStatus MapForkStatus(shader::RadRayDxcCompileStatus status) noexcept {
-    switch (status) {
-        case shader::RadRayDxcCompileStatus::Success:
-            return shader::CompileStatus::Success;
-        case shader::RadRayDxcCompileStatus::InvalidRequest:
-            return shader::CompileStatus::InvalidRequest;
-        case shader::RadRayDxcCompileStatus::ContractMismatch:
-            return shader::CompileStatus::ContractMismatch;
-        case shader::RadRayDxcCompileStatus::TargetFailure:
-            return shader::CompileStatus::TargetFailure;
-    }
-    return shader::CompileStatus::InvalidRequest;
+    return true;
 }
 
 bool DecodeForkContract(
     const ComPtr<shader::IRadRayDxcResult>& result,
     shader::ShaderContract& contract,
-    vector<CompileDiagnostic>& diagnostics) {
+    string& diagnostics) {
     shader::RadRayDxcBlobView blob{};
     if (FAILED(result->GetContractBlob(&blob)) || blob.Data == nullptr || blob.Size == 0) {
-        AddForkError(diagnostics, 2008, "RadRay DXC result has no contract blob");
+        AppendDiagnostic(diagnostics, "RadRay DXC result has no contract blob");
         return false;
     }
-    const DiscoveryResult decoded = DecodeWireShaderContract(
+    DiscoveryResult decoded = DecodeWireShaderContract(
         std::span<const byte>{reinterpret_cast<const byte*>(blob.Data), blob.Size});
     if (!decoded.Succeeded()) {
-        diagnostics.insert(diagnostics.end(), decoded.Diagnostics.begin(), decoded.Diagnostics.end());
+        AppendDiagnostic(diagnostics, decoded.Diagnostics);
         return false;
     }
-    contract = decoded.Contract;
+    contract = std::move(*decoded.Value);
     return true;
 }
 
 bool PopulateForkStages(
     CompileTargetLane& lane,
     const shader::ShaderContract& contract,
-    vector<CompileDiagnostic>& diagnostics) {
+    string& diagnostics) {
     if (lane.Metadata.size() < sizeof(shader::WireMetadataEnvelope)) {
-        AddForkError(diagnostics, 2008, "RadRay metadata envelope is truncated");
+        AppendDiagnostic(diagnostics, "RadRay metadata envelope is truncated");
         return false;
     }
     shader::WireMetadataEnvelope envelope{};
@@ -198,7 +196,7 @@ bool PopulateForkStages(
         (lane.Target == shader::ShaderTarget::SPIRV && envelope.RootSignature.Size != 0) ||
         !envelope.Bytecode.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
         envelope.Bytecode.Size != lane.Bytecode.size()) {
-        AddForkError(diagnostics, 2008, "RadRay metadata entry or bytecode range is invalid");
+        AppendDiagnostic(diagnostics, "RadRay metadata entry or bytecode range is invalid");
         return false;
     }
     const auto* entries = reinterpret_cast<const shader::WireEntryRecord*>(
@@ -212,14 +210,14 @@ bool PopulateForkStages(
             !record.Name.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
             record.InterfaceOffset > lane.Bytecode.size() ||
             record.InterfaceSize > lane.Bytecode.size() - record.InterfaceOffset) {
-            AddForkError(diagnostics, 2008, "RadRay metadata entry interface is invalid");
+            AppendDiagnostic(diagnostics, "RadRay metadata entry interface is invalid");
             return false;
         }
         const string_view name{
             reinterpret_cast<const char*>(lane.Metadata.data() + record.Name.Offset),
             record.Name.Size};
         if (name != expected.Name) {
-            AddForkError(diagnostics, 2008, "RadRay metadata entry name does not match contract");
+            AppendDiagnostic(diagnostics, "RadRay metadata entry name does not match contract");
             return false;
         }
         lane.Stages.push_back({
@@ -237,14 +235,14 @@ bool CopyForkLane(
     shader::ShaderTarget target,
     const shader::ShaderContract& contract,
     CompileTargetLane& lane,
-    vector<CompileDiagnostic>& diagnostics) {
+    string& diagnostics) {
     const shader::RadRayDxcTarget forkTarget = target == ShaderTarget::DXIL
         ? shader::RadRayDxcTarget::DXIL
         : shader::RadRayDxcTarget::SPIRV;
     shader::RadRayDxcLaneView view{};
     if (FAILED(result->GetTargetLane(forkTarget, &view)) || view.Bytecode.Data == nullptr ||
         view.Metadata.Data == nullptr || view.Bytecode.Size == 0 || view.Metadata.Size == 0) {
-        AddForkError(diagnostics, 2008, "RadRay DXC result did not return the requested target lane");
+        AppendDiagnostic(diagnostics, "RadRay DXC result did not return the requested target lane");
         return false;
     }
     lane.Target = target;
@@ -259,14 +257,12 @@ bool CopyForkLane(
 
 }  // namespace
 
-Client::Client(std::string_view compilerLibraryName) noexcept : _compilerLibrary(compilerLibraryName) {
+Client::Client(std::string_view compilerLibraryName) : _compilerLibrary(compilerLibraryName) {
     ComPtr<shader::IRadRayDxcCompiler> compiler;
-    vector<CompileDiagnostic> diagnostics;
+    string diagnostics;
     if (!_compilerLibrary.IsValid()) return;
-    if (!AcquireForkCompiler(_compilerLibrary, compiler, &diagnostics)) {
-        for (const auto& diagnostic : diagnostics) {
-            RADRAY_ERR_LOG("shader compiler unavailable: {}, {}", diagnostic.Code, diagnostic.Message);
-        }
+    if (!AcquireForkCompiler(_compilerLibrary, compiler, diagnostics)) {
+        RADRAY_ERR_LOG("shader compiler unavailable: {}", diagnostics);
         return;
     }
     shader::RadRayDxcAbiInfo info{};
@@ -302,45 +298,47 @@ DiscoveryResult Client::DiscoverSourceContract(
     std::span<const std::filesystem::path> includePaths) const {
     DiscoveryResult result;
     const auto encoded = shader::EncodeSourceContractRequest(request);
-    if (!encoded.has_value()) {
-        result.Diagnostics.push_back({2000, "discovery request is invalid"});
-        return result;
+    if (!encoded.Succeeded()) {
+        shader::AppendDiagnostic(result.Diagnostics, encoded.Diagnostics);
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
     MarshaledIncludePaths marshaled;
     if (!MarshalIncludePaths(includePaths, marshaled, result.Diagnostics)) {
-        return result;
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
     ComPtr<shader::IRadRayDxcCompiler> compiler;
-    if (!AcquireForkCompiler(_compilerLibrary, compiler, &result.Diagnostics)) {
-        result.Diagnostics.push_back({2000, "RadRay DXC fork is unavailable"});
-        return result;
+    if (!AcquireForkCompiler(_compilerLibrary, compiler, result.Diagnostics)) {
+        shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork is unavailable");
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
     const shader::RadRayDxcBlobView wireRequest{
-        reinterpret_cast<const uint8_t*>(encoded->data()),
-        static_cast<uint32_t>(encoded->size())};
+        reinterpret_cast<const uint8_t*>(encoded.Value->data()),
+        static_cast<uint32_t>(encoded.Value->size())};
     ComPtr<shader::IRadRayDxcResult> forkResult;
     const HRESULT hr = compiler->DiscoverSourceContract(
         wireRequest,
         marshaled.View(),
         reinterpret_cast<shader::IRadRayDxcResult**>(forkResult.GetAddressOf()));
     if (FAILED(hr) || forkResult == nullptr) {
-        result.Diagnostics.push_back({2001, "RadRay DXC fork discovery call failed"});
-        return result;
+        shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork discovery call failed");
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
     shader::RadRayDxcCompileStatus status{};
     if (FAILED(forkResult->GetStatus(&status))) {
-        result.Diagnostics.push_back({2008, "RadRay DXC fork discovery result has no status"});
-        return result;
+        shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork discovery result has no status");
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
-    AppendForkDiagnostics(forkResult, result.Diagnostics);
-    result.Status = MapForkStatus(status);
+    if (!AppendForkDiagnostics(forkResult, result.Diagnostics)) return WithSourceContext(std::move(result), request.SourceName, "discover");
     if (status != shader::RadRayDxcCompileStatus::Success) {
-        return result;
+        if (result.Diagnostics.empty()) {
+            AppendDiagnostic(result.Diagnostics, "RadRay DXC rejected the request without diagnostic text");
+        }
+        return WithSourceContext(std::move(result), request.SourceName, "discover");
     }
-    if (!DecodeForkContract(forkResult, result.Contract, result.Diagnostics)) {
-        result.Status = shader::CompileStatus::InvalidRequest;
-    }
-    return result;
+    shader::ShaderContract contract;
+    if (!DecodeForkContract(forkResult, contract, result.Diagnostics)) return WithSourceContext(std::move(result), request.SourceName, "discover");
+    result.Value = std::move(contract);
+    return WithSourceContext(std::move(result), request.SourceName, "discover");
 }
 
 CompileVariantResult Client::CompileVariant(
@@ -348,71 +346,73 @@ CompileVariantResult Client::CompileVariant(
     std::span<const std::filesystem::path> includePaths) const {
     CompileVariantResult result;
     const auto canonical = shader::CanonicalizeCompileVariantRequest(request);
-    if (!canonical.has_value() || canonical->RootSource.empty() || !IsAvailable()) {
-        result.Status = shader::CompileStatus::InvalidRequest;
-        result.Diagnostics.push_back({2000, "compile request is invalid or RadRay DXC fork is unavailable"});
-        return result;
+    if (!canonical.Succeeded()) {
+        shader::AppendDiagnostic(result.Diagnostics, canonical.Diagnostics);
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
+    }
+    if (canonical.Value->RootSource.empty()) {
+        shader::AppendDiagnostic(result.Diagnostics, "RootSource must not be empty");
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
     MarshaledIncludePaths marshaled;
     if (!MarshalIncludePaths(includePaths, marshaled, result.Diagnostics)) {
-        result.Status = shader::CompileStatus::InvalidRequest;
-        return result;
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
-    const auto encoded = shader::EncodeCanonicalCompileVariantRequest(*canonical);
-    if (!encoded.has_value()) {
-        result.Status = shader::CompileStatus::InvalidRequest;
-        result.Diagnostics.push_back({2000, "compile request canonicalization failed"});
-        return result;
+    const auto encoded = shader::EncodeCanonicalCompileVariantRequest(*canonical.Value);
+    if (!encoded.Succeeded()) {
+        shader::AppendDiagnostic(result.Diagnostics, encoded.Diagnostics);
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
     ComPtr<shader::IRadRayDxcCompiler> compiler;
-    if (!AcquireForkCompiler(_compilerLibrary, compiler, &result.Diagnostics)) {
-        result.Status = shader::CompileStatus::InvalidRequest;
-        return result;
+    if (!AcquireForkCompiler(_compilerLibrary, compiler, result.Diagnostics)) {
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
     const shader::RadRayDxcBlobView wireRequest{
-        reinterpret_cast<const uint8_t*>(encoded->data()),
-        static_cast<uint32_t>(encoded->size())};
+        reinterpret_cast<const uint8_t*>(encoded.Value->data()),
+        static_cast<uint32_t>(encoded.Value->size())};
     ComPtr<shader::IRadRayDxcResult> forkResult;
     const HRESULT hr = compiler->CompileVariant(
         wireRequest,
         marshaled.View(),
         reinterpret_cast<shader::IRadRayDxcResult**>(forkResult.GetAddressOf()));
     if (FAILED(hr) || forkResult == nullptr) {
-        result.Status = shader::CompileStatus::TargetFailure;
-        result.Diagnostics.push_back({2003, "RadRay DXC fork compile call failed"});
-        return result;
+        shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork compile call failed");
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
     shader::RadRayDxcCompileStatus status{};
     if (FAILED(forkResult->GetStatus(&status))) {
-        result.Status = shader::CompileStatus::TargetFailure;
-        result.Diagnostics.push_back({2008, "RadRay DXC fork compile result has no status"});
-        return result;
+        shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork compile result has no status");
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
-    AppendForkDiagnostics(forkResult, result.Diagnostics);
-    result.Status = MapForkStatus(status);
+    if (!AppendForkDiagnostics(forkResult, result.Diagnostics)) return WithSourceContext(std::move(result), request.SourceName, "compile");
     if (status != shader::RadRayDxcCompileStatus::Success) {
-        return result;
+        if (result.Diagnostics.empty()) {
+            AppendDiagnostic(result.Diagnostics, "RadRay DXC rejected the request without diagnostic text");
+        }
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
     shader::ShaderContract contract;
     if (!DecodeForkContract(forkResult, contract, result.Diagnostics)) {
-        result.Status = shader::CompileStatus::TargetFailure;
-        result.Lanes.clear();
-        return result;
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
     }
+    vector<CompileTargetLane> lanes;
     for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
-        if (!shader::HasTarget(canonical->Targets, target)) {
+        if (!shader::HasTarget(canonical.Value->Targets, target)) {
             continue;
         }
         CompileTargetLane lane;
         if (!CopyForkLane(forkResult, target, contract, lane, result.Diagnostics)) {
-            result.Status = shader::CompileStatus::TargetFailure;
-            result.Lanes.clear();
-            return result;
+            AppendDiagnostic(result.Diagnostics, target == ShaderTarget::DXIL ? "reading DXIL lane failed" : "reading SPIR-V lane failed");
+            return WithSourceContext(std::move(result), request.SourceName, "compile");
         }
-        result.Lanes.push_back(std::move(lane));
+        lanes.push_back(std::move(lane));
     }
-    result.Status = result.Lanes.empty() ? shader::CompileStatus::InvalidRequest : shader::CompileStatus::Success;
-    return result;
+    if (lanes.empty()) {
+        AppendDiagnostic(result.Diagnostics, "Targets did not select any compilation lane");
+        return WithSourceContext(std::move(result), request.SourceName, "compile");
+    }
+    result.Value = std::move(lanes);
+    return WithSourceContext(std::move(result), request.SourceName, "compile");
 }
 
 }  // namespace radray::shader_compiler
@@ -421,7 +421,7 @@ CompileVariantResult Client::CompileVariant(
 
 namespace radray::shader_compiler {
 
-Client::Client(std::string_view) noexcept : _compilerLibrary{} {}
+Client::Client(std::string_view) : _compilerLibrary{} {}
 bool Client::IsAvailable() const noexcept { return false; }
 std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept { return std::nullopt; }
 DiscoveryResult Client::DiscoverSourceContract(
@@ -438,19 +438,16 @@ DiscoveryResult Client::DiscoverSourceContract(
 DiscoveryResult Client::DiscoverSourceContract(
     const shader::SourceContractRequest& request,
     std::span<const std::filesystem::path>) const {
-    (void)request;
     DiscoveryResult result;
-    result.Status = shader::CompileStatus::InvalidRequest;
-    result.Diagnostics.push_back({2001, "RadRay DXC fork is unavailable on this platform"});
-    return result;
+    shader::AppendDiagnostic(result.Diagnostics, "RadRay DXC fork is unavailable on this platform");
+    return WithSourceContext(std::move(result), request.SourceName, "discover");
 }
 shader::CompileVariantResult Client::CompileVariant(
-    const shader::CompileVariantRequest&,
+    const shader::CompileVariantRequest& request,
     std::span<const std::filesystem::path>) const {
     shader::CompileVariantResult result;
-    result.Status = shader::CompileStatus::InvalidRequest;
-    result.Diagnostics.push_back({2000, "shader compiler client is unavailable on this platform"});
-    return result;
+    shader::AppendDiagnostic(result.Diagnostics, "shader compiler client is unavailable on this platform");
+    return WithSourceContext(std::move(result), request.SourceName, "compile");
 }
 
 }  // namespace radray::shader_compiler

@@ -1,6 +1,9 @@
 > - 适用: 2026-10-16 Render Framework 重构后的 CPU 时间回退定位
 > - 权威: 经授权保存的测量与代码分析；未实施优化，不作为新的框架契约
-> - 锚点: `benchmarks/bench_material_scene/material_scene_workload.cpp`, `modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/src/render_framework/material_template.cpp`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`benchmarks/bench_material_scene/material_scene_workload.cpp`, `modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/src/render_framework/material_template.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # Render Framework CPU 回退定位
 

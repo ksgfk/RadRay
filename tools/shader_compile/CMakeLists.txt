@@ -14,4 +14,5 @@ if (MSVC)
             "$<$<CONFIG:MinSizeRel>:-map:${RADRAY_BUILD_PATH}/MinSizeRel/radray_shader_compile.map>")
 endif()
 
-radray_deploy_dxc_runtime(radray_shader_compile)
+add_executable(RadRay::shader_compile ALIAS radray_shader_compile)
+set_target_properties(radray_shader_compile PROPERTIES EXPORT_NAME shader_compile)

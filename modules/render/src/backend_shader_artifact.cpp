@@ -3,20 +3,6 @@
 #include <utility>
 
 namespace radray::render {
-namespace {
-
-void SetError(
-    BackendShaderArtifactError* error,
-    BackendShaderArtifactFailure failure,
-    shader::ShaderArtifactDecodeError decodeFailure = shader::ShaderArtifactDecodeError::None) noexcept {
-    if (error != nullptr) {
-        error->Failure = failure;
-        error->DecodeFailure = decodeFailure;
-    }
-}
-
-}  // namespace
-
 PreparedBackendShaderArtifact::PreparedBackendShaderArtifact(
     shader::DxilShaderArtifactView artifact, ResolvedD3D12Layout layout) noexcept
     : _artifact(std::move(artifact)), _layout(std::move(layout)) {}
@@ -124,93 +110,78 @@ std::optional<ShaderBlobCategory> GetShaderBlobCategory(
     return std::nullopt;
 }
 
-std::optional<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
+shader::DiagnosticResult<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
     RenderBackend backend,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
-    const ShaderProgramLayoutRecipe& recipe,
-    Nullable<BackendShaderArtifactError*> outError) noexcept {
-    auto* error = outError.HasValue() ? outError.Get() : nullptr;
-    SetError(error, BackendShaderArtifactFailure::None);
+    const ShaderProgramLayoutRecipe& recipe) {
     const std::optional<shader::ShaderTarget> backendTarget = GetShaderTargetForBackend(backend);
     if (!backendTarget.has_value()) {
-        SetError(error, BackendShaderArtifactFailure::UnsupportedBackend);
-        return std::nullopt;
+        return {std::nullopt, "shader artifact backend is unsupported or was not built"};
     }
     if (backendTarget.value() != options.Target) {
-        SetError(error, BackendShaderArtifactFailure::TargetMismatch);
-        return std::nullopt;
+        return {std::nullopt, "shader artifact target does not match the requested device/backend"};
     }
-    shader::ShaderArtifactDecodeError decodeError = shader::ShaderArtifactDecodeError::None;
     switch (options.Target) {
         case shader::ShaderTarget::DXIL: {
-            std::optional<shader::DxilShaderArtifactView> artifact =
-                shader::DecodeDxilShaderArtifact(blob, options, &decodeError);
-            if (!artifact.has_value()) {
-                SetError(error, BackendShaderArtifactFailure::DecodeFailed, decodeError);
-                return std::nullopt;
+            auto artifact =
+                shader::DecodeDxilShaderArtifact(blob, options);
+            if (!artifact.Succeeded()) {
+                return {std::nullopt, std::move(artifact.Diagnostics)};
             }
             std::optional<ResolvedD3D12Layout> resolved =
-                ResolveD3D12Layout(artifact.value(), recipe.D3D12);
+                ResolveD3D12Layout(*artifact.Value, recipe.D3D12);
             if (!resolved.has_value()) {
-                SetError(error, BackendShaderArtifactFailure::LayoutResolveFailed);
-                return std::nullopt;
+                return {std::nullopt, "D3D12 shader artifact pipeline layout resolution failed"};
             }
-            return PreparedBackendShaderArtifact{std::move(*artifact), std::move(*resolved)};
+            return {PreparedBackendShaderArtifact{std::move(*artifact.Value), std::move(*resolved)}, std::move(artifact.Diagnostics)};
         }
         case shader::ShaderTarget::SPIRV: {
-            std::optional<shader::SpirvShaderArtifactView> artifact =
-                shader::DecodeSpirvShaderArtifact(blob, options, &decodeError);
-            if (!artifact.has_value()) {
-                SetError(error, BackendShaderArtifactFailure::DecodeFailed, decodeError);
-                return std::nullopt;
+            auto artifact =
+                shader::DecodeSpirvShaderArtifact(blob, options);
+            if (!artifact.Succeeded()) {
+                return {std::nullopt, std::move(artifact.Diagnostics)};
             }
             std::optional<ResolvedVulkanLayout> resolved =
-                ResolveVulkanLayout(artifact.value(), recipe.Vulkan);
+                ResolveVulkanLayout(*artifact.Value, recipe.Vulkan);
             if (!resolved.has_value()) {
-                SetError(error, BackendShaderArtifactFailure::LayoutResolveFailed);
-                return std::nullopt;
+                return {std::nullopt, "Vulkan shader artifact pipeline layout resolution failed"};
             }
-            return PreparedBackendShaderArtifact{std::move(*artifact), std::move(*resolved)};
+            return {PreparedBackendShaderArtifact{std::move(*artifact.Value), std::move(*resolved)}, std::move(artifact.Diagnostics)};
         }
     }
-    SetError(error, BackendShaderArtifactFailure::TargetMismatch);
-    return std::nullopt;
+    return {std::nullopt, "shader artifact target does not match the requested device/backend"};
 }
 
-std::optional<ResolvedLayoutHash> ResolveBackendLayoutHash(
+shader::DiagnosticResult<ResolvedLayoutHash> ResolveBackendLayoutHash(
     RenderBackend backend, std::span<const byte> blob,
-    const shader::ShaderArtifactDecodeOptions& options, const ShaderProgramLayoutRecipe& recipe,
-    BackendShaderArtifactError* error) noexcept {
-    auto prepared = PrepareBackendShaderArtifact(backend, blob, options, recipe, error);
-    if (!prepared) return std::nullopt;
-    return prepared->LayoutHash();
+    const shader::ShaderArtifactDecodeOptions& options, const ShaderProgramLayoutRecipe& recipe) {
+    auto prepared = PrepareBackendShaderArtifact(backend, blob, options, recipe);
+    if (!prepared.Succeeded()) return {std::nullopt, std::move(prepared.Diagnostics)};
+    return {prepared.Value->LayoutHash(), std::move(prepared.Diagnostics)};
 }
 
-std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device, std::span<const byte> blob,
-    const shader::ShaderArtifactDecodeOptions& options, const ShaderProgramLayoutRecipe& recipe,
-    BackendShaderArtifactError* error) noexcept {
-    auto prepared = PrepareBackendShaderArtifact(device.GetBackend(), blob, options, recipe, error);
-    if (!prepared) return std::nullopt;
-    return CreateBackendShaderArtifact(device, std::move(*prepared), error);
+    const shader::ShaderArtifactDecodeOptions& options, const ShaderProgramLayoutRecipe& recipe) {
+    auto prepared = PrepareBackendShaderArtifact(device.GetBackend(), blob, options, recipe);
+    if (!prepared.Succeeded()) return {std::nullopt, std::move(prepared.Diagnostics)};
+    auto created = CreateBackendShaderArtifact(device, std::move(*prepared.Value));
+    shader::AppendDiagnostic(prepared.Diagnostics, created.Diagnostics);
+    created.Diagnostics = std::move(prepared.Diagnostics);
+    return created;
 }
 
-std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
-    PreparedBackendShaderArtifact prepared,
-    Nullable<BackendShaderArtifactError*> outError) noexcept {
-    auto* error = outError.HasValue() ? outError.Get() : nullptr;
-    SetError(error, BackendShaderArtifactFailure::None);
+    PreparedBackendShaderArtifact prepared) {
     const std::optional<shader::ShaderTarget> backendTarget =
         GetShaderTargetForBackend(device.GetBackend());
     if (!backendTarget.has_value()) {
-        SetError(error, BackendShaderArtifactFailure::UnsupportedBackend);
-        return std::nullopt;
+        return {std::nullopt, "shader artifact backend is unsupported or was not built"};
     }
     if (backendTarget.value() != prepared.GetTarget()) {
-        SetError(error, BackendShaderArtifactFailure::TargetMismatch);
-        return std::nullopt;
+        return {std::nullopt, "shader artifact target does not match the requested device/backend"};
     }
 
     switch (prepared.GetTarget()) {
@@ -221,16 +192,15 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
             auto* factory = dynamic_cast<detail::D3D12PipelineLayoutFactory*>(&device);
             Nullable<unique_ptr<PipelineLayout>> layout = factory ? factory->CreatePipelineLayout(resolved) : nullptr;
             if (!layout.HasValue()) {
-                SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
-                return std::nullopt;
+                return {std::nullopt, "D3D12 shader artifact native pipeline layout creation failed"};
             }
-            return BackendShaderArtifact{
-                std::move(artifact),
-                std::move(resolved),
-                layout.Release()};
+            return {BackendShaderArtifact{
+                        std::move(artifact),
+                        std::move(resolved),
+                        layout.Release()},
+                    {}};
 #else
-            SetError(error, BackendShaderArtifactFailure::UnsupportedBackend);
-            return std::nullopt;
+            return {std::nullopt, "shader artifact backend is unsupported or was not built"};
 #endif
         }
         case shader::ShaderTarget::SPIRV: {
@@ -240,21 +210,19 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
             auto* factory = dynamic_cast<detail::VulkanPipelineLayoutFactory*>(&device);
             Nullable<unique_ptr<PipelineLayout>> layout = factory ? factory->CreatePipelineLayout(resolved) : nullptr;
             if (!layout.HasValue()) {
-                SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
-                return std::nullopt;
+                return {std::nullopt, "Vulkan shader artifact native pipeline layout creation failed"};
             }
-            return BackendShaderArtifact{
-                std::move(artifact),
-                std::move(resolved),
-                layout.Release()};
+            return {BackendShaderArtifact{
+                        std::move(artifact),
+                        std::move(resolved),
+                        layout.Release()},
+                    {}};
 #else
-            SetError(error, BackendShaderArtifactFailure::UnsupportedBackend);
-            return std::nullopt;
+            return {std::nullopt, "shader artifact backend is unsupported or was not built"};
 #endif
         }
     }
-    SetError(error, BackendShaderArtifactFailure::TargetMismatch);
-    return std::nullopt;
+    return {std::nullopt, "shader artifact target does not match the requested device/backend"};
 }
 
 }  // namespace radray::render

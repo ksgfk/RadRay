@@ -1,6 +1,9 @@
 > - 适用: World 紧凑 local TRS 存储原型的 CPU 场景同步对照与接口迁移评估
 > - 权威: 2026-09-24 本机实验快照，不是跨机器性能承诺；当前接口以 render-framework 为准
-> - 锚点: `modules/runtime/include/radray/runtime/game_framework/world_transform_store.h`, `modules/runtime/src/game_framework/world_transform_store.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_framework/scene_writer.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `modules/runtime/tests/scene_sync_workload.cpp`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/include/radray/runtime/game_framework/world_transform_store.h`, `modules/runtime/src/game_framework/world_transform_store.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_framework/scene_writer.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `modules/runtime/tests/scene_sync_workload.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # World → Scene 变换存储原型测量
 
@@ -32,7 +35,7 @@ F=2、GT+RT 双线程、五轮中位数：10 万对象全量随机更新从 **15
 
 ## 实现及保留的边界
 
-下文是本次实验实现摘要，长期契约见 [Runtime 宿主](../architecture/render-framework.md#层级与渲染连接)。
+下文是本次实验实现摘要，长期契约见 [Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md#层级与渲染连接)。
 
 1. 新增 WorldTransformStore，以紧凑的 48 字节 `{TransformId, LocalTransform}` 行保存注册组件的权威 local TRS；setter 直接写该存储。组件缓存内部指针，容量增长时统一修正。
 2. dirty bit 去重，同时保留紧凑变化行索引和 64 槽位变化块。稀疏时一次 gather，密集时按块内连续范围复制；超过阈值才排序块索引。Collect 不再逐组件排序、解引用和重新打包 TRS，也不扫描整份静止场景。
@@ -278,7 +281,7 @@ CV 是五个运行均值的变异系数。近似持平且范围重叠的场景�
 
 本机额外留档根目录为 `artifacts/transform_store_20260924`，被 Git 忽略：`baseline/sources`、`prototype_v3/sources` 保存前后源码；各自 `source.patch` 保存相对 Git HEAD 的完整差异（包含开始时用户已有改动）；`implementation.patch` 仅含本轮 C++ 改动。该目录还保存原始 native JSON、构建/测试日志与测量脚本。`quick*`、`sweep`、`prototype` 是开发中间版本，不能替代本报告的最终结果。
 
-构建与原生基准用法见[性能测量](../guide/performance.md#world--renderscene-状态同步基准)。比较新旧版时先分别保留 Release 二进制，再固定 affinity 串行交替执行；原生示例（路径需替换为对应版本）：
+构建与原生基准用法见[性能测量](2026-10-21-runtime-performance-snapshot.md#world--renderscene-状态同步基准)。比较新旧版时先分别保留 Release 二进制，再固定 affinity 串行交替执行；原生示例（路径需替换为对应版本）：
 
 ```powershell
 ./build_transform_perf/_build/Release/bench_scene_sync.exe `
