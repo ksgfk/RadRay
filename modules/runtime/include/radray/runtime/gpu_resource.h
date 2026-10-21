@@ -1,0 +1,356 @@
+#pragma once
+
+#include <atomic>
+#include <limits>
+#include <optional>
+#include <span>
+
+#include <radray/intrusive_ptr.h>
+#include <radray/nullable.h>
+#include <radray/render/rhi.h>
+#include <radray/runtime/gpu_mesh.h>
+#include <radray/types.h>
+
+namespace radray {
+
+class MeshResource;
+
+/// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
+/// 由 GpuSystem 从 flight 命令池分配前后计时命令，包裹实际提交的应用批次；跳过帧不采样。
+/// CompleteFlight 时 resolve。应用只读 GetLastGpuTimeMs()。后端 readback barrier 差异内部隐藏。
+class GpuFrameProfiler {
+public:
+    GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount);
+    static unique_ptr<GpuFrameProfiler> TryCreate(render::Device* device, render::CommandQueue* queue, uint32_t flightCount);
+    ~GpuFrameProfiler() noexcept;
+    GpuFrameProfiler(const GpuFrameProfiler&) = delete;
+    GpuFrameProfiler(GpuFrameProfiler&&) = delete;
+    GpuFrameProfiler& operator=(const GpuFrameProfiler&) = delete;
+    GpuFrameProfiler& operator=(GpuFrameProfiler&&) = delete;
+
+    /// 录制开始时 reset pool + 写 Top timestamp。
+    void BeginFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
+    /// 帧尾(提交之前):写 Bottom timestamp + resolve 到 readback(含后端 barrier)。
+    void EndFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
+    /// flight fence 完成后:读回并换算耗时。
+    void Resolve(uint32_t flightIndex);
+
+    float GetLastGpuTimeMs() const noexcept { return _lastGpuTimeMs.load(std::memory_order_relaxed); }
+
+private:
+    explicit GpuFrameProfiler(render::CommandQueue* queue) noexcept : _queue(queue) {}
+    bool Initialize(render::Device* device, uint32_t flightCount);
+    static constexpr uint32_t TimestampQueryCount = 2;
+
+    struct FrameTiming {
+        unique_ptr<render::QueryPool> Pool;
+        unique_ptr<render::Buffer> Readback;
+        bool Pending{false};
+    };
+
+    render::CommandQueue* _queue;
+    bool _readbackNeedsBarrier{false};
+    vector<FrameTiming> _frames;
+    std::atomic<float> _lastGpuTimeMs{0.0f};
+};
+
+struct UploadMemoryStats {
+    uint64_t PageCount{0};
+    uint64_t PageCapacityBytes{0};
+    uint64_t CommitCount{0};
+    uint64_t CommittedBytes{0};
+    uint64_t RecordedRangeCount{0};
+    uint64_t FlushedRangeCount{0};
+};
+
+struct MappedBufferRange {
+    render::Buffer* Target{nullptr};
+    render::BufferRange Range{};
+};
+
+/// 收集持久映射缓冲区的写入范围，在提交前按后端完成刷新。
+class HostWriteBatch {
+public:
+    HostWriteBatch();
+
+    void Record(render::Buffer* target, render::BufferRange range);
+    void Flush(render::Device& device) noexcept;
+
+    bool Empty() const noexcept { return _ranges.empty(); }
+    bool IsSealed() const noexcept { return _sealed; }
+    std::span<const MappedBufferRange> GetRanges() const noexcept { return _ranges; }
+    const UploadMemoryStats& GetStats() const noexcept { return _stats; }
+
+    void Seal() noexcept;
+    void BeginReservation() noexcept;
+    void EndReservation() noexcept;
+    void Reset() noexcept;
+    void RecordPageAllocation(uint64_t capacity) noexcept;
+
+private:
+    vector<MappedBufferRange> _ranges;
+    UploadMemoryStats _stats{};
+    bool _sealed{false};
+    uint32_t _reservations{0};
+};
+
+/// 在作用域内映射缓冲区范围，并自动完成相应的主机访问操作。
+class ScopedBufferMap {
+public:
+    ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept;
+    ~ScopedBufferMap() noexcept;
+
+    ScopedBufferMap(const ScopedBufferMap&) = delete;
+    ScopedBufferMap& operator=(const ScopedBufferMap&) = delete;
+    ScopedBufferMap(ScopedBufferMap&&) = delete;
+    ScopedBufferMap& operator=(ScopedBufferMap&&) = delete;
+
+    void* Data() const noexcept { return _data; }
+
+    template <typename T>
+    T* DataAs() const noexcept {
+        return static_cast<T*>(_data);
+    }
+
+    explicit operator bool() const noexcept { return _data != nullptr; }
+
+private:
+    render::Buffer* _buffer{nullptr};
+    void* _data{nullptr};
+    render::BufferRange _range{};
+    bool _write{false};
+};
+
+struct BufferUploadRequest {
+    std::span<const byte> SrcData;
+    render::Buffer* DstBuffer;
+    uint64_t DstOffset{0};
+    render::BufferStates Before{render::BufferState::Common};
+    render::BufferStates After{render::BufferState::Common};
+};
+
+struct TextureUploadRequest {
+    std::span<const byte> SrcData;
+    render::Texture* DstTexture;
+    render::SubresourceRange DstRange;
+    uint64_t SrcRowPitch{0};
+    render::TextureStates Before{render::TextureState::Undefined};
+    render::TextureStates After{render::TextureState::ShaderRead};
+};
+struct TextureRegionUploadRequest {
+    std::span<const byte> SrcData;
+    render::Texture* DstTexture;
+    /// Runtime supplies staging SourceOffset/RowPitch; the remaining fields describe the destination.
+    render::BufferTextureCopyRegion Region;
+    uint64_t SrcRowPitch{0};
+    render::TextureStates Before{render::TextureState::Undefined};
+    render::TextureStates After{render::TextureState::ShaderRead};
+};
+
+/// 持有持久映射的上传缓冲区，并提供线性子分配。
+class MappedUploadPage {
+public:
+    struct Allocation {
+        render::Buffer* Target{nullptr};
+        uint64_t Offset{0};
+        uint64_t Size{0};
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+        bool IsValid() const noexcept { return Target != nullptr; }
+    };
+
+    /// 仅可移动的映射切片，提交时记录实际写入范围。
+    class Reservation {
+    public:
+        Reservation() noexcept = default;
+        Reservation(const Reservation&) = delete;
+        Reservation& operator=(const Reservation&) = delete;
+        Reservation(Reservation&& other) noexcept;
+        Reservation& operator=(Reservation&& other) noexcept;
+        ~Reservation() noexcept;
+
+        void* Data() const noexcept { return _data; }
+        render::Buffer* Target() const noexcept { return _target; }
+        uint64_t Offset() const noexcept { return _offset; }
+        uint64_t Capacity() const noexcept { return _capacity; }
+        bool IsValid() const noexcept { return _target != nullptr; }
+
+        Allocation Commit(uint64_t actualSize);
+
+    private:
+        friend class MappedUploadPage;
+
+        Reservation(
+            render::Buffer* target,
+            void* data,
+            uint64_t offset,
+            uint64_t capacity,
+            HostWriteBatch* hostWrites) noexcept;
+        void AbandonCheck() const noexcept;
+
+        render::Buffer* _target{nullptr};
+        void* _data{nullptr};
+        uint64_t _offset{0};
+        uint64_t _capacity{0};
+        HostWriteBatch* _hostWrites{nullptr};
+        bool _committed{true};
+    };
+
+    explicit MappedUploadPage(
+        unique_ptr<render::Buffer> buffer,
+        Nullable<HostWriteBatch*> allocationStats = nullptr) noexcept;
+    MappedUploadPage(const MappedUploadPage&) = delete;
+    MappedUploadPage& operator=(const MappedUploadPage&) = delete;
+    ~MappedUploadPage() noexcept;
+
+    Reservation Reserve(uint64_t size, uint64_t alignment, HostWriteBatch& hostWrites);
+    Reservation ReserveAt(uint64_t offset, uint64_t size, HostWriteBatch& hostWrites);
+    void Reset() noexcept { _used = 0; }
+
+    render::Buffer* GetBuffer() const noexcept { return _buffer.get(); }
+    uint64_t GetCapacity() const noexcept { return _buffer != nullptr ? _buffer->GetDesc().Size : 0; }
+    uint64_t GetUsed() const noexcept { return _used; }
+
+private:
+    unique_ptr<render::Buffer> _buffer;
+    void* _mapped{nullptr};
+    uint64_t _used{0};
+};
+
+/// 上传堆暂存页池，按页线性分配，并在关联 flight 完成后回收标准页。
+class StagingBufferPool {
+public:
+    using Allocation = MappedUploadPage::Allocation;
+    using Reservation = MappedUploadPage::Reservation;
+
+    struct Descriptor {
+        uint64_t PageSize{8ull * 1024 * 1024};
+        uint64_t MaxCachedBytes{64ull * 1024 * 1024};
+        uint32_t MaxCachedPages{8};
+    };
+
+    StagingBufferPool(render::Device* device, const Descriptor& desc) noexcept;
+    explicit StagingBufferPool(render::Device* device) noexcept;
+    ~StagingBufferPool() noexcept;
+    StagingBufferPool(const StagingBufferPool&) = delete;
+    StagingBufferPool& operator=(const StagingBufferPool&) = delete;
+
+    void BeginEpoch(HostWriteBatch& hostWrites);
+
+    /// 从上传页中预留暂存内存；大于标准页的请求会使用一次性缓冲区。
+    Reservation Reserve(uint64_t size, uint64_t alignment = 1);
+    /// Returns an invalid reservation on allocation failure; existing active pages remain owned.
+    Reservation TryReserve(uint64_t size, uint64_t alignment = 1);
+
+    /// 封口本 epoch，活跃页保留至真实完成。
+    void SealEpoch();
+
+    /// 真实完成后回收标准页，并释放一次性缓冲区。
+    void CompleteEpoch();
+
+private:
+    struct Page {
+        unique_ptr<MappedUploadPage> Upload;
+        bool Cacheable{true};
+    };
+
+    Page CreatePage(uint64_t capacity, bool cacheable);
+    Nullable<Page*> AcquireStandardPage();
+    void TrimFreeList() noexcept;
+
+    render::Device* _device;
+    Descriptor _desc;
+    vector<Page> _active;
+    bool _sealed{false};
+    vector<Page> _freeList;
+    uint64_t _nextPageId{0};
+    HostWriteBatch* _hostWrites{nullptr};
+};
+
+/// 向外部命令缓冲区记录资源复制命令，并管理所需的暂存页。
+class ResourceUploader {
+public:
+    ResourceUploader(render::Device* device, StagingBufferPool& stagingPool);
+    ~ResourceUploader() noexcept;
+    ResourceUploader(const ResourceUploader&) = delete;
+    ResourceUploader& operator=(const ResourceUploader&) = delete;
+
+    void UploadBuffer(render::CommandBuffer* cmdBuffer, const BufferUploadRequest& request);
+    /// Stages every range before recording any command. Failure leaves destination resources untouched.
+    /// Ranges must be ordered, non-overlapping and share one destination and Before/After states.
+    bool TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, std::span<const BufferUploadRequest> requests);
+    void UploadTexture(render::CommandBuffer* cmdBuffer, const TextureUploadRequest& request);
+    /// Validates and stages the whole batch before recording destination changes.
+    /// Barriers affect exactly one mip/layer per request. Caller retains retry data for skipped flights.
+    bool TryUploadTextureRegions(render::CommandBuffer* cmdBuffer, std::span<const TextureRegionUploadRequest> requests);
+    std::optional<GpuMesh> UploadMeshResource(
+        render::CommandBuffer* cmdBuffer,
+        const MeshResource& meshResource);
+
+    render::Device* GetDevice() const noexcept { return _device; }
+
+private:
+    render::Device* _device;
+    StagingBufferPool& _stagingPool;
+    vector<StagingBufferPool::Allocation> _bufferUploads;
+    vector<render::ResourceBarrierDescriptor> _bufferUploadBarriers;
+};
+
+/// 从上传块中分配满足对齐要求的帧内常量缓冲区切片。
+class DynamicCBufferArena {
+public:
+    struct Descriptor {
+        uint64_t BasicSize{256 * 1024};
+        uint64_t Alignment{256};
+        uint64_t MaxResetSize{std::numeric_limits<uint64_t>::max()};
+        string NamePrefix{};
+    };
+
+    using Allocation = MappedUploadPage::Allocation;
+    using Reservation = MappedUploadPage::Reservation;
+
+    /// 持有一个用作 Arena 后备存储的映射上传页。
+    class Block {
+    public:
+        explicit Block(unique_ptr<MappedUploadPage> page) noexcept;
+        Block(const Block&) = delete;
+        Block& operator=(const Block&) = delete;
+        ~Block() noexcept = default;
+
+        unique_ptr<MappedUploadPage> Page;
+    };
+
+    DynamicCBufferArena(
+        render::Device* device,
+        HostWriteBatch* hostWrites,
+        const Descriptor& desc) noexcept;
+    DynamicCBufferArena(render::Device* device, HostWriteBatch* hostWrites) noexcept;
+    DynamicCBufferArena(const DynamicCBufferArena&) = delete;
+    DynamicCBufferArena& operator=(const DynamicCBufferArena&) = delete;
+    DynamicCBufferArena(DynamicCBufferArena&& other) noexcept;
+    DynamicCBufferArena& operator=(DynamicCBufferArena&& other) noexcept;
+    ~DynamicCBufferArena() noexcept;
+
+    bool IsValid() const noexcept;
+    void Destroy() noexcept;
+    Reservation Reserve(uint64_t size) noexcept;
+    void Reset() noexcept;
+    void Clear() noexcept;
+    bool Contains(const render::Buffer* buffer) const noexcept;
+    uint64_t GetMaxResetSize() const noexcept { return _desc.MaxResetSize; }
+
+    friend void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept;
+
+private:
+    Nullable<Block*> GetOrCreateBlock(uint64_t size) noexcept;
+
+    render::Device* _device;
+    HostWriteBatch* _hostWrites;
+    vector<unique_ptr<Block>> _blocks;
+    Descriptor _desc;
+    size_t _activeBlockIndex{};
+    uint64_t _minBlockSize{};
+    uint64_t _allocatedThisFrame{};
+};
+
+}  // namespace radray

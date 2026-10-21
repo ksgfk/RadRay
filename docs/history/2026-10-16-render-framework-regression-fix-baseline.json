@@ -1,0 +1,71 @@
+{
+  "status": "phase 0 baseline for the render framework CPU regression fix plan; not a finalized contract",
+  "commit": "06b8c236e10e5af0b2a17777ace9ebce4c767a07",
+  "worktree_changed_files": [
+    "benchmarks/bench_material_scene/bench_material_scene.cpp",
+    "benchmarks/bench_material_scene/material_scene_workload.cpp",
+    "benchmarks/bench_material_scene/material_scene_workload.h",
+    "docs/guide/performance.md",
+    "modules/runtime/src/render_framework/renderer.cpp",
+    "docs/history/2026-10-16-render-framework-regression-fix-baseline.csv",
+    "docs/history/2026-10-16-render-framework-regression-fix-baseline.json",
+    "docs/history/2026-10-16-render-framework-regression-fix-plan.md"
+  ],
+  "method": "Release build of the permanent benchmark. CompileOnly resumes Google Benchmark timing only inside FrameBuilder::Compile; CompletionCpu resumes timing only after CompleteFlightIfReady returns. All draws are still recorded and submitted. Each case: 500 (CompileOnly) or 1000 (CompletionCpu) iterations x 3 repetitions.",
+  "build": {
+    "generator": "Visual Studio 18 2026",
+    "config": "Release",
+    "target": "bench_material_scene",
+    "profiler": "RADRAY_ENABLE_PROFILER=ON",
+    "profiler_note": "the diagnosis ran profiler OFF; absolute numbers are not directly comparable across configs",
+    "cpu": "24 x 3418 MHz",
+    "gpu": "NVIDIA GeForce RTX 4080",
+    "d3d12_driver": "32.0.16.1742",
+    "vulkan_api": "1.4.351"
+  },
+  "runs": [
+    {
+      "name": "compile-only",
+      "command": [
+        "F:\\cpp\\RadRay\\build_debug\\_build\\Release\\bench_material_scene.exe",
+        "--benchmark_filter=MaterialScene/CompileOnly/",
+        "--benchmark_min_time=500x",
+        "--benchmark_repetitions=3",
+        "--benchmark_out_format=json",
+        "--benchmark_out=build_debug/fix-plan-baseline/compile-only.json"
+      ],
+      "output": "build_debug/fix-plan-baseline/compile-only.json"
+    },
+    {
+      "name": "completion-cpu",
+      "command": [
+        "F:\\cpp\\RadRay\\build_debug\\_build\\Release\\bench_material_scene.exe",
+        "--benchmark_filter=MaterialScene/CompletionCpu/",
+        "--benchmark_min_time=1000x",
+        "--benchmark_repetitions=3",
+        "--benchmark_out_format=json",
+        "--benchmark_out=build_debug/fix-plan-baseline/completion-cpu.json"
+      ],
+      "output": "build_debug/fix-plan-baseline/completion-cpu.json"
+    }
+  ],
+  "sha256": {
+    "bench_material_scene.exe": "de3de1c6f6cb60e65ebf40a726f3b7ffb51a9c9ea05ee6ef375f4e06668b973a",
+    "benchmarks/bench_material_scene/bench_material_scene.cpp": "60d512e8efc7e32d8f2d773b78a68f634bf21524e2913c1bd59c60d3fead7176",
+    "benchmarks/bench_material_scene/material_scene_workload.cpp": "d895494428d73b733c0dfa59864c4389a62ec1483db43effd8665df73219912f",
+    "benchmarks/bench_material_scene/material_scene_workload.h": "ffd17217cb0271c3c6949defe1704d6d982fa640b35ba7174cf10513fb78ff9d",
+    "modules/runtime/src/render_framework/renderer.cpp": "faa1df3906186270d752603f07ecb38f3542c7354e482a3e4d8bf564b1742226",
+    "build_debug/fix-plan-baseline/compile-only.json": "1f3cbeedb4c92eee611973b3dd63e740e268860cf7d25fd248522040b21d572b",
+    "build_debug/fix-plan-baseline/completion-cpu.json": "ad22b1e6df50f76d1ac34e2e992d6b72f1f287f36d660a203e10366a627e45ce",
+    "2026-10-16-render-framework-regression-fix-baseline.csv": "efbb5297c4a81983df85fe5db492db63e4c714ed28989176a11bc3b6bd7e3ce3"
+  },
+  "results_file": "2026-10-16-render-framework-regression-fix-baseline.csv",
+  "notes": [
+    "baseline is the profiler-ON (RADRAY_ENABLE_PROFILER=ON) Release retest; no profiler-OFF build was produced (user decision).",
+    "local raw output lives in build_debug/fix-plan-baseline/ and is not committed; the CSV keeps the medians.",
+    "CompileOnly reproduces the report shape: near-linear in draws/frame with seven material value variants.",
+    "CompileOnly d3d12 M32..M300 repeat-run CV is 14-37%; rely on curve shape, not single-point absolutes.",
+    "CompletionCpu excludes the fence wait; it scales with draws/frame and is microseconds at M1.",
+    "production source change in this baseline is limited to RADRAY_PROFILE_SCOPE_N in renderer.cpp plus the benchmark hooks."
+  ]
+}

@@ -1,0 +1,97 @@
+#pragma once
+
+#ifdef RADRAY_ENABLE_D3D12
+
+#include <optional>
+
+#include <radray/types.h>
+#include <radray/logger.h>
+#include <radray/utility.h>
+#include <radray/render/rhi.h>
+
+#include <radray/platform/win32_headers.h>
+#include <wrl.h>
+#include <dxgi1_6.h>
+#include <directx/d3dx12.h>
+#include <directx/d3d12shader.h>
+#define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
+#include <D3D12MemAlloc.h>
+
+namespace radray::render::d3d12 {
+
+using Microsoft::WRL::ComPtr;
+
+class Win32Event {
+public:
+    Win32Event() noexcept = default;
+    ~Win32Event() noexcept;
+    Win32Event(const Win32Event& other) noexcept = delete;
+    Win32Event(Win32Event&& other) noexcept;
+    Win32Event& operator=(Win32Event&& other) noexcept;
+    Win32Event& operator=(const Win32Event& other) noexcept = delete;
+
+    HANDLE Get() const noexcept { return _event; }
+
+    void Destroy() noexcept;
+
+    static std::optional<Win32Event> Create() noexcept;
+
+private:
+    HANDLE _event{nullptr};
+};
+
+
+std::string_view GetErrorName(HRESULT hr) noexcept;
+
+void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
+
+bool IsStencilFormatDXGI(DXGI_FORMAT fmt) noexcept;
+
+DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
+
+DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
+
+D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
+DXGI_FORMAT MapType(TextureFormat v) noexcept;
+D3D12_HEAP_TYPE MapType(MemoryType v) noexcept;
+D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept;
+D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept;
+struct MapPrimitiveTopologyResult {
+    D3D12_PRIMITIVE_TOPOLOGY_TYPE type;
+    D3D12_PRIMITIVE_TOPOLOGY topology;
+};
+MapPrimitiveTopologyResult MapType(PrimitiveTopology v) noexcept;
+D3D12_INPUT_CLASSIFICATION MapType(VertexStepMode v) noexcept;
+DXGI_FORMAT MapType(VertexFormat v) noexcept;
+std::optional<D3D12_FILL_MODE> MapType(PolygonMode v) noexcept;
+D3D12_CULL_MODE MapType(CullMode v) noexcept;
+D3D12_BLEND_OP MapType(BlendOperation v) noexcept;
+D3D12_BLEND MapBlendColor(BlendFactor v) noexcept;
+D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept;
+std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept;
+D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept;
+D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
+D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
+D3D12_RESOURCE_STATES MapType(BufferStates v) noexcept;
+D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept;
+D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept;
+D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept;
+D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
+D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
+D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
+D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept;
+
+}  // namespace radray::render::d3d12
+
+std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept;
+std::string_view format_as(D3D_SHADER_MODEL v) noexcept;
+std::string_view format_as(D3D12_RESOURCE_HEAP_TIER v) noexcept;
+std::string_view format_as(D3D12_RESOURCE_BINDING_TIER v) noexcept;
+std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
+std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
+std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept;
+std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept;
+std::string_view format_as(D3D12_MESSAGE_SEVERITY v) noexcept;
+std::string_view format_as(D3D12_MESSAGE_CATEGORY v) noexcept;
+
+#endif

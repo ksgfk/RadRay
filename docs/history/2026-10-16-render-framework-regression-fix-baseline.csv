@@ -1,0 +1,15 @@
+group,backend,materials,draws_per_frame,real_time_median_us,real_time_cv_percent
+CompileOnly,d3d12,1,3,9.661,3.52
+CompileOnly,d3d12,7,21,25.587,7.07
+CompileOnly,d3d12,32,96,92.596,13.77
+CompileOnly,d3d12,100,300,187.788,37.39
+CompileOnly,d3d12,300,900,871.402,29.56
+CompileOnly,vulkan,1,3,8.290,43.20
+CompileOnly,vulkan,7,21,20.943,2.96
+CompileOnly,vulkan,32,96,89.215,2.18
+CompileOnly,vulkan,100,300,311.545,8.33
+CompileOnly,vulkan,300,900,986.175,8.11
+CompletionCpu,d3d12,1,3,2.324,5.42
+CompletionCpu,d3d12,100,300,47.032,22.49
+CompletionCpu,vulkan,1,3,2.633,22.77
+CompletionCpu,vulkan,100,300,56.083,10.16

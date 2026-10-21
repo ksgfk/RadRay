@@ -1,0 +1,39 @@
+#pragma once
+
+#include <utility>
+#include <string_view>
+#include <bit>
+
+namespace radray {
+
+class DynamicLibrary {
+public:
+    constexpr DynamicLibrary() noexcept = default;
+    explicit DynamicLibrary(std::string_view name) noexcept;
+    DynamicLibrary(const DynamicLibrary&) = delete;
+    DynamicLibrary(DynamicLibrary&& other) noexcept;
+    DynamicLibrary& operator=(const DynamicLibrary&) = delete;
+    DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
+    ~DynamicLibrary() noexcept;
+
+    void* GetSymbol(std::string_view name) const noexcept;
+
+    template <class T>
+    requires std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>
+    T GetFunction(std::string_view name) const noexcept {
+        return std::bit_cast<T>(GetSymbol(name));
+    }
+
+    bool IsValid() const noexcept;
+
+    void Destroy() noexcept;
+
+    friend constexpr void swap(DynamicLibrary& l, DynamicLibrary& r) noexcept {
+        std::swap(l._handle, r._handle);
+    }
+
+private:
+    void* _handle{nullptr};
+};
+
+}  // namespace radray

@@ -1,0 +1,881 @@
+#include "gpu_test_fixture.h"
+#include "shader_contract_fixtures.h"
+#include "shader_program_cache.h"
+#include <radray/basic_math.h>
+#include <radray/file.h>
+
+#include <radray/render/pipeline_layout_types.h>
+#include <radray/render/backend_shader_artifact.h>
+#include <radray/runtime/shader_jit.h>
+#include <radray/runtime/shader_program.h>
+
+#include <gtest/gtest.h>
+
+#include <array>
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <chrono>
+
+namespace radray {
+namespace {
+
+constexpr uint32_t kWidth = 64;
+constexpr uint32_t kHeight = 64;
+constexpr render::TextureFormat kFormat = render::TextureFormat::RGBA8_UNORM;
+constexpr std::string_view kSourceName = "runtime_jit/graphics.hlsl";
+constexpr std::string_view kComputeSourceName = "runtime_jit/compute.hlsl";
+constexpr uint32_t kComputeValue = 0xc0de1234u;
+constexpr std::string_view kGraphicsSource = R"hlsl(
+struct VSInput {
+    float3 Position : POSITION;
+};
+
+struct VSOutput {
+    float4 Position : SV_Position;
+};
+
+[shader("vertex")]
+VSOutput VSMain(VSInput input) {
+    VSOutput output;
+    output.Position = float4(input.Position, 1.0f);
+    return output;
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return float4(1.0f, 0.0f, 1.0f, 1.0f);
+}
+)hlsl";
+
+constexpr std::string_view kKeywordSource = R"hlsl(
+#pragma radray_keyword_group QUALITY "low" "high"
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
+}
+)hlsl";
+
+constexpr std::string_view kComputeSource = R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0)
+RWStructuredBuffer<uint> Output : register(u0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
+    Output[0] = 0xc0de1234;
+}
+)hlsl";
+
+vector<byte> CopyBytes(std::string_view value) {
+    const auto* data = reinterpret_cast<const byte*>(value.data());
+    return {data, data + value.size()};
+}
+
+vector<byte> ReadBytes(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return {};
+    }
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size <= 0) {
+        return {};
+    }
+    file.seekg(0, std::ios::beg);
+    vector<byte> result(static_cast<size_t>(size));
+    file.read(reinterpret_cast<char*>(result.data()), size);
+    return file.good() || file.eof() ? result : vector<byte>{};
+}
+
+vector<std::filesystem::path> ShaderIncludePaths() {
+    return {std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib"};
+}
+
+shader::CompileVariantRequest MakeRequest(
+    const shader::ContractHash& contract,
+    shader::ShaderTarget target) {
+    return shader::CompileVariantRequest{
+        .SourceName = string{kSourceName},
+        .RootSource = CopyBytes(kGraphicsSource),
+        .Defines = {},
+        .Assignments = {},
+        .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+        .ExpectedContract = contract};
+}
+
+shader::CompileVariantRequest MakeComputeRequest(
+    const shader::ContractHash& contract,
+    shader::ShaderTarget target) {
+    return shader::CompileVariantRequest{
+        .SourceName = string{kComputeSourceName},
+        .RootSource = CopyBytes(kComputeSource),
+        .Defines = {},
+        .Assignments = {},
+        .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+        .ExpectedContract = contract};
+}
+
+void RunGraphicsJitSmoke(
+    render::test::DeviceContext& context,
+    render::RenderBackend backend) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const std::optional<shader::ShaderTarget> target =
+        render::GetShaderTargetForBackend(backend);
+    ASSERT_TRUE(target.has_value());
+    const auto contract = jit.DiscoverContractHash(
+        kSourceName,
+        std::as_bytes(std::span{kGraphicsSource.data(), kGraphicsSource.size()}),
+        target.value());
+    ASSERT_TRUE(contract.has_value());
+    const auto request = MakeRequest(contract.value(), target.value());
+    const auto jitArtifact = jit.Compile(request, target.value());
+    ASSERT_TRUE(jitArtifact.has_value());
+    ASSERT_EQ(jitArtifact->Target, target.value());
+
+    shader::ShaderArtifactDecodeOptions options{
+        .Target = jitArtifact->Target,
+        .ExpectedGpuArtifact = jitArtifact->ExpectedGpuArtifact};
+    render::Device& device = *context.Device;
+    render::BackendShaderArtifactError artifactError;
+    std::optional<render::BackendShaderArtifact> backendArtifact =
+        render::CreateBackendShaderArtifact(device, jitArtifact->Metadata, options, &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    auto programResult = ShaderProgram::Create(&device, std::move(backendArtifact.value()));
+    ASSERT_TRUE(programResult);
+    auto program = programResult.Release();
+    const auto vertexStage = program->GetStage(shader::ShaderStage::Vertex);
+    const auto pixelStage = program->GetStage(shader::ShaderStage::Pixel);
+    ASSERT_TRUE(vertexStage);
+    ASSERT_TRUE(pixelStage);
+    EXPECT_EQ(vertexStage->EntryPoint, "VSMain");
+    EXPECT_EQ(pixelStage->EntryPoint, "PSMain");
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Compute));
+
+    auto targetTexture = render::test::MakeRenderTarget(
+        &device,
+        kFormat,
+        kWidth,
+        kHeight,
+        render::TextureUse::RenderTarget | render::TextureUse::CopySource);
+    ASSERT_TRUE(targetTexture.has_value());
+
+    const render::VertexBufferLayout vertexBufferLayout{
+        .Binding = 0,
+        .ArrayStride = sizeof(float) * 3,
+        .StepMode = render::VertexStepMode::Vertex};
+    const render::VertexAttribute vertexAttribute{
+        .BufferBinding = 0,
+        .Semantic = "POSITION",
+        .Format = render::VertexFormat::FLOAT32X3,
+        .Location = 0};
+    const render::VertexInputState vertexInput{
+        .Buffers = std::span{&vertexBufferLayout, 1},
+        .Attributes = std::span{&vertexAttribute, 1}};
+    const render::ColorTargetState colorTarget = render::ColorTargetState::Default(kFormat);
+    render::PrimitiveState primitive = render::PrimitiveState::Default();
+    primitive.Cull = render::CullMode::None;
+    auto psoResult = device.CreateGraphicsPipelineState(render::GraphicsPipelineStateDescriptor{
+        .PipelineLayout = program->GetPipelineLayout(),
+        .VS = vertexStage,
+        .PS = pixelStage,
+        .VertexInput = vertexInput,
+        .Primitive = primitive,
+        .DepthStencil = std::nullopt,
+        .MultiSample = render::MultiSampleState::Default(),
+        .ColorTargets = std::span{&colorTarget, 1}});
+    ASSERT_TRUE(psoResult.HasValue());
+    unique_ptr<render::GraphicsPipelineState> pso = psoResult.Release();
+
+    constexpr std::array<float, 9> triangle{
+        0.0f, 0.8f, 0.0f,
+        -0.8f, -0.8f, 0.0f,
+        0.8f, -0.8f, 0.0f};
+    auto vertexBuffer = render::test::MakeUploadBuffer(
+        device,
+        std::as_bytes(std::span{triangle}),
+        render::BufferUse::Vertex);
+    ASSERT_TRUE(vertexBuffer.HasValue());
+    const render::DeviceDetail detail = device.GetDetail();
+    const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(kFormat);
+    const uint64_t rowPitch = Align(
+        static_cast<uint64_t>(kWidth) * bytesPerPixel,
+        detail.TextureDataPitchAlignment);
+    const uint64_t readbackSize = rowPitch * kHeight;
+    auto readbackResult = device.CreateBuffer(render::BufferDescriptor{
+        .Size = readbackSize,
+        .Memory = render::MemoryType::ReadBack,
+        .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
+    ASSERT_TRUE(readbackResult.HasValue());
+    unique_ptr<render::Buffer> readback = readbackResult.Release();
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
+    ASSERT_TRUE(commandResult.HasValue());
+    unique_ptr<render::CommandBuffer> command = commandResult.Release();
+    command->Begin();
+    const render::ResourceBarrierDescriptor toTarget = render::BarrierTextureDescriptor{
+        .Target = targetTexture->Tex.get(),
+        .Before = render::TextureState::Undefined,
+        .After = render::TextureState::RenderTarget};
+    command->ResourceBarrier(std::span{&toTarget, 1});
+    const render::ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+    auto encoderResult = command->BeginRenderPass(render::RenderPassBeginDescriptor{
+        .Colors = array{render::RenderPassColorAttachment{targetTexture->View.get(), render::LoadAction::Clear, render::StoreAction::Store, clearValue}},
+        .Width = kWidth,
+        .Height = kHeight,
+        .Name = "Runtime shader JIT"});
+    ASSERT_TRUE(encoderResult.HasValue());
+    unique_ptr<render::GraphicsCommandEncoder> encoder = encoderResult.Release();
+    encoder->SetViewport(Viewport{0, 0, static_cast<float>(kWidth), static_cast<float>(kHeight), 0, 1});
+    encoder->SetScissor(Rect{0, 0, kWidth, kHeight});
+    encoder->BindGraphicsPipelineState(pso.get());
+    const render::VertexBufferBinding vertexBinding{
+        .Binding = 0,
+        .View = render::VertexBufferView{.Target = vertexBuffer.Get(), .Size = triangle.size() * sizeof(float)}};
+    encoder->BindVertexBuffers(std::span{&vertexBinding, 1});
+    encoder->Draw(3, 1, 0, 0);
+    command->EndRenderPass(std::move(encoder));
+    const render::ResourceBarrierDescriptor toCopy = render::BarrierTextureDescriptor{
+        .Target = targetTexture->Tex.get(),
+        .Before = render::TextureState::RenderTarget,
+        .After = render::TextureState::CopySource};
+    command->ResourceBarrier(std::span{&toCopy, 1});
+    command->CopyTextureToBuffer(readback.get(), 0, targetTexture->Tex.get(), render::SubresourceRange{0, 1, 0, 1});
+    command->End();
+    render::CommandBuffer* commands[]{command.get()};
+    context.Queue->Submit(render::CommandQueueSubmitDescriptor{.CmdBuffers = commands});
+    context.Queue->Wait();
+    void* mapped = readback->Map(0, readbackSize);
+    ASSERT_NE(mapped, nullptr);
+    readback->InvalidateMappedRange(render::BufferRange{0, readbackSize});
+    const auto* pixels = static_cast<const uint8_t*>(mapped);
+    const auto* center = pixels + rowPitch * (kHeight / 2) + bytesPerPixel * (kWidth / 2);
+    EXPECT_EQ(center[0], 255);
+    EXPECT_EQ(center[1], 0);
+    EXPECT_EQ(center[2], 255);
+    EXPECT_EQ(center[3], 255);
+    readback->Unmap();
+}
+
+void RunComputeJitSmoke(
+    render::test::DeviceContext& context,
+    render::RenderBackend backend) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const std::optional<shader::ShaderTarget> target =
+        render::GetShaderTargetForBackend(backend);
+    ASSERT_TRUE(target.has_value());
+    const auto source = std::as_bytes(std::span{kComputeSource.data(), kComputeSource.size()});
+    const auto contract = jit.DiscoverContractHash(kComputeSourceName, source, target.value());
+    ASSERT_TRUE(contract.has_value());
+    const auto artifact = jit.Compile(
+        MakeComputeRequest(contract.value(), target.value()),
+        target.value());
+    ASSERT_TRUE(artifact.has_value());
+    ASSERT_EQ(artifact->Target, target.value());
+
+    const shader::ShaderArtifactDecodeOptions options{
+        .Target = artifact->Target,
+        .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
+    render::Device& device = *context.Device;
+    render::BackendShaderArtifactError artifactError;
+    std::optional<render::BackendShaderArtifact> backendArtifact =
+        render::CreateBackendShaderArtifact(device, artifact->Metadata, options, &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    auto programResult = ShaderProgram::Create(&device, std::move(backendArtifact.value()));
+    ASSERT_TRUE(programResult);
+    auto program = programResult.Release();
+    const auto computeStage = program->GetStage(shader::ShaderStage::Compute);
+    ASSERT_TRUE(computeStage);
+    EXPECT_EQ(computeStage->EntryPoint, "CSMain");
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Vertex));
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Pixel));
+    const render::BindingHandle outputBinding = program->GetPipelineLayout()->FindBinding("Output");
+    ASSERT_TRUE(outputBinding.IsValid());
+
+    auto psoResult = device.CreateComputePipelineState(render::ComputePipelineStateDescriptor{
+        .PipelineLayout = program->GetPipelineLayout(),
+        .CS = computeStage.value()});
+    ASSERT_TRUE(psoResult.HasValue());
+    unique_ptr<render::ComputePipelineState> pso = psoResult.Release();
+
+    auto outputResult = device.CreateBuffer(render::BufferDescriptor{
+        .Size = sizeof(uint32_t),
+        .Memory = render::MemoryType::Device,
+        .Usage = render::BufferUse::UnorderedAccess | render::BufferUse::CopySource,
+        .Hints = render::ResourceHint::None});
+    ASSERT_TRUE(outputResult.HasValue());
+    unique_ptr<render::Buffer> output = outputResult.Release();
+    auto parameterSetResult = device.CreateShaderParameterSet(render::ShaderParameterSetDescriptor{
+        .Layout = program->GetPipelineLayout(),
+        .GroupIndex = 0});
+    ASSERT_TRUE(parameterSetResult.HasValue());
+    unique_ptr<render::ShaderParameterSet> parameterSet = parameterSetResult.Release();
+    ASSERT_TRUE(parameterSet->Set(
+        outputBinding,
+        0,
+        render::ShaderBufferBinding{
+            .Target = output.get(),
+            .Range = render::BufferRange{0, sizeof(uint32_t)},
+            .StructureByteStride = sizeof(uint32_t)}));
+    ASSERT_TRUE(parameterSet->FlushWrites());
+
+    auto readbackResult = device.CreateBuffer(render::BufferDescriptor{
+        .Size = sizeof(uint32_t),
+        .Memory = render::MemoryType::ReadBack,
+        .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead,
+        .Hints = render::ResourceHint::None});
+    ASSERT_TRUE(readbackResult.HasValue());
+    unique_ptr<render::Buffer> readback = readbackResult.Release();
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
+    ASSERT_TRUE(commandResult.HasValue());
+    unique_ptr<render::CommandBuffer> command = commandResult.Release();
+    command->Begin();
+    const render::ResourceBarrierDescriptor toUav = render::BarrierBufferDescriptor{
+        .Target = output.get(),
+        .Before = render::BufferState::Undefined,
+        .After = render::BufferState::UnorderedAccess};
+    command->ResourceBarrier(std::span{&toUav, 1});
+    auto encoderResult = command->BeginComputePass();
+    ASSERT_TRUE(encoderResult.HasValue());
+    unique_ptr<render::ComputeCommandEncoder> encoder = encoderResult.Release();
+    encoder->BindComputePipelineState(pso.get());
+    encoder->BindShaderParameterSet(0, parameterSet.get());
+    encoder->Dispatch(1, 1, 1);
+    command->EndComputePass(std::move(encoder));
+    const render::ResourceBarrierDescriptor toCopy = render::BarrierBufferDescriptor{
+        .Target = output.get(),
+        .Before = render::BufferState::UnorderedAccess,
+        .After = render::BufferState::CopySource};
+    command->ResourceBarrier(std::span{&toCopy, 1});
+    command->CopyBufferToBuffer(readback.get(), 0, output.get(), 0, sizeof(uint32_t));
+    command->End();
+    render::CommandBuffer* commands[]{command.get()};
+    context.Queue->Submit(render::CommandQueueSubmitDescriptor{.CmdBuffers = commands});
+    context.Queue->Wait();
+    void* mapped = readback->Map(0, sizeof(uint32_t));
+    ASSERT_NE(mapped, nullptr);
+    readback->InvalidateMappedRange(render::BufferRange{0, sizeof(uint32_t)});
+    EXPECT_EQ(*static_cast<const uint32_t*>(mapped), kComputeValue);
+    readback->Unmap();
+}
+
+TEST(RadRayRuntimeShaderJit, CompilerResultDecodesAndCorruptionFailsClosed) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const auto source = CopyBytes(kGraphicsSource);
+    const auto contract = jit.DiscoverContractHash(kSourceName, source, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(contract.has_value());
+    const auto artifact = jit.Compile(MakeRequest(contract.value(), shader::ShaderTarget::DXIL), shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(artifact.has_value());
+    const auto options = shader::ShaderArtifactDecodeOptions{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
+    const auto decoded = shader::DecodeDxilShaderArtifact(artifact->Metadata, options);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_FALSE(decoded->Generic().Bytecode().empty());
+    auto wrongGpuArtifact = artifact->ExpectedGpuArtifact;
+    wrongGpuArtifact.Bytes[0] ^= 1u;
+    const auto wrongOptions = shader::ShaderArtifactDecodeOptions{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = wrongGpuArtifact};
+    EXPECT_FALSE(shader::DecodeDxilShaderArtifact(artifact->Metadata, wrongOptions).has_value());
+}
+
+TEST(RadRayRuntimeShaderJit, InvalidRequestAndArtifactIdentityFailClosed) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const auto source = CopyBytes(kGraphicsSource);
+    const auto contract = jit.DiscoverContractHash(kSourceName, source, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(contract.has_value());
+    const shader::CompileVariantRequest request = MakeRequest(contract.value(), shader::ShaderTarget::DXIL);
+
+    shader::CompileVariantRequest missingTarget = request;
+    missingTarget.Targets = shader::ShaderTargetMask::SPIRV;
+    EXPECT_FALSE(jit.Compile(missingTarget, shader::ShaderTarget::DXIL).has_value());
+
+    shader::CompileVariantRequest driftedContract = request;
+    driftedContract.ExpectedContract.Bytes[0] ^= 1u;
+    EXPECT_FALSE(jit.Compile(driftedContract, shader::ShaderTarget::DXIL).has_value());
+
+    const auto keywordSource = CopyBytes(kKeywordSource);
+    constexpr std::string_view keywordSourceName = "runtime_jit/keyword.hlsl";
+    const auto keywordContract = jit.DiscoverContractHash(
+        keywordSourceName,
+        keywordSource,
+        shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(keywordContract.has_value());
+    shader::CompileVariantRequest invalidAssignment{
+        .SourceName = string{keywordSourceName},
+        .RootSource = keywordSource,
+        .Defines = {},
+        .Assignments = {{"QUALITY", "invalid"}},
+        .Targets = shader::ShaderTargetMask::DXIL,
+        .ExpectedContract = keywordContract.value()};
+    EXPECT_FALSE(jit.Compile(invalidAssignment, shader::ShaderTarget::DXIL).has_value());
+
+    const auto artifact = jit.Compile(request, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(artifact.has_value());
+    shader::ShaderArtifactDecodeOptions options{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
+    auto corruptMetadata = artifact->Metadata;
+    corruptMetadata[0] = byte{0};
+    EXPECT_FALSE(shader::DecodeDxilShaderArtifact(corruptMetadata, options).has_value());
+    options.ExpectedToolchainIdentity = 0xdeadbeefull;
+    EXPECT_FALSE(shader::DecodeDxilShaderArtifact(artifact->Metadata, options).has_value());
+}
+
+TEST(RadRayRuntimeShaderJit, ShaderlibPassMetadataCorruptionFailsClosed) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+
+    constexpr std::string_view sourceName = "modules/shader_compiler/tests/data/depth.hlsl";
+    const vector<byte> source = ReadBytes(std::filesystem::path{RADRAY_PROJECT_DIR} / sourceName);
+    ASSERT_FALSE(source.empty());
+    const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(contract.has_value());
+
+    shader::CompileVariantRequest request{
+        .SourceName = string{sourceName},
+        .RootSource = source,
+        .Defines = {},
+        .Assignments = {{"DEPTH_MODE", "regular"}},
+        .Targets = shader::ShaderTargetMask::DXIL,
+        .ExpectedContract = contract.value()};
+
+    const auto artifact = jit.Compile(request, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(artifact.has_value());
+    auto corruptedMetadata = artifact->Metadata;
+    corruptedMetadata[0] = byte{0};
+    EXPECT_FALSE(shader::DecodeDxilShaderArtifact(
+                     corruptedMetadata,
+                     shader::ShaderArtifactDecodeOptions{
+                         .Target = shader::ShaderTarget::DXIL,
+                         .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact})
+                     .has_value());
+}
+
+TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+
+    struct FixtureCase {
+        std::string_view Name;
+        shader::ShaderTargetMask Targets;
+    };
+    constexpr FixtureCase cases[] = {
+        {"no_resource_graphics", shader::ShaderTargetMask::All},
+        {"texture_sampler", shader::ShaderTargetMask::All},
+        {"shadow_static_sampler", shader::ShaderTargetMask::All},
+        {"multiple_root_constants", shader::ShaderTargetMask::DXIL},
+        {"spirv_push_constant", shader::ShaderTargetMask::SPIRV},
+        {"target_specific_bindings", shader::ShaderTargetMask::All},
+        {"compute", shader::ShaderTargetMask::All},
+        {"shared_cbuffer_type", shader::ShaderTargetMask::All},
+        {"nested_cbuffer_roots", shader::ShaderTargetMask::All},
+    };
+    const std::filesystem::path sourceRoot = std::filesystem::path{RADRAY_PROJECT_DIR} /
+                                             "modules/render/tests/data/shader_sources";
+
+    for (const FixtureCase& fixtureCase : cases) {
+        const auto fixture = std::find_if(
+            render::test::GetShaderContractFixtures().begin(),
+            render::test::GetShaderContractFixtures().end(),
+            [&](const render::test::ShaderContractFixture& value) noexcept {
+                return value.Name == fixtureCase.Name;
+            });
+        ASSERT_NE(fixture, render::test::GetShaderContractFixtures().end());
+        const string sourceFile = string{fixture->Name} + ".hlsl";
+        const vector<byte> source = ReadBytes(sourceRoot / sourceFile);
+        ASSERT_FALSE(source.empty()) << fixtureCase.Name;
+        const string sourceName = "fixtures/" + sourceFile;
+        const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
+        ASSERT_TRUE(contract.has_value()) << fixtureCase.Name;
+
+        const size_t expectedBindingCount = static_cast<size_t>(std::count_if(
+            fixture->Bindings.begin(),
+            fixture->Bindings.end(),
+            [](const render::test::FixtureBindingFact& value) noexcept {
+                return value.Kind != render::test::FixtureResourceKind::RootConstant;
+            }));
+        const size_t rootFactCount = static_cast<size_t>(std::count_if(
+            fixture->Bindings.begin(),
+            fixture->Bindings.end(),
+            [](const render::test::FixtureBindingFact& value) noexcept {
+                return value.Kind == render::test::FixtureResourceKind::RootConstant;
+            }));
+
+        for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
+            if (!shader::HasTarget(fixtureCase.Targets, target)) {
+                continue;
+            }
+            SCOPED_TRACE(fmt::format("{} target {}", fixtureCase.Name, static_cast<uint32_t>(target)));
+            const auto artifact = jit.Compile(
+                shader::CompileVariantRequest{
+                    .SourceName = sourceName,
+                    .RootSource = source,
+                    .Defines = {},
+                    .Assignments = {},
+                    .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+                    .ExpectedContract = contract.value()},
+                target);
+            ASSERT_TRUE(artifact.has_value());
+            shader::ShaderArtifactDecodeOptions options{
+                .Target = target,
+                .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact,
+                .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
+            shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
+            std::optional<shader::ShaderArtifactView> generic;
+            // Counted off the resolved layout of whichever target this lane is: the two resolved
+            // types are separate by design, so the test compares the counts rather than trying to
+            // hold one common layout value.
+            std::optional<size_t> resolvedBindingCount;
+            std::optional<size_t> resolvedPushCount;
+            if (target == shader::ShaderTarget::DXIL) {
+#if defined(RADRAY_ENABLE_D3D12)
+                const auto typed = shader::DecodeDxilShaderArtifact(artifact->Metadata, options, &error);
+                ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
+                generic = typed->Generic();
+                // Native layout creation consumes the resolved layout, so the test resolves first;
+                // no modifiers, because this asserts what the compiler published.
+                const auto resolved = render::ResolveD3D12Layout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushConstants.size();
+#else
+                GTEST_SKIP() << "D3D12 is disabled";
+#endif
+            } else {
+#if defined(RADRAY_ENABLE_VULKAN)
+                const auto typed = shader::DecodeSpirvShaderArtifact(artifact->Metadata, options, &error);
+                ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
+                generic = typed->Generic();
+                const auto resolved = render::ResolveVulkanLayout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushBlock.has_value() ? 1u : 0u;
+#else
+                GTEST_SKIP() << "Vulkan is disabled";
+#endif
+            }
+            ASSERT_TRUE(generic.has_value());
+            ASSERT_TRUE(resolvedBindingCount.has_value());
+            ASSERT_TRUE(resolvedPushCount.has_value());
+            EXPECT_EQ(generic->Entries().size(), fixture->Entries.size());
+            EXPECT_EQ(generic->Bindings().size(), expectedBindingCount);
+            EXPECT_EQ(resolvedBindingCount.value(), expectedBindingCount);
+            const size_t expectedRootCount = fixture->HasSingleSpirvPushBlock
+                                                 ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
+                                             : target == shader::ShaderTarget::DXIL ? rootFactCount
+                                                                                    : 0u;
+            EXPECT_EQ(generic->RootConstants().size(), expectedRootCount);
+            EXPECT_EQ(resolvedPushCount.value(), expectedRootCount);
+            for (const render::test::FixtureBindingFact& expected : fixture->Bindings) {
+                if (expected.Kind == render::test::FixtureResourceKind::RootConstant) {
+                    continue;
+                }
+                const auto binding = generic->FindBinding(expected.Name);
+                ASSERT_TRUE(binding.has_value());
+                EXPECT_EQ(
+                    binding->Record.Group,
+                    target == shader::ShaderTarget::DXIL ? expected.D3D12Group : expected.VulkanSet);
+                EXPECT_EQ(
+                    binding->Record.Binding,
+                    target == shader::ShaderTarget::DXIL ? expected.D3D12Binding : expected.VulkanBinding);
+                if (expected.PayloadType.empty()) {
+                    EXPECT_EQ(binding->Record.TypeIndex, shader::kShaderNoType);
+                } else {
+                    ASSERT_LT(binding->Record.TypeIndex, generic->Types().size());
+                    const shader::WireTypeRecord& payload =
+                        generic->Types()[binding->Record.TypeIndex];
+                    EXPECT_EQ(
+                        generic->GetName(payload.Name).value_or(std::string_view{}),
+                        expected.PayloadType);
+                }
+            }
+            for (const render::test::FixtureBindingFact& expected : fixture->Bindings) {
+                if (expected.Kind != render::test::FixtureResourceKind::RootConstant) {
+                    continue;
+                }
+                const auto root = std::find_if(
+                    generic->RootConstants().begin(),
+                    generic->RootConstants().end(),
+                    [&](const shader::WireRootConstantRecord& value) {
+                        return generic->GetName(value.Name).value_or(std::string_view{}) ==
+                               expected.Name;
+                    });
+                ASSERT_NE(root, generic->RootConstants().end());
+                if (expected.PayloadType.empty()) {
+                    EXPECT_EQ(root->TypeIndex, shader::kShaderNoType);
+                } else {
+                    ASSERT_LT(root->TypeIndex, generic->Types().size());
+                    EXPECT_EQ(
+                        generic->GetName(generic->Types()[root->TypeIndex].Name)
+                            .value_or(std::string_view{}),
+                        expected.PayloadType);
+                }
+            }
+        }
+    }
+}
+
+TEST(RadRayRuntimeShaderJit, D3D12) {
+#if defined(RADRAY_ENABLE_D3D12)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
+        GTEST_SKIP() << "D3D12 is unavailable on this machine";
+    }
+    RunGraphicsJitSmoke(context, render::RenderBackend::D3D12);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeShaderJit, CacheUsesDeviceAndConfigurationAndRetainsProgramsAcrossSourceRevisions) {
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) GTEST_SKIP() << context.Reason;
+    struct SourceDirectory {
+        std::filesystem::path Path;
+        ~SourceDirectory() {
+            std::error_code error;
+            std::filesystem::remove_all(Path, error);
+        }
+    } source{std::filesystem::temp_directory_path() / fmt::format("radray_shader_revision_{}", std::chrono::steady_clock::now().time_since_epoch().count())};
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::create_directories(source.Path, error));
+    ASSERT_FALSE(error);
+    ASSERT_TRUE(WriteTextFile(source.Path / "graphics.hlsl", kGraphicsSource));
+    ShaderProgramCache cache{*context.Device, source.Path, {}};
+    ShaderProgramRequest request{.SourceName = "graphics.hlsl"};
+    const auto original = cache.GetOrCreateShaderProgram(request);
+    ASSERT_TRUE(original);
+    EXPECT_EQ(cache.GetOrCreateShaderProgram(request).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 1u);
+    EXPECT_EQ(cache.GetProgramCount(), 1u);
+    EXPECT_EQ(cache.GetArtifactCount(), 1u);
+    ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
+    const auto replacement = cache.GetOrCreateShaderProgram(request);
+    ASSERT_TRUE(replacement);
+    EXPECT_NE(replacement.Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+    EXPECT_EQ(cache.GetProgramCount(), 2u);
+    EXPECT_EQ(cache.GetArtifactCount(), 2u);
+    EXPECT_NE(original->GetPipelineLayout(), nullptr);
+
+    request.SourceName = "retry.hlsl";
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(request));
+    ASSERT_TRUE(WriteTextFile(source.Path / "retry.hlsl", kGraphicsSource));
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(request));
+    ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
+    EXPECT_TRUE(cache.GetOrCreateShaderProgram(request));
+    EXPECT_FALSE(cache.InvalidateSource("../outside.hlsl"));
+}
+
+void RunCachedLayoutPreparationTest(render::RenderBackend backend) {
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(backend, context)) GTEST_SKIP() << context.Reason;
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const auto target = *render::GetShaderTargetForBackend(backend);
+    const auto source = CopyBytes(R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0)
+StructuredBuffer<uint> Input : register(t0);
+VK_BINDING(1, 0)
+RWStructuredBuffer<uint> Output : register(u0);
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) { Output[0] = Input[0]; }
+)hlsl");
+    const auto contract = jit.DiscoverContractHash("cache_layout.hlsl", source, target);
+    ASSERT_TRUE(contract);
+    auto compiled = jit.Compile(shader::CompileVariantRequest{
+                                    .SourceName = "cache_layout.hlsl", .RootSource = source, .Defines = {}, .Assignments = {}, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract},
+                                target);
+    ASSERT_TRUE(compiled);
+    ShaderProgramCache cache{*context.Device, {}, ShaderIncludePaths()};
+    const auto get = [&](const render::ShaderProgramLayoutRecipe& recipe) {
+        return cache.GetOrCreateShaderProgram(compiled->Metadata, compiled->ExpectedGpuArtifact, recipe);
+    };
+    const auto original = get({});
+    ASSERT_TRUE(original);
+    EXPECT_EQ(get({}).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 1u);
+
+    render::ShaderProgramLayoutRecipe recipe;
+    const render::ShaderLayoutSelector input{"Input", shader::ShaderBindingKind::StructuredBuffer};
+    const render::ShaderLayoutSelector output{"Output", shader::ShaderBindingKind::RWStructuredBuffer};
+    if (backend == render::RenderBackend::D3D12) {
+        recipe.D3D12.BufferPlacements = {{input, render::D3D12BufferPlacement::Table}, {output, render::D3D12BufferPlacement::Table}};
+    } else {
+        recipe.Vulkan.BufferDescriptors = {{input, render::VulkanBufferDescriptorPlacement::Regular}, {output, render::VulkanBufferDescriptorPlacement::Regular}};
+    }
+    EXPECT_EQ(get(recipe).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+    if (backend == render::RenderBackend::D3D12) {
+        std::reverse(recipe.D3D12.BufferPlacements.begin(), recipe.D3D12.BufferPlacements.end());
+        recipe.Vulkan.BufferDescriptors = {{{"Missing", shader::ShaderBindingKind::Texture}, render::VulkanBufferDescriptorPlacement::Dynamic}};
+    } else {
+        std::reverse(recipe.Vulkan.BufferDescriptors.begin(), recipe.Vulkan.BufferDescriptors.end());
+        recipe.D3D12.BufferPlacements = {{{"Missing", shader::ShaderBindingKind::Texture}, render::D3D12BufferPlacement::RootDescriptor}};
+    }
+    EXPECT_EQ(get(recipe).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+    auto invalid = recipe;
+    if (backend == render::RenderBackend::D3D12) {
+        invalid.D3D12.BufferPlacements.push_back(invalid.D3D12.BufferPlacements.front());
+    } else {
+        invalid.Vulkan.BufferDescriptors.push_back(invalid.Vulkan.BufferDescriptors.front());
+    }
+    EXPECT_FALSE(get(invalid));
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+
+    invalid = recipe;
+    if (backend == render::RenderBackend::D3D12) {
+        invalid.D3D12.BufferPlacements.front().Selector.ExpectedLogicalResourceKind = shader::ShaderBindingKind::Texture;
+        recipe.D3D12.BufferPlacements.back().Placement = render::D3D12BufferPlacement::RootDescriptor;
+    } else {
+        invalid.Vulkan.BufferDescriptors.front().Selector.ExpectedLogicalResourceKind = shader::ShaderBindingKind::Texture;
+        recipe.Vulkan.BufferDescriptors.back().Placement = render::VulkanBufferDescriptorPlacement::Dynamic;
+    }
+    EXPECT_FALSE(get(invalid));
+    const auto dynamic = get(recipe);
+    ASSERT_TRUE(dynamic);
+    EXPECT_NE(dynamic.Get(), original.Get());
+    EXPECT_TRUE(dynamic->IsBufferDynamic("Input"));
+    EXPECT_FALSE(dynamic->IsBufferDynamic("Output"));
+    const auto count = cache.GetLayoutPreparationCount();
+    EXPECT_EQ(get(recipe).Get(), dynamic.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), count);
+    EXPECT_EQ(cache.GetProgramCount(), 2u);
+
+    auto wrongIdentity = compiled->ExpectedGpuArtifact;
+    wrongIdentity.Bytes[0] ^= 1;
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(compiled->Metadata, wrongIdentity, recipe));
+    const byte saved = compiled->Metadata[0];
+    compiled->Metadata[0] ^= byte{1};
+    EXPECT_FALSE(get(recipe));
+    compiled->Metadata[0] = saved;
+    const auto afterInvalid = cache.GetLayoutPreparationCount();
+    EXPECT_EQ(get(recipe).Get(), dynamic.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), afterInvalid);
+}
+
+TEST(RadRayRuntimeShaderJit, CachedLayoutPreparationD3D12) {
+    RunCachedLayoutPreparationTest(render::RenderBackend::D3D12);
+}
+
+TEST(RadRayRuntimeShaderJit, CachedLayoutPreparationVulkan) {
+    RunCachedLayoutPreparationTest(render::RenderBackend::Vulkan);
+}
+
+TEST(RadRayRuntimeShaderJit, ExplicitRootSignatureD3D12) {
+#if defined(RADRAY_ENABLE_D3D12)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
+        GTEST_SKIP() << "D3D12 is unavailable on this machine";
+    }
+
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const string sourceName = "fixtures/shadow_static_sampler.hlsl";
+    const vector<byte> source = ReadBytes(
+        std::filesystem::path{RADRAY_PROJECT_DIR} /
+        "modules/render/tests/data/shader_sources/shadow_static_sampler.hlsl");
+    ASSERT_FALSE(source.empty());
+    const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(contract.has_value());
+    const auto artifact = jit.Compile(
+        shader::CompileVariantRequest{
+            .SourceName = sourceName,
+            .RootSource = source,
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .ExpectedContract = contract.value()},
+        shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(artifact.has_value());
+    const shader::ShaderArtifactDecodeOptions options{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
+    shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
+    const auto typed = shader::DecodeDxilShaderArtifact(
+        artifact->Metadata,
+        options,
+        &error);
+    ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
+    EXPECT_FALSE(typed->Generic().SerializedRootSignature().empty());
+    render::BackendShaderArtifactError artifactError;
+    const auto backendArtifact = render::CreateBackendShaderArtifact(
+        *context.Device,
+        artifact->Metadata,
+        options,
+        &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeShaderJit, Vulkan) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::Vulkan, context)) {
+        GTEST_SKIP() << "Vulkan is unavailable on this machine";
+    }
+    RunGraphicsJitSmoke(context, render::RenderBackend::Vulkan);
+#else
+    GTEST_SKIP() << "Vulkan is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeShaderJit, VulkanValidation) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::Vulkan, context, true)) {
+        GTEST_SKIP() << "Vulkan validation layer is unavailable on this machine";
+    }
+    RunGraphicsJitSmoke(context, render::RenderBackend::Vulkan);
+#else
+    GTEST_SKIP() << "Vulkan is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeShaderJit, ComputeD3D12) {
+#if defined(RADRAY_ENABLE_D3D12)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
+        GTEST_SKIP() << "D3D12 is unavailable on this machine";
+    }
+    RunComputeJitSmoke(context, render::RenderBackend::D3D12);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeShaderJit, ComputeVulkan) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::Vulkan, context)) {
+        GTEST_SKIP() << "Vulkan is unavailable on this machine";
+    }
+    RunComputeJitSmoke(context, render::RenderBackend::Vulkan);
+#else
+    GTEST_SKIP() << "Vulkan is disabled";
+#endif
+}
+
+}  // namespace
+}  // namespace radray

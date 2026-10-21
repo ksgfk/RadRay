@@ -1,0 +1,281 @@
+#pragma once
+
+// Coroutine support for RadRay, layered on stdexec (P2300 sender/receiver).
+//
+// Business code should use the radray aliases and helpers from this file
+// instead of depending on exec::task / stdexec::* directly. That keeps the
+// stdexec dependency behind a small facade.
+
+#include <concepts>
+#include <coroutine>
+#include <limits>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+#include <exec/async_scope.hpp>
+#include <exec/task.hpp>
+#include <exec/when_any.hpp>
+#include <stdexec/execution.hpp>
+
+#include <radray/types.h>
+#include <radray/logger.h>
+
+namespace radray {
+
+template <class T>
+using task = exec::task<T>;
+
+using stop_source = stdexec::inplace_stop_source;
+using stop_token = stdexec::inplace_stop_token;
+
+using stdexec::when_all;
+using stdexec::when_all_with_variant;
+using exec::when_any;
+
+struct ManualCoroutineRecord {
+    uint64_t Sequence{0};
+    std::coroutine_handle<> Continuation{};
+    stop_token Stop;
+    bool Canceled{false};
+    /// Set false while an external operation must finish before the coroutine can unwind.
+    /// Cancellation still marks the record; its owner must resume it after that operation.
+    bool ResumeOnCancel{true};
+};
+
+template <class TRecord>
+requires std::derived_from<TRecord, ManualCoroutineRecord>
+class ManualCoroutineScheduler {
+public:
+    ManualCoroutineScheduler() noexcept = default;
+    ManualCoroutineScheduler(const ManualCoroutineScheduler&) = delete;
+    ManualCoroutineScheduler(ManualCoroutineScheduler&&) = delete;
+    ManualCoroutineScheduler& operator=(const ManualCoroutineScheduler&) = delete;
+    ManualCoroutineScheduler& operator=(ManualCoroutineScheduler&&) = delete;
+
+    ~ManualCoroutineScheduler() noexcept {
+        CancelAll();
+    }
+
+    template <class... Args>
+    TRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation, Args&&... args) {
+        if (_nextSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Coroutine record sequence exhausted");
+        auto entry = make_unique<Entry>(std::forward<Args>(args)...);
+        TRecord* record = &entry->Record;
+        record->Sequence = _nextSequence++;
+        record->Continuation = continuation;
+        record->Stop = stop;
+        record->Canceled = false;
+        _records.emplace_back(std::move(entry));
+
+        if (stop.stop_requested()) {
+            record->Canceled = true;
+        } else if (stop.stop_possible()) {
+            _records.back()->StopCallback.emplace(stop, StopCallback{this, record});
+        }
+        return record;
+    }
+
+    bool Erase(TRecord* record) noexcept {
+        for (size_t i = 0; i < _records.size(); ++i) {
+            if (&_records[i]->Record == record) {
+                _records[i]->StopCallback.reset();
+                _records.erase(_records.begin() + static_cast<ptrdiff_t>(i));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool IsAlive(TRecord* record) const noexcept {
+        for (const unique_ptr<Entry>& entry : _records) {
+            if (&entry->Record == record) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool IsAlive(TRecord* record, uint64_t sequence) const noexcept {
+        return IsAlive(record) && record->Sequence == sequence;
+    }
+
+    /// Capture one exclusive boundary per scheduler before dispatching across instances.
+    uint64_t GetSequenceBoundary() const noexcept { return _nextSequence; }
+
+    /// Predicate must not mutate this scheduler. Freeze ready identities before resuming
+    /// any continuation; new records wait for a later dispatch. Survivors are erased.
+    template <class TPredicate>
+    void DispatchReady(TPredicate&& ready, uint64_t boundary = std::numeric_limits<uint64_t>::max()) {
+        vector<std::pair<TRecord*, uint64_t>> batch;
+        for (const auto& entry : _records) {
+            auto* record = &entry->Record;
+            if (record->Stop.stop_requested()) record->Canceled = true;
+            if (record->Sequence < boundary && ready(*record)) batch.emplace_back(record, record->Sequence);
+        }
+        for (auto [record, sequence] : batch) {
+            if (!IsAlive(record, sequence)) continue;
+            ResumeRecord(record);
+            if (IsAlive(record, sequence)) Erase(record);
+        }
+    }
+
+    TRecord* At(size_t index) noexcept {
+        return index < _records.size() ? &_records[index]->Record : nullptr;
+    }
+
+    const TRecord* At(size_t index) const noexcept {
+        return index < _records.size() ? &_records[index]->Record : nullptr;
+    }
+
+    TRecord* Front() noexcept {
+        return _records.empty() ? nullptr : &_records.front()->Record;
+    }
+
+    TRecord* Back() noexcept {
+        return _records.empty() ? nullptr : &_records.back()->Record;
+    }
+
+    size_t Count() const noexcept {
+        return _records.size();
+    }
+
+    bool Empty() const noexcept {
+        return _records.empty();
+    }
+
+    void ResumeRecord(TRecord* record) noexcept {
+        if (record == nullptr) {
+            return;
+        }
+        std::coroutine_handle<> continuation = record->Continuation;
+        record->Continuation = {};
+        if (continuation) {
+            continuation.resume();
+        }
+    }
+
+    void CancelRecord(TRecord* record) noexcept {
+        if (record == nullptr) {
+            return;
+        }
+        record->Canceled = true;
+        if (record->ResumeOnCancel) {
+            ResumeRecord(record);
+        }
+    }
+
+    void CancelAll() noexcept {
+        while (!_records.empty()) {
+            TRecord* record = Back();
+            const auto sequence = record->Sequence;
+            record->Canceled = true;
+            ResumeRecord(record);
+            if (IsAlive(record, sequence)) {
+                Erase(record);
+            }
+        }
+    }
+
+private:
+    struct StopCallback {
+        ManualCoroutineScheduler* Scheduler{nullptr};
+        TRecord* Record{nullptr};
+
+        void operator()() const noexcept {
+            if (Scheduler != nullptr && Record != nullptr) {
+                Scheduler->CancelRecord(Record);
+            }
+        }
+    };
+
+    using StopCallbackStorage = stop_token::template callback_type<StopCallback>;
+
+    struct Entry {
+        template <class... Args>
+        explicit Entry(Args&&... args)
+            : Record(std::forward<Args>(args)...) {}
+
+        TRecord Record;
+        std::optional<StopCallbackStorage> StopCallback;
+    };
+
+    vector<unique_ptr<Entry>> _records;
+    uint64_t _nextSequence{1};
+};
+
+class TaskScope {
+public:
+    TaskScope() noexcept = default;
+    TaskScope(const TaskScope&) = delete;
+    TaskScope(TaskScope&&) = delete;
+    TaskScope& operator=(const TaskScope&) = delete;
+    TaskScope& operator=(TaskScope&&) = delete;
+
+    ~TaskScope() noexcept {
+        RequestStop();
+        WaitUntilEmpty();
+    }
+
+    void Spawn(task<void> t) {
+        _scope.spawn(std::move(t));
+    }
+
+    bool RequestStop() noexcept {
+        return _scope.request_stop();
+    }
+
+    task<void> Join() {
+        co_await _scope.on_empty();
+    }
+
+    void WaitUntilEmpty() noexcept {
+        (void)stdexec::sync_wait(_scope.on_empty());
+    }
+
+    stop_token GetStopToken() const noexcept {
+        return _scope.get_stop_token();
+    }
+
+private:
+    exec::async_scope _scope;
+};
+
+inline task<stop_token> CurrentStopToken() {
+    co_return co_await stdexec::get_stop_token();
+}
+
+/// 从协程 promise 的 env 里取 stop token。
+///
+/// 【为何需要它】: `co_await CurrentStopToken()` 只能在协程体里用, 而手写 awaitable 的
+/// await_suspend 拿到的只是一个 coroutine_handle —— 那里正是最需要 stop token 的地方
+/// (要把它记进等待记录, 以便取消时能恢复协程)。
+///
+/// promise 不提供 stop token (含类型擦除的 coroutine_handle<>) 时返回默认构造的 token,
+/// 其 stop_requested() 恒为 false —— 即"不可取消", 这是对"没有取消源"唯一安全的解释。
+template <class Promise>
+stop_token GetCoroutineStopToken(std::coroutine_handle<Promise> handle) noexcept {
+    if constexpr (std::is_void_v<Promise>) {
+        (void)handle;
+        return stop_token{};
+    } else if constexpr (requires { stdexec::get_stop_token(stdexec::get_env(handle.promise())); }) {
+        return stdexec::get_stop_token(stdexec::get_env(handle.promise()));
+    } else {
+        (void)handle;
+        return stop_token{};
+    }
+}
+
+inline task<void> StopCurrentTask() {
+    co_await stdexec::just_stopped();
+}
+
+template <class T>
+task<std::optional<T>> AwaitWithStopToken(task<T> t, stop_token stop) {
+    co_return co_await stdexec::stopped_as_optional(
+        stdexec::write_env(
+            std::move(t),
+            stdexec::prop{stdexec::get_stop_token, stop}));
+}
+
+}  // namespace radray

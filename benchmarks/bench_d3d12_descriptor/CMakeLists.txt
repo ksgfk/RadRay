@@ -1,0 +1,6 @@
+add_executable(bench_d3d12_descriptor bench_d3d12_descriptor.cpp)
+target_include_directories(bench_d3d12_descriptor PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/src")
+target_link_libraries(bench_d3d12_descriptor PRIVATE radrayrender benchmark::benchmark)
+radray_default_compile_flags(bench_d3d12_descriptor)
+radray_optimize_flags_binary(bench_d3d12_descriptor)
+radray_set_build_path(bench_d3d12_descriptor)

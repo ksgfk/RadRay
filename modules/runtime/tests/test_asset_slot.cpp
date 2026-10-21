@@ -1,0 +1,1053 @@
+// AssetManager 的槽位生命周期。四条规则: (1) 引用归零才卸载; (2) 销毁对齐到 Pump;
+// (3) OnUnload 先于析构, 在那里直接释放已完成使用的数据; (4) AssetManager 先死时仍无条件走
+// 一遍 OnUnload。
+//
+// 【不需要 device】用假资产 (自己计数 OnUnload / 析构) 代替真资产, 无显卡也能跑。
+// 真资产交出 GPU 对象的路径由 test_shader_program 覆盖。
+
+#include <radray/runtime/asset_manager.h>
+
+#include <radray/coroutine.h>
+#include <radray/runtime/asset.h>
+#include <radray/runtime/image_asset.h>
+#include <radray/runtime/wait_frame.h>
+#include <radray/types.h>
+
+#include <gtest/gtest.h>
+
+#include <coroutine>
+#include <cstdint>
+#include <typeinfo>
+
+namespace radray {
+namespace {
+
+class AssetFacet {
+public:
+    virtual ~AssetFacet() noexcept = default;
+};
+
+class AssetPaddingFacet {
+public:
+    virtual ~AssetPaddingFacet() noexcept = default;
+    uint64_t Padding{0x123456789abcdef0ull};
+};
+
+class SharedAssetFacet {
+public:
+    virtual ~SharedAssetFacet() noexcept = default;
+};
+
+class LeftAssetFacet : public virtual SharedAssetFacet {
+public:
+    ~LeftAssetFacet() noexcept override = default;
+};
+
+class RightAssetFacet : public virtual SharedAssetFacet {
+public:
+    ~RightAssetFacet() noexcept override = default;
+};
+
+class UnrelatedAssetFacet {
+public:
+    virtual ~UnrelatedAssetFacet() noexcept = default;
+};
+
+/// 一个不碰 GPU 的假资产。它把 OnUnload 与析构的次数记到外部计数器上, 使"OnUnload
+/// 先于析构"与"引用归零才卸载"可被断言。
+class ProbeAsset : public Asset,
+                   public AssetPaddingFacet,
+                   public AssetFacet,
+                   public LeftAssetFacet,
+                   public RightAssetFacet {
+public:
+    struct Counters {
+        uint32_t Unloaded{0};
+        uint32_t Destroyed{0};
+        /// OnUnload 时 Destroyed 的值。为 0 才说明 OnUnload 确实跑在析构之前。
+        uint32_t DestroyedAtUnload{0xffffffff};
+        /// OnUnload 的 payload 被销毁的次数。
+        uint32_t PayloadDestroyed{0};
+    };
+
+    /// 【计数器必须是 shared_ptr, 不能是指向用例栈上局部量的裸指针】: 用例结束时若仍有
+    /// 存活引用, 槽位要到 fixture 的 ~AssetManager 才回收 —— 那已经在用例函数返回【之后】,
+    /// 栈上的 Counters 早已死亡, 于是 OnUnload 写进已失效的栈帧。那种写入不一定立刻崩,
+    /// 表现为随机的挂死或串扰, 极难定位。共享所有权让计数器活到最后一个写入者之后。
+    ProbeAsset(shared_ptr<Counters> counters, bool ownsPayload) noexcept
+        : _counters(std::move(counters)), _ownsPayload(ownsPayload) {}
+
+    ~ProbeAsset() noexcept override {
+        if (_counters != nullptr) {
+            ++_counters->Destroyed;
+        }
+    }
+
+    void OnUnload(AssetManager&) override {
+        if (_counters != nullptr) {
+            ++_counters->Unloaded;
+            _counters->DestroyedAtUnload = _counters->Destroyed;
+        }
+        if (!_ownsPayload) {
+            return;
+        }
+        // 真资产在此把整包 GPU 对象交出去。这里交一个记账用的守卫即可 —— 被测的是路径,
+        // 不是资源类型。
+        DestroyGuard guard{_counters};
+    }
+
+private:
+    /// 析构时给 PayloadDestroyed +1, 被移走的那份不再记账。
+    ///
+    /// 移动守卫转移计数器所有权, 而
+    /// 用户声明的析构函数会【抑制隐式移动构造】—— 那时移动静默退化为拷贝, 于是临时对象
+    /// 与存下来的那份各记一次账, 计数翻倍。这正是本文件第一版失败的原因。
+    class DestroyGuard {
+    public:
+        explicit DestroyGuard(shared_ptr<Counters> sink) noexcept : _sink(std::move(sink)) {}
+        DestroyGuard(DestroyGuard&& other) noexcept : _sink(std::move(other._sink)) {}
+        DestroyGuard(const DestroyGuard&) = delete;
+        DestroyGuard& operator=(DestroyGuard&&) = delete;
+        DestroyGuard& operator=(const DestroyGuard&) = delete;
+
+        ~DestroyGuard() noexcept {
+            if (_sink != nullptr) {
+                ++_sink->PayloadDestroyed;
+            }
+        }
+
+    private:
+        shared_ptr<Counters> _sink;
+    };
+
+    shared_ptr<Counters> _counters;
+    bool _ownsPayload{false};
+};
+
+using Counters = ProbeAsset::Counters;
+
+shared_ptr<Counters> MakeCounters() { return make_shared<Counters>(); }
+
+/// 立即恢复的帧边界等待器, 并记录被等待过的次数。
+///
+/// 【为何可以立即恢复】: 测试里没有 GPU 在跑 —— 没有已录制的命令列表, "等到已录制的
+/// work 完成"这个条件平凡成立。真实实现必须等 fence, 见 GpuSystem::Wait。
+class CountingWaitFrame : public IWaitFrameProcessor {
+public:
+    task<void> Wait() override {
+        ++Count;
+        co_return;
+    }
+
+    uint32_t Count{0};
+};
+
+constexpr AssetId MakeId(uint32_t n) noexcept {
+    return AssetId{n, 0x0001, 0x4000, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+}
+
+/// 一个由测试手动放行的挂起点。
+///
+/// 【为何必须有它】: async_scope::spawn 会【同步】推进协程直到第一个真正的挂起点, 而
+/// 一个只有 co_return 的加载 task 没有挂起点 —— 它在 Load() 返回之前就跑完了。于是所有
+/// 关心"在飞期间发生了什么"的用例都无从下手。这个 gate 给加载协程造一个可控的停留处。
+///
+/// 【为何是 `co_await gate.Wait()` 而不是 `co_await gate`】: exec::task 的 promise 有
+/// await_transform, 它会把 awaitable 【按值】转发一遍; 若 operator co_await 定义在 gate
+/// 自己身上, 那个 this 就指向那份副本, 于是 handle 记进了副本而原 gate 永远 IsPending()
+/// 为 false。Wait() 返回的 awaiter 只带一个指向真 gate 的指针, 复制它无害。
+class ManualGate {
+public:
+    ManualGate() noexcept = default;
+    ManualGate(const ManualGate&) = delete;
+    ManualGate(ManualGate&&) = delete;
+    ManualGate& operator=(const ManualGate&) = delete;
+    ManualGate& operator=(ManualGate&&) = delete;
+
+    /// 【析构即放行】: 用例中途 ASSERT 失败会直接 return, 若此时还有协程停在门口,
+    /// ~AssetManager 的 WaitUntilEmpty 会永久阻塞 —— 一个失败的断言就变成一次挂死,
+    /// 掩盖真正的失败信息。gate 是用例的局部量, 声明序保证它先于 fixture 析构。
+    ~ManualGate() { Resume(); }
+
+    bool IsPending() const noexcept { return static_cast<bool>(_handle); }
+
+    void Resume() {
+        std::coroutine_handle<> handle = _handle;
+        _handle = {};
+        if (handle) {
+            handle.resume();
+        }
+    }
+
+    struct Awaiter {
+        ManualGate* Gate{nullptr};
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(std::coroutine_handle<> continuation) const noexcept {
+            Gate->_handle = continuation;
+        }
+        void await_resume() const noexcept {}
+    };
+
+    Awaiter Wait() noexcept { return Awaiter{this}; }
+
+private:
+    std::coroutine_handle<> _handle{};
+};
+
+class ProbeAssetSource final : public IAssetSource {
+public:
+    ProbeAssetSource(AssetId id, string path, shared_ptr<Counters> counters) noexcept
+        : _id(id), _path(std::move(path)), _counters(std::move(counters)) {}
+
+    std::optional<task<AssetLoadResult>> CreateLoadTask(const AssetId& id) override {
+        if (id != _id) {
+            return std::nullopt;
+        }
+        ++CreateCount;
+        return LoadProbe(_counters);
+    }
+
+    std::optional<AssetId> ResolveId(std::string_view relPath) const override {
+        ++ResolveCount;
+        return relPath == _path ? std::optional<AssetId>{_id} : std::nullopt;
+    }
+
+    uint32_t CreateCount{0};
+    mutable uint32_t ResolveCount{0};
+
+private:
+    static task<AssetLoadResult> LoadProbe(shared_ptr<Counters> counters) {
+        co_return AssetLoadResult::Success(make_unique<ProbeAsset>(std::move(counters), false));
+    }
+
+    AssetId _id;
+    string _path;
+    shared_ptr<Counters> _counters;
+};
+
+/// 【声明序即析构序的反面】: _waitFrame 必须比 _assets 活得久 —— 资产在 OnUnload 里经
+/// manager 用它, 而那发生在 manager 析构期间。故 _waitFrame 声明在前 (逆序析构时后死)。
+class AssetSlotTest : public ::testing::Test {
+protected:
+    AssetManager& Assets() noexcept { return _assets; }
+    CountingWaitFrame& WaitFrame() noexcept { return _waitFrame; }
+
+private:
+    CountingWaitFrame _waitFrame;
+    AssetManager _assets;
+};
+
+// ════════════════════════════════════════════════════════════
+//  引用计数是生命周期的唯一权威
+// ════════════════════════════════════════════════════════════
+
+/// 最后一份引用消失才卸载。这条是整个模型的地基: 正因为它成立, 缓存了资产内部指针的
+/// 地方只需存一份 ref, 不必再有第二层引用计数的"内容"对象。
+TEST_F(AssetSlotTest, SlotSurvivesUntilTheLastReferenceGoesAway) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(1);
+
+    {
+        StreamingAssetRef<ProbeAsset> first =
+            Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(counters, false));
+        ASSERT_TRUE(first.IsReady());
+        EXPECT_EQ(Assets().GetAssetCount(), 1u);
+
+        {
+            // 同 id 再取一份 —— 是同一个槽位, 只多一份计数。
+            StreamingAssetRef<ProbeAsset> second = Assets().Find<ProbeAsset>(id);
+            ASSERT_TRUE(second.IsReady());
+            EXPECT_EQ(second.Get(), first.Get());
+            EXPECT_TRUE(second == first) << "dedup by id must land on the same slot";
+            EXPECT_EQ(Assets().GetAssetCount(), 1u);
+        }
+
+        // 放掉一份不足以卸载, Pump 也不该动它。
+        Assets().Pump();
+        EXPECT_EQ(counters->Unloaded, 0u);
+        EXPECT_EQ(Assets().GetAssetCount(), 1u);
+        EXPECT_TRUE(first.IsReady());
+    }
+
+    // 引用归零, 但销毁对齐到 Pump —— 归零那一刻【还没有】发生任何事。
+    EXPECT_EQ(counters->Unloaded, 0u) << "destruction is aligned to Pump, not to the last release";
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+
+    Assets().Pump();
+    EXPECT_EQ(counters->Unloaded, 1u);
+    EXPECT_EQ(counters->Destroyed, 1u);
+    EXPECT_EQ(Assets().GetAssetCount(), 0u) << "the slot should be gone once Pump collects it";
+    EXPECT_FALSE(Assets().Find<ProbeAsset>(id).IsValid());
+}
+
+/// 【销毁不就地发生】这条单独立一个用例, 因为它是 ~StreamingAssetRefAny 得以保持
+/// noexcept 且可在遍历资产表时安全调用的全部依据。就地销毁会让那条路径跑资产析构 ——
+/// 而资产析构会放开它自己持有的引用, 从而递归销毁别的槽位、令正在遍历的迭代器失效。
+TEST_F(AssetSlotTest, ReleasingTheLastReferenceDoesNotDestroyInPlace) {
+    shared_ptr<Counters> counters = MakeCounters();
+    {
+        StreamingAssetRef<ProbeAsset> ref =
+            Assets().AddReady<ProbeAsset>(MakeId(2), make_unique<ProbeAsset>(counters, false));
+        ASSERT_TRUE(ref.IsReady());
+    }
+    EXPECT_EQ(counters->Unloaded, 0u);
+    EXPECT_EQ(counters->Destroyed, 0u);
+    EXPECT_EQ(Assets().GetAssetCount(), 1u) << "the slot must outlive the last reference until Pump";
+
+    Assets().Pump();
+    EXPECT_EQ(counters->Destroyed, 1u);
+}
+
+/// 引用归零后再 Find 回来即可复活槽位 —— 只要发生在 Pump 之前。这不是一个要依赖的特性,
+/// 而是"销毁对齐到 Pump"的直接推论, 固定住它可防止有人把销毁改回归零处。
+TEST_F(AssetSlotTest, ReacquiringBeforePumpKeepsTheSameAsset) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(3);
+    const ProbeAsset* raw = nullptr;
+
+    {
+        StreamingAssetRef<ProbeAsset> ref =
+            Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(counters, false));
+        ASSERT_TRUE(ref.IsReady());
+        raw = ref.Get().Get();
+    }
+
+    StreamingAssetRef<ProbeAsset> revived = Assets().Find<ProbeAsset>(id);
+    ASSERT_TRUE(revived.IsReady());
+    EXPECT_EQ(revived.Get().Get(), raw);
+
+    Assets().Pump();
+    EXPECT_EQ(counters->Unloaded, 0u) << "the slot was referenced again before Pump ran";
+    EXPECT_TRUE(revived.IsReady());
+}
+
+/// OnUnload 跑在析构【之前】。这不是风格问题: OnUnload 要拿 AssetManager 才能交出需要
+/// 延迟销毁的数据, 而析构函数里拿不到, 故顺序反了就等于没有延迟释放。
+TEST_F(AssetSlotTest, OnUnloadRunsBeforeTheDestructor) {
+    shared_ptr<Counters> counters = MakeCounters();
+    {
+        StreamingAssetRef<ProbeAsset> ref =
+            Assets().AddReady<ProbeAsset>(MakeId(4), make_unique<ProbeAsset>(counters, false));
+        ASSERT_TRUE(ref.IsReady());
+    }
+    Assets().Pump();
+
+    EXPECT_EQ(counters->Unloaded, 1u);
+    EXPECT_EQ(counters->Destroyed, 1u);
+    EXPECT_EQ(counters->DestroyedAtUnload, 0u) << "OnUnload must observe an alive asset";
+}
+
+/// 最后显式使用结束后 OnUnload 直接释放 payload，不额外等待帧边界。
+TEST_F(AssetSlotTest, OnUnloadReleasesCompletedPayloadsDirectly) {
+    shared_ptr<Counters> counters = MakeCounters();
+    {
+        StreamingAssetRef<ProbeAsset> ref =
+            Assets().AddReady<ProbeAsset>(MakeId(5), make_unique<ProbeAsset>(counters, true));
+        ASSERT_TRUE(ref.IsReady());
+        EXPECT_EQ(WaitFrame().Count, 0u);
+    }
+    Assets().Pump();
+
+    EXPECT_EQ(counters->Unloaded, 1u);
+    EXPECT_EQ(WaitFrame().Count, 0u) << "completed asset ownership unloads directly";
+    EXPECT_EQ(counters->PayloadDestroyed, 1u);
+}
+
+/// 【一帧一个协程帧】: 同一次 Pump 里归零的多个资产共用一个等待帧边界的协程。故大量
+/// 资产同时归零不会产生大量协程。
+TEST_F(AssetSlotTest, CompletedPayloadsFromOnePumpReleaseDirectly) {
+    shared_ptr<Counters> a = MakeCounters();
+    shared_ptr<Counters> b = MakeCounters();
+    shared_ptr<Counters> c = MakeCounters();
+    {
+        StreamingAssetRef<ProbeAsset> r1 = Assets().AddReady<ProbeAsset>(MakeId(6), make_unique<ProbeAsset>(a, true));
+        StreamingAssetRef<ProbeAsset> r2 = Assets().AddReady<ProbeAsset>(MakeId(7), make_unique<ProbeAsset>(b, true));
+        StreamingAssetRef<ProbeAsset> r3 = Assets().AddReady<ProbeAsset>(MakeId(8), make_unique<ProbeAsset>(c, true));
+        ASSERT_TRUE(r1.IsReady() && r2.IsReady() && r3.IsReady());
+        EXPECT_EQ(Assets().GetAssetCount(), 3u);
+    }
+    Assets().Pump();
+
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(WaitFrame().Count, 0u) << "asset unloads require no extra frame wait";
+    EXPECT_EQ(a->PayloadDestroyed, 1u);
+    EXPECT_EQ(b->PayloadDestroyed, 1u);
+    EXPECT_EQ(c->PayloadDestroyed, 1u);
+}
+
+/// Cascading releases beyond the entry cutoff wait for the next explicit Pump.
+TEST_F(AssetSlotTest, CascadedDependenciesWaitForTheNextPump) {
+    shared_ptr<Counters> ownerCounters = MakeCounters();
+    shared_ptr<Counters> heldCounters = MakeCounters();
+    const AssetId heldId = MakeId(9);
+
+    /// 一个持有另一份资产引用的资产。析构时那份引用随之放开。
+    class OwnerAsset : public ProbeAsset {
+    public:
+        OwnerAsset(shared_ptr<Counters> counters, StreamingAssetRefAny held) noexcept
+            : ProbeAsset(std::move(counters), false), _held(std::move(held)) {}
+
+    private:
+        StreamingAssetRefAny _held;
+    };
+
+    {
+        StreamingAssetRef<ProbeAsset> held =
+            Assets().AddReady<ProbeAsset>(heldId, make_unique<ProbeAsset>(heldCounters, false));
+        ASSERT_TRUE(held.IsReady());
+
+        // 创建入口仍受 Asset 基类约束；实际对象可以是更深的派生类型。
+        StreamingAssetRef<ProbeAsset> owner = Assets().AddReady<ProbeAsset>(
+            MakeId(10),
+            unique_ptr<ProbeAsset>{make_unique<OwnerAsset>(ownerCounters, held.AsAny())});
+        ASSERT_TRUE(owner.IsReady());
+        EXPECT_EQ(Assets().GetAssetCount(), 2u);
+    }
+
+    Assets().Pump();
+    EXPECT_EQ(ownerCounters->Destroyed, 1u);
+    EXPECT_EQ(heldCounters->Destroyed, 0u);
+    Assets().Pump();
+    EXPECT_EQ(heldCounters->Destroyed, 1u);
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+}
+
+TEST_F(AssetSlotTest, ResidentAndRescuedAssetsSurviveUntilReleasedAndDependencyChainsDrain) {
+    auto counters = MakeCounters();
+    vector<StreamingAssetRef<ProbeAsset>> resident;
+    for (uint32_t i = 0; i < 10000; ++i)
+        resident.push_back(Assets().AddReady<ProbeAsset>(MakeId(10000 + i), make_unique<ProbeAsset>(counters, false)));
+    for (uint32_t i = 0; i < 100; ++i) Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 10000u);
+    EXPECT_EQ(counters->Destroyed, 0u);
+    const auto rescuedId = resident.back().GetAssetId();
+    resident.back().Reset();
+    auto rescued = Assets().Find(rescuedId);
+    Assets().Pump();
+    EXPECT_TRUE(rescued.IsReady());
+    EXPECT_EQ(Assets().GetAssetCount(), 10000u);
+    EXPECT_EQ(counters->Destroyed, 0u);
+    rescued.Reset();
+    resident.clear();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Destroyed, 10000u);
+
+    class DependencyAsset final : public ProbeAsset {
+    public:
+        DependencyAsset(shared_ptr<Counters> counters, StreamingAssetRefAny dependency)
+            : ProbeAsset(std::move(counters), false), Dependency(std::move(dependency)) {}
+        StreamingAssetRefAny Dependency;
+    };
+    StreamingAssetRefAny chain;
+    for (uint32_t i = 0; i < 10000; ++i)
+        chain = Assets().AddReady(MakeId(20000 + i), make_unique<DependencyAsset>(counters, std::move(chain)));
+    chain.Reset();
+    for (uint32_t remaining = 10000; remaining > 0; --remaining) {
+        EXPECT_EQ(Assets().GetAssetCount(), remaining);
+        Assets().Pump();
+    }
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Destroyed, 20000u);
+    EXPECT_EQ(counters->Unloaded, 20000u);
+}
+
+TEST_F(AssetSlotTest, ReentrantUnloadCanReloadItsIdentityWithoutRevivingTheDyingObject) {
+    auto counters = MakeCounters();
+    StreamingAssetRefAny replacement;
+    class ReloadingAsset final : public ProbeAsset {
+    public:
+        ReloadingAsset(shared_ptr<Counters> counters, StreamingAssetRefAny& replacement)
+            : ProbeAsset(counters, false), Counts(std::move(counters)), Replacement(replacement) {}
+        void OnUnload(AssetManager& manager) override {
+            ProbeAsset::OnUnload(manager);
+            EXPECT_FALSE(manager.Find(MakeId(40000)).IsValid());
+            Replacement = manager.AddReady(MakeId(40000), make_unique<ProbeAsset>(Counts, false));
+            EXPECT_DEATH(manager.Pump(), "");
+        }
+        shared_ptr<Counters> Counts;
+        StreamingAssetRefAny& Replacement;
+    };
+    auto ref = Assets().AddReady(MakeId(40000), make_unique<ReloadingAsset>(counters, replacement));
+    ref.Reset();
+    Assets().Pump();
+    EXPECT_TRUE(replacement.IsReady());
+    EXPECT_EQ(counters->Destroyed, 1u);
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    replacement.Reset();
+    Assets().Pump();
+    EXPECT_EQ(counters->Destroyed, 2u);
+}
+
+/// 引用归零、Pump 回收之后, 同 id 可以重新建槽位。验的是回收真的把索引项擦掉了 ——
+/// 若只清了对象而留着索引, 这里会命中一个空槽位。
+TEST_F(AssetSlotTest, SameIdCanBeReoccupiedAfterCollection) {
+    shared_ptr<Counters> first = MakeCounters();
+    shared_ptr<Counters> second = MakeCounters();
+    const AssetId id = MakeId(11);
+
+    {
+        StreamingAssetRef<ProbeAsset> ref =
+            Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(first, false));
+        ASSERT_TRUE(ref.IsReady());
+    }
+    Assets().Pump();
+    ASSERT_EQ(Assets().GetAssetCount(), 0u);
+
+    StreamingAssetRef<ProbeAsset> again =
+        Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(second, false));
+    ASSERT_TRUE(again.IsReady());
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    EXPECT_EQ(second->Unloaded, 0u);
+    EXPECT_EQ(first->Unloaded, 1u);
+}
+
+/// 空引用不指向槽位, 且各项查询都给出安全的答案 (不解引用 nullptr)。
+TEST_F(AssetSlotTest, EmptyReferenceAnswersEverythingSafely) {
+    StreamingAssetRef<ProbeAsset> empty;
+    EXPECT_FALSE(empty.IsValid());
+    EXPECT_FALSE(empty.IsReady());
+    EXPECT_FALSE(empty.IsCompleted());
+    EXPECT_FALSE(empty.IsFaulted());
+    EXPECT_FALSE(empty.IsCanceled());
+    EXPECT_FALSE(static_cast<bool>(empty));
+    EXPECT_EQ(empty.Get(), nullptr);
+    empty.Cancel();  // 无操作, 不得崩。
+    empty.Reset();
+}
+
+/// 相等【比较槽位身份, 不比较 AssetId】。两个空引用的 id 都是空, 若按 id 比就会相等 ——
+/// 那会让"两个空引用指向同一资产"这种荒谬结论成立。
+TEST_F(AssetSlotTest, EqualityComparesSlotIdentityNotAssetId) {
+    shared_ptr<Counters> a = MakeCounters();
+    shared_ptr<Counters> b = MakeCounters();
+    StreamingAssetRef<ProbeAsset> first =
+        Assets().AddReady<ProbeAsset>(MakeId(12), make_unique<ProbeAsset>(a, false));
+    StreamingAssetRef<ProbeAsset> second =
+        Assets().AddReady<ProbeAsset>(MakeId(13), make_unique<ProbeAsset>(b, false));
+    ASSERT_TRUE(first.IsReady() && second.IsReady());
+
+    EXPECT_TRUE(first == first);
+    EXPECT_FALSE(first == second);
+
+    StreamingAssetRef<ProbeAsset> emptyA;
+    StreamingAssetRef<ProbeAsset> emptyB;
+    EXPECT_TRUE(emptyA == emptyB) << "two empty refs are both 'no slot' — that is the same slot";
+    EXPECT_FALSE(emptyA == first);
+}
+
+/// 查询直接遵循真实 C++ 继承关系；测试类型没有声明 Guid。
+TEST_F(AssetSlotTest, RttiViewsSupportBasesCrossCastsPointerAdjustmentAndVirtualInheritance) {
+    shared_ptr<Counters> counters = MakeCounters();
+    StreamingAssetRefAny any = Assets().AddReady(
+        MakeId(14),
+        unique_ptr<Asset>{make_unique<ProbeAsset>(counters, false)});
+    ASSERT_TRUE(any.IsReady());
+
+    EXPECT_TRUE(any.Is<ProbeAsset>());
+    EXPECT_TRUE(any.Is<Asset>());
+    EXPECT_TRUE(any.Is<AssetFacet>());
+    EXPECT_TRUE(any.Is<SharedAssetFacet>());
+    EXPECT_FALSE(any.Is<UnrelatedAssetFacet>());
+
+    StreamingAssetRef<ProbeAsset> typed = any.CastTo<ProbeAsset>();
+    StreamingAssetRef<AssetFacet> facet = any.CastTo<AssetFacet>();
+    StreamingAssetRef<LeftAssetFacet> left = any.CastTo<LeftAssetFacet>();
+    StreamingAssetRef<RightAssetFacet> right = any.CastTo<RightAssetFacet>();
+    StreamingAssetRef<SharedAssetFacet> shared = any.CastTo<SharedAssetFacet>();
+    StreamingAssetRef<const AssetFacet> constFacet = any.CastTo<const AssetFacet>();
+    ASSERT_TRUE(typed.IsReady());
+    ASSERT_TRUE(facet.IsReady());
+    ASSERT_TRUE(left.IsReady());
+    ASSERT_TRUE(right.IsReady());
+    ASSERT_TRUE(shared.IsReady());
+    ASSERT_TRUE(constFacet.IsReady());
+    EXPECT_EQ(typed.Get(), any.Get());
+    EXPECT_TRUE(typed == any);
+    EXPECT_TRUE(facet == any);
+    EXPECT_TRUE(shared == any);
+    EXPECT_EQ(constFacet.Get().Get(), static_cast<const AssetFacet*>(facet.Get().Get()));
+
+    Nullable<Asset*> object = any.Get();
+    ASSERT_TRUE(object);
+    Asset* rawObject = object.Get();
+    EXPECT_EQ(typeid(*rawObject), typeid(ProbeAsset));
+    EXPECT_NE(
+        static_cast<const void*>(facet.Get().Get()),
+        static_cast<const void*>(object.Get()));
+    EXPECT_EQ(
+        dynamic_cast<SharedAssetFacet*>(left.Get().Get()),
+        shared.Get().Get());
+    EXPECT_EQ(
+        dynamic_cast<SharedAssetFacet*>(right.Get().Get()),
+        shared.Get().Get());
+
+    StreamingAssetRef<UnrelatedAssetFacet> unrelated = any.CastTo<UnrelatedAssetFacet>();
+    EXPECT_FALSE(unrelated.IsValid());
+}
+
+/// ImageAsset 的构造发生在 radrayruntime 静态库内部，查询模板实例位于最终测试程序中；
+/// 这条覆盖跨链接单元的真实生产 RTTI。
+TEST_F(AssetSlotTest, LibraryCreatedImageAssetIsQueryableFromFinalExecutable) {
+    ImageAssetLoadOptions options;
+    options.FallbackImage = MakeSolidImage(1, 2, 3, 255);
+    StreamingAssetRef<ImageAsset> image = LoadImageAsset(
+        Assets(),
+        MakeId(41),
+        std::filesystem::path{"__radray_missing_image_for_rtti__.png"},
+        options);
+
+    Assets().Pump();
+
+    ASSERT_TRUE(image.IsReady());
+    Nullable<Asset*> object = image.AsAny().Get();
+    ASSERT_TRUE(object);
+    Asset* rawObject = object.Get();
+    EXPECT_EQ(typeid(*rawObject), typeid(ImageAsset));
+    EXPECT_TRUE(image.AsAny().Is<ImageAsset>());
+}
+
+// ════════════════════════════════════════════════════════════
+//  在飞加载
+// ════════════════════════════════════════════════════════════
+
+/// 加载期间 manager 自持一份引用, 故调用方可以立刻丢弃返回值做预热。
+TEST_F(AssetSlotTest, LoadHoldsItsOwnReferenceWhileInFlight) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(15);
+
+    ManualGate gate;
+    StreamingAssetRef<AssetFacet> ref = Assets().Load<AssetFacet>(AssetLoadRequest{
+        .Id = id,
+        .Task = [](ManualGate* g) -> task<AssetLoadResult> {
+            co_await g->Wait();
+            co_return AssetLoadResult::Failure("deliberate failure");
+        }(&gate),
+        .DebugName = "probe"});
+    ASSERT_TRUE(gate.IsPending());
+    EXPECT_TRUE(ref.IsValid());
+    EXPECT_FALSE(ref.IsCompleted()) << "still Loading";
+    EXPECT_EQ(ref.Get(), nullptr) << "Loading must not hand out the asset";
+    EXPECT_EQ(counters->Unloaded, 0u);
+
+    gate.Resume();
+    Assets().Pump();
+    // 这次是失败, 故槽位是 Faulted 而非 Ready。
+    EXPECT_TRUE(ref.IsFaulted());
+    EXPECT_FALSE(ref.IsReady());
+    EXPECT_TRUE(ref.IsCompleted());
+}
+
+/// 【外部引用全部放手不会取消在飞加载】。这是一条刻意的策略: 加载多半已花掉大半代价
+/// (IO 已完成、GPU 上传已提交), 半途取消既救不回那部分开销, 又要求每个 loader 都写
+/// "取消后如何回退"。让它跑完, 之后按常规归零回收。
+///
+/// 若哪天有人改成自动取消, 这个用例会失败并把讨论拉到该改的地方。
+TEST_F(AssetSlotTest, DroppingEveryExternalRefLetsTheLoadRunToCompletion) {
+    shared_ptr<Counters> counters = MakeCounters();
+    bool taskObservedStop = false;
+
+    ManualGate gate;
+    {
+        StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+            .Id = MakeId(16),
+            .Task = [](ManualGate* g, bool* observed, shared_ptr<Counters> c) -> task<AssetLoadResult> {
+                co_await g->Wait();
+                stop_token stop = co_await CurrentStopToken();
+                *observed = stop.stop_requested();
+                co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+            }(&gate, &taskObservedStop, counters)});
+        ASSERT_TRUE(gate.IsPending());
+        EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    }
+    // 外部放手了, 但 manager 自持的那份引用还在 —— 槽位存活, 加载继续。
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    EXPECT_TRUE(gate.IsPending());
+
+    gate.Resume();
+    EXPECT_FALSE(taskObservedStop) << "dropping external refs must NOT request_stop the load";
+
+    // Pump 让结果落地并放开加载那份引用; 此刻已无人持有, 同一次 Pump 里即被回收。
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Unloaded, 1u) << "the completed asset is collected once nobody wants it";
+    EXPECT_EQ(counters->Destroyed, 1u);
+}
+
+/// 同 id 的第二次 Load 不再启动加载, 直接复用在飞槽位。第二个 task 【一次都不能跑】——
+/// 否则同一份资源会被解析两遍, 而那是最贵也最难看出来的一类浪费。
+TEST_F(AssetSlotTest, LoadDeduplicatesByAssetId) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(17);
+    uint32_t started = 0;
+    auto makeTask = [counters, &started]() -> task<AssetLoadResult> {
+        ++started;
+        co_return AssetLoadResult::Success(make_unique<ProbeAsset>(counters, false));
+    };
+
+    StreamingAssetRef<ProbeAsset> first =
+        Assets().Load<ProbeAsset>(AssetLoadRequest{.Id = id, .Task = makeTask()});
+    StreamingAssetRef<ProbeAsset> second =
+        Assets().Load<ProbeAsset>(AssetLoadRequest{.Id = id, .Task = makeTask()});
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    EXPECT_EQ(started, 1u) << "the deduplicated request's task must never be spawned";
+    EXPECT_TRUE(first == second) << "dedup is observable as reference equality";
+
+    Assets().Pump();
+    ASSERT_TRUE(first.IsReady());
+    ASSERT_TRUE(second.IsReady());
+    EXPECT_EQ(first.Get(), second.Get());
+}
+
+/// 显式 Cancel 让槽位进入 Canceled 终态, 而不是 Faulted —— 两者要能区分, 否则调用方
+/// 分不清"加载失败要报错"与"我自己取消了, 不必报错"。
+TEST_F(AssetSlotTest, ExplicitCancelEndsInCanceledNotFaulted) {
+    ManualGate gate;
+    StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+        .Id = MakeId(18),
+        .Task = [](ManualGate* g) -> task<AssetLoadResult> {
+            co_await g->Wait();
+            stop_token stop = co_await CurrentStopToken();
+            if (stop.stop_requested()) {
+                co_await StopCurrentTask();
+            }
+            co_return AssetLoadResult::Failure("not reached");
+        }(&gate)});
+    ASSERT_TRUE(gate.IsPending());
+
+    ref.Cancel();
+    gate.Resume();
+    Assets().Pump();
+
+    EXPECT_TRUE(ref.IsCompleted());
+    EXPECT_TRUE(ref.IsCanceled());
+    EXPECT_FALSE(ref.IsFaulted());
+    EXPECT_FALSE(ref.IsReady());
+    EXPECT_EQ(ref.Get(), nullptr);
+}
+
+/// 【取消是协作式的】: Cancel 只 request_stop, 它不能中止一个不看 stop token 的加载 ——
+/// 那个 task 仍会跑完并把结果交上来, 槽位进 Ready 而非 Canceled。
+///
+/// 这条看似在"断言一个缺点", 但它固定的是 loader 的编写契约: 想让 Cancel 真正生效, loader
+/// 必须在自己的挂起点上查 stop token (或经 AwaitWithStopToken 等待 sender)。
+TEST_F(AssetSlotTest, CancelDoesNotAbortALoadThatIgnoresItsStopToken) {
+    shared_ptr<Counters> counters = MakeCounters();
+    ManualGate gate;
+    StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+        .Id = MakeId(19),
+        .Task = [](ManualGate* g, shared_ptr<Counters> c) -> task<AssetLoadResult> {
+            co_await g->Wait();  // 刻意不查 stop token。
+            co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+        }(&gate, counters)});
+    ref.Cancel();
+    gate.Resume();
+    Assets().Pump();
+
+    EXPECT_TRUE(ref.IsReady());
+    EXPECT_FALSE(ref.IsCanceled());
+}
+
+/// Success(null) 仍是失败结果；槽位不得进入 Ready。
+TEST_F(AssetSlotTest, EmptySuccessfulResultFaultsTheSlot) {
+    StreamingAssetRefAny ref = Assets().Load(AssetLoadRequest{
+        .Id = MakeId(20),
+        .Task = []() -> task<AssetLoadResult> {
+            co_return AssetLoadResult::Success(unique_ptr<Asset>{});
+        }()});
+    Assets().Pump();
+
+    EXPECT_TRUE(ref.IsFaulted());
+    EXPECT_EQ(ref.Get(), nullptr);
+}
+
+/// Loading 时任何完整类视图都能共享槽位；最终不匹配的既有视图保留终态观察权，
+/// 但不把实际 Ready 暴露成自己的成功。
+TEST_F(AssetSlotTest, LoadingViewRetainsSlotAfterFinalTypeMismatch) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(40);
+    StreamingAssetRef<UnrelatedAssetFacet> mismatch = Assets().Load<UnrelatedAssetFacet>(AssetLoadRequest{
+        .Id = id,
+        .Task = [](shared_ptr<Counters> c) -> task<AssetLoadResult> {
+            co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+        }(counters)});
+    StreamingAssetRefAny any = mismatch.AsAny();
+    StreamingAssetRef<AssetFacet> matching = Assets().Find<AssetFacet>(id);
+
+    ASSERT_TRUE(mismatch.IsValid());
+    ASSERT_TRUE(matching.IsValid());
+    EXPECT_TRUE(mismatch == any);
+    EXPECT_TRUE(matching == any);
+    EXPECT_FALSE(mismatch.IsCompleted());
+    EXPECT_FALSE(matching.IsCompleted());
+
+    Assets().Pump();
+
+    ASSERT_TRUE(any.IsReady());
+    EXPECT_TRUE(matching.IsCompleted());
+    EXPECT_TRUE(matching.IsReady());
+    EXPECT_NE(matching.Get(), nullptr);
+    EXPECT_TRUE(mismatch.IsValid());
+    EXPECT_TRUE(mismatch.IsCompleted());
+    EXPECT_FALSE(mismatch.IsReady());
+    EXPECT_FALSE(mismatch.IsFaulted());
+    EXPECT_FALSE(mismatch.IsCanceled());
+    EXPECT_EQ(mismatch.Get(), nullptr);
+
+    StreamingAssetRef<UnrelatedAssetFacet> lateMismatch =
+        any.CastTo<UnrelatedAssetFacet>();
+    EXPECT_FALSE(lateMismatch.IsValid());
+
+    any.Reset();
+    matching.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 1u)
+        << "the mismatched view still owns the shared slot";
+
+    mismatch.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Unloaded, 1u);
+    EXPECT_EQ(counters->Destroyed, 1u);
+}
+
+/// 没人持有的 Faulted 槽位会被回收, id 随之释放 —— 故拿对参数重试不会被 dedup 命中一个
+/// 坏槽位。这是"引用计数是唯一权威"买到的一个具体好处。
+TEST_F(AssetSlotTest, UnreferencedFaultedSlotIsCollectedSoTheIdIsFree) {
+    const AssetId id = MakeId(21);
+    {
+        StreamingAssetRefAny ref = Assets().Load(AssetLoadRequest{
+            .Id = id,
+            .Task = []() -> task<AssetLoadResult> {
+                co_return AssetLoadResult::Failure("deliberate");
+            }()});
+        Assets().Pump();
+        ASSERT_TRUE(ref.IsFaulted());
+    }
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+
+    shared_ptr<Counters> counters = MakeCounters();
+    StreamingAssetRef<ProbeAsset> retried =
+        Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(counters, false));
+    EXPECT_TRUE(retried.IsReady()) << "the id must be free after the faulted slot is collected";
+}
+
+// ════════════════════════════════════════════════════════════
+//  IAssetSource 桥接
+// ════════════════════════════════════════════════════════════
+
+TEST_F(AssetSlotTest, SourceLoadUsesTheExistingSlotTableAndDeduplicates) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(27);
+    ProbeAssetSource source{id, "probe.asset", counters};
+    Assets().SetAssetSource(&source);
+
+    StreamingAssetRef<ProbeAsset> first = Assets().Load<ProbeAsset>(id);
+    StreamingAssetRef<ProbeAsset> second = Assets().Load<ProbeAsset>(id);
+    EXPECT_TRUE(first.IsValid());
+    EXPECT_TRUE(first == second);
+    EXPECT_EQ(source.CreateCount, 1u) << "the source must not create a discarded duplicate task";
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+
+    Assets().Pump();
+    ASSERT_TRUE(first.IsReady());
+    ASSERT_TRUE(second.IsReady());
+    EXPECT_EQ(first.Get(), second.Get());
+    Assets().SetAssetSource(nullptr);
+}
+
+TEST_F(AssetSlotTest, MissingOrUnresolvedSourceReturnsAnInvalidReference) {
+    const AssetId id = MakeId(28);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>(id).IsValid());
+
+    ProbeAssetSource source{id, "known.asset", MakeCounters()};
+    Assets().SetAssetSource(&source);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>(MakeId(29)).IsValid());
+    EXPECT_EQ(source.CreateCount, 0u);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>("missing.asset").IsValid());
+    EXPECT_EQ(source.ResolveCount, 1u);
+    Assets().SetAssetSource(nullptr);
+}
+
+TEST_F(AssetSlotTest, SourcePathResolvesToThePersistentId) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(30);
+    ProbeAssetSource source{id, "folder/probe.asset", counters};
+    Assets().SetAssetSource(&source);
+
+    StreamingAssetRef<ProbeAsset> byPath = Assets().Load<ProbeAsset>("folder/probe.asset");
+    StreamingAssetRef<ProbeAsset> byId = Assets().Load<ProbeAsset>(id);
+    EXPECT_TRUE(byPath.IsValid());
+    EXPECT_TRUE(byPath == byId);
+    EXPECT_EQ(byPath.GetAssetId(), id);
+    EXPECT_EQ(source.ResolveCount, 1u);
+    EXPECT_EQ(source.CreateCount, 1u);
+
+    Assets().Pump();
+    EXPECT_TRUE(byPath.IsReady());
+    Assets().SetAssetSource(nullptr);
+}
+
+// ════════════════════════════════════════════════════════════
+//  co_await 一份引用
+// ════════════════════════════════════════════════════════════
+
+/// 等待者在 Pump 提交结果之后被恢复。
+TEST_F(AssetSlotTest, AwaitingAReferenceResumesAfterPump) {
+    shared_ptr<Counters> counters = MakeCounters();
+    bool resumed = false;
+    bool sawReady = false;
+
+    ManualGate gate;
+    StreamingAssetRef<AssetFacet> ref = Assets().Load<AssetFacet>(AssetLoadRequest{
+        .Id = MakeId(22),
+        .Task = [](ManualGate* g, shared_ptr<Counters> c) -> task<AssetLoadResult> {
+            co_await g->Wait();
+            co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+        }(&gate, counters)});
+
+    TaskScope waiters;
+    waiters.Spawn([](AssetManager* manager, StreamingAssetRef<AssetFacet> r, bool* resumedOut, bool* readyOut) -> task<void> {
+        co_await manager->Wait(r);
+        *resumedOut = true;
+        *readyOut = r.IsReady();
+    }(&Assets(), ref, &resumed, &sawReady));
+
+    EXPECT_FALSE(resumed) << "the waiter must not resume before the load completes";
+
+    gate.Resume();
+    // 加载协程已写好结果, 但槽位仍是 Loading —— 终态只在 Pump 里发生, 等待者也只在那里恢复。
+    EXPECT_FALSE(resumed) << "leaving Loading is Pump's job, not the load coroutine's";
+
+    Assets().Pump();
+    EXPECT_TRUE(resumed);
+    EXPECT_TRUE(sawReady) << "the asset must already be published when the waiter resumes";
+    waiters.WaitUntilEmpty();
+}
+
+/// 已是终态的引用不挂起 (await_ready 为真)。
+TEST_F(AssetSlotTest, AwaitingACompletedReferenceDoesNotSuspend) {
+    shared_ptr<Counters> counters = MakeCounters();
+    StreamingAssetRef<ProbeAsset> ref =
+        Assets().AddReady<ProbeAsset>(MakeId(23), make_unique<ProbeAsset>(counters, false));
+    ASSERT_TRUE(ref.IsReady());
+
+    bool resumed = false;
+    TaskScope waiters;
+    waiters.Spawn([](StreamingAssetRef<ProbeAsset> r, bool* out) -> task<void> {
+        *out = co_await r;
+    }(ref, &resumed));
+    EXPECT_TRUE(resumed);
+    waiters.WaitUntilEmpty();
+}
+
+/// 空引用也算"等到了" —— 没有东西可等。这条防的是把空引用当成永久挂起。
+TEST_F(AssetSlotTest, AwaitingAnEmptyReferenceCompletesImmediately) {
+    bool resumed = false;
+    TaskScope waiters;
+    waiters.Spawn([](bool* out) -> task<void> {
+        StreamingAssetRef<ProbeAsset> empty;
+        *out = co_await empty;
+    }(&resumed));
+    EXPECT_TRUE(resumed);
+    waiters.WaitUntilEmpty();
+}
+
+/// 【等待者被取消 ≠ 资产加载失败】。await_resume 返回 false 表达的是前者, 而
+/// AssetManager::Wait 会把它转成对当前 task 的 stop 传播 —— 于是等待方不会误把
+/// "我自己不等了"读成"资产坏了"。取消等待者【不】取消底层加载。
+TEST_F(AssetSlotTest, CancelingAWaiterDoesNotCancelTheLoad) {
+    shared_ptr<Counters> counters = MakeCounters();
+    bool waiterFinished = false;
+    bool waiterSawCompletion = true;
+
+    ManualGate gate;
+    StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+        .Id = MakeId(24),
+        .Task = [](ManualGate* g, shared_ptr<Counters> c) -> task<AssetLoadResult> {
+            co_await g->Wait();
+            co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+        }(&gate, counters)});
+
+    {
+        TaskScope waiters;
+        waiters.Spawn([](StreamingAssetRef<ProbeAsset> r, bool* finished, bool* sawCompletion) -> task<void> {
+            *sawCompletion = co_await r;
+            *finished = true;
+        }(ref, &waiterFinished, &waiterSawCompletion));
+        ASSERT_FALSE(waiterFinished);
+        // ~TaskScope 会 RequestStop + WaitUntilEmpty: 等待者被取消并就地恢复。
+    }
+    EXPECT_TRUE(waiterFinished);
+    EXPECT_FALSE(waiterSawCompletion) << "false means 'the waiter was canceled', not 'the load failed'";
+
+    // 加载本身没被牵连。
+    ASSERT_TRUE(gate.IsPending());
+    gate.Resume();
+    Assets().Pump();
+    EXPECT_TRUE(ref.IsReady()) << "canceling a waiter must not cancel the underlying load";
+}
+
+// ════════════════════════════════════════════════════════════
+//  关停
+// ════════════════════════════════════════════════════════════
+
+/// AssetManager 先死时仍无条件对每个槽位走一遍 OnUnload。持有外部引用不能阻止它 ——
+/// 那是使用错误 (会记 error log), 但 GPU 资源必须在 device 之前交出去, 否则泄漏比悬垂
+/// 更难查。这条固定的是"关停时选悬垂而非泄漏"这个决定。
+TEST_F(AssetSlotTest, ManagerDestructionUnloadsEverySlotEvenWhenStillReferenced) {
+    shared_ptr<Counters> counters = MakeCounters();
+    CountingWaitFrame waitFrame;
+    using Ref = StreamingAssetRef<ProbeAsset>;
+    alignas(Ref) array<byte, sizeof(Ref)> leakedStorage;
+    // This negative test deliberately leaves an outstanding reference. Ending its storage
+    // lifetime must not call Reset or a destructor after the manager invalidates the slot.
+    auto* leaked = std::construct_at(reinterpret_cast<Ref*>(leakedStorage.data()));
+
+    {
+        AssetManager assets;
+
+        *leaked = assets.AddReady<ProbeAsset>(MakeId(25), make_unique<ProbeAsset>(counters, true));
+        ASSERT_TRUE(leaked->IsReady());
+    }
+
+    EXPECT_EQ(counters->Unloaded, 1u);
+    EXPECT_EQ(counters->Destroyed, 1u);
+    // payload 交出后已无从等待帧边界 (关停时加载 scope 已停), 故就地销毁 —— 关停路径
+    // 在此之前已 device wait-idle 过。
+    EXPECT_EQ(counters->PayloadDestroyed, 1u) << "payloads must not leak past the device";
+    // The reference is now invalid: even Reset would access a released slot.
+}
+
+/// 关停时【已写好但还没 Pump 的结果】仍会落地, 那个资产照样走 OnUnload。
+///
+/// 【为何这条值得单独测】: ~AssetManager 里刻意不调 Pump 而是手动走 PumpLoadResults +
+/// CollectZeroRefSlots (Pump 的第三步会 spawn 一个必然立刻被取消的协程)。漏掉第一步的
+/// 后果正是这里断言的东西: 资产留在 PendingResult 里随 optional 析构, 永远不走 OnUnload,
+/// 于是它持有的 GPU 对象活过 device。
+TEST_F(AssetSlotTest, ShutdownCommitsPendingResultsSoTheyStillUnload) {
+    shared_ptr<Counters> counters = MakeCounters();
+    CountingWaitFrame waitFrame;
+
+    {
+        AssetManager assets;
+
+        // 无挂起点的 task 在 Load 返回前就跑完, 结果已写进 PendingResult 但尚未 Pump。
+        StreamingAssetRefAny ref = assets.Load(AssetLoadRequest{
+            .Id = MakeId(26),
+            .Task = [](shared_ptr<Counters> c) -> task<AssetLoadResult> {
+                co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, true));
+            }(counters)});
+        ASSERT_TRUE(ref.IsValid());
+        ASSERT_FALSE(ref.IsCompleted()) << "the result is pending; committing it is Pump's job";
+        EXPECT_EQ(counters->Unloaded, 0u);
+    }
+
+    EXPECT_EQ(counters->Unloaded, 1u) << "a pending result must still be committed and unloaded";
+    EXPECT_EQ(counters->Destroyed, 1u);
+    EXPECT_EQ(counters->PayloadDestroyed, 1u);
+}
+
+}  // namespace
+}  // namespace radray
