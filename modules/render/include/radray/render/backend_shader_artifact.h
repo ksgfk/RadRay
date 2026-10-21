@@ -10,20 +10,6 @@
 
 namespace radray::render {
 
-enum class BackendShaderArtifactFailure : uint32_t {
-    None = 0,
-    UnsupportedBackend,
-    TargetMismatch,
-    DecodeFailed,
-    LayoutResolveFailed,
-    PipelineLayoutCreationFailed,
-};
-
-struct BackendShaderArtifactError {
-    BackendShaderArtifactFailure Failure{BackendShaderArtifactFailure::None};
-    shader::ShaderArtifactDecodeError DecodeFailure{shader::ShaderArtifactDecodeError::None};
-};
-
 struct ShaderBindingInfo {
     shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
     uint32_t Group{0};
@@ -53,11 +39,11 @@ private:
     std::variant<shader::DxilShaderArtifactView, shader::SpirvShaderArtifactView> _artifact;
     std::variant<ResolvedD3D12Layout, ResolvedVulkanLayout> _layout;
 
-    friend std::optional<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
+    friend shader::DiagnosticResult<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
         RenderBackend, std::span<const byte>, const shader::ShaderArtifactDecodeOptions&,
-        const ShaderProgramLayoutRecipe&, Nullable<BackendShaderArtifactError*>) noexcept;
-    friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
-        Device&, PreparedBackendShaderArtifact, Nullable<BackendShaderArtifactError*>) noexcept;
+        const ShaderProgramLayoutRecipe&);
+    friend shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
+        Device&, PreparedBackendShaderArtifact);
 };
 
 class BackendShaderArtifact {
@@ -101,15 +87,14 @@ private:
         ResolvedVulkanLayout resolvedLayout,
         unique_ptr<PipelineLayout> layout) noexcept;
 
-    friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
-        Device&, PreparedBackendShaderArtifact, Nullable<BackendShaderArtifactError*>) noexcept;
+    friend shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
+        Device&, PreparedBackendShaderArtifact);
 
-    friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+    friend shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
         Device&,
         std::span<const byte>,
         const shader::ShaderArtifactDecodeOptions&,
-        const ShaderProgramLayoutRecipe&,
-        BackendShaderArtifactError*) noexcept;
+        const ShaderProgramLayoutRecipe&);
 };
 
 std::optional<shader::ShaderTarget> GetShaderTargetForBackend(
@@ -118,40 +103,35 @@ std::optional<shader::ShaderTarget> GetShaderTargetForBackend(
 std::optional<ShaderBlobCategory> GetShaderBlobCategory(
     shader::ShaderTarget target) noexcept;
 
-std::optional<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
+shader::DiagnosticResult<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
     RenderBackend backend,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
-    const ShaderProgramLayoutRecipe& recipe,
-    Nullable<BackendShaderArtifactError*> error = nullptr) noexcept;
+    const ShaderProgramLayoutRecipe& recipe);
 
-std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
-    PreparedBackendShaderArtifact prepared,
-    Nullable<BackendShaderArtifactError*> error = nullptr) noexcept;
+    PreparedBackendShaderArtifact prepared);
 
 // Standalone hash query, without native creation. A caller that may create a native artifact
 // should use PrepareBackendShaderArtifact and consume its result instead of resolving twice.
-std::optional<ResolvedLayoutHash> ResolveBackendLayoutHash(
+shader::DiagnosticResult<ResolvedLayoutHash> ResolveBackendLayoutHash(
     RenderBackend backend,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
-    const ShaderProgramLayoutRecipe& recipe,
-    BackendShaderArtifactError* error = nullptr) noexcept;
+    const ShaderProgramLayoutRecipe& recipe);
 
-std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
-    const ShaderProgramLayoutRecipe& recipe,
-    BackendShaderArtifactError* error = nullptr) noexcept;
+    const ShaderProgramLayoutRecipe& recipe);
 
-inline std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+inline shader::DiagnosticResult<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
     std::span<const byte> blob,
-    const shader::ShaderArtifactDecodeOptions& options,
-    BackendShaderArtifactError* error = nullptr) noexcept {
-    return CreateBackendShaderArtifact(device, blob, options, ShaderProgramLayoutRecipe{}, error);
+    const shader::ShaderArtifactDecodeOptions& options) {
+    return CreateBackendShaderArtifact(device, blob, options, ShaderProgramLayoutRecipe{});
 }
 
 }  // namespace radray::render

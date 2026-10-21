@@ -16,20 +16,20 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 [AGENTS.md](AGENTS.md) 也是长期文档，记录仓库级约束与阅读入口。
 长期知识集中在它与 `docs/architecture/`、`docs/guide/`，历史版本由 Git 保存。
 
-当前 runtime 提供 World/Scene 增量交付、材质、实例绘制、公共 Pipeline 与单 graphics queue 的 RasterGraph。
-旧 RenderGraph、完整 Forward 和 ImGui 适配已移除；当前能力见[Runtime 宿主](docs/architecture/render-framework.md)，
-删除前设计与历史测量由[架构地图](docs/architecture/overview.md#历史资料)索引。
+当前主线提供 core、window、RHI 双后端、shader contract 与可选 compiler client。
 
 ## 快速开始
 
 ```powershell
 python tools/fetch_third_party.py restore
 python tools/fetch_sdks.py restore
+python tools/build_third_party.py build --triplet windows-x64-msvc --config Debug --parallel 8
 cmake --preset win-x64-debug
-cmake --build build_debug --config Debug --parallel 24
+cmake --build --preset win-x64-debug --parallel 24
+ctest --preset win-x64-debug
 ```
 
-二进制在 `build_debug/_build/<Config>/`。
+二进制在 `build/windows-x64-msvc/Debug/_build/<Config>/`。
 
 ## License
 

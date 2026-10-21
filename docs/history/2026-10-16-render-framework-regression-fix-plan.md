@@ -1,6 +1,9 @@
 > - 适用: 2026-10-16 确认的 Render Framework CPU 回退修复计划
 > - 权威: 经用户授权保存的修复计划与决策；阶段 0 已实施，阶段 1–4 已实施，阶段 5 未纳入，不作为当前框架契约
-> - 锚点: `benchmarks/bench_material_scene/`, `modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/src/render_framework/material_template.cpp`, `docs/architecture/render-framework.md`, `docs/guide/performance.md`
+> - 锚点: `docs/history/2026-10-21-runtime-render-framework-snapshot.md`, `docs/guide/performance.md`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`benchmarks/bench_material_scene/`, `modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/src/render_framework/material_template.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # Render Framework CPU 回退修复计划
 
@@ -8,7 +11,7 @@
 阶段 0 的原始对照、二进制与源码校验见[基线数据](2026-10-16-render-framework-regression-fix-baseline.json)与[基线 CSV](2026-10-16-render-framework-regression-fix-baseline.csv)。
 原因与测量见[CPU 回退定位](2026-10-16-render-framework-regression-diagnosis.md)；本记录补充修复方向，不替换诊断数据。
 计划作者只读了 `06b8c23` 的源码，未参与阶段 0 前的构建与测量；阶段 1 之后的目标仍为预估，须由各阶段实测确认。
-当前契约见 [Runtime 宿主](../architecture/render-framework.md)、[帧与 GPU](../architecture/frame-and-gpu.md) 与 [性能测量](../guide/performance.md)。
+当前契约见 [Runtime 宿主](2026-10-21-runtime-render-framework-snapshot.md)、[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md) 与 [性能测量](2026-10-21-runtime-performance-snapshot.md)。
 
 本记录由用户明确授权保存为 `docs/history/2026-10-16-render-framework-regression-fix-plan.md`。
 
@@ -152,7 +155,7 @@ CompileOnly 固定 N1000/V3/F3、tint 取 `i%7`；CompletionCpu 在 `CompleteFli
 
 **文档**
 
-- 同步更新 `docs/architecture/render-framework.md`：帧编译合并、BindingRegistry 两段。
+- 同步更新 `docs/history/2026-10-21-runtime-render-framework-snapshot.md`：帧编译合并、BindingRegistry 两段。
 - 同步更新 `docs/guide/performance.md`：新增 case。
 
 ## 原始证据

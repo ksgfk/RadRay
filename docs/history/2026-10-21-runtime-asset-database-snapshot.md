@@ -1,0 +1,147 @@
+> - 适用: 查阅 runtime 移除前的 asset-database 设计与操作
+> - 权威: 2026-10-21 归档快照；不是当前契约或本次验证结果
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+
+状态：已归档。日期为本次归档日期。基线：`751aca4e6a70203e6a62f9de67893b33463b94fc`，文件树等同原 HEAD `ed23aef93b779082d3efab221bbe52d9f30051f0`。
+原文件（相对 docs 根）：`architecture/asset-database.md`。正文中的“当前”、命令、测试与能力均限定于此基线；共享说明保留上下文，不覆盖当前长期文档。
+原源码锚点（通过归档基线查阅）：`modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`
+
+# 开发时资产数据库
+
+`AssetDatabase` 把 `<AssetRoot>/assets.json` 全量读入普通 C++ 结构并维护两张内存索引：
+
+```text
+AssetId (manifest GUID) → AssetEntry
+lowercase canonical path → AssetId
+```
+
+这份 JSON 是一个资产根内的身份与导入元数据权威；没有 LMDB、本地数据库或导入产物缓存。
+仓库当前把整个 `assets/` 目录列入 `.gitignore`，没有跟踪项目级 manifest 或资产文件；调用方若要
+消费 GUID 轨，必须另行提供资产根。`AssetRoot` 由装配方通过 `ApplicationRuntimeDescriptor`
+传入，空路径表示不启用数据库。
+清单不存在时 `Open` 返回空库，之后可以 `AddEntry` + `Save` 建立；不存在的资产根也可由首次
+`Save` 创建，但 `Refresh` 要求根目录已经存在。
+
+## Manifest Schema
+
+当前版本固定为 1：
+
+```json
+{
+  "version": 1,
+  "assets": [
+    {
+      "guid": "d21480ee-f0c8-4fb1-9a9d-cf9147b10842",
+      "path": "textures/example.png",
+      "type": "texture",
+      "settings": {"srgb": true, "generateMips": true}
+    }
+  ]
+}
+```
+
+根对象只能有 `version` 与 `assets`。条目的 `guid`、`path`、`type` 是必需字符串，`settings`
+可选。GUID 读取使用 `Guid::TryParse`，接受 N/D/B/P 格式但拒绝空 GUID；写出始终是小写 D 格式。
+`version != 1` 不做迁移，直接拒绝打开。
+
+`Save` 按 `path` 排序全量重写清单，不保留条目顺序或额外根内容。它先完整写入同目录临时文件，
+再原子替换 `assets.json`，写失败不会先截断身份权威。已解析的 settings 由强类型对象重新序列化；
+未注册 type、无 settings 形状的 type、或 settings 解码失败时，原始 JSON **值片段**保存在
+`RawSettings`，包括内部空白与数字拼写，并在保存时逐字写回。默认 typed settings 解码器也拒绝
+未知或重复字段，使旧版本工具面对未来 schema 时走 RawSettings，而不是静默删字段。
+
+`RawSettings` 由独立的语法跳读器按字节区间截取，因为 yyjson 的 `JsonValue` 是解析后的 view，
+恢复不出原始空白与数字拼写。这条保真依赖 `ReadTextFile` 按二进制读取：文本模式会把 CRLF 折成
+LF，跨行 settings 因此被改写并以 LF 存回，在 CRLF 工作树里表现为整段无意义 diff。
+
+## Path 口径
+
+存储形态是资产根相对、`/` 分隔、词法规范化的非空路径：
+
+- 禁止 `\`、`:`、绝对根、`..`、`.`、空段与尾斜杠。
+- path 必须是合法 UTF-8。唯一性与查询在 Windows 上按 invariant Unicode lowercase key 判断；
+  其他平台至少固定 ASCII 大小写折叠，不受进程 locale 影响。
+- `AddEntry`、`SetPath` 与 path 查询的输入较宽容：接受 `\`、重复分隔符和 `.` 段，先转成
+  canonical 形态；绝对路径、盘符和任何 `..` 仍拒绝。
+- `SetPath` 只改 path，GUID 永不改变；`RemoveEntry` 才移除身份。
+
+`Find` 返回指向表内 `AssetEntry` 的指针。`unordered_map` rehash 不使它失效，删除对应条目会。
+`ResolvePath(entry)` 只做 `AssetRoot / entry.Path`，不会重新分配身份。
+
+## 错误分级
+
+`Open` 的结构错误返回 `nullptr` 并填写 `outError`，不以异常表达预期失败：
+
+- JSON 语法或根 schema 错误、未知版本；
+- 必需字段缺失或类型错误；
+- GUID 无效、为空或重复；
+- path 非 canonical，或按大小写不敏感口径重复。
+
+内容缺损只记 warning，条目仍进入索引：
+
+- 源文件不存在，或存在性无法判定（权限、路径过长等 IO 错误，与"确实不存在"分别记录）；
+- `type` 没有注册 importer；
+- settings 无法按该 importer 的强类型形状解码。
+
+这使“先交付清单、后补文件”和新旧工具版本交错仍可工作，同时不放过任何身份歧义。
+
+## Importer 与 Settings
+
+`AssetImporter` 是由数据库独占的虚接口，声明稳定的 type 名、`Refresh` 认领的扩展名、settings
+工厂和加载入口。依赖在 importer 构造时注入，`AssetLoadContext` 只有绝对路径与 settings 指针。
+
+`AssetImportSettings` 只提供多态析构与 JSON 编解码，不提供自定义类型虚函数。
+`GetSettings<T>()` 和 `MutableSettings<T>()` 直接对实际 settings 对象使用指针形式
+`dynamic_cast`，并返回 `Nullable`；查询目标可以是任意完整类类型，所以基类、接口、横向转换和
+const 视图都遵循真实 C++ 继承关系。仅为查询 settings 不需要声明 GUID。
+
+有 settings 的 importer 继承 `TypedAssetImporter<TSettings>`。它在普通（非协程）的 `Load`
+中先用 `dynamic_cast` 同步检查 settings 类型并复制 context，再把 `std::filesystem::path` 与
+`TSettings` 按值传给真正的惰性 task。
+因此 task 挂起后不会回查可能已被修改或删除的 `AssetEntry`。自定义 `AssetImporter::Load` 也必须
+保持这条同步读取契约。
+
+默认 importer：
+
+| type | 扩展名 | settings | 加载路径 |
+|---|---|---|---|
+| `texture` | `.png`, `.jpg`, `.jpeg` | `TextureImportSettings{Srgb, GenerateMips}` | 暂未实现 GPU 上传；保留 settings，加载明确失败 |
+| `mesh` | `.obj` | 无 | 暂未实现 GPU 上传；加载明确失败 |
+
+内置网格、纹理的 GPU 加载路径已移除，不读取或上传源文件；待设计范围见
+[资产 GPU 上传待设计](2026-10-21-runtime-frame-and-gpu-snapshot.md#资产-gpu-上传待设计)。CPU ImageAsset 与通用 OBJ reader 不受影响。
+
+## 加载桥接
+
+依赖方向是：
+
+```text
+AssetManager → IAssetSource ← AssetDatabase
+```
+
+`AssetManager::Load(AssetId)` 向 source 请求 `task<AssetLoadResult>`，随后仍进入原有的单 slot 表；
+`Load<T>(relPath)` 先经 `ResolveId` 找 manifest GUID。source 未装配、路径/ID 未登记或 type 无
+importer 时记 error 并返回无效引用，不 abort。原有 `Load(AssetLoadRequest)` 保持不变，供散文件
+和显式 loader 使用。
+
+`Refresh` 递归扫描资产根：扩展名被 importer 认领且尚未登记的文件调用 `AddEntry`；已登记但
+文件缺失的条目与 GUID 原样保留。它不自动 `Save`，连续扫描同一路径不会重分配 GUID。
+
+## 装配与关停
+
+`Application` 在 `AssetManager` 已创建且配置了非空资产根时构造默认 importer 并调用 `Open`；不要求启用 Gpu。
+Application 直接调用 `AssetManager::SetAssetSource(_assetDatabase.get())`，将已打开的数据库作为
+`IAssetSource` 连接；未启用或打开失败时传入空值。依赖关系与生命周期见
+[Application 直接装配](2026-10-21-runtime-render-framework-snapshot.md#application-直接装配)。
+打开失败只记 error，应用仍保留显式 `AssetLoadRequest` 路径。
+
+数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束。
+AssetManager 必须先于 RenderSystem 销毁，释放材质持有的参数集和 layout 借用；GPU owner 必须先于 device 释放。
+完整顺序统一见[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md#关停顺序)。manifest 与扩展名登记不代表当前 importer 已实现 GPU 加载。
+
+## 测试
+
+`AssetDatabaseTest` 覆盖 schema/path 硬失败、GUID 格式、双索引、强类型与原始 settings、排序
+保存、重开一致性和 `Refresh` GUID 稳定性。`AssetSlotTest` 覆盖 `IAssetSource` 的 ID/path 加载、
+source 缺失和 slot 去重；两组均不需要 GPU。内置 GPU importer 的未实现诊断和路径快照由
+`BuiltinGpuImportersReportUnimplementedAndOwnTheirPath` 覆盖；`FrameUploadTest` 保留通用上传工具的校验测试。

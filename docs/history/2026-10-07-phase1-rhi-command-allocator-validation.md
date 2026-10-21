@@ -1,6 +1,9 @@
 > - 适用: 2026-10-07 第一阶段 RHI CommandAllocator、公共 pipeline 与材质绘制实现的本机验收
 > - 权威: 临时实施与测量记录，不替代长期接口契约；未运行项不计为通过
-> - 锚点: `modules/render/tests/test_command_allocator.cpp`, `modules/runtime/tests/test_pipeline.cpp`, `modules/runtime/tests/test_scene_draw.cpp`, `benchmarks/bench_command_allocator/bench_command_allocator.cpp`
+> - 锚点: `modules/render/tests/test_command_allocator.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/tests/test_pipeline.cpp`, `modules/runtime/tests/test_scene_draw.cpp`, `benchmarks/bench_command_allocator/bench_command_allocator.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 第一阶段实施与验收记录
 
@@ -9,7 +12,7 @@
 公共实现和调用方迁移已落地，下述实测覆盖不能等同原计划每个矩阵格都已独立验证。
 本文保留 2026-10-07 的 CSV 与覆盖边界；后续已迁移到完成时 Reset、设备内附件缓存和持久材质组，
 D3D12 command 的 empty root signature 也已删除。当前接口见[RHI](../architecture/render-rhi.md)、
-[帧与 GPU](../architecture/frame-and-gpu.md)，当前命令和测量口径见[性能测量](../guide/performance.md)。
+[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)，当前命令和测量口径见[性能测量](2026-10-21-runtime-performance-snapshot.md)。
 
 ## 实施范围与当前边界
 
@@ -35,8 +38,8 @@ D3D12 command 的 empty root signature 也已删除。当前接口见[RHI](../ar
 RHI 没有公开 Texture 的所属设备查询，RenderOutput 不额外宣称能检测跨设备附件。
 缓存旧 program/PSO 在 idle 拆除；未实现细粒度热重载回收。
 
-长期契约见 [RHI](../architecture/render-rhi.md)、[帧与 GPU](../architecture/frame-and-gpu.md)
-及[渲染框架](../architecture/render-framework.md)。
+长期契约见 [RHI](../architecture/render-rhi.md)、[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)
+及[渲染框架](2026-10-21-runtime-render-framework-snapshot.md)。
 
 ## 环境与正确性验证
 

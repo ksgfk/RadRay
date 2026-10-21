@@ -109,13 +109,13 @@ Visual Studio/MSBuild 不创建该目标，也不自动调用或串联 `win_gen_
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${command:cmake.launchTargetPath}",
-            "args": ["--d3d12", "--multithread", "--valid-layer"],
+            "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [
                 {
                     "name": "PATH",
-                    "value": "${command:cmake.getLaunchTargetDirectory};${env:PATH}"
+                    "value": "${workspaceFolder}/SDKs/radray_dxc/extracted/bin;${env:PATH}"
                 }
             ],
             "console": "integratedTerminal"
@@ -124,8 +124,9 @@ Visual Studio/MSBuild 不创建该目标，也不自动调用或串联 `win_gen_
 }
 ```
 
-以上参数用于 `example_scene_sync`，用 `--vulkan` 切换后端；`example_framework_stress` 的验证开关是 `--validation`。
-先选择对应 CMake launch target。Windows `PATH` 用分号分隔，并包含已部署 DXC 运行库的目标输出目录。
+先选择当前存在的测试、工具或基准 CMake launch target，再按目标填写参数。Windows `PATH` 用分号分隔，
+直接包含 SDK 的 bin；测试和工具不再向输出目录复制 DXC。此环境属于该调试配置，不修改集成终端。
+终端手动运行程序的环境设置见[开发时加载 DXC](build-test.md#开发时加载-dxc)。
 
 ## 格式化
 

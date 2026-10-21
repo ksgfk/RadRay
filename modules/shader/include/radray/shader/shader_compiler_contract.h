@@ -1,12 +1,12 @@
 #pragma once
 
 #include <cstddef>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
 #include <radray/types.h>
+#include <radray/shader/diagnostic_result.h>
 
 namespace radray::shader {
 
@@ -427,11 +427,6 @@ struct CompileVariantRequest {
     ContractHash ExpectedContract{};
 };
 
-struct CompileDiagnostic {
-    uint32_t Code{0};
-    string Message;
-};
-
 struct CompileStageArtifact {
     ShaderStage Stage{ShaderStage::Vertex};
     string EntryPoint;
@@ -445,31 +440,20 @@ struct CompileTargetLane {
     vector<byte> Metadata;
 };
 
-enum class CompileStatus : uint8_t {
-    Success = 0,
-    InvalidRequest = 1,
-    ContractMismatch = 2,
-    TargetFailure = 3,
-};
-
-struct CompileVariantResult {
-    CompileStatus Status{CompileStatus::InvalidRequest};
-    vector<CompileTargetLane> Lanes;
-    vector<CompileDiagnostic> Diagnostics;
-};
+using CompileVariantResult = DiagnosticResult<vector<CompileTargetLane>>;
 
 bool IsLogicalSourceName(std::string_view sourceName) noexcept;
 
 bool HasDuplicateNames(const vector<Define>& values) noexcept;
 bool HasDuplicateNames(const vector<KeywordAssignment>& values) noexcept;
 
-std::optional<CompileVariantRequest> CanonicalizeCompileVariantRequest(
+DiagnosticResult<CompileVariantRequest> CanonicalizeCompileVariantRequest(
     const CompileVariantRequest& request);
 
-std::optional<vector<byte>> EncodeCanonicalCompileVariantRequest(
+DiagnosticResult<vector<byte>> EncodeCanonicalCompileVariantRequest(
     const CompileVariantRequest& request);
 
-std::optional<vector<byte>> EncodeSourceContractRequest(
+DiagnosticResult<vector<byte>> EncodeSourceContractRequest(
     const SourceContractRequest& request);
 
 }  // namespace radray::shader

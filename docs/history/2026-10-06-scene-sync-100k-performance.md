@@ -1,12 +1,15 @@
 > - 适用: 诊断 `examples/scene_sync` 在 `--instances=100000` 时的稳态性能瓶颈与优化顺序
 > - 权威: 2026-10-06 本机历史诊断；描述优化前实现，不作为当前性能或跨机器契约
-> - 锚点: `examples/scene_sync/example_scene_sync.cpp`, `examples/scene_sync/scene_draw.cpp`, `modules/runtime/src/render_framework/scene_gpu.cpp`, `modules/runtime/src/gpu_resource.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `benchmarks/bench_scene_gpu/bench_scene_gpu.cpp`
+> - 锚点: `modules/render/src/d3d12/d3d12_impl.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`examples/scene_sync/example_scene_sync.cpp`, `examples/scene_sync/scene_draw.cpp`, `modules/runtime/src/render_framework/scene_gpu.cpp`, `modules/runtime/src/gpu_resource.cpp`, `benchmarks/bench_scene_gpu/bench_scene_gpu.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # scene_sync：100,000 对象性能诊断
 
 状态：诊断当时只保留插桩；后续已实现公共 pipeline、VisibleSlots 自动实例化与材质复用。
-当前用法见[实例绘制](../guide/instancing.md)，后续实测见[材质和实例化验收](2026-10-13-material-instancing-performance.md)。
-以下逐对象 draw 数、上传范围与帧率只属于所列基线；稀疏 copy 的当前成本需按[性能测量](../guide/performance.md#scene-gpu-上传)重新采样。
+当前用法见[实例绘制](2026-10-21-runtime-instancing-snapshot.md)，后续实测见[材质和实例化验收](2026-10-13-material-instancing-performance.md)。
+以下逐对象 draw 数、上传范围与帧率只属于所列基线；稀疏 copy 的当前成本需按[性能测量](2026-10-21-runtime-performance-snapshot.md#scene-gpu-上传)重新采样。
 
 ## 结论
 
@@ -173,7 +176,7 @@ GT fence / writable-slot 等待是背压表现，不宜据此判断 GPU 成为�
 - Plots：`SceneSync/LastResolvedGpuMs`、`SceneGpu/UploadObjects`、`SceneGpu/UploadRanges`；空闲帧明确采样 0 上传。
 
 使用项目 `radray/profiler.h` 宏和现有 RHI debug group API，GPU 时间戳仍由 render 后端实现。
-使用方法已同步至[构建与测试](../guide/build-test.md#生命周期与增量渲染验收)。
+使用方法已同步至[构建与测试](2026-10-21-runtime-build-test-snapshot.md#生命周期与增量渲染验收)。
 
 最终 Release 目标构建成功。设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 后，
 31 项相关 GTest 全部通过，覆盖 SceneSyncCorrectness、SceneApplyChanges、SceneViews、SceneDraw，

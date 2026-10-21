@@ -97,10 +97,8 @@ int main() {
                 .Policy = {}},
             includePaths);
         if (!discovery.Succeeded()) {
-            std::cerr << "discovery failed for " << fileName << '\n';
-            for (const auto& diagnostic : discovery.Diagnostics) {
-                std::cerr << diagnostic.Code << ": " << diagnostic.Message << '\n';
-            }
+            std::cerr << "discovery failed for " << fileName << '\n'
+                      << discovery.Diagnostics << '\n';
             return 4;
         }
 
@@ -110,22 +108,19 @@ int main() {
             .Defines = {},
             .Assignments = {},
             .Targets = ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash};
+            .ExpectedContract = discovery.Value->Hash};
         const auto result = client.CompileVariant(request, includePaths);
-        if (result.Status != radray::shader::CompileStatus::Success || result.Lanes.size() != 2) {
-            std::cerr << "compile failed for " << fileName << " status "
-                      << static_cast<int>(result.Status) << '\n';
-            for (const auto& diagnostic : result.Diagnostics) {
-                std::cerr << diagnostic.Code << ": " << diagnostic.Message << '\n';
-            }
+        if (!result.Succeeded() || result.Value->size() != 2) {
+            std::cerr << "compile failed for " << fileName << '\n'
+                      << result.Diagnostics << '\n';
             return 5;
         }
         for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
             const auto lane = std::find_if(
-                result.Lanes.begin(),
-                result.Lanes.end(),
+                result.Value->begin(),
+                result.Value->end(),
                 [target](const CompileTargetLane& value) noexcept { return value.Target == target; });
-            if (lane == result.Lanes.end() || lane->Metadata.empty()) {
+            if (lane == result.Value->end() || lane->Metadata.empty()) {
                 return 6;
             }
             const string suffix = target == ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";

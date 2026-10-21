@@ -2,8 +2,8 @@
   "manifest": {
     "base_commit": "f20c56fbf073154185ae792daac71982e5f6ab43",
     "git_status": [
-      " M docs/architecture/overview.md",
-      " M docs/architecture/render-framework.md",
+      " M docs\/architecture\/overview.md",
+      " M docs\/architecture\/render-framework.md",
       " M examples/CMakeLists.txt",
       " M modules/render/include/radray/render/backend/d3d12_impl.h",
       " M modules/render/include/radray/render/backend/vulkan_impl.h",

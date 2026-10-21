@@ -14,7 +14,11 @@ if (RADRAY_ENABLE_D3D12)
 endif()
 
 add_library(radrayrender STATIC ${RADRAY_RENDER_SRC} ${RADRAY_RENDER_INC})
-target_include_directories(radrayrender PUBLIC include)
+add_library(RadRay::render ALIAS radrayrender)
+set_target_properties(radrayrender PROPERTIES EXPORT_NAME render)
+target_include_directories(radrayrender PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(radrayrender PUBLIC
     radraycore
     radrayshader
@@ -23,15 +27,15 @@ target_link_libraries(radrayrender PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:GPUOpen::VulkanMemoryAllocator>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Headers>
     $<$<BOOL:${RADRAY_ENABLE_D3D12}>:Microsoft::DirectX-Guids>
-    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:D3D12MemoryAllocator>)
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:GPUOpen::D3D12MemoryAllocator>)
 target_link_libraries(radrayrender PRIVATE
     xxHash::xxhash)
 if (APPLE AND RADRAY_ENABLE_VULKAN)
     find_library(RADRAY_COCOA_FRAMEWORK Cocoa REQUIRED)
     find_library(RADRAY_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
     target_link_libraries(radrayrender PUBLIC
-        ${RADRAY_COCOA_FRAMEWORK}
-        ${RADRAY_QUARTZCORE_FRAMEWORK})
+        "-framework Cocoa"
+        "-framework QuartzCore")
 endif()
 
 target_compile_definitions(radrayrender PUBLIC
@@ -44,10 +48,6 @@ if (APPLE AND RADRAY_ENABLE_VULKAN)
     set_source_files_properties(${_VK_MM_SRC} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 endif()
 target_precompile_headers(radrayrender PRIVATE <radray/render/rhi.h>)
-
-if (RADRAY_BUILD_SHADER_COMPILER)
-    radray_deploy_dxc_runtime(radrayrender)
-endif()
 
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)

@@ -4,10 +4,10 @@
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`
 > - 记录日期: 2026-09-14，随设计快照首次保存于 `b543db17`；原文对应上述基线
 
-以下内容保存自基线的 `docs/architecture/runtime-imgui.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
+以下内容保存自基线的 `docs/history/2026-10-21-runtime-runtime-imgui-snapshot.md`。原有源码路径仅对该提交有效；使用 `git show a68237fb44d8cb3025de8f08047a6a3ec17fec92:<路径>` 查阅。
 
 > - 适用: 接入可选 runtime UI、字体、平台窗口、资产图片或本帧 Graph 图片
-> - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步与扩展槽见 [帧与 GPU](../architecture/frame-and-gpu.md)，overlay 与 Graph 规则见 [Render framework](2026-09-14-render-framework-legacy.md)、[Renderer foundation](2026-09-14-renderer-foundation-legacy.md)
+> - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步与扩展槽见 [帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)，overlay 与 Graph 规则见 [Render framework](2026-09-14-render-framework-legacy.md)、[Renderer foundation](2026-09-14-renderer-foundation-legacy.md)
 > - 基线源码路径: `modules/imgui/CMakeLists.txt`, `modules/imgui/include/radray/imgui/imgui_config.h`, `modules/imgui/include/radray/imgui/imgui_system.h`, `modules/imgui/include/radray/imgui/imgui_graph.h`, `modules/imgui/src/imgui_system.cpp`, `modules/imgui/src/imgui_graph.cpp`, `modules/imgui/tests/test_imgui_rendering.cpp`, `modules/runtime/include/radray/runtime/application_extension.h`, `shaderlib/ui/`, `tools/generate_builtin_shaders.py`
 
 # 可选 ImGui 模块
@@ -62,7 +62,7 @@ void OnInit() override {
 
 `EventDraw` 是 sigslot 信号，支持多个订阅者；只在有效帧内、World::Tick 之后触发，订阅者在
 `OnShutdown` 断开连接。一个 Application 拥有一个 context，全部 ImGui API 与平台回调只在创建线程执行。
-UI 由 [Application 固定帧序](../architecture/frame-and-gpu.md#帧序) 驱动，runner 拒绝模态消息造成的嵌套 Tick。
+UI 由 [Application 固定帧序](2026-10-21-runtime-frame-and-gpu-snapshot.md#帧序) 驱动，runner 拒绝模态消息造成的嵌套 Tick。
 窗口创建、输出注册在主线程且 render idle 时发生。平台子窗口经 WindowManager 创建，
 AppWindow 管理 swapchain，输出用途为 Auxiliary。窗口标题、透明度、owner、装饰、焦点、
 位置和大小由平台回调转发；不使用 `RenderPlatformWindowsDefault()`，提交与 Present 只有原有路径。

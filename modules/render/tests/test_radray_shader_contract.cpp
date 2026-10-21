@@ -60,26 +60,26 @@ TEST(RadRayShaderContract, CanonicalRequestIsStable) {
         .Assignments = {{"QUALITY", "high"}, {"ALPHA_TEST", "off"}},
         .Targets = shader::ShaderTargetMask::All};
 
-    const auto first = shader::EncodeCanonicalCompileVariantRequest(request);
+    const auto first = shader::EncodeCanonicalCompileVariantRequest(request).Value;
     ASSERT_TRUE(first.has_value());
 
     std::swap(request.Defines[0], request.Defines[1]);
     std::swap(request.Assignments[0], request.Assignments[1]);
-    const auto reordered = shader::EncodeCanonicalCompileVariantRequest(request);
+    const auto reordered = shader::EncodeCanonicalCompileVariantRequest(request).Value;
     ASSERT_TRUE(reordered.has_value());
     EXPECT_EQ(*first, *reordered);
 
     request.SourceName = "moved/texture_sampler.hlsl";
-    const auto moved = shader::EncodeCanonicalCompileVariantRequest(request);
+    const auto moved = shader::EncodeCanonicalCompileVariantRequest(request).Value;
     ASSERT_TRUE(moved.has_value());
     EXPECT_NE(*first, *moved);
 
     request.SourceName = "C:/shaderlib/texture_sampler.hlsl";
-    EXPECT_FALSE(shader::EncodeCanonicalCompileVariantRequest(request).has_value());
+    EXPECT_FALSE(shader::EncodeCanonicalCompileVariantRequest(request).Value.has_value());
 
     request.SourceName = "fixtures/texture_sampler.hlsl";
     request.Defines.push_back({"DEBUG_VIEW", "1"});
-    EXPECT_FALSE(shader::EncodeCanonicalCompileVariantRequest(request).has_value());
+    EXPECT_FALSE(shader::EncodeCanonicalCompileVariantRequest(request).Value.has_value());
 }
 
 TEST(RadRayShaderContract, FixtureTablePinsTopologyAndTargetFacts) {
@@ -190,16 +190,14 @@ TEST(RadRayShaderContract, RetiredMetadataSchemasAreRejectedRatherThanTranslated
             envelope.GpuArtifact))
             << retired;
 
-        shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
-        EXPECT_FALSE(shader::DecodeShaderArtifact(
-                         older,
-                         shader::ShaderArtifactDecodeOptions{
-                             .Target = shader::ShaderTarget::DXIL,
-                             .ExpectedGpuArtifact = envelope.GpuArtifact},
-                         &error)
-                         .has_value())
+        auto diagnosticResult1 = shader::DecodeShaderArtifact(
+            older,
+            shader::ShaderArtifactDecodeOptions{
+                .Target = shader::ShaderTarget::DXIL,
+                .ExpectedGpuArtifact = envelope.GpuArtifact});
+        EXPECT_FALSE(diagnosticResult1.Succeeded())
             << retired;
-        EXPECT_EQ(error, shader::ShaderArtifactDecodeError::UnsupportedSchemaVersion) << retired;
+        EXPECT_NE(diagnosticResult1.Diagnostics.find("schema"), string::npos) << retired;
     }
 }
 

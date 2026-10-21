@@ -1,0 +1,6 @@
+add_executable(test_radray_shader test_shader_diagnostics.cpp)
+target_link_libraries(test_radray_shader PRIVATE radrayshader GTest::gtest_main)
+radray_default_compile_flags(test_radray_shader)
+radray_optimize_flags_binary(test_radray_shader)
+radray_set_build_path(test_radray_shader)
+gtest_discover_tests(test_radray_shader)

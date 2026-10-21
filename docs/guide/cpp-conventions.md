@@ -11,10 +11,10 @@
 
 | 类别 | 风格 | 例 |
 |---|---|---|
-| 类型（class / struct / enum） | PascalCase | `RenderPipeline`, `GpuSystem`, `ScopeGuard` |
-| 函数与方法（含自由函数） | PascalCase | `GetWorld`, `BeginFrameRecord`, `PerspectiveLH` |
+| 类型（class / struct / enum） | PascalCase | `Device`, `TaskScope`, `ScopeGuard` |
+| 函数与方法（含自由函数） | PascalCase | `CreateBuffer`, `BeginRenderPass`, `PerspectiveLH` |
 | 私有成员变量 | `_` 前缀 + camelCase | `_activePasses`, `_renderStateCreated` |
-| 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `GpuMesh::DrawData::VertexBuffers` |
+| 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `Viewport::Height` |
 | `constexpr` 常量 | `k` 前缀 + PascalCase | `kShaderAssetFormatVersion`, `kMaxPointLights` |
 | 宏 | ALL_CAPS | `RADRAY_ABORT`, `RADRAY_FORWARD_OBJECT_GROUP` |
 | 命名空间 | 全小写 | `radray`, `radray::render`, `radray::detail` |
@@ -28,7 +28,7 @@
 这些名字。
 
 文件内辅助函数有两派并存，**以文件为单位自洽**：render/shader 后端用 `static` + `_` 前缀
-（`_CreateVkSwapChain`），runtime/core 用匿名 namespace + 无前缀。改哪个文件就跟那个文件。
+（`_CreateVkSwapChain`），core 用匿名 namespace + 无前缀。改哪个文件就跟那个文件。
 
 ## 文件组织
 
@@ -49,7 +49,7 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 
 平台相关的 include 用 `#if defined(RADRAY_PLATFORM_WINDOWS)` 包在末尾。
 
-`.cpp` 内部实现放匿名 namespace（runtime / core）或文件级 `static`（render / shader 后端），
+`.cpp` 内部实现放匿名 namespace（core）或文件级 `static`（render / shader 后端），
 见上文命名一节。
 
 ## 接口风格
@@ -58,7 +58,7 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 
 ```cpp
 Nullable<unique_ptr<Buffer>> CreateBuffer(...);   // 指针类，可能没有
-std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
+std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示意）
 ```
 
 `Nullable` 的 API 是 `HasValue()` / `Get()` / `Release()` / `Unwrap()` / `operator bool`。
@@ -88,13 +88,8 @@ std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
 static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc);
 ```
 
-runtime 的普通 owner 使用公有构造 + `make_unique`（例如 `RenderSystem`、`AssetManager`）。
-需要报告启动失败的设施使用结果入口：`GpuSystem::TryCreate` / `TryAttachDevice` 填写
-`RuntimeStartupResult`，`RenderSystem::OnInitialize` 也可能失败；不能把 runtime 构造一概视为不会失败。
-
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
-[RHI 所有权](../architecture/render-rhi.md)。runtime 的 World/Actor/Component 先由显式驱动器注销与 teardown，
-再析构成员；析构不恢复业务 hook 或隐式推进 S1。普通资源包装仍使用析构函数与成员声明顺序。
+[RHI 所有权](../architecture/render-rhi.md)。普通资源包装使用析构函数与成员声明顺序。
 
 RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`ScopeGuard`、`TaskScope`、
 `ScopedBufferMap`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
@@ -116,12 +111,12 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 - 后端 encoder 保留 PSO 重复绑定检查；VB、IB 与 shader 参数组每次合法绑定都下发原生命令，
   不保存去重缓存。具体行为见 [RHI 与后端](../architecture/render-rhi.md)。
 
-性能改动使用适用的基准或 Tracy 数据验证，不凭直觉声称收益；旧 runtime_profile harness 已移除。
+性能改动使用适用的基准或 Tracy 数据验证，不凭直觉声称收益。
 
 ## 测试
 
 测试源码放 `modules/<module>/tests/test_<topic>.cpp`。同一模块的这些源文件链进一个可执行文件
-（`test_radray_core`、`test_radray_render`、`test_radray_runtime`、`test_radray_shader_compiler`），
+（`test_radray_core`、`test_radray_render`、`test_radray_shader_compiler`），
 `gtest_main` 和被测库只链接一次。CTest 仍按每个 `TEST()` 启动进程。只有不能和其它用例共享进程映像的测试另开 exe：
 目前是 `test_inline_vector`，它替换全局 `operator new` / `operator delete`。`EXPECT_DEATH` / `EXPECT_EXIT`
 已经在子进程里跑断言，不因此再拆可执行文件。
@@ -130,16 +125,19 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 不增加专用计数接口；运行时性能插桩沿用 `RADRAY_PROFILE_*`。
 
 ```cmake
-radray_add_test(test_radray_runtime SOURCES test_foo.cpp test_bar.cpp LINK_LIBS radrayruntime)
+add_executable(test_radray_core test_foo.cpp test_bar.cpp)
+target_link_libraries(test_radray_core PRIVATE radraycore GTest::gtest_main)
+radray_default_compile_flags(test_radray_core)
+radray_optimize_flags_binary(test_radray_core)
+radray_set_build_path(test_radray_core)
+gtest_discover_tests(test_radray_core)
 ```
 
-`radray_add_test` 链接 `GTest::gtest_main`，并用 CMake `gtest_discover_tests` 在链接后把每个
-`TEST()` 注册成 CTest 用例。同一可执行文件需要不同 CTest 属性时，再调用一次 `gtest_discover_tests`
-并用 `TEST_FILTER` 把 suite 分开；不要通过 `DISCOVER_ARGS` 传 `DISCOVERY_MODE`，原因见
-[构建与测试](build-test.md)。
-
-`radray_add_radray_gtest_case` 是在**已有**目标上按 `--gtest_filter` 注册单个 ctest 用例，
-并自动注入 `RADRAY_PROJECT_DIR` / `RADRAY_ASSETS_DIR` 等环境变量。目前仓库里还没有调用方。
+顶层开启测试时加载 CMake `GoogleTest` 模块，各模块直接调用官方接口注册。
+`gtest_discover_tests` 枚举可执行文件中的用例；发现模式见[构建与测试](build-test.md#测试)。
+通过 `PROPERTIES` 设置测试环境变量、超时或串行运行要求；需要划分不同属性的用例组时，
+可使用互不重叠的 `TEST_FILTER` 分别发现。依赖 DXC 的测试通过启动环境查找 SDK，不复制 DLL；
+构建期 discovery 与测试执行的环境配置见[开发时加载 DXC](build-test.md#开发时加载-dxc)。
 
 **`ctest -R` 匹配 gtest 套件名（C++ 类名），不是 cmake 目标名。** 对照表在
 [build-test](build-test.md)。
@@ -153,8 +151,6 @@ radray_add_test(test_radray_runtime SOURCES test_foo.cpp test_bar.cpp LINK_LIBS 
 
 | 设施 | 在哪 | 用途 |
 |---|---|---|
-| `ManualGate` | `runtime/tests/test_asset_slot.cpp` | 手工协程闸门。`async_scope::spawn` 会同步跑完只有 `co_return` 的 task，所以要挂住协程必须有它。写 `co_await gate.Wait()`，直接 `co_await gate` 会拷贝它 |
-| `ProbeAsset` + `DestroyGuard` | 同上 | 不碰 GPU 的假资产，计数 `OnUnload` 与析构 |
 | `Scoped*`（`ScopedDirectory` 等） | 各测试文件 | 临时目录 / 临时输入 |
 
 需要仓库根路径的测试从 `RADRAY_PROJECT_DIR` 环境变量取，编译期有

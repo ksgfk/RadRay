@@ -1,17 +1,20 @@
 > - 适用: 生命周期 v2 实施结果与本机验收，2026-09-20
 > - 权威: 临时验收记录，不替代长期接口契约；未执行项不计为通过
-> - 锚点: `modules/runtime/tests/test_world_lifecycle.cpp`, `modules/runtime/tests/test_gpu_scene_lifetime.cpp`, `benchmarks/bench_lifecycle/bench_lifecycle.cpp`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/tests/test_world_lifecycle.cpp`, `modules/runtime/tests/test_gpu_scene_lifetime.cpp`, `benchmarks/bench_lifecycle/bench_lifecycle.cpp`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 生命周期与增量渲染 v2 验收
 
 状态：v2 实施阶段的历史验收记录；已运行、静态检查及未覆盖项分别记录，不视为 T01–T74 全部通过。
 本文及引用的仓库外旧实施计划只作为历史基线；Scene 对象 GPU 参数与视图交付的当前接口以
-[runtime 契约](../architecture/render-framework.md#对象-gpu-参数与当帧视图)为准。
+[runtime 契约](2026-10-21-runtime-render-framework-snapshot.md#对象-gpu-参数与当帧视图)为准。
 以下测试结果与 CSV 采集于移除运行时测试统计之前。当前实现已删除相关累计字段，测试改用自身 probe、
 实际更新包与对象状态；旧 CSV 的 Gather、矩阵求值、owner 搬移计数及性能数值仅保留为历史数据，不能视为当前版本的测量。
 后续也已移除 TextureAsset 的保守 DeferDestroy 和 AssetManager 的 GPU 等待注入，改为完整使用者保活；
-下文对此的“保留”及旧测试名仅描述 v2 时点。当前契约见[资产系统](../architecture/asset-system.md#gpu-使用者保活)，
-现行基准见[性能测量](../guide/performance.md#cpu-生命周期与-obj)。
+下文对此的“保留”及旧测试名仅描述 v2 时点。当前契约见[资产系统](2026-10-21-runtime-asset-system-snapshot.md#gpu-使用者保活)，
+现行基准见[性能测量](2026-10-21-runtime-performance-snapshot.md#cpu-生命周期与-obj)。
 基线：`88942aa8a6cad2e7f0d0973d91d2f95ea5ceaee1`，分支 `refactor/render-framework-reset`；开始时工作树干净。
 实施依据为仓库外 `RadRay_Lifecycle_and_Incremental_Rendering_Plan_v2.md`。未查询远端，不把本地 HEAD 称为远端最新。
 
@@ -25,7 +28,7 @@
 - C6：功能、随机、规模、真实 GPU 测试与 384 配置 CPU 基准，结果见下。
 
 没有新增通用命令总线、全 Scene 快照、每 flight 完整 Scene、任意 lambda 生命周期调度器或第二套 fence。
-生产接口行为见 [runtime 契约](../architecture/render-framework.md)、[GPU 帧契约](../architecture/frame-and-gpu.md)、[资产契约](../architecture/asset-system.md)。
+生产接口行为见 [runtime 契约](2026-10-21-runtime-render-framework-snapshot.md)、[GPU 帧契约](2026-10-21-runtime-frame-and-gpu-snapshot.md)、[资产契约](2026-10-21-runtime-asset-system-snapshot.md)。
 
 ## 使用者与退休审计
 

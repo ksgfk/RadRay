@@ -1,4 +1,0 @@
-add_executable(bench_raster_prepare bench_raster_prepare.cpp bench_raster_prepare.h)
-target_link_libraries(bench_raster_prepare PRIVATE radrayruntime benchmark::benchmark)
-radray_default_compile_flags(bench_raster_prepare)
-radray_set_build_path(bench_raster_prepare)

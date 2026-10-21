@@ -1,8 +1,11 @@
 > - 适用: 重构前回顾旧渲染框架的职责、数据流与设计约束
 > - 权威: 删除前的历史设计快照；不代表新框架方案或当前可调用 API
-> - 锚点: `AGENTS.md`, `modules/runtime/`, `modules/render/`, `modules/shader/`
+> - 锚点: `AGENTS.md`, `modules/render/`, `modules/shader/`, `docs/history/2026-10-21-runtime-archive.md`
 > - 基线: `a68237fb44d8cb3025de8f08047a6a3ec17fec92`（原 main）
 > - 记录日期: 2026-09-14，依据 Git 首次保存提交 `b543db17`；不是基线提交日期
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 旧渲染框架设计快照
 

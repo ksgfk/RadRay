@@ -70,12 +70,12 @@ std::optional<ResolvedVulkanLayout> ResolveFixture(std::string_view name) {
         return std::nullopt;
     }
     const auto artifact = shader::DecodeSpirvShaderArtifact(
-        blob,
-        shader::ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::SPIRV,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index.value(), shader::ShaderTarget::SPIRV),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
-        nullptr);
+                              blob,
+                              shader::ShaderArtifactDecodeOptions{
+                                  .Target = shader::ShaderTarget::SPIRV,
+                                  .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index.value(), shader::ShaderTarget::SPIRV),
+                                  .ExpectedToolchainIdentity = kFixtureToolchainIdentity})
+                              .Value;
     if (!artifact.has_value()) {
         return std::nullopt;
     }
@@ -531,13 +531,13 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     const vector<byte> blob = ReadBinary(bytecodePath);
     ASSERT_FALSE(blob.empty());
     const auto artifact = shader::DecodeSpirvShaderArtifact(
-        blob,
-        shader::ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::SPIRV,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
-                FindFixtureIndex("compute").value(), shader::ShaderTarget::SPIRV),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
-        nullptr);
+                              blob,
+                              shader::ShaderArtifactDecodeOptions{
+                                  .Target = shader::ShaderTarget::SPIRV,
+                                  .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
+                                      FindFixtureIndex("compute").value(), shader::ShaderTarget::SPIRV),
+                                  .ExpectedToolchainIdentity = kFixtureToolchainIdentity})
+                              .Value;
     ASSERT_TRUE(artifact.has_value());
     const auto bytecode = artifact->Generic().FindStageBytecode(shader::ShaderStage::Compute);
     ASSERT_TRUE(bytecode.has_value());

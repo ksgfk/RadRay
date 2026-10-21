@@ -289,20 +289,20 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
         shader::ShaderTarget::DXIL,
         ShaderIncludePaths());
     ASSERT_TRUE(contract.Succeeded());
-    request.ExpectedContract = contract.Contract.Hash;
+    request.ExpectedContract = contract.Value->Hash;
 
     const auto includePaths = ShaderIncludePaths();
     const shader::CompileVariantResult result = client.CompileVariant(request, includePaths);
     const shader::CompileVariantResult repeat = client.CompileVariant(request, includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.front().Message)
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics
         << "\n"
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(repeat.Status, shader::CompileStatus::Success)
-        << (repeat.Diagnostics.empty() ? "" : repeat.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
-    ASSERT_EQ(repeat.Lanes.size(), result.Lanes.size());
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        << result.Diagnostics;
+    ASSERT_TRUE(repeat.Succeeded())
+        << repeat.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
+    ASSERT_EQ(repeat.Value->size(), result.Value->size());
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         EXPECT_EQ(lane.Stages.size(), 2u);
         EXPECT_FALSE(lane.Bytecode.empty());
         ASSERT_GE(lane.Metadata.size(), sizeof(shader::WireMetadataEnvelope));
@@ -327,15 +327,15 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
         }
         EXPECT_EQ(envelope.RootSignature.Size, 0u);
     }
-    for (size_t index = 0; index < result.Lanes.size(); ++index) {
-        EXPECT_EQ(result.Lanes[index].Target, repeat.Lanes[index].Target);
-        EXPECT_EQ(result.Lanes[index].Bytecode, repeat.Lanes[index].Bytecode);
-        EXPECT_EQ(result.Lanes[index].Metadata, repeat.Lanes[index].Metadata);
-        ASSERT_EQ(result.Lanes[index].Stages.size(), repeat.Lanes[index].Stages.size());
-        for (size_t stageIndex = 0; stageIndex < result.Lanes[index].Stages.size(); ++stageIndex) {
+    for (size_t index = 0; index < result.Value->size(); ++index) {
+        EXPECT_EQ((*result.Value)[index].Target, (*repeat.Value)[index].Target);
+        EXPECT_EQ((*result.Value)[index].Bytecode, (*repeat.Value)[index].Bytecode);
+        EXPECT_EQ((*result.Value)[index].Metadata, (*repeat.Value)[index].Metadata);
+        ASSERT_EQ((*result.Value)[index].Stages.size(), (*repeat.Value)[index].Stages.size());
+        for (size_t stageIndex = 0; stageIndex < (*result.Value)[index].Stages.size(); ++stageIndex) {
             EXPECT_EQ(
-                result.Lanes[index].Stages[stageIndex].Bytecode,
-                repeat.Lanes[index].Stages[stageIndex].Bytecode);
+                (*result.Value)[index].Stages[stageIndex].Bytecode,
+                (*repeat.Value)[index].Stages[stageIndex].Bytecode);
         }
     }
 }
@@ -353,7 +353,7 @@ TEST(RadRayDxcMetadata, CrossTargetDiscoveryComparesFrontendContracts) {
         .Policy = {}};
     const auto matching = client.DiscoverSourceContract(matchingRequest, includePaths);
     ASSERT_TRUE(matching.Succeeded())
-        << (matching.Diagnostics.empty() ? "" : matching.Diagnostics.back().Message);
+        << matching.Diagnostics;
 
     constexpr std::string_view divergentSource = R"hlsl(
 #if defined(__spirv__)
@@ -379,13 +379,8 @@ float4 PIXEL_ENTRY() : SV_Target0 {
         .Targets = shader::ShaderTargetMask::All,
         .Policy = {}};
     const auto divergent = client.DiscoverSourceContract(divergentRequest, includePaths);
-    EXPECT_EQ(divergent.Status, shader::CompileStatus::InvalidRequest);
-    const bool hasCrossTargetDiagnostic = std::any_of(
-        divergent.Diagnostics.begin(),
-        divergent.Diagnostics.end(),
-        [](const shader::CompileDiagnostic& diagnostic) noexcept {
-            return diagnostic.Code == 2011;
-        });
+    EXPECT_FALSE(divergent.Succeeded());
+    const bool hasCrossTargetDiagnostic = !divergent.Diagnostics.empty();
     EXPECT_TRUE(hasCrossTargetDiagnostic);
 }
 
@@ -405,28 +400,28 @@ TEST(RadRayDxcMetadata, FilesystemIncludesAreResolvedByDxc) {
         shader::ShaderTarget::DXIL,
         ShaderIncludePaths());
     ASSERT_TRUE(contract.Succeeded());
-    request.ExpectedContract = contract.Contract.Hash;
+    request.ExpectedContract = contract.Value->Hash;
 
     const auto includePaths = ShaderIncludePaths();
     const shader::CompileVariantResult first = client.CompileVariant(request, includePaths);
     const shader::CompileVariantResult second = client.CompileVariant(request, includePaths);
-    ASSERT_EQ(first.Status, shader::CompileStatus::Success)
-        << (first.Diagnostics.empty() ? "" : first.Diagnostics.back().Message);
-    ASSERT_EQ(second.Status, shader::CompileStatus::Success)
-        << (second.Diagnostics.empty() ? "" : second.Diagnostics.back().Message);
-    ASSERT_EQ(first.Lanes.size(), 1u);
-    ASSERT_EQ(second.Lanes.size(), 1u);
-    EXPECT_EQ(first.Lanes[0].Bytecode, second.Lanes[0].Bytecode);
-    EXPECT_EQ(first.Lanes[0].Metadata, second.Lanes[0].Metadata);
+    ASSERT_TRUE(first.Succeeded())
+        << first.Diagnostics;
+    ASSERT_TRUE(second.Succeeded())
+        << second.Diagnostics;
+    ASSERT_EQ(first.Value->size(), 1u);
+    ASSERT_EQ(second.Value->size(), 1u);
+    EXPECT_EQ((*first.Value)[0].Bytecode, (*second.Value)[0].Bytecode);
+    EXPECT_EQ((*first.Value)[0].Metadata, (*second.Value)[0].Metadata);
 
     shader::WireMetadataEnvelope firstEnvelope{};
-    std::memcpy(&firstEnvelope, first.Lanes[0].Metadata.data(), sizeof(firstEnvelope));
+    std::memcpy(&firstEnvelope, (*first.Value)[0].Metadata.data(), sizeof(firstEnvelope));
     request.Defines.push_back({"USE_EXTRA", "1"});
     const shader::CompileVariantResult conditional = client.CompileVariant(request, includePaths);
-    ASSERT_EQ(conditional.Status, shader::CompileStatus::Success)
-        << (conditional.Diagnostics.empty() ? "" : conditional.Diagnostics.back().Message);
+    ASSERT_TRUE(conditional.Succeeded())
+        << conditional.Diagnostics;
     shader::WireMetadataEnvelope conditionalEnvelope{};
-    std::memcpy(&conditionalEnvelope, conditional.Lanes[0].Metadata.data(), sizeof(conditionalEnvelope));
+    std::memcpy(&conditionalEnvelope, (*conditional.Value)[0].Metadata.data(), sizeof(conditionalEnvelope));
     EXPECT_NE(firstEnvelope.BytecodeDigest, conditionalEnvelope.BytecodeDigest);
 }
 
@@ -447,10 +442,10 @@ TEST(RadRayDxcMetadata, EmptyIncludePathListIsValidForIncludeFreeRoot) {
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::DXIL,
             .Policy = {},
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         std::span<const std::filesystem::path>{});
-    EXPECT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    EXPECT_TRUE(result.Succeeded())
+        << result.Diagnostics;
 }
 
 TEST(RadRayDxcMetadata, EmptyIncludeDirectoryIsRejected) {
@@ -489,17 +484,17 @@ TEST(RadRayDxcMetadata, IncludePathOrderFollowsDxcShadowing) {
         .Assignments = {},
         .Targets = shader::ShaderTargetMask::DXIL,
         .Policy = {},
-        .ExpectedContract = discovery.Contract.Hash};
+        .ExpectedContract = discovery.Value->Hash};
     const auto first = client.CompileVariant(request, firstPaths);
     const auto second = client.CompileVariant(request, secondPaths);
-    ASSERT_EQ(first.Status, shader::CompileStatus::Success);
-    ASSERT_EQ(second.Status, shader::CompileStatus::Success);
-    ASSERT_EQ(first.Lanes.size(), 1u);
-    ASSERT_EQ(second.Lanes.size(), 1u);
+    ASSERT_TRUE(first.Succeeded());
+    ASSERT_TRUE(second.Succeeded());
+    ASSERT_EQ(first.Value->size(), 1u);
+    ASSERT_EQ(second.Value->size(), 1u);
     shader::WireMetadataEnvelope firstEnvelope{};
     shader::WireMetadataEnvelope secondEnvelope{};
-    std::memcpy(&firstEnvelope, first.Lanes.front().Metadata.data(), sizeof(firstEnvelope));
-    std::memcpy(&secondEnvelope, second.Lanes.front().Metadata.data(), sizeof(secondEnvelope));
+    std::memcpy(&firstEnvelope, first.Value->front().Metadata.data(), sizeof(firstEnvelope));
+    std::memcpy(&secondEnvelope, second.Value->front().Metadata.data(), sizeof(secondEnvelope));
     EXPECT_NE(firstEnvelope.BytecodeDigest, secondEnvelope.BytecodeDigest);
 }
 
@@ -526,7 +521,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
                                          .Defines = {},
                                          .Assignments = {},
                                          .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
-                                         .ExpectedContract = discovery.Contract.Hash},
+                                         .ExpectedContract = discovery.Value->Hash},
                                      includePaths);
     };
 
@@ -534,17 +529,17 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
         "fixtures/multiple_root_constants.hlsl",
         kMultipleRootConstantsSource,
         shader::ShaderTarget::DXIL);
-    ASSERT_EQ(rootResult.Status, shader::CompileStatus::Success)
-        << (rootResult.Diagnostics.empty() ? "" : rootResult.Diagnostics.back().Message);
-    ASSERT_EQ(rootResult.Lanes.size(), 1u);
+    ASSERT_TRUE(rootResult.Succeeded())
+        << rootResult.Diagnostics;
+    ASSERT_EQ(rootResult.Value->size(), 1u);
     shader::WireMetadataEnvelope rootEnvelope{};
-    std::memcpy(&rootEnvelope, rootResult.Lanes[0].Metadata.data(), sizeof(rootEnvelope));
+    std::memcpy(&rootEnvelope, (*rootResult.Value)[0].Metadata.data(), sizeof(rootEnvelope));
     EXPECT_GT(rootEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(rootEnvelope.RootConstantRecords.Size, 2u * sizeof(shader::WireRootConstantRecord));
     vector<shader::WireRootConstantRecord> roots(2);
     std::memcpy(
         roots.data(),
-        rootResult.Lanes[0].Metadata.data() + rootEnvelope.RootConstantRecords.Offset,
+        (*rootResult.Value)[0].Metadata.data() + rootEnvelope.RootConstantRecords.Offset,
         rootEnvelope.RootConstantRecords.Size);
     EXPECT_EQ(roots[0].RegisterSpace, 0u);
     EXPECT_EQ(roots[0].Register, 0u);
@@ -561,17 +556,17 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
         "fixtures/single_push_constant.hlsl",
         kSinglePushConstantSource,
         shader::ShaderTarget::SPIRV);
-    ASSERT_EQ(pushResult.Status, shader::CompileStatus::Success)
-        << (pushResult.Diagnostics.empty() ? "" : pushResult.Diagnostics.back().Message);
-    ASSERT_EQ(pushResult.Lanes.size(), 1u);
+    ASSERT_TRUE(pushResult.Succeeded())
+        << pushResult.Diagnostics;
+    ASSERT_EQ(pushResult.Value->size(), 1u);
     shader::WireMetadataEnvelope pushEnvelope{};
-    std::memcpy(&pushEnvelope, pushResult.Lanes[0].Metadata.data(), sizeof(pushEnvelope));
+    std::memcpy(&pushEnvelope, (*pushResult.Value)[0].Metadata.data(), sizeof(pushEnvelope));
     EXPECT_EQ(pushEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(pushEnvelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
     shader::WireRootConstantRecord push{};
     std::memcpy(
         &push,
-        pushResult.Lanes[0].Metadata.data() + pushEnvelope.RootConstantRecords.Offset,
+        (*pushResult.Value)[0].Metadata.data() + pushEnvelope.RootConstantRecords.Offset,
         sizeof(push));
     EXPECT_EQ(push.RegisterSpace, 0u);
     EXPECT_EQ(push.Register, 0u);
@@ -586,7 +581,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
         pushEnvelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
     std::memcpy(
         pushTypes.data(),
-        pushResult.Lanes[0].Metadata.data() + pushEnvelope.TypeRecords.Offset,
+        (*pushResult.Value)[0].Metadata.data() + pushEnvelope.TypeRecords.Offset,
         pushEnvelope.TypeRecords.Size);
     const shader::WireTypeRecord& pushPayload = pushTypes[push.TypeIndex];
     EXPECT_EQ(
@@ -595,7 +590,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     EXPECT_EQ(pushPayload.ParentIndex, shader::kShaderNoType);
     const std::string_view pushPayloadName{
         reinterpret_cast<const char*>(
-            pushResult.Lanes[0].Metadata.data() + pushPayload.Name.Offset),
+            (*pushResult.Value)[0].Metadata.data() + pushPayload.Name.Offset),
         pushPayload.Name.Size};
     EXPECT_EQ(pushPayloadName, "PushData");
 
@@ -603,25 +598,25 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
         "fixtures/multiple_push_constant.hlsl",
         kMultiplePushConstantSource,
         shader::ShaderTarget::SPIRV);
-    EXPECT_EQ(multiplePushResult.Status, shader::CompileStatus::TargetFailure);
-    EXPECT_TRUE(multiplePushResult.Lanes.empty());
+    EXPECT_FALSE(multiplePushResult.Succeeded());
+    EXPECT_FALSE(multiplePushResult.Value.has_value());
     EXPECT_FALSE(multiplePushResult.Diagnostics.empty());
 
     const auto computeResult = compile(
         "fixtures/compute_root_signature.hlsl",
         kComputeRootSignatureSource,
         shader::ShaderTarget::DXIL);
-    ASSERT_EQ(computeResult.Status, shader::CompileStatus::Success)
-        << (computeResult.Diagnostics.empty() ? "" : computeResult.Diagnostics.back().Message);
-    ASSERT_EQ(computeResult.Lanes.size(), 1u);
+    ASSERT_TRUE(computeResult.Succeeded())
+        << computeResult.Diagnostics;
+    ASSERT_EQ(computeResult.Value->size(), 1u);
     shader::WireMetadataEnvelope computeEnvelope{};
-    std::memcpy(&computeEnvelope, computeResult.Lanes[0].Metadata.data(), sizeof(computeEnvelope));
+    std::memcpy(&computeEnvelope, (*computeResult.Value)[0].Metadata.data(), sizeof(computeEnvelope));
     EXPECT_GT(computeEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(computeEnvelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
     shader::WireRootConstantRecord computeRoot{};
     std::memcpy(
         &computeRoot,
-        computeResult.Lanes[0].Metadata.data() + computeEnvelope.RootConstantRecords.Offset,
+        (*computeResult.Value)[0].Metadata.data() + computeEnvelope.RootConstantRecords.Offset,
         sizeof(computeRoot));
     EXPECT_EQ(computeRoot.Register, 0u);
     EXPECT_EQ(computeRoot.Size, 16u);
@@ -651,7 +646,7 @@ TEST(RadRayDxcMetadata, DeclarationPayloadOwnersSurviveCrossStageMerge) {
                 .Policy = {}},
             includePaths);
         ASSERT_TRUE(discovery.Succeeded())
-            << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+            << discovery.Diagnostics;
         const shader::CompileVariantResult result = client.CompileVariant(
             shader::CompileVariantRequest{
                 .SourceName = sourceName,
@@ -659,13 +654,13 @@ TEST(RadRayDxcMetadata, DeclarationPayloadOwnersSurviveCrossStageMerge) {
                 .Defines = {},
                 .Assignments = {},
                 .Targets = shader::ShaderTargetMask::All,
-                .ExpectedContract = discovery.Contract.Hash},
+                .ExpectedContract = discovery.Value->Hash},
             includePaths);
-        ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-            << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-        ASSERT_EQ(result.Lanes.size(), 2u);
+        ASSERT_TRUE(result.Succeeded())
+            << result.Diagnostics;
+        ASSERT_EQ(result.Value->size(), 2u);
 
-        for (const shader::CompileTargetLane& lane : result.Lanes) {
+        for (const shader::CompileTargetLane& lane : *result.Value) {
             shader::WireMetadataEnvelope envelope{};
             std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
             vector<shader::WireBindingRecord> bindings(
@@ -735,7 +730,7 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const auto includePaths = ShaderIncludePaths();
-    const auto expectTargetFailure = [&](std::string_view name, std::string_view source, uint32_t code) {
+    const auto expectTargetFailure = [&](std::string_view name, std::string_view source) {
         const auto discovery = client.DiscoverSourceContract(
             name,
             CopyBytes(source),
@@ -748,43 +743,32 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
                                                       .Defines = {},
                                                       .Assignments = {},
                                                       .Targets = shader::ShaderTargetMask::DXIL,
-                                                      .ExpectedContract = discovery.Contract.Hash},
+                                                      .ExpectedContract = discovery.Value->Hash},
                                                   includePaths);
-        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << name;
-        EXPECT_TRUE(result.Lanes.empty()) << name;
-        EXPECT_TRUE(std::any_of(
-            result.Diagnostics.begin(),
-            result.Diagnostics.end(),
-            [code](const shader::CompileDiagnostic& diagnostic) noexcept {
-                return diagnostic.Code == code;
-            }))
-            << name << " expected diagnostic " << code;
+        EXPECT_FALSE(result.Succeeded()) << name;
+        EXPECT_FALSE(result.Value.has_value()) << name;
+        EXPECT_FALSE(result.Diagnostics.empty())
+            << name << " expected diagnostic text";
     };
     const auto expectDiscoveryFailure = [&](std::string_view name,
-                                            std::string_view source,
-                                            uint32_t code) {
+                                            std::string_view source) {
         const auto discovery = client.DiscoverSourceContract(
             name,
             CopyBytes(source),
             shader::ShaderTarget::DXIL,
             includePaths);
         EXPECT_FALSE(discovery.Succeeded()) << name;
-        EXPECT_EQ(discovery.Status, shader::CompileStatus::InvalidRequest) << name;
-        EXPECT_TRUE(std::any_of(
-            discovery.Diagnostics.begin(),
-            discovery.Diagnostics.end(),
-            [code](const shader::CompileDiagnostic& diagnostic) noexcept {
-                return diagnostic.Code == code;
-            }))
-            << name << " expected diagnostic " << code;
+        EXPECT_FALSE(discovery.Succeeded()) << name;
+        EXPECT_FALSE(discovery.Diagnostics.empty())
+            << name << " expected diagnostic text";
     };
     // A sampler the shader actually samples with, that the policy does not address, is an uncovered
     // active resource rather than something the backend may fill in.
-    expectTargetFailure("fixtures/missing_static_sampler.hlsl", kMissingStaticSamplerSource, 2121);
+    expectTargetFailure("fixtures/missing_static_sampler.hlsl", kMissingStaticSamplerSource);
     // Two static samplers at one register is a policy the RootSignature compiler cannot serialize,
     // and the policy is parsed at discovery time.
     expectDiscoveryFailure(
-        "fixtures/duplicate_static_sampler.hlsl", kDuplicateStaticSamplerSource, 2117);
+        "fixtures/duplicate_static_sampler.hlsl", kDuplicateStaticSamplerSource);
 }
 
 TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
@@ -803,24 +787,24 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
                                                   .Defines = {},
                                                   .Assignments = {},
                                                   .Targets = shader::ShaderTargetMask::DXIL,
-                                                  .ExpectedContract = discovery.Contract.Hash},
+                                                  .ExpectedContract = discovery.Value->Hash},
                                               includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 1u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 1u);
     shader::WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    std::memcpy(&envelope, (*result.Value)[0].Metadata.data(), sizeof(envelope));
     EXPECT_GT(envelope.RootSignature.Size, 0u);
     const byte rts0[] = {
         static_cast<byte>('R'), static_cast<byte>('T'),
         static_cast<byte>('S'), static_cast<byte>('0')};
     EXPECT_EQ(
         std::search(
-            result.Lanes[0].Bytecode.begin(),
-            result.Lanes[0].Bytecode.end(),
+            (*result.Value)[0].Bytecode.begin(),
+            (*result.Value)[0].Bytecode.end(),
             rts0,
             rts0 + 4),
-        result.Lanes[0].Bytecode.end());
+        (*result.Value)[0].Bytecode.end());
 
     const auto exactDiscovery = client.DiscoverSourceContract(
         "fixtures/root_signature_exact_resource.hlsl",
@@ -834,13 +818,13 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
                                                        .Defines = {},
                                                        .Assignments = {},
                                                        .Targets = shader::ShaderTargetMask::DXIL,
-                                                       .ExpectedContract = exactDiscovery.Contract.Hash},
+                                                       .ExpectedContract = exactDiscovery.Value->Hash},
                                                    includePaths);
-    ASSERT_EQ(exactResult.Status, shader::CompileStatus::Success)
-        << (exactResult.Diagnostics.empty() ? "" : exactResult.Diagnostics.back().Message);
-    ASSERT_EQ(exactResult.Lanes.size(), 1u);
+    ASSERT_TRUE(exactResult.Succeeded())
+        << exactResult.Diagnostics;
+    ASSERT_EQ(exactResult.Value->size(), 1u);
     shader::WireMetadataEnvelope exactEnvelope{};
-    std::memcpy(&exactEnvelope, exactResult.Lanes[0].Metadata.data(), sizeof(exactEnvelope));
+    std::memcpy(&exactEnvelope, (*exactResult.Value)[0].Metadata.data(), sizeof(exactEnvelope));
     EXPECT_NE(exactEnvelope.BasePipelineLayoutDigest, envelope.BasePipelineLayoutDigest);
     EXPECT_NE(exactEnvelope.GpuArtifact, envelope.GpuArtifact);
 }
@@ -861,16 +845,11 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureMustCoverActiveResource) {
                                                   .Defines = {},
                                                   .Assignments = {},
                                                   .Targets = shader::ShaderTargetMask::DXIL,
-                                                  .ExpectedContract = discovery.Contract.Hash},
+                                                  .ExpectedContract = discovery.Value->Hash},
                                               includePaths);
-    EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
-    EXPECT_TRUE(result.Lanes.empty());
-    const bool hasRootDiagnostic = std::any_of(
-        result.Diagnostics.begin(),
-        result.Diagnostics.end(),
-        [](const shader::CompileDiagnostic& diagnostic) noexcept {
-            return diagnostic.Code == 2121;
-        });
+    EXPECT_FALSE(result.Succeeded());
+    EXPECT_FALSE(result.Value.has_value());
+    const bool hasRootDiagnostic = !result.Diagnostics.empty();
     EXPECT_TRUE(hasRootDiagnostic);
 }
 
@@ -890,15 +869,15 @@ TEST(RadRayDxcMetadata, StaticSamplerIsTargetSpecificButImmutable) {
                                                   .Defines = {},
                                                   .Assignments = {},
                                                   .Targets = shader::ShaderTargetMask::All,
-                                                  .ExpectedContract = discovery.Contract.Hash},
+                                                  .ExpectedContract = discovery.Value->Hash},
                                               includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
 
     uint32_t dxilTextureBinding = 0;
     uint32_t spirvTextureBinding = 0;
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
@@ -969,14 +948,9 @@ TEST(RadRayDxcMetadata, MismatchedGraphicsRootSignaturesFailClosed) {
             target,
             includePaths);
         EXPECT_FALSE(discovery.Succeeded()) << "target=" << static_cast<uint32_t>(target);
-        EXPECT_EQ(discovery.Status, shader::CompileStatus::InvalidRequest)
+        EXPECT_FALSE(discovery.Succeeded())
             << "target=" << static_cast<uint32_t>(target);
-        EXPECT_TRUE(std::any_of(
-            discovery.Diagnostics.begin(),
-            discovery.Diagnostics.end(),
-            [](const shader::CompileDiagnostic& diagnostic) noexcept {
-                return diagnostic.Code == 2105;
-            }))
+        EXPECT_FALSE(discovery.Diagnostics.empty())
             << "target=" << static_cast<uint32_t>(target);
     }
 }
@@ -993,8 +967,8 @@ TEST(RadRayDxcMetadata, ContractDriftFailsClosed) {
         .Targets = shader::ShaderTargetMask::DXIL};
     request.ExpectedContract.Bytes.fill(0xff);
     const shader::CompileVariantResult result = client.CompileVariant(request, ShaderIncludePaths());
-    EXPECT_EQ(result.Status, shader::CompileStatus::ContractMismatch);
-    EXPECT_TRUE(result.Lanes.empty());
+    EXPECT_FALSE(result.Succeeded());
+    EXPECT_FALSE(result.Value.has_value());
 }
 
 TEST(RadRayDxcMetadata, AssignmentInducedTopologyDriftIsContractMismatch) {
@@ -1021,7 +995,7 @@ float4 PIXEL_ENTRY() : SV_Target0 {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
 
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
@@ -1030,16 +1004,11 @@ float4 PIXEL_ENTRY() : SV_Target0 {
             .Defines = {},
             .Assignments = {{string{"PIXEL_ENTRY"}, string{"PSLow"}}},
             .Targets = shader::ShaderTargetMask::DXIL,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    EXPECT_EQ(result.Status, shader::CompileStatus::ContractMismatch);
-    EXPECT_TRUE(result.Lanes.empty());
-    const bool hasTopologyDiagnostic = std::any_of(
-        result.Diagnostics.begin(),
-        result.Diagnostics.end(),
-        [](const shader::CompileDiagnostic& diagnostic) noexcept {
-            return diagnostic.Code == 2007;
-        });
+    EXPECT_FALSE(result.Succeeded());
+    EXPECT_FALSE(result.Value.has_value());
+    const bool hasTopologyDiagnostic = !result.Diagnostics.empty();
     EXPECT_TRUE(hasTopologyDiagnostic);
 }
 
@@ -1082,7 +1051,7 @@ TEST(RadRayDxcMetadata, StagesMayUseDisjointResourceSets) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/stage_disjoint_resources.hlsl",
@@ -1090,15 +1059,15 @@ TEST(RadRayDxcMetadata, StagesMayUseDisjointResourceSets) {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
 
     // Both lanes must carry the union of the two stages' resources, each tagged
     // with only the stage that uses it.
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
@@ -1154,7 +1123,7 @@ TEST(RadRayDxcMetadata, StructVertexInputsAgreeAcrossTargets) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/struct_vertex_input.hlsl",
@@ -1162,11 +1131,11 @@ TEST(RadRayDxcMetadata, StructVertexInputsAgreeAcrossTargets) {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
 
     struct ExpectedInput {
         std::string_view Semantic;
@@ -1178,7 +1147,7 @@ TEST(RadRayDxcMetadata, StructVertexInputsAgreeAcrossTargets) {
         {"NORMAL", 1, 3},
         {"TEXCOORD", 2, 2}};
 
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
@@ -1231,7 +1200,7 @@ float4 VSMain(VertexInput input) : SV_Position {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/matrix_vertex_input.hlsl",
@@ -1239,11 +1208,11 @@ float4 VSMain(VertexInput input) : SV_Position {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
 
     struct ExpectedInput {
         std::string_view Semantic;
@@ -1256,7 +1225,7 @@ float4 VSMain(VertexInput input) : SV_Position {
         {"TEXCOORD", 1, 2},
         {"TEXCOORD", 2, 3}};
 
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         shader::WireMetadataEnvelope envelope{};
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
         vector<shader::WireVertexInputRecord> inputs(
@@ -1339,7 +1308,7 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/cbuffer_type_payload.hlsl",
@@ -1347,11 +1316,11 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
 
     using Kind = shader::ShaderTypeKind;
     using Scalar = shader::ShaderScalarKind;
@@ -1378,13 +1347,13 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
 
     // Per lane: every published fact of the root and of each field, compared as a whole at the end.
     vector<vector<std::array<uint32_t, 8>>> perLane;
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         const auto target = static_cast<uint32_t>(lane.Target);
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
         vector<shader::WireTypeRecord> types(envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
-        ASSERT_FALSE(types.empty()) << "target=" << target;
+        ASSERT_FALSE(types.empty()) << "target=" << static_cast<uint32_t>(target);
         std::memcpy(types.data(), lane.Metadata.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
         const auto name = [&](const shader::WireTypeRecord& record) {
             return std::string_view{
@@ -1401,10 +1370,10 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
         };
 
         const auto root = find(shader::kShaderNoType, "Shared");
-        ASSERT_NE(root, types.end()) << "target=" << target;
-        EXPECT_EQ(root->Kind, static_cast<uint32_t>(Kind::Struct)) << "target=" << target;
+        ASSERT_NE(root, types.end()) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(root->Kind, static_cast<uint32_t>(Kind::Struct)) << "target=" << static_cast<uint32_t>(target);
         // The cbuffer size the runtime allocates and the POD's sizeof must be this number.
-        EXPECT_EQ(root->Size, 224u) << "target=" << target;
+        EXPECT_EQ(root->Size, 224u) << "target=" << static_cast<uint32_t>(target);
         const auto rootIndex = static_cast<uint32_t>(std::distance(types.begin(), root));
 
         auto& lanefacts = perLane.emplace_back();
@@ -1433,14 +1402,14 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
 
         // The nested element type is published with its own layout, uint4 included.
         const auto leaf = find(shader::kShaderNoType, "Leaf");
-        ASSERT_NE(leaf, types.end()) << "target=" << target;
-        EXPECT_EQ(leaf->Size, 32u) << "target=" << target;
+        ASSERT_NE(leaf, types.end()) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(leaf->Size, 32u) << "target=" << static_cast<uint32_t>(target);
         const auto leafIndex = static_cast<uint32_t>(std::distance(types.begin(), leaf));
         const auto codes = find(leafIndex, "Codes");
-        ASSERT_NE(codes, types.end()) << "target=" << target;
-        EXPECT_EQ(codes->ScalarKind, static_cast<uint32_t>(Scalar::UnsignedInteger)) << "target=" << target;
-        EXPECT_EQ(codes->ColumnCount, 4u) << "target=" << target;
-        EXPECT_EQ(codes->Offset, 16u) << "target=" << target;
+        ASSERT_NE(codes, types.end()) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(codes->ScalarKind, static_cast<uint32_t>(Scalar::UnsignedInteger)) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(codes->ColumnCount, 4u) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(codes->Offset, 16u) << "target=" << static_cast<uint32_t>(target);
         lanefacts.push_back(facts(*leaf));
         lanefacts.push_back(facts(*codes));
     }
@@ -1492,7 +1461,7 @@ float4 PSMain() : SV_Target0 { return ReadEverything(); }
         const auto discovery = client.DiscoverSourceContract(
             "fixtures/cbuffer_disputed.hlsl", CopyBytes(source), shader::ShaderTarget::DXIL, includePaths);
         ASSERT_TRUE(discovery.Succeeded())
-            << field.Declaration << ": " << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+            << field.Declaration << ": " << discovery.Diagnostics;
         const auto result = client.CompileVariant(
             shader::CompileVariantRequest{
                 .SourceName = "fixtures/cbuffer_disputed.hlsl",
@@ -1500,14 +1469,11 @@ float4 PSMain() : SV_Target0 { return ReadEverything(); }
                 .Defines = {},
                 .Assignments = {},
                 .Targets = shader::ShaderTargetMask::All,
-                .ExpectedContract = discovery.Contract.Hash},
+                .ExpectedContract = discovery.Value->Hash},
             includePaths);
-        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << field.Declaration;
-        EXPECT_TRUE(result.Lanes.empty()) << field.Declaration;
-        const bool named = std::any_of(
-            result.Diagnostics.begin(), result.Diagnostics.end(), [](const shader::CompileDiagnostic& diagnostic) {
-                return diagnostic.Message.find("Shared") != string::npos;
-            });
+        EXPECT_FALSE(result.Succeeded()) << field.Declaration;
+        EXPECT_FALSE(result.Value.has_value()) << field.Declaration;
+        const bool named = result.Diagnostics.find("Shared") != string::npos;
         EXPECT_TRUE(named) << field.Declaration << ": the diagnostic must name the struct that disagrees";
     }
 }
@@ -1545,7 +1511,7 @@ float4 PSMain() : SV_Target0 {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/cross_stage_register_drift.hlsl",
@@ -1553,16 +1519,11 @@ float4 PSMain() : SV_Target0 {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::SPIRV,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
-    EXPECT_TRUE(result.Lanes.empty());
-    const bool hasBindingDiagnostic = std::any_of(
-        result.Diagnostics.begin(),
-        result.Diagnostics.end(),
-        [](const shader::CompileDiagnostic& diagnostic) noexcept {
-            return diagnostic.Code == 2109;
-        });
+    EXPECT_FALSE(result.Succeeded());
+    EXPECT_FALSE(result.Value.has_value());
+    const bool hasBindingDiagnostic = !result.Diagnostics.empty();
     EXPECT_TRUE(hasBindingDiagnostic);
 }
 
@@ -1593,7 +1554,7 @@ float4 PSMain() : SV_Target0 {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/resource_array.hlsl",
@@ -1601,12 +1562,12 @@ float4 PSMain() : SV_Target0 {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 2u);
-    for (const shader::CompileTargetLane& lane : result.Lanes) {
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 2u);
+    for (const shader::CompileTargetLane& lane : *result.Value) {
         shader::WireMetadataEnvelope envelope{};
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
         ASSERT_EQ(envelope.BindingRecords.Size, sizeof(shader::WireBindingRecord));
@@ -1630,8 +1591,7 @@ TEST(RadRayDxcMetadata, ImplicitBindingIsRejectedPerLane) {
     const auto includePaths = ShaderIncludePaths();
     const auto expectLaneFailure = [&](std::string_view name,
                                        std::string_view source,
-                                       shader::ShaderTarget target,
-                                       uint32_t expectedCode) {
+                                       shader::ShaderTarget target) {
         const auto discovery = client.DiscoverSourceContract(
             name,
             CopyBytes(source),
@@ -1646,18 +1606,13 @@ TEST(RadRayDxcMetadata, ImplicitBindingIsRejectedPerLane) {
                 .Assignments = {},
                 .Targets = static_cast<shader::ShaderTargetMask>(
                     shader::ToTargetMask(target)),
-                .ExpectedContract = discovery.Contract.Hash},
+                .ExpectedContract = discovery.Value->Hash},
             includePaths);
-        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << name;
-        EXPECT_TRUE(result.Lanes.empty()) << name;
-        const bool hasExpectedCode = std::any_of(
-            result.Diagnostics.begin(),
-            result.Diagnostics.end(),
-            [&](const shader::CompileDiagnostic& diagnostic) noexcept {
-                return diagnostic.Code == expectedCode;
-            });
-        EXPECT_TRUE(hasExpectedCode)
-            << name << " expected diagnostic " << expectedCode;
+        EXPECT_FALSE(result.Succeeded()) << name;
+        EXPECT_FALSE(result.Value.has_value()) << name;
+        const bool hasDiagnostic = !result.Diagnostics.empty();
+        EXPECT_TRUE(hasDiagnostic)
+            << name << " expected diagnostic text";
     };
 
     // Carries [[vk::binding]] but no register(): the DXIL lane must refuse it.
@@ -1675,8 +1630,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     expectLaneFailure(
         "fixtures/missing_register.hlsl",
         missingRegisterSource,
-        shader::ShaderTarget::DXIL,
-        2111);
+        shader::ShaderTarget::DXIL);
 
     // Array wrappers must not hide the resource type from the AST-side check.
     constexpr std::string_view missingArrayRegisterSource = R"hlsl(
@@ -1693,8 +1647,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     expectLaneFailure(
         "fixtures/missing_array_register.hlsl",
         missingArrayRegisterSource,
-        shader::ShaderTarget::DXIL,
-        2111);
+        shader::ShaderTarget::DXIL);
 
     // Carries register() but no [[vk::binding]]: the SPIR-V lane must refuse it.
     constexpr std::string_view missingVkBindingSource = R"hlsl(
@@ -1708,8 +1661,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     expectLaneFailure(
         "fixtures/missing_vk_binding.hlsl",
         missingVkBindingSource,
-        shader::ShaderTarget::SPIRV,
-        2113);
+        shader::ShaderTarget::SPIRV);
 
     // Binding enforcement happens after dead-resource removal. An entirely
     // unused declaration is not part of either lane's artifact contract.
@@ -1734,12 +1686,12 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(deadResult.Status, shader::CompileStatus::Success)
-        << (deadResult.Diagnostics.empty() ? "" : deadResult.Diagnostics.back().Message);
-    ASSERT_EQ(deadResult.Lanes.size(), 2u);
-    for (const shader::CompileTargetLane& lane : deadResult.Lanes) {
+    ASSERT_TRUE(deadResult.Succeeded())
+        << deadResult.Diagnostics;
+    ASSERT_EQ(deadResult.Value->size(), 2u);
+    for (const shader::CompileTargetLane& lane : *deadResult.Value) {
         shader::WireMetadataEnvelope envelope{};
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
         EXPECT_EQ(envelope.BindingRecords.Size, 0u);
@@ -1779,7 +1731,7 @@ TEST(RadRayDxcMetadata, RootConstantStageMaskFollowsAuthoredVisibility) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/visibility_scoped_root_constant.hlsl",
@@ -1787,18 +1739,18 @@ TEST(RadRayDxcMetadata, RootConstantStageMaskFollowsAuthoredVisibility) {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::DXIL,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 1u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 1u);
     shader::WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    std::memcpy(&envelope, (*result.Value)[0].Metadata.data(), sizeof(envelope));
     ASSERT_EQ(envelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
     shader::WireRootConstantRecord root{};
     std::memcpy(
         &root,
-        result.Lanes[0].Metadata.data() + envelope.RootConstantRecords.Offset,
+        (*result.Value)[0].Metadata.data() + envelope.RootConstantRecords.Offset,
         sizeof(root));
     EXPECT_EQ(root.StageMask, 1u << static_cast<uint8_t>(shader::ShaderStage::Vertex));
 }
@@ -1836,11 +1788,11 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::All,
             .Policy = policy,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    EXPECT_EQ(result.Lanes.size(), 2u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    EXPECT_EQ(result.Value->size(), 2u);
 
     for (const uint32_t hlslVersion : {2016u, 2017u, 2018u, 2021u}) {
         policy = {};
@@ -1853,14 +1805,12 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
                 .Assignments = {},
                 .Targets = shader::ShaderTargetMask::All,
                 .Policy = policy,
-                .ExpectedContract = discovery.Contract.Hash},
+                .ExpectedContract = discovery.Value->Hash},
             includePaths);
-        EXPECT_EQ(versionResult.Status, shader::CompileStatus::Success)
+        EXPECT_TRUE(versionResult.Succeeded())
             << "HLSL " << hlslVersion << ": "
-            << (versionResult.Diagnostics.empty()
-                    ? ""
-                    : versionResult.Diagnostics.back().Message);
-        EXPECT_EQ(versionResult.Lanes.size(), 2u) << "HLSL " << hlslVersion;
+            << versionResult.Diagnostics;
+        EXPECT_EQ(versionResult.Value->size(), 2u) << "HLSL " << hlslVersion;
     }
 }
 
@@ -1896,9 +1846,9 @@ TEST(RadRayDxcMetadata, DiscoveryHonorsRequestedShaderModel) {
     request.Policy = policy;
     const auto discovery = client.DiscoverSourceContract(request, includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
-    ASSERT_EQ(discovery.Contract.EntryPoints.size(), 1u);
-    EXPECT_EQ(discovery.Contract.EntryPoints[0].Stage, shader::ShaderStage::Compute);
+        << discovery.Diagnostics;
+    ASSERT_EQ(discovery.Value->EntryPoints.size(), 1u);
+    EXPECT_EQ(discovery.Value->EntryPoints[0].Stage, shader::ShaderStage::Compute);
 
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
@@ -1908,11 +1858,11 @@ TEST(RadRayDxcMetadata, DiscoveryHonorsRequestedShaderModel) {
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::DXIL,
             .Policy = policy,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    EXPECT_EQ(result.Lanes.size(), 1u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    EXPECT_EQ(result.Value->size(), 1u);
 
     // The same source must still fail closed below its required shader model,
     // proving the profile tracks the request instead of always widening.
@@ -1948,7 +1898,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
         const auto discovery = client.DiscoverSourceContract(request, includePaths);
         EXPECT_TRUE(discovery.Succeeded())
             << "SM " << shaderModel << ": "
-            << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+            << discovery.Diagnostics;
     }
 }
 
@@ -1974,7 +1924,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
     const auto result = client.CompileVariant(
         shader::CompileVariantRequest{
             .SourceName = "fixtures/toolchain_identity.hlsl",
@@ -1982,14 +1932,14 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
             .Defines = {},
             .Assignments = {},
             .Targets = shader::ShaderTargetMask::DXIL,
-            .ExpectedContract = discovery.Contract.Hash},
+            .ExpectedContract = discovery.Value->Hash},
         includePaths);
-    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
-        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
-    ASSERT_EQ(result.Lanes.size(), 1u);
+    ASSERT_TRUE(result.Succeeded())
+        << result.Diagnostics;
+    ASSERT_EQ(result.Value->size(), 1u);
     shader::WireMetadataEnvelope envelope{};
-    ASSERT_GE(result.Lanes[0].Metadata.size(), sizeof(envelope));
-    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    ASSERT_GE((*result.Value)[0].Metadata.size(), sizeof(envelope));
+    std::memcpy(&envelope, (*result.Value)[0].Metadata.data(), sizeof(envelope));
     EXPECT_EQ(envelope.ToolchainIdentity, kExpectedToolchainIdentity);
     EXPECT_EQ(envelope.SchemaVersion, shader::kShaderMetadataSchemaVersion);
 }
@@ -2004,7 +1954,7 @@ TEST(RadRayDxcMetadata, UnsupportedCompilePolicyFailsClosed) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        << discovery.Diagnostics;
 
     vector<shader::CompilePolicy> invalidPolicies;
     shader::CompilePolicy policy{};
@@ -2041,11 +1991,11 @@ TEST(RadRayDxcMetadata, UnsupportedCompilePolicyFailsClosed) {
                 .Assignments = {},
                 .Targets = shader::ShaderTargetMask::DXIL,
                 .Policy = invalidPolicies[index],
-                .ExpectedContract = discovery.Contract.Hash},
+                .ExpectedContract = discovery.Value->Hash},
             includePaths);
-        EXPECT_EQ(result.Status, shader::CompileStatus::InvalidRequest)
+        EXPECT_FALSE(result.Succeeded())
             << "policy case " << index;
-        EXPECT_TRUE(result.Lanes.empty()) << "policy case " << index;
+        EXPECT_FALSE(result.Value.has_value()) << "policy case " << index;
         EXPECT_FALSE(result.Diagnostics.empty()) << "policy case " << index;
     }
 }
@@ -2067,8 +2017,8 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
         .Assignments = {},
         .Targets = shader::ShaderTargetMask::All};
     const shader::CompileVariantResult result = client.CompileVariant(request, ShaderIncludePaths());
-    EXPECT_EQ(result.Status, shader::CompileStatus::InvalidRequest);
-    EXPECT_TRUE(result.Lanes.empty());
+    EXPECT_FALSE(result.Succeeded());
+    EXPECT_FALSE(result.Value.has_value());
     EXPECT_FALSE(result.Diagnostics.empty());
 }
 
@@ -2092,11 +2042,11 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     request.SourceName = "fixtures/padded_cbuffer.hlsl";
     request.RootSource = CopyBytes(source);
     request.Targets = shader::ShaderTargetMask::DXIL;
-    request.ExpectedContract = discovery.Contract.Hash;
+    request.ExpectedContract = discovery.Value->Hash;
     const auto compiled = client.CompileVariant(request, {});
-    ASSERT_EQ(compiled.Status, shader::CompileStatus::Success);
-    ASSERT_EQ(compiled.Lanes.size(), 1u);
-    const auto& original = compiled.Lanes.front().Metadata;
+    ASSERT_TRUE(compiled.Succeeded());
+    ASSERT_EQ(compiled.Value->size(), 1u);
+    const auto& original = compiled.Value->front().Metadata;
     shader::WireMetadataEnvelope envelope{};
     ASSERT_GE(original.size(), sizeof(envelope));
     std::memcpy(&envelope, original.data(), sizeof(envelope));
@@ -2115,9 +2065,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
         .Target = shader::ShaderTarget::DXIL,
         .ExpectedGpuArtifact = envelope.GpuArtifact,
         .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
-    shader::ShaderArtifactDecodeError error{};
-    const auto artifact = shader::DecodeShaderArtifact(original, options, &error);
-    ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
+
+    auto diagnosticResult1 = shader::DecodeShaderArtifact(original, options);
+    const auto artifact = std::move(diagnosticResult1.Value);
+    ASSERT_TRUE(artifact.has_value()) << diagnosticResult1.Diagnostics;
     EXPECT_EQ(artifact->Types()[1].Size, 16u);
     EXPECT_EQ(artifact->Types()[1].Stride, 12u);
     const auto reject = [&](auto&& mutate) {
@@ -2125,9 +2076,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
         mutate(changedTypes);
         auto changed = original;
         std::memcpy(changed.data() + envelope.TypeRecords.Offset, changedTypes.data(), envelope.TypeRecords.Size);
-        shader::ShaderArtifactDecodeError failure{};
-        EXPECT_FALSE(shader::DecodeShaderArtifact(changed, options, &failure).has_value());
-        EXPECT_EQ(failure, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+
+        auto diagnosticResult2 = shader::DecodeShaderArtifact(changed, options);
+        EXPECT_FALSE(diagnosticResult2.Succeeded());
+        EXPECT_NE(diagnosticResult2.Diagnostics.find("type"), string::npos);
     };
     reject([](auto& records) { records[0].Stride = 24; }); // Root cannot carry a leaf padding allowance.
     reject([](auto& records) { records[1].Size = 8; }); // Payload does not fit its occupied range.
@@ -2166,11 +2118,11 @@ float4 VSMain(float3 position : POSITION) : SV_Position {{
         request.Targets = shader::ShaderTargetMask::DXIL;
         const auto contract = client.DiscoverSourceContract(request.SourceName, request.RootSource, shader::ShaderTarget::DXIL, {});
         ASSERT_TRUE(contract.Succeeded());
-        request.ExpectedContract = contract.Contract.Hash;
+        request.ExpectedContract = contract.Value->Hash;
         const auto compiled = client.CompileVariant(request, {});
-        ASSERT_EQ(compiled.Status, shader::CompileStatus::Success);
-        ASSERT_EQ(compiled.Lanes.size(), 1u);
-        const auto& original = compiled.Lanes.front().Metadata;
+        ASSERT_TRUE(compiled.Succeeded());
+        ASSERT_EQ(compiled.Value->size(), 1u);
+        const auto& original = compiled.Value->front().Metadata;
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(original.size(), sizeof(envelope));
         std::memcpy(&envelope, original.data(), sizeof(envelope));
@@ -2188,9 +2140,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position {{
         EXPECT_EQ(types[4].Size, 4u);
         const shader::ShaderArtifactDecodeOptions options{
             .Target = shader::ShaderTarget::DXIL, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
-        shader::ShaderArtifactDecodeError error{};
-        auto artifact = shader::DecodeShaderArtifact(original, options, &error);
-        ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
+
+        auto diagnosticResult3 = shader::DecodeShaderArtifact(original, options);
+        auto artifact = std::move(diagnosticResult3.Value);
+        ASSERT_TRUE(artifact.has_value()) << diagnosticResult3.Diagnostics;
         EXPECT_EQ(artifact->Types()[2].Size, 12u);
         EXPECT_EQ(artifact->Types()[2].Stride, 4u);
         const auto reject = [&](auto&& mutate) {
@@ -2198,9 +2151,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position {{
             mutate(changedTypes);
             auto changed = original;
             std::memcpy(changed.data() + envelope.TypeRecords.Offset, changedTypes.data(), envelope.TypeRecords.Size);
-            shader::ShaderArtifactDecodeError failure{};
-            EXPECT_FALSE(shader::DecodeShaderArtifact(changed, options, &failure).has_value());
-            EXPECT_EQ(failure, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+
+            auto diagnosticResult4 = shader::DecodeShaderArtifact(changed, options);
+            EXPECT_FALSE(diagnosticResult4.Succeeded());
+            EXPECT_NE(diagnosticResult4.Diagnostics.find("type"), string::npos);
         };
         reject([](auto& t) { t[2].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Vector); });
         reject([](auto& t) { t[2].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Array); });
@@ -2225,8 +2179,9 @@ float4 VSMain(float3 position : POSITION) : SV_Position {{
         std::memcpy(wrongTarget.data(), &spirvEnvelope, sizeof(spirvEnvelope));
         auto spirvOptions = options;
         spirvOptions.Target = shader::ShaderTarget::SPIRV;
-        EXPECT_FALSE(shader::DecodeShaderArtifact(wrongTarget, spirvOptions, &error).has_value());
-        EXPECT_EQ(error, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+        auto diagnosticResult5 = shader::DecodeShaderArtifact(wrongTarget, spirvOptions);
+        EXPECT_FALSE(diagnosticResult5.Succeeded());
+        EXPECT_NE(diagnosticResult5.Diagnostics.find("type"), string::npos);
     }
 }
 

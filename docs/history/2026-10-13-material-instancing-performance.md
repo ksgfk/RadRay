@@ -1,13 +1,16 @@
 > - 适用: 2026-10-13 材质、增量同步和实例化的历史功能与性能验收
 > - 权威: 历史本机实测；不作为当前性能或跨机器保证，当前契约见 render-framework
-> - 锚点: `benchmarks/bench_material_scene/bench_material_scene.cpp`, `benchmarks/bench_material_scene/material_scene_workload.cpp`, `tools/run_material_scene_benchmark.py`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`benchmarks/bench_material_scene/bench_material_scene.cpp`, `benchmarks/bench_material_scene/material_scene_workload.cpp`, `tools/run_material_scene_benchmark.py`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # 材质和实例化验收
 
 状态：P0–P6 在该轮实施并完成测量。基线为 `b63c14d571c10fcbc7b519bd80b218b6541fe5e7`，
 分支为 `refactor/render-framework-reset`；结果对应测量时未提交的工作树，源码快照当时保存在本机 perf 目录。
 后续 GPU 生命周期改动将绘制模板归入 RenderScene、共享计划归入 MaterialPass，并移除 Scene Attempt；
-本文的实施表和数值不追溯改写。当前接口见[Runtime 架构](../architecture/render-framework.md)，可复用的测量方法见[性能测量](../guide/performance.md)。
+本文的实施表和数值不追溯改写。当前接口见[Runtime 架构](2026-10-21-runtime-render-framework-snapshot.md)，可复用的测量方法见[性能测量](2026-10-21-runtime-performance-snapshot.md)。
 最初的 benchmark 和 Tracy 基线在任何行为修改之前完成。修正 workload 后另用原提交源码重建对照，原始数据保留。
 
 在 N=100k、M=1、V=3、无变换更新时，CPU 准备和录制从 D3D12 86.90 ms 降到 15.61 ms，
@@ -27,7 +30,7 @@ Vulkan 101.74 ms 降到 15.33 ms。每帧 300,000 draw 变为 3 draw；手动集
 | P5 | InstancedStaticMeshComponent：共享配置、连续数据、稳定业务 handle、连接 Shape 映射、独立 batch domain；native producer 使用相同底层路径 |
 | P6 | 两后端完整自动压力矩阵、Direct/Manual/ManualTint 对照、两种 churn×三时序、分阶段 Tracy、19 条内存曲线、GPU 回归、长期文档与示例 |
 
-使用示例见[实例绘制](../guide/instancing.md)，所有权与缓存契约见[Runtime 架构](../architecture/render-framework.md)。
+使用示例见[实例绘制](2026-10-21-runtime-instancing-snapshot.md)，所有权与缓存契约见[Runtime 架构](2026-10-21-runtime-render-framework-snapshot.md)。
 压力测试发现并修复了精确 reserve(size+count) 在重复单对象入口中导致反复搬移的问题，Writer 与集合现采用几何增长。
 全量回归还发现单线程 modal/vblank 回调的输入交付顺序问题，已将输入派发放在相应 Update 之前并完成回归。
 这些修补已进入本报告的最终二进制；中间版本数据保留在 `build_release/perf/intermediate-exact-reserve/`，未混入结论。

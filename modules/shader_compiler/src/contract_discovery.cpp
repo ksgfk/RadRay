@@ -119,8 +119,7 @@ private:
 };
 
 void AddWireDiagnostic(DiscoveryResult& result, string_view message) {
-    result.Status = shader::CompileStatus::InvalidRequest;
-    result.Diagnostics.push_back({2200, string{message}});
+    shader::AppendDiagnostic(result.Diagnostics, message);
 }
 
 bool IsCanonicalContract(const shader::ShaderContract& contract) noexcept {
@@ -177,6 +176,7 @@ bool IsCanonicalContract(const shader::ShaderContract& contract) noexcept {
 
 DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob) {
     DiscoveryResult result;
+    shader::ShaderContract contract;
     ContractWireReader reader{blob};
     uint32_t magic = 0;
     uint16_t schema = 0;
@@ -196,7 +196,7 @@ DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob) {
         AddWireDiagnostic(result, "contract blob kind is invalid");
         return result;
     }
-    result.Contract.Kind = static_cast<shader::ShaderKind>(kind);
+    contract.Kind = static_cast<shader::ShaderKind>(kind);
     for (uint32_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
         shader::KeywordGroup group;
         uint32_t valueCount = 0;
@@ -214,7 +214,7 @@ DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob) {
             }
             group.Values.push_back(std::move(value));
         }
-        result.Contract.KeywordGroups.push_back(std::move(group));
+        contract.KeywordGroups.push_back(std::move(group));
     }
 
     uint32_t entryCount = 0;
@@ -222,7 +222,7 @@ DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob) {
         AddWireDiagnostic(result, "contract blob entry list is invalid");
         return result;
     }
-    result.Contract.EntryPoints.reserve(entryCount);
+    contract.EntryPoints.reserve(entryCount);
     for (uint32_t entryIndex = 0; entryIndex < entryCount; ++entryIndex) {
         shader::EntryPoint entry;
         uint8_t stage = 0;
@@ -235,17 +235,17 @@ DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob) {
             return result;
         }
         entry.Stage = static_cast<shader::ShaderStage>(stage);
-        result.Contract.EntryPoints.push_back(std::move(entry));
+        contract.EntryPoints.push_back(std::move(entry));
     }
 
     shader::ContractHash encodedHash{};
-    if (!reader.ReadHash(encodedHash) || reader.Remaining() != 0 || !IsCanonicalContract(result.Contract) ||
-        MakeContractHash(result.Contract) != encodedHash) {
+    if (!reader.ReadHash(encodedHash) || reader.Remaining() != 0 || !IsCanonicalContract(contract) ||
+        MakeContractHash(contract) != encodedHash) {
         AddWireDiagnostic(result, "contract blob canonical hash or topology is invalid");
         return result;
     }
-    result.Contract.Hash = encodedHash;
-    result.Status = shader::CompileStatus::Success;
+    contract.Hash = encodedHash;
+    result.Value = std::move(contract);
     return result;
 }
 

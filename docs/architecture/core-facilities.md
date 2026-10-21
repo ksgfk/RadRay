@@ -110,10 +110,9 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 `coroutine_handle`，而 `coroutine_handle<>` 已经把 promise 的 env 擦除了，
 于是取不到 stop token。这个函数探测 promise 里有没有 `get_stop_token`，
 没有就返回一个 `stop_requested()` 恒为 false 的默认 token（= 不可取消）。
-`AssetWaitAwaitable::await_suspend` 为此把自己模板化，见 [asset-system](asset-system.md)。
 
 `ManualCoroutineScheduler` 的记录不能搬动——记录里存着回指调度器的指针（stop callback）。
-帧等待表因此放在 `FrameTimeline::_flights` 的 `vector<unique_ptr<Flight>>` 中，保证调度器地址稳定。
+调用方必须保证调度器及其活跃记录的地址稳定。
 
 记录默认在 stop callback 中立即恢复。持有尚未完成的外部操作时，可以设置
 `ResumeOnCancel=false`：stop callback 仍标记 `Canceled`，由记录拥有者在操作安全完成后恢复。
@@ -122,11 +121,10 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 记录的 `Sequence` 由所属 ManualCoroutineScheduler 分配，在该实例内单调递增且不回绕。
 `DispatchReady` 先按无副作用的谓词冻结就绪记录的地址与序号，再恢复续体；回调取消其他记录或
 新建记录时，旧地址不会误派发给新的等待。恢复后仍存活的原记录由调度器摘除。
-跨多个等待表派发时，先分别捕获 `GetSequenceBoundary()` 的排他截止，再逐表派发；
-ApplicationScheduler、帧边界等待和资产 Ready 通知共用此派发实现。窗口操作仍保留自己的安全点与交付阶段。
+跨多个等待表派发时，先分别捕获 `GetSequenceBoundary()` 的排他截止，再逐表派发。
 
-`TaskScope` 不可拷贝不可移动，且析构会阻塞。它必须在它所依赖的系统（例如 `GpuSystem`）
-之前析构，否则取消时的析构会碰到已死的 device。
+`TaskScope` 不可拷贝不可移动，且析构会阻塞。它必须在任务依赖的服务之前析构，
+并保证完成与取消所需的执行环境仍存活。
 
 ## 日志与断言
 
@@ -288,11 +286,10 @@ template <> struct JsonDeserializer<T> {
   需要稳定标识的类型特化 `RuntimeTypeTrait<T>::value`，显式读取 `runtime_type_id_v<T>` 时会先按
   `remove_cvref_t` 归一化并要求 GUID 非空。它不描述继承、不保存对象描述符，也不建立 GUID 与
   RTTI 的全局映射。对象关系查询使用指针形式 `dynamic_cast`，精确动态类型使用 `typeid`，
-  底层系统由 [Application 直接装配](render-framework.md#application-直接装配)，通过构造参数和 setter 连接；
   仅为这些查询不需要声明 GUID。
 - **RTTI 是工程编译约定** — `radray_default_compile_flags` 为每个自有 target 以 `PRIVATE`
   方式设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，仅作用于 C++ 编译。新增库、测试、
-  工具、样例与 benchmark 都必须调用该函数；`radray_add_test` 已代为调用。core 不通过链接接口
+  工具、样例与 benchmark 都必须显式调用该函数。core 不通过链接接口
   传播 RTTI 选项，仓库外使用公共对象查询的 consumer 需自行开启 RTTI。把开关放在现有的
   工程编译函数中，可以统一自有目标而不改变第三方配置，也不把工程策略挂在 core 的公共接口上。
 - **`intrusive_ptr.h`** — `IntrusivePtr` + `AdoptRef` / `RetainRef`，依赖 ADL 的

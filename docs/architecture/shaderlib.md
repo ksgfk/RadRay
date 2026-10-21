@@ -1,19 +1,17 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或产品 pass
 > - 权威: 本文是 schema 8 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
+> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
 
 # shaderlib
 
 `shaderlib/` 是 HLSL 源码树，也是 compiler include 解析使用的逻辑根目录。共享数学、材质、
-光照和阴影原语位于库层；旧 Forward、UI 与图 blit 产品 shader 已移除。
+光照原语位于库层。
 compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 作者不维护 sidecar metadata，active binding 与 type tree 随 concrete target lane artifact 生成。
 
 测试专用 shader 随所属模块放在 `modules/<module>/tests/`，不放入 `shaderlib/`。
 shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
 测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
-
-旧产品 shader 的归属和设计见[历史快照](../history/2026-09-14-render-framework-design.md)。
 
 ## 分层
 
@@ -24,7 +22,6 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `core/` | 标量数学、局部 frame、颜色转换 | 不包含光源、材质或后端绑定 |
 | `bsdf/` | Fresnel、微表面分布、Principled BSDF | 不包含光源和资源绑定 |
 | `lighting/` | 光源布局与辐照度求值 | 不包含 entry pass |
-| `shadow/` | 过滤、级联和 cube shadow 原语 | 不包含 pipeline binding |
 
 ## 文件导航
 
@@ -36,10 +33,7 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `bsdf/fresnel.hlsli` | 介电 Fresnel 与折射几何辅助量 |
 | `bsdf/microfacet.hlsli` | GGX 的 D/G 项和 roughness 转换 |
 | `bsdf/principled.hlsli` | Principled BRDF 反射半球求值 |
-| `lighting/lights.hlsli` | shader 光源布局与辐照度；不等同于 runtime CPU LightSceneData 的内存布局 |
-| `shadow/filtering.hlsli` | 阴影 UV、bias、PCF 原语 |
-| `shadow/cascade.hlsli` | 方向光级联阴影数据与求值 |
-| `shadow/cube.hlsli` | 点光源 cube shadow 数据与面序 |
+| `lighting/lights.hlsli` | shader 光源布局与辐照度；不隐含任何 CPU 结构的内存布局 |
 | `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT`、`VK_IMAGE_FORMAT` target gate |
 
 ## 编码约定
@@ -52,8 +46,7 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 ```
 
 共享结构的字段顺序、对齐和矩阵约定是 shader ABI；compiler 为每个 active CBuffer declaration
-发布指向当前 target-lane payload root 的 owner。调用方根据这份布局准备实际 GPU 字节；runtime 不再提供通用按名参数存储/setter，
-也不能把 CPU 光源表直接 memcpy 成 shader 布局。`shadow/filtering.hlsli` 中的序列化枚举值和 `lights.hlsli` 中的上限
+发布指向当前 target-lane payload root 的 owner。调用方根据这份布局准备实际 GPU 字节，不能把 CPU 光源表直接 memcpy 成 shader 布局。`lighting/lights.hlsli` 中的光源数量上限
 属于 ABI，不能因为重命名或排版而改变。
 
 `core/platform.hlsli` 只提供 DXIL/SPIR-V target gate：`VK_LOCATION`、`VK_BINDING` 和

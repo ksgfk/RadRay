@@ -393,7 +393,6 @@ class SamplerValidation final : public ValidatedObject<Sampler> {
 public:
     using ValidatedObject::ValidatedObject;
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
-    vector<uint64_t> GetBindingIdentity() const noexcept override { return Ready("GetBindingIdentity") ? Real()->GetBindingIdentity() : vector<uint64_t>{}; }
 };
 
 class FenceValidation final : public ValidatedObject<Fence> {
@@ -465,13 +464,6 @@ public:
         for (uint32_t i = 0; i < Bindings.size(); ++i)
             if (Bindings[i].Name == name) return BindingHandleAccess::Make(i, reinterpret_cast<uintptr_t>(this));
         return {};
-    }
-    std::optional<ParameterGroupCompatibility> GetParameterGroupCompatibility(uint32_t group) const noexcept override {
-        return Ready("GetParameterGroupCompatibility") ? Real()->GetParameterGroupCompatibility(group) : std::nullopt;
-    }
-    std::optional<uint32_t> GetParameterElementIndex(uint32_t group, BindingHandle binding, uint32_t element) const noexcept override {
-        const auto record = Resolve(binding, false, "GetParameterElementIndex");
-        return record ? Real()->GetParameterElementIndex(group, record->Native, element) : std::nullopt;
     }
     Nullable<const BindingInfo*> Resolve(BindingHandle handle, bool push, std::string_view operation) const noexcept {
         const auto index = BindingHandleAccess::RecordIndex(handle);

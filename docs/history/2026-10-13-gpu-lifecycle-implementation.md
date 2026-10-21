@@ -1,6 +1,9 @@
 > - 适用: 2026-10-13–14 GPU 生命周期、Vulkan 1.2 与 per-flight Scene 计划实施验收
 > - 权威: 本次执行状态与测量快照，不作为长期契约；当前行为以 architecture/guide 为准
-> - 锚点: `modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `modules/render/src/vk/vulkan_impl.cpp`, `tools/run_gpu_lifecycle_benchmark.py`
+> - 锚点: `modules/render/src/vk/vulkan_impl.cpp`, `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/gpu_system.cpp`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/src/gpu_frame_resources.cpp`, `tools/run_gpu_lifecycle_benchmark.py`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # GPU 生命周期计划实施与验收
 
@@ -12,7 +15,7 @@
 后续实现已移除 Prepare token，当前直接 `BeginRenderPass(desc)`；encoder 与 swapchain frame 的终结也已改为按值消费。
 下文阶段表、测试名及原生复用记录保持采样时语义，调用当前 API 以长期文档为准。`build*/` 下原始证据未入库，不保证本机仍保留。
 
-当前合同见 [帧与 GPU](../architecture/frame-and-gpu.md)、[RHI 与后端](../architecture/render-rhi.md)、[渲染框架](../architecture/render-framework.md)、[资产系统](../architecture/asset-system.md)，运行入口见 [构建与测试](../guide/build-test.md#gpu-生命周期回归)。
+当前合同见 [帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)、[RHI 与后端](../architecture/render-rhi.md)、[渲染框架](2026-10-21-runtime-render-framework-snapshot.md)、[资产系统](2026-10-21-runtime-asset-system-snapshot.md)，运行入口见 [构建与测试](2026-10-21-runtime-build-test-snapshot.md#gpu-生命周期回归)。
 
 ## 阶段与落点
 

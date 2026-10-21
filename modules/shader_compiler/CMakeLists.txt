@@ -2,7 +2,11 @@ file(GLOB_RECURSE RADRAY_SHADER_COMPILER_SRC CONFIGURE_DEPENDS "src/*.cpp")
 file(GLOB_RECURSE RADRAY_SHADER_COMPILER_INC CONFIGURE_DEPENDS "include/*.h")
 
 add_library(radrayshadercompiler STATIC ${RADRAY_SHADER_COMPILER_SRC} ${RADRAY_SHADER_COMPILER_INC})
-target_include_directories(radrayshadercompiler PUBLIC include)
+add_library(RadRay::shadercompiler ALIAS radrayshadercompiler)
+set_target_properties(radrayshadercompiler PROPERTIES EXPORT_NAME shadercompiler)
+target_include_directories(radrayshadercompiler PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(radrayshadercompiler PRIVATE RadRayDXC::Headers)
 target_link_libraries(radrayshadercompiler PUBLIC radraycore)
 target_link_libraries(radrayshadercompiler PUBLIC radrayshader)

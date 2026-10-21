@@ -19,7 +19,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 长期知识只放在本文件、`docs/architecture/` 与 `docs/guide/`；README 是项目介绍与入口。
 术语、约束和必要的设计理由就地维护在所属文档，历史由 Git 保存。
 行为变化时同步更新对应长期文档。开发历史放在 `docs/history/`，仅在用户明确要求或同意保存时写入；未授权则默认不写。AI 可以说明拟记录的内容与保留价值，询问是否入库，但不必每次改动都询问；已有授权不重复确认。
-历史文件使用 `YYYY-MM-DD-主题.扩展名`，注明状态与基线，不作为当前契约；具体归档规则见[文档维护](docs/guide/documentation.md#开发历史)。
+已有历史记录与附件保持原样；与历史相比的变化只在当前所属文档说明。历史文件使用 `YYYY-MM-DD-主题.扩展名`，注明状态与基线，不作为当前契约；具体归档规则见[文档维护](docs/guide/documentation.md#开发历史)。
 代码注释写 API 契约与局部约束，设计说明放文档；代码至多保留一处指向所属文档的文件头入口。
 
 ## 硬规则
@@ -33,13 +33,13 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - 新增或引入使用全局变量、全局 `static` 变量或函数内 `static` 共享状态前，必须先询问用户并获得同意，不得直接使用。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。
-- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core。
-- shader 不依赖 DXC 或 render/runtime；可选 shadercompiler → shader/core。runtime 仅在启用 JIT 时链接该 client，公共 shader/render/runtime 契约不依赖 DXC SDK 头。
-- `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。
+- 模块基础依赖：shader → core，window → core，render → shader/core；可选 shadercompiler → shader/core。
+- shader 不依赖 DXC 或 render；公共 shader/render 契约不依赖 DXC SDK 头。
+- `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。依赖分为用户手动执行的 fetch、`build_third_party.py` 和主工程 `find_package` 三阶段；配置、构建、安装不自动拉取或准备依赖。安装只导出 RadRay 自身，外部依赖由包发现提供。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。
 - `.hlsl` 是 entry source，`.hlsli` 是带 include guard 的库；entry 通过标准 `[shader("...")]` 声明。
 - `shaderlib/core/platform.hlsli` 是唯一 target gate，`VK_BINDING(binding, set)` 直接使用 binding 数字；不新增平行 metadata 或编号包装。
-- 测试放在 `modules/<module>/tests/`，使用 `radray_add_test` 或 `radray_add_radray_gtest_case` 注册。同一模块的 GTest 源文件链进一个可执行文件；只有必须独占进程映像的测试（例如替换全局 `operator new`）单独成 exe。discovery 使用 `gtest_discover_tests` 的默认 POST_BUILD，需要 CMake >= 4.4.1，不要改成 `PRE_TEST`。
+- 测试放在 `modules/<module>/tests/`，使用 CMake 官方 `add_executable`、`target_link_libraries` 和 `gtest_discover_tests` 注册。同一模块的 GTest 源文件链进一个可执行文件；只有必须独占进程映像的测试（例如替换全局 `operator new`）单独成 exe。discovery 遵从 CMake 官方默认值或 `CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE` 设置。
 - 正确性测试使用 Google Test（GTest）；性能测试使用 Google Benchmark，不用 `TEST` / `TEST_F` 承载基准测量。
 - 禁止为了测试在生产代码中添加仅供测试使用的字段，包括统计计数、事件轨迹和观测状态；这些数据由测试 fixture/probe 自行持有和记录。
 - `ctest -R` 匹配测试名中的 gtest suite，不是 CMake target。构建完成后再运行测试，不并发执行构建与测试。

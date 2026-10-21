@@ -79,12 +79,12 @@ FixtureArtifact DecodeFixture(std::string_view name) {
         return {};
     }
     result.View = shader::DecodeDxilShaderArtifact(
-        result.Blob,
-        shader::ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::DXIL,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index.value(), shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
-        nullptr);
+                      result.Blob,
+                      shader::ShaderArtifactDecodeOptions{
+                          .Target = shader::ShaderTarget::DXIL,
+                          .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index.value(), shader::ShaderTarget::DXIL),
+                          .ExpectedToolchainIdentity = kFixtureToolchainIdentity})
+                      .Value;
     return result;
 }
 

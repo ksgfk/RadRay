@@ -1,6 +1,9 @@
 > - 适用: 2026-10-16 Render Framework 重构的实施与前后实测
 > - 权威: 经用户授权保存的验收证据；当前契约见架构和指南，不以历史数值作为通用保证
-> - 锚点: `modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/tests/test_renderer_registry.cpp`, `examples/descriptor_reuse/`, `tools/run_descriptor_reuse.py`
+> - 锚点: `docs/history/2026-10-21-runtime-archive.md`
+归档维护注（2026-10-21）：本记录的原基线、结果及当时语义不变；下列源码锚点已随 runtime 移除，按原基线或归档说明查阅：`modules/runtime/src/render_framework/renderer.cpp`, `modules/runtime/src/render_framework/binding_registry.cpp`, `modules/runtime/tests/test_renderer_registry.cpp`, `examples/descriptor_reuse/`, `tools/run_descriptor_reuse.py`。
+正文中指向 runtime 的“当前”说明现仅为历史快照，不代表主线能力。
+
 
 # Render Framework 重构验收
 
@@ -8,8 +11,8 @@
 基线：`f20c56fbf073154185ae792daac71982e5f6ab43` 加实施开始时的 sampler 工作区改动。
 删除旧代码之前已保存[原状、计划和补丁](2026-10-16-render-framework-refactor-plan.md)，并实际完成旧框架离屏读回。
 
-当前契约见 [Render Framework](../architecture/render-framework.md)、[帧与 GPU](../architecture/frame-and-gpu.md)、
-[Shader authoring](../guide/shader-authoring.md)、[构建与测试](../guide/build-test.md)和[性能测量](../guide/performance.md)。
+当前契约见 [Render Framework](2026-10-21-runtime-render-framework-snapshot.md)、[帧与 GPU](2026-10-21-runtime-frame-and-gpu-snapshot.md)、
+[Shader authoring](../guide/shader-authoring.md)、[构建与测试](2026-10-21-runtime-build-test-snapshot.md)和[性能测量](2026-10-21-runtime-performance-snapshot.md)。
 
 ## 已实现的边界
 
@@ -124,7 +127,7 @@ python tools/run_descriptor_reuse.py --exe build_debug/_build/Debug/example_desc
 涉及 OrderedSubmissions、SwapChainLifecycle 的单/双线程及 MultiSwapChainHostWaitBeforePresent。
 render 的 1 项跳过是 Vulkan 原生缓存专用测试被参数化为 D3D12 时不适用。
 这些跳过不计为通过；42 项核心离屏读回和 Renderer 生命周期双后端验收没有跳过。
-环境限制说明见[构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
+环境限制说明见[构建与测试](2026-10-21-runtime-build-test-snapshot.md#vulkan-多交换链同步验证已知问题)。
 
 ## Release 性能证据
 
