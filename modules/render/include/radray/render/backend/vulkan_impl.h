@@ -8,15 +8,10 @@
 #include <radray/allocator.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/render/backend/vulkan_helper.h>
-#include <radray/render/pipeline_layout_types.h>
+#include <radray/render/sampler_cache.h>
 #include <radray/render/rhi.h>
 
 namespace radray::render::vulkan {
-
-class PipelineLayoutCacheVulkan;
-class CachedPipelineLayoutVulkan;
-void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept;
-void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept;
 
 using DeviceFuncTable = VolkDeviceTable;
 
@@ -39,16 +34,13 @@ class BufferViewVulkan;
 class ImageVulkan;
 class ImageViewVulkan;
 class PipelineLayoutVulkan;
+class BindingGroupLayoutVulkan;
 class ShaderParameterSetVulkan;
 class GraphicsPipelineVulkan;
 class ComputePipelineVulkan;
 class ShaderModuleVulkan;
 class SamplerVulkan;
 class QueryPoolVulkan;
-
-struct SamplerStateHashVulkan {
-    size_t operator()(const VulkanImmutableSamplerState& state) const noexcept;
-};
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -115,96 +107,6 @@ public:
     void DestroyImpl() noexcept;
 
     VmaAllocator _vma;
-};
-
-struct DescriptorSetLayoutCacheKeyVulkan {
-    struct BindingKey {
-        uint32_t Binding;
-        VkDescriptorType Type;
-        uint32_t Count;
-        VkShaderStageFlags Stages;
-        vector<VkSampler> ImmutableSamplers;
-
-        friend bool operator==(const BindingKey&, const BindingKey&) noexcept = default;
-    };
-
-    vector<BindingKey> Bindings;
-
-    friend bool operator==(const DescriptorSetLayoutCacheKeyVulkan&, const DescriptorSetLayoutCacheKeyVulkan&) noexcept = default;
-};
-
-}  // namespace radray::render::vulkan
-
-namespace std {
-
-template <>
-struct hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan> {
-    size_t operator()(const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept;
-};
-
-}  // namespace std
-
-namespace radray::render::vulkan {
-
-class DescriptorSetLayoutCacheVulkan;
-
-class DescriptorSetLayoutVulkan final {
-public:
-    DescriptorSetLayoutVulkan(
-        DescriptorSetLayoutCacheVulkan* cache,
-        DeviceVulkan* device,
-        VkDescriptorSetLayout layout) noexcept;
-    DescriptorSetLayoutVulkan(const DescriptorSetLayoutVulkan&) = delete;
-    DescriptorSetLayoutVulkan& operator=(const DescriptorSetLayoutVulkan&) = delete;
-    DescriptorSetLayoutVulkan(DescriptorSetLayoutVulkan&&) = delete;
-    DescriptorSetLayoutVulkan& operator=(DescriptorSetLayoutVulkan&&) = delete;
-
-    ~DescriptorSetLayoutVulkan() noexcept;
-
-    VkDescriptorSetLayout Get() const noexcept { return _layout; }
-    uint32_t GetRefCount() const noexcept { return _refCount; }
-
-private:
-    friend class DescriptorSetLayoutCacheVulkan;
-    friend void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
-    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
-
-    void DestroyImpl() noexcept;
-
-    DescriptorSetLayoutCacheVulkan* _cache;
-    const DescriptorSetLayoutCacheKeyVulkan* _key{nullptr};
-    DeviceVulkan* _device;
-    VkDescriptorSetLayout _layout;
-    uint32_t _refCount{0};
-};
-
-void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
-void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
-
-class DescriptorSetLayoutCacheVulkan final {
-public:
-    explicit DescriptorSetLayoutCacheVulkan(DeviceVulkan* device) noexcept;
-
-    ~DescriptorSetLayoutCacheVulkan() noexcept;
-
-    IntrusivePtr<DescriptorSetLayoutVulkan> GetOrCreate(std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
-
-    void Destroy() noexcept;
-
-    uint32_t GetLayoutCount() const noexcept {
-        return static_cast<uint32_t>(_layouts.size());
-    }
-
-private:
-    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
-
-    using Key = DescriptorSetLayoutCacheKeyVulkan;
-    using BindingKey = Key::BindingKey;
-
-    void Evict(DescriptorSetLayoutVulkan* layout) noexcept;
-
-    DeviceVulkan* _device;
-    unordered_map<Key, unique_ptr<DescriptorSetLayoutVulkan>> _layouts;
 };
 
 class DescriptorSetAllocatorVulkan final {
@@ -360,7 +262,7 @@ private:
     list<NativeFramebufferVulkan*> _idleFramebuffers;
 };
 
-class DeviceVulkan final : public Device, public detail::VulkanPipelineLayoutFactory {
+class DeviceVulkan final : public Device {
 public:
     DeviceVulkan(
         InstanceVulkanImpl* instance,
@@ -401,9 +303,9 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::SpirvShaderArtifactView& artifact, const VulkanTargetLayoutOptions& options = {}) noexcept;
+    Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& layout) noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -424,13 +326,9 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const ResolvedVulkanLayout& layout) noexcept;
-
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
-    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
-
-    Nullable<SamplerVulkan*> GetOrCreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
+    Nullable<SamplerVulkan*> GetOrCreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -449,10 +347,8 @@ public:
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
     unique_ptr<VulkanRenderPassCache> _renderPassCache;
-    DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
-    unique_ptr<PipelineLayoutCacheVulkan> _pipelineLayoutCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
-    unordered_map<VulkanImmutableSamplerState, unique_ptr<SamplerVulkan>, SamplerStateHashVulkan> _samplerCache;
+    unordered_map<SamplerDescriptor, unique_ptr<SamplerVulkan>> _samplerCache;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
     VkPhysicalDeviceProperties _properties;
@@ -627,7 +523,8 @@ public:
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
     bool SetPushConstants(
-        BindingHandle binding,
+        uint32_t pushId,
+        uint32_t byteOffset,
         std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
@@ -666,7 +563,7 @@ public:
 
     void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
+    bool SetPushConstants(uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
@@ -1106,57 +1003,45 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
-// 由 ResolvedVulkanLayout 建立的 set binding metadata；logical kind 与 native placement 独立保存。
 struct ShaderParameterSetLayoutEntryVulkan {
+    uint32_t BindingId{0};
     uint32_t Binding{0};
-    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+    BindingKind LogicalKind{BindingKind::CBuffer};
     VulkanBufferDescriptorPlacement Placement{VulkanBufferDescriptorPlacement::Regular};
     uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
     VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
-    // Index into the creation-time `ResolvedVulkanLayout::ImmutableSamplers`, or `shader::kShaderNoSampler`.
-    uint32_t ImmutableSamplerIndex{shader::kShaderNoSampler};
-    // 仅用于 typed buffer：本 binding 的数组元素在 parameter set 的 _texelBufferViews 中的起始下标。
     size_t TexelBufferViewOffset{0};
-
-    bool IsDynamic() const noexcept {
-        return Placement == VulkanBufferDescriptorPlacement::Dynamic;
-    }
-
-    bool HasImmutableSampler() const noexcept {
-        return ImmutableSamplerIndex != shader::kShaderNoSampler;
-    }
 };
-
+class BindingGroupLayoutVulkan final : public BindingGroupLayout {
+public:
+    ~BindingGroupLayoutVulkan() noexcept override;
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+    BindingGroupLayoutDescriptor GetDesc() const noexcept override;
+    DeviceVulkan* _device{nullptr};
+    VkDescriptorSetLayout _layout{VK_NULL_HANDLE};
+    uint32_t _set{0};
+    vector<BindingDescriptor> _bindings;
+    vector<ShaderParameterSetLayoutEntryVulkan> _entries;
+    vector<uint32_t> _dynamicOrder;
+    vector<VkDescriptorPoolSize> _poolSizes;
+};
 class PipelineLayoutVulkan final : public PipelineLayout {
 public:
     explicit PipelineLayoutVulkan(DeviceVulkan* device) noexcept;
     VkPipelineLayout GetNative() const noexcept;
-    std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> GetSetLayouts() const noexcept;
-
     ~PipelineLayoutVulkan() noexcept override;
-
     bool IsValid() const noexcept override;
-
     void Destroy() noexcept override;
-
     void SetDebugName(std::string_view name) noexcept override;
-
-    BindingHandle FindBinding(std::string_view name) const noexcept override;
-
-public:
+    PipelineLayoutDescriptor GetDesc() const noexcept override;
     void DestroyImpl() noexcept;
-
     DeviceVulkan* _device;
-    IntrusivePtr<CachedPipelineLayoutVulkan> _nativeLayout;
-    vector<vector<ShaderParameterSetLayoutEntryVulkan>> _parameterSetLayouts;
-    // Dynamic descriptor order per set, as indices into `_parameterSetLayouts[set]`. Copied from
-    // `ResolvedVulkanLayout::DynamicOffsetOrder` rather than recomputed, so the order
-    // `vkCmdBindDescriptorSets` expects is the resolved order by construction.
-    vector<vector<uint32_t>> _dynamicEntryOrder;
-    vector<BackendBindingName> _bindingNames;
-    std::optional<VkPushConstantRange> _pushConstantRange;
-    std::optional<ShaderBindingLocation> _pushConstantLocation;
+    VkPipelineLayout _layout{VK_NULL_HANDLE};
+    VkDescriptorSetLayout _emptySetLayout{VK_NULL_HANDLE};
+    vector<PipelineLayoutGroupDescriptor> _groups;
+    vector<PushConstantDescriptor> _pushes;
 };
 
 class ShaderParameterSetVulkan final : public ShaderParameterSet {
@@ -1169,7 +1054,7 @@ public:
     void Destroy() noexcept override;
 
     bool Set(
-        BindingHandle binding,
+        uint32_t bindingId,
         uint32_t arrayElement,
         ShaderParameterValue value) noexcept override;
 
@@ -1181,8 +1066,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device{nullptr};
-    PipelineLayoutVulkan* _layout{nullptr};
-    uint32_t _groupIndex{0};
+    BindingGroupLayoutVulkan* _layout{nullptr};
     DescriptorSetAllocatorVulkan::Allocation _allocation;
     // 仅持有 typed buffer descriptor 引用的原生 view；普通 buffer、texture、sampler 不占此数组。
     vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
@@ -1293,6 +1177,7 @@ constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulka
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
 constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
+constexpr auto CastVkObject(BindingGroupLayout* p) noexcept { return static_cast<BindingGroupLayoutVulkan*>(p); }
 constexpr auto CastVkObject(PipelineLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
 constexpr auto CastVkObject(ShaderParameterSet* p) noexcept { return static_cast<ShaderParameterSetVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }

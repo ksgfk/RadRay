@@ -21,7 +21,6 @@ target_include_directories(radrayrender PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(radrayrender PUBLIC
     radraycore
-    radrayshader
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:Vulkan::Headers>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:volk::volk_headers>
     $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:GPUOpen::VulkanMemoryAllocator>

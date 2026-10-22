@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
-> - 权威: 本文说明 schema 8 当前 RHI layout 契约、所有权与两个后端映射。上层使用方式见帧与 GPU 文档
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 权威: 本文说明显式 RHI layout 契约、所有权与两个后端映射。Shader 编写方式见 [authoring 指南](../guide/shader-authoring.md)
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -25,20 +25,19 @@ auto device = Device::Create(descriptor, {.IsEnabled = true});
 layout、parameter set、PSO、sampler、fence、query pool、swapchain 和同步对象都通过同一 device 的包装层。
 嵌套描述符、variant 和 span 先完整校验再解包，返回描述符里的对象指针指向包装对象。
 借用 queue、缓存 sampler、backbuffer 与同步对象在各自 owner 的有效期内具有稳定包装身份；
-swapchain 重建会释放旧 image / sync 包装。`BindingHandle` 使用包装 layout 的身份并映射到后端 handle。
-artifact 桥调用内部 target-typed 纯虚 layout 工厂，仍使用现有 resolved 类型；不公开解包接口。
+swapchain 重建会释放旧 image / sync 包装。组布局与完整布局分别包装，数值 BindingId、GroupSlot、PushId 原样透传。
 
 关闭后直接返回真实后端，不创建校验上下文、包装对象、注册表或校验状态。
 后端将 CPU 参数和调用顺序合法性作为前提，只保留实际执行所需的原生 allocator 复用、PSO 缓存、
 描述符 dirty / initialized 信息、布局映射、原生保活、交换链同步回收与 profiler 数据。
-能力探测、artifact 解码 / carrier 解析、原生创建失败和不可恢复执行错误处理仍在对应实现中。
+能力探测、原生创建失败和不可恢复执行错误处理仍在对应实现中。
 依赖具体后端类型的工具或测试须显式关闭包装，公共 RHI 调用方不强转后端类型。
 
 D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句柄，非空性由校验层预检或关闭校验时的调用方契约保证。
-创建前的 DXGI factory / Vulkan 环境检查、幂等销毁、可选接口 / 句柄、缓存关闭状态与原生失败结果处理仍然保留。
+创建前的 DXGI factory / Vulkan 环境检查、幂等销毁、可选接口 / 句柄、原生失败结果处理仍然保留。
 
 校验层检查 device 归属与有效性、范围与对齐、usage、录制与 allocator epoch、encoder 配对、
-附件 / PSO 兼容、binding 类型和 handle、完整 dynamic offsets，以及 CPU 上可检测的父子销毁顺序。
+附件 / PSO 兼容、binding 数字 ID、资源类型、完整 dynamic offsets，以及 CPU 上可检测的父子销毁顺序。
 批量调用全部预检通过才向后端转发；状态在成功后提交，不自动修正录制顺序或补发同步。
 
 | 非法调用 | 行为 |
@@ -68,11 +67,6 @@ Vulkan 的 viewport 可以用负高度表达 Y 翻转；D3D12 要求正高度。
 `QueryPoolDescriptor::DebugName` 是非拥有的 `std::string_view`，调用方须保证其引用的字符串
 在 `CreateQueryPool` 调用期间有效；两个后端均即时设置原生对象名称，不保存该 view。
 D3D12 与 Vulkan 查询池仅平铺保存查询类型与数量，不保存创建描述符。
-
-layout 章节以下以 schema 8 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
-公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable sampler 都已删除。
-`BindingHandle` 的内部 token 是 layout 对象地址加该 layout metadata table 的 record index，
-位布局不是 ABI，只有后端和内部校验层可以拆开它。
 
 ## Timestamp 时钟关联
 
@@ -165,15 +159,13 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 | queue、缓存 sampler、swapchain image 与同步对象 | 从所属 device/cache/swapchain 借用，不转移 owner |
 | graphics/compute encoder | Begin 返回独占 owner，按值交给 End 消费 |
 
-`Device::Create` 创建 RHI device；普通资源通过其纯虚工厂创建，layout 由 artifact 的 target-typed
-入口创建，encoder 由 command 开始。`Nullable<unique_ptr<T>>` 表达可能创建失败；`Get()` 借用，`Release()` 转移 owner。
+`Device::Create` 创建 RHI device；资源和显式布局通过其纯虚工厂创建，encoder 由 command 开始。`Nullable<unique_ptr<T>>` 表达可能创建失败；`Get()` 借用，`Release()` 转移 owner。
 
 `Device` 之所以是 `shared_ptr`：后端实现对象需要回指 device 拿分配器、描述符堆和函数表，
 而 device 的生命周期由调用方管理。RHI 不为每个资源公开共享工厂；调用方可以显式共享
-一个独占创建的 owner，但仍须满足全部使用者的完成条件。native layout 复用归设备缓存。
+一个独占创建的 owner，但仍须满足全部使用者的完成条件。native layout 只通过调用方共享同一 RHI 对象复用。
 
-**两段式析构**：每个实现类都有幂等的 `Destroy()` 和内部的 `DestroyImpl()`，析构函数兜底调
-后者。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
+**两段式析构**：对象具有幂等的 `Destroy()`，析构函数兜底释放。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
 
 `RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `rhi.h` 中直接返回类型标签外，
 所有实例操作都是纯虚接口；保留构造、虚析构、静态工厂和无状态辅助函数。
@@ -205,7 +197,7 @@ Vulkan 一个 storage 持有一个未开启逐 buffer reset 的 command pool，�
 
 名称分别作用于 allocator 与 child，child 命名不会改写共享 pool 的名称。
 
-## 后端选择：descriptor visit + artifact 动态桥
+## 后端选择
 
 选后端**不是**运行期能力探测，而是"你传了哪个 descriptor"：
 
@@ -217,20 +209,9 @@ using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescrip
 这是全仓库唯一决定**创建哪个后端**的分派点。对应后端未编译时打日志返回 `nullptr`，不尝试
 另一个后端。
 
-另有一处不选择后端的受限分派：`CreateBackendShaderArtifact` 接收已经创建的 `Device`、metadata
-blob 与显式 `ShaderArtifactDecodeOptions`，先要求 device backend 与 options target 一致，再调用
-对应 typed decoder 和 backend typed layout 入口。artifact envelope target 仍由 decoder 核对；
-任一步失败都不尝试另一 target。运行时 caller 因而不包含 backend impl 头，typed concrete 入口与
-反向组合的编译失败边界仍保留。
-需要先查询布局身份时，使用 `PrepareBackendShaderArtifact` 获取拥有 decoded artifact 和 resolved layout
-的 CPU 结果；其字段私有，只能由校验入口建立。`CreateBackendShaderArtifact(Device&, prepared)` 消费
-该结果，重新核对 device target 后调用 typed native layout builder，不重复解码与解析。
-原有 blob 重载依次调用 prepare 和 native 创建；独立 hash 查询仍可使用 `ResolveBackendLayoutHash`。
-上述 prepare、create 和 hash 查询统一返回 `shader::DiagnosticResult<T>`，通过 `Succeeded()` 判断，
-从 `Value` 取结果、从 `Diagnostics` 读取诊断，不再提供 artifact 错误枚举或错误输出参数。
-解码失败保留 decoder 原文；layout resolve/native 创建失败补充后端和操作名称，底层详细日志继续保留。
-公共结果语义见 [Shader pipeline](shader-pipeline.md#诊断结果)。
-
+Shader 直接通过 `ShaderDescriptor::Source` 接收原始 DXIL 或 SPIR-V 字节码，`Category` 与设备匹配。
+`ShaderEntry` 在 PSO 描述中选择 entry。render 不解码 artifact、不解析反射、不链接 shader/compiler；
+调用方可以使用独立 shader/compiler 模块，也可以提供外部工具生成的合法字节码。
 
 编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
 `modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
@@ -246,172 +227,81 @@ Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `I
 
 ## 绑定模型
 
-统一 command 操作仍是两层：`PipelineLayout` 持有 backend-native layout 与内部 binding metadata，
-`ShaderParameterSet` 携带值。layout 构造则明确拆成三段：
+调用方定义 shader 与资源之间的 ABI，后端只按显式描述创建布局并执行绑定。
 
 ```text
-target artifact decode
-  -> backend-specific target-typed resolve
-  -> native layout creation
+BindingGroupLayoutDescriptor → BindingGroupLayout → ShaderParameterSet
+                                      ↓
+PipelineLayoutDescriptor（GroupSlot + 组布局、push blocks）→ PipelineLayout
+                                                             ↓
+                                               Shader + PSO descriptor → PSO
 ```
 
-DXIL artifact 只能 resolve 成 owning/hashable `ResolvedD3D12Layout`，SPIR-V artifact 只能 resolve 成
-`ResolvedVulkanLayout`；两者是对应 `Device::CreatePipelineLayout` 路径的唯一数据输入。公共层不增加
-target-erased `PipelineLayoutDescriptor`，caller 不能绕过 artifact 自造第二份 schema。resolved value
-拥有 strings、records、sampler recipes 与 dynamic order，不借用 artifact spans，也不包含 native
-handles。
+`Device::CreateBindingGroupLayout` 与 `CreatePipelineLayout` 返回可空独占 owner。
+创建描述里的 spans 只借用至返回；布局复制自身需要的不可变描述与后端映射。`GetDesc()` 返回的 spans
+借用至布局销毁。完整布局和参数集借用组布局，PSO 借用完整布局，device 必须覆盖所有这些对象的寿命。
 
-pipeline 通过 `ShaderProgramLayoutRecipe` 并列提供 D3D12/Vulkan typed options。current backend
-只消费自己的字段；每个 Target layout modifier 用 canonical declaration name + expected logical kind
-精确选择一项。selector 不存在/inactive、kind mismatch、duplicate target 或 D3D12 explicit carrier 上
-出现 D3D12 modifier，都由 resolve 按 `ShaderLayoutResolveError` 返回并 fail closed：resolve 不做
-Debug abort，否则这些拒绝路径在唯一会跑测试的配置里无法验证。这不是可恢复 API——caller 唯一的
-正确反应是修 recipe 或 shader。
-
-`ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
-`BackendShaderArtifact::FindBindingInfo(canonicalName)` 提供只读的 target-resolved descriptor 事实：
-logical kind、group、数组 count、实际 stages、dynamic placement 与 immutable/static sampler；push 或
-未知名称返回空。它不暴露可供 caller 重建 layout 的 schema，Graph 参数准备只消费这份查询结果。
-
-logical resource kind 与 native placement 分开保存。CBuffer、typed/structured/raw buffers、texture/
-storage texture 与 sampler 决定 value/descriptor class；D3 Table/RootDescriptor 和 Vulkan
-Regular/Dynamic 只存在于 resolved records。logical kind 与 placement 是两个独立轴，两个后端的内部
-entry 都同时保留它们并由二者推导 native descriptor/root parameter type；把它们融合成单一枚举会让
-uniform/storage、texel/image 的区分靠命名巧合成立，因此公共面不再有这样的枚举。
-
-两个后端的 base policy 与合法 modifier 如下：
-
-| | D3D12 | Vulkan |
+| 数字命名空间 | 作用域 | 使用方式 |
 |---|---|---|
-| 无 RootSignature policy | Implicit descriptor tables | ordinary descriptors |
-| descriptor table policy | serialized table 原样消费 | ordinary descriptors |
-| root CBV policy | root CBV | dynamic uniform buffer |
-| root SRV/UAV buffer policy | root SRV/UAV | dynamic storage buffer |
-| RootConstants policy | `32BIT_CONSTANTS` root destinations | authored push declaration的 `VkPushConstantRange` |
-| StaticSampler policy | full native static sampler state | full-state immutable `VkSampler` |
-| Target modifier | 仅 Implicit 合法 count=1 buffer Table<->RootDescriptor | uniform/storage Regular<->Dynamic；full immutable sampler install/replacement |
+| BindingId | 一个组 | `set->Set(bindingId, arrayIndex, value)` |
+| GroupSlot | 一个完整布局 | `encoder->BindShaderParameterSet(groupSlot, set, offsets)` |
+| PushId | 一个完整布局 | `encoder->SetPushConstants(pushId, byteOffset, bytes)` |
 
-DXIL artifact 的 serialized Root Signature range 非空时，D3D12 直接把同一 carrier 传给
-`ID3D12Device::CreateRootSignature`，并用 `D3D12CreateVersionedRootSignatureDeserializer`
-建立 descriptor table、root descriptor、RootConstants 与 static sampler destinations。此路径
-不根据 active metadata 重建作者 RS，也不接受 D3 modifier；D3 static sampler 现有 direct-consumption
-路径本身正确。range 为空时，resolver 按 active facts 生成 Implicit canonical topology，再把精确
-合法 buffer modifiers应用为root descriptors。ordinary global RS 1.0/1.1是范围；Local RS与
-directly-indexed heaps不支持。native Root Signature 由 render 的设备内缓存复用。
+ID 由调用方指定，不含地址、generation 或 HLSL 名称。同一个数字可用于不同命名空间。
+绑定项声明 `Kind`、`Count`、`Stages`，并独立填写可选 `D3D12`、`Vulkan` 映射；当前后端只消费自己的一侧。
+D3D12 映射包含 `RegisterType`（CBV/SRV/UAV/Sampler）、Register、Space、Table/RootDescriptor placement。
+Vulkan 映射包含 Set、Binding、Regular/Dynamic placement。一个组的全部 Vulkan 绑定必须属于同一 set；
+空组使用 set 0。GroupSlot 不必等于 set，也不等于 D3 register space；不同组不能占用同一 native set。
+组内 binding ID 唯一，普通 descriptor 数组用 Count 表达；dynamic/root buffer 与固定 sampler 限定 Count=1。
 
-`ResolvedVulkanLayout` 是创建 `VkPipelineLayout` 所用数据的完整权威，至少持有：
+`ShaderParameterValue` 为 buffer、typed buffer、texture view、sampler 的 variant。
+`ShaderBufferBinding` 携带 buffer range 和 structured stride；typed buffer 使用独立
+`ShaderTexelBufferBinding`，同时携带格式；raw buffer 的 stride 为 0。Set 只更新指定数组元素。
+`ImmutableSampler` 直接持有 render 自有 `SamplerDescriptor`，归组布局，不能通过 Set 覆盖。
+固定与普通 sampler 使用相同 filter/address/LOD/bias/anisotropy/compare/border/reduction 语义；
+Vulkan 还支持合法的 unnormalized coordinates，D3D12 拒绝不能表达的 unnormalized、mirror-clamp 和整数 border。
+设备不支持的 sampler 能力返回失败，不静默降级。sampler cache key 包含这些字段。
 
-- set 0 到 max active set 的有序 set recipes；slot 空洞由有效 empty set-layout recipe 占位；
-- 每个 active descriptor 的 logical kind、set/binding/count、Regular/Dynamic placement 与 actual
-  stage flags；
-- full-state immutable sampler recipes及descriptor引用；
-- 最多一个 active logical push block 的range/stages；
-- Vulkan规定的dynamic offset packing order（set、binding、array element）；
-- canonical `ResolvedLayoutHash`与name->metadata table映射。
+Shader 是否使用全部槽位不影响布局。调用方负责字节码与显式布局的 ABI 匹配，以及跨完整布局使用参数集时的
+原生兼容性。多个 PSO 可共享一个完整布局；多个完整布局可共享同一组布局和参数集。
+可选 RHI validation 仅检查槽位存在、可设置的资源类型、数组/buffer 范围、动态偏移、device 归属和必要调用状态；
+不按完整结构、hash、原生坐标或对象身份判断布局兼容，不执行完整 shader ABI 校验。
 
-native 创建顺序为从 Device 缓存取得 immutable sampler -> descriptor set layouts -> `VkPipelineLayout`。
-Vulkan Device 的 sampler 缓存以完整 `VulkanImmutableSamplerState` 为 key，逐字段比较和哈希；
-浮点正负零视为相同值，非有限 LOD/anisotropy 值在创建前拒绝。普通 `GetOrCreateSampler` 先将
-`SamplerDescriptor` 映射为完整 Vulkan 状态，再与 immutable sampler 共用缓存；独占
-`CreateSampler` 使用相同创建路径但不进入缓存。D3D12 继续使用普通 `SamplerCache`。
-`PipelineLayoutVulkan` 只在创建期间保留局部 sampler 句柄数组，不拥有或销毁 sampler；相同状态
-跨 layout 复用句柄，也让 descriptor set layout cache 可以复用含 immutable sampler 的相同布局。
-Device 在清理 descriptor allocator、pipeline layout cache 和 set layout cache 后销毁缓存 sampler，因此 sampler 的生命周期
-覆盖相关 set layout、descriptor pool/set 的最后使用；这是
-[Vulkan immutable sampler 契约](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetLayoutBinding.html)
-的要求。缓存不提前淘汰 sampler，调用方仍须在销毁 Device 前完成 GPU 使用并释放其子对象。
-descriptor limits、
-dynamic-buffer limits、push size/alignment、sampler feature/extension与native create结果在此边界产生
-diagnostic/failure。unsupported sampler state不得用default state静默替换；pipeline可提供明确的
-Vulkan sampler replacement modifier。hash只覆盖sampler semantics，不覆盖`VkSampler` handles。
-full state 使用 Vulkan target-typed fixed-width recipe；公共 `SamplerDescriptor` 不扩张成
-D3/Vulkan static-sampler policy 的统一副本。
+### D3D12 组存储与 Root Signature
 
-**D3D12 的 `Set()` 直接更新 CPU mirror，显式 `FlushWrites()` 发布 dirty descriptors，Bind 不发布。**
-set 不保存 `ShaderParameterValue`，也不维护逻辑值 dirty 或相同值缓存。重复 Set 每次都会更新 mirror，
-flush 发布最后写入的 descriptor。Buffer view 在第一个 CPU 目标创建一次，再复制到同一元素的其他
-目标；texture/sampler 从已有 CPU descriptor 复制。root descriptor 只保存 GPU 地址，绑定时加上
-传入的 dynamic offset；static sampler 不允许 Set。
+组布局不创建 RS；它按 BindingId 排序，在组内按 `(heap 类型, shader visibility)` 建立稳定的 descriptor tables，
+并分别保存 root buffer 和固定 sampler 项。CBV/SRV/UAV 可以共表，sampler 单独成表。
+创建完整布局时先放 push constants，再组合各组的 root descriptors、tables 和固定 sampler；
+保存 GroupSlot 到本次 root parameter 编号的映射，序列化 RS 1.1 后直接 `CreateRootSignature`。
+`RootSigD3D12` 直接持有 `ComPtr<ID3D12RootSignature>`，序列化数据只作为创建输入。
+根签名超过 64 DWORD 或原生创建失败返回空值。
 
-真实后端的参数热路径信任已创建布局的 destinations，只做 handle 解码、group/数组寻址和跨布局 table 映射。
-设备归属、usage、类型、格式、范围、对齐、有效性和 required 元素完整性由可选校验层检查，关闭时成为调用方的
-前置条件。`IsValid()` 仍可显式查询原生对象，Set/Flush/Bind 不调用完整校验扫描；原生创建和分配失败处理保留。
-**Vulkan 的 Set 直接调用 `vkUpdateDescriptorSets` 更新一个数组元素。** 不保存参数值、逻辑 dirty
-或相同值缓存，不构造批量发布 scratch。`FlushWrites()` 仅保留接口兼容，合法 set 上为空操作；Bind
-不执行 descriptor 更新。原生 Set 只按已验证的 handle/group/数组位置转换参数并写入；immutable sampler
-禁写、资源语义、required 元素和 set-layout 兼容性均在包装层预检。原生 set 不保存逻辑参数值、封存状态
-或 required 元素完整性状态；校验关闭时仍由调用方保证合法输入。
-typed buffer 在 Set 时创建原生 `VkBufferView`，成功更新 descriptor 后替换旧 view；set 只为 typed
-buffer 元素持有这些 view，不为其他参数分配值存储。原生创建失败返回 false，原 descriptor/view
-保持不变。调用方须在 Set 替换或销毁前完成旧 descriptor 和 view 的 GPU 使用；同步边界现在是 Set，
-不能延迟到兼容 Flush。D3D12 的显式发布边界保持不变。
+参数集每个 table 分配连续 CPU mirror 与 shader-visible 区间，组内 offset 不随完整布局变化。
+Set 更新 mirror 和 dirty ranges；FlushWrites 只发布 dirty 部分，并避免跨未初始化空洞批量复制。
+root buffer 保存 GPU 基地址，绑定时加偏移。绑定根据当前 PSO 的完整布局映射下发，不重排参数集 descriptor 存储。
+不同完整布局可以给同一组不同 root 编号，调用方共享组布局即可保留稳定的组存储。
 
-D3D12 每个 table 独立合并相邻或重叠的 dirty ranges。单区间用 `CopyDescriptorsSimple`，稀疏多区间
-用一次 `CopyDescriptors`；覆盖率至少 50% 或超过 16 段时，仅在首尾跨度内所有 CPU 槽位均已初始化
-的条件下复制整个跨度。显式 table 的空洞、未写元素不生成臆测的 null descriptor，也不能作为复制源。
-Set 允许增量初始化，flush 只发布已写入的槽位；调用方必须在 shader 实际访问前写入所需元素。Bind 不隐式 flush。
+### Vulkan 组布局与参数集
 
-`ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 不能让 RHI 反向
-依赖 compiler client。schema 8 declaration `TypeIndex` 只连接 CPU payload schema，不进入 resolved
-layout records、native layout 创建或 `ResolvedLayoutHash`。Vulkan 已经不经过任何过渡 input：set
-entries、empty set holes、dynamic order、push range 与 name table 全部直接由
-`ResolvedVulkanLayout` 建立，因此 Vulkan layout 只有一种描述方式。D3D12 同样如此：
-`DeviceD3D12::CreateRootSignatureInternal` 直接接受 `ResolvedD3D12Layout`，explicit carrier 与
-Implicit 两条路径共用同一份 parameter group 构建，因此整个 render 层不再存在第二种 layout 描述。
+`BindingGroupLayoutVulkan` 直接创建并拥有一个 `VkDescriptorSetLayout`，保存 descriptor 数量和按 native binding
+排序的动态偏移顺序。固定 sampler 从 device sampler cache 取得，必须在 cache/device 销毁前释放全部组布局与参数集。
+参数集只从组布局取得 handle、pool sizes 与槽位信息，通过现有 descriptor allocator 分配；不访问完整布局。
+`PipelineLayoutVulkan` 借用组布局，直接创建并拥有 `VkPipelineLayout`。set 0..最大 set 之间的空洞使用该完整布局
+私有的一个空 `VkDescriptorSetLayout`；同一对象的多个空洞共用它，其他完整布局各自创建。
 
-### Binding handle、dynamic offset 与 push
+Set 直接更新 descriptor set，typed buffer view 归参数集。`FlushWrites()` 不另建发布批次。
+销毁完整布局只释放它自身的 native pipeline layout 和私有空 set layout，不销毁借用的组布局。
 
-descriptor与push declaration的canonical HLSL name都通过`PipelineLayout::FindBinding`解析为
-`BindingHandle`。handle公共面只有default-invalid、validity和equality；caller不能构造或读取group、
-slot、namespace、generation、table index。内部 token 的位布局不是 ABI；handle 只能用于发放它的
-layout，切换 target、Variant 或重新编译后创建的新 layout 必须重新查询 handle。
+### Dynamic offsets 与 push constants
 
-`PipelineLayout`内部metadata table record分两类：
+`ShaderParameterDynamicOffset{BindingId, ArrayIndex, Offset}` 使用组内 ID，Offset 单位为字节。
+每个 dynamic/root buffer 必须显式提供一次偏移，包括零；当前 ArrayIndex 必须为 0。
+输入 span 顺序任意；Vulkan 按组创建时确定的 native 顺序打包，D3D12 加到对应 root buffer 地址。
+调用方保证偏移、range 和设备对齐限制合法；校验开启时拒绝缺项、多项、重复、越界和错位。
 
-- Descriptor：logical kind、group/binding、array facts和一个或多个backend native destinations；
-- Push：resolved size/stages、D3 root destinations和/或Vulkan ranges。
-
-两类 record 共用同一个 name 表，因此 push declaration 与 descriptor declaration 用同样的方式取
-handle；handle 命名的是 record 而不是 register，record kind 决定它只能走 parameter set write 还是
-只能走 push 提交，写错一侧会被拒绝。handle 的 generation 直接使用发放它的 layout 对象地址，
-以 `uintptr_t` 完整保存并与 record index 分开存储，不使用全局计数器；不同存活 layout 间混用
-handle 会被拒绝。`RootSigD3D12` 是一次性对象：构造至析构期间不复用为另一份 layout，
-`Destroy()` 后不得重新初始化；新 layout 创建新对象。因此对象存活期间地址身份保持稳定，
-不需要递增 generation。调用方必须在 layout 销毁后丢弃它发放的所有 handle。
-`BindingHandle::IsValid()` 只检查身份非零，不检查 layout 是否仍然存活。
-
-`RootSigD3D12` 只保留原生 root signature 对象与运行时绑定 metadata。原生 root signature
-描述、root parameters、descriptor ranges、static samplers 与 flags 仅在创建阶段使用，不随
-layout 保存。push metadata 保存 root parameter 索引及 `Num32BitValues`；创建时完成参数类型、
-索引及大小一致性校验；提交时包装层检查完整块大小，真实后端按 metadata 写入各目标。
-
-一个D3 declaration按visibility-disjoint参数fan-out时仍只有一个handle，一次write/offset提交到全部
-destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
-这不要求handle公开group。
-
-D3D12 与 Vulkan 的 `BindShaderParameterSet` 每次调用都执行 native 绑定，不缓存参数组的上次绑定状态。
-D3D12 完成 table 映射后直接绑定 GPU 区间，再按传入的 dynamic offsets 写 root descriptors；
-不建立临时 root 写入列表，也不保证无效输入下的整次绑定原子性。
-同 layout/group 直接使用 table 对应关系；跨 layout/group 按 heap 类型、visibility、数量、range 布局与
-flags、active 槽位的 namespace/binding/array element/kind/placement 建立一一对应，忽略 root parameter
-index 与所属 group 的 space 数字。table 顺序可以不同，重复签名按出现顺序配对；校验层预检不兼容时拒绝绑定，
-不自动重新排列 descriptors。非所属 group 的 range space 仍按原值比较。
-
-`ShaderParameterDynamicOffset` 使用 `BindingHandle + Offset`，不携带裸 binding number。
-D3D12 按传入顺序解析目标声明并查找源 root 地址；不检查 offset 的重复、缺失、范围、对齐或 root 是否
-已经 Set。Vulkan 将传入的 offsets 按 `DynamicOffsetOrder` 排列后交给原生绑定。
-校验层要求每个 root/dynamic descriptor 恰好一个 offset，并检查已初始化、对齐和有效范围；关闭校验时
-由调用方保证这些前置条件。合法输入可用于两个后端。
-
-D3 root descriptor 的地址是 buffer GPU VA + bound range offset + dynamic offset，authored root CBV
-与 Implicit modifier 生成的 root descriptor 走同一条路径并记同一种 destination，所以同一个
-dynamic-cbuffer arena offset 在两种 topology 上落在同一段字节；offset 位移后的窗口必须仍在资源内，
-constant buffer 还要求位移后地址保持 256-byte 对齐。visibility-disjoint fan-out 时一次提交写到全部
-destinations。
-
-push 提交为 `SetPushConstants(BindingHandle, bytes)`，不再传 group。每次必须提交完整 resolved block，
-要求 `size == resolved block size`、非零且 4-byte aligned；不支持 prefix 更新或 destination offset。
-一个 Vulkan Variant 最多一个 active logical push block，D3 仍可有多个 RootConstants declarations。
+Push constants 由显式 PushConstantDescriptor 定义独立 PushId、Size、Stages 与 DX/VK 位置。
+Vulkan 限一个逻辑块，D3D12 支持多个 root constant 块；部分更新的 byteOffset 和 data.size 都必须按 4 字节对齐，
+且范围位于声明块内。Vulkan 在块内偏移上加描述中的 native Offset；D3D12 转为块内 DWORD offset。
 
 ### Vertex input
 
@@ -434,54 +324,27 @@ Sampler 堆使用 D3D12 允许的完整 shader-visible 容量，容纳多视图�
 `CmdListD3D12::Begin` 时把两个 GPU 堆 `SetDescriptorHeaps`（copy 队列除外）。
 `DescriptorHeapViewRAII` 负责归还。
 
-D3D12 外层 parameter group 对应 HLSL register space；内部 descriptor table 是存储、发布和绑定单位。
-Implicit 路径在每个 group 内按 `(heap 类型, MapShaderStages(entry.Stages))` 拆表：仅 Vertex/Pixel
-分别映射到 VERTEX/PIXEL，Compute 和合法多阶段组合映射到 ALL；ALL 不拆成多个阶段副本。
-按 canonical entries 首次出现的键决定 table 顺序，内部按 Count 紧密排列，每个 binding 生成一个 range。
-CBV/SRV/UAV 可同表，sampler 单独分表；每个 table 消耗一个 root DWORD，拆表后超出 64 DWORD 则失败。
-显式 carrier 的 table 划分、visibility、range offsets/flags 保持作者原样，不套用 Implicit 分组规则。
+参数集创建时为每个 table 分配等长 CPU mirror 与 GPU 区间；不同 table 区间不保证相邻。
+分配失败通过已有 RAII 释放已成功的区间。GPU 区间随 set 持有；每次绑定不生成 descriptor 快照。
+Vulkan 的 `DescriptorSetAllocatorVulkan` 继续按 `{layout, poolSizes}` 在 descriptor pool 页上分配与复用。
+描述符分配器、sampler cache、render-pass/framebuffer 机制与布局所有权独立。
 
-parameter set 创建时，每个 table 同时分配等长的连续 CPU mirror 和连续 GPU 区间；不同 table 区间
-不保证相邻。binding destinations 使用 group 内 TableIndex、table 内 offset 和 array element，允许
-一对多映射；root descriptor/static sampler 不占这些区间。分配失败通过 RAII 回收已成功的区间。
-GPU 区间随 set 持有，不为每次绑定生成快照。调用方负责 fence 同步：不得更新或回收仍可能被 GPU
-引用的区间，并需保证资源、layout 与 set 的生命周期覆盖使用期。CPU mirror 本身不解决在途覆盖问题。
+## 原生布局直接所有权与显式共享
 
-Vulkan 侧 `DescriptorSetLayoutCacheVulkan` 按 key 去重 layout，`DescriptorSetAllocatorVulkan`
-按 `{layout, poolSizes}` 在页（= 一个 `VkDescriptorPool`）上分配。
-`DescriptorSetLayoutVulkan` 由 native pipeline layout 缓存条目持有，使用 `IntrusivePtr`，
-最后一个引用释放时驱逐。
+RHI 没有 pipeline layout cache，也没有 Vulkan descriptor set layout cache。相同描述的两次创建分别执行
+原生创建，不保留去重 key、hash、cache entry、驱逐表或布局专用引用计数。复用由调用方保存并共享同一个
+RHI 布局对象完成；取消缓存不保证驱动内部不会共享实现。
 
-## Native PipelineLayout 缓存
+这项决定取代[历史计划](../history/2026-10-22-explicit-rhi-binding-layout-rationale.md)中保留原生布局缓存的安排。
+先前由 shader active resource 集合定义布局，使 shader 变体、资源裁剪和 compiler metadata 影响参数 ABI，
+并把名称解析、policy modifier、缓存身份和参数集兼容性带进 RHI。显式组布局让 ABI 和复用边界归调用方；
+删除隐式去重可减少所有权链、缓存关闭顺序和跨布局身份依赖。代价是重复创建相同描述会重复支付原生创建与内存成本，
+调用方必须主动共享布局，必要时在自己的生命周期范围内组织复用。
 
-`pipeline_layout_cache.h/.cpp` 提供 `PipelineLayoutCache` 与 `CachedPipelineLayout` 公共基础设施，
-分别保存关闭状态和单线程引用计数，不通过基类指针管理所有权。
-两个后端的缓存、条目、key 和 hasher 仅定义在 `src/d3d12/pipeline_layout_cache_d3d12.h/.cpp`
-与 `src/vk/pipeline_layout_cache_vulkan.h/.cpp`，公共头不包含这些私有头。
-Device 以具体后端缓存类型的 `unique_ptr` 独占缓存，每个 RHI PipelineLayout 包装持有具体后端条目的 `IntrusivePtr`。
-公共后端头只前向声明这些具体类型及 ADL 引用计数函数；类型定义仍位于私有头。
-缓存的 `GetEntryCount`、`Evict` 保留虚接口，两个公共基类均保留虚析构；后端派生类使用 `final` 和 `override`。
-最后一次 `IntrusivePtrRelease` 通过具体后端缓存指针调用虚函数 `Evict`，去虚拟化由编译器根据类型和优化条件完成，
-不通过移除 `virtual` 或限定调用绕过虚派发。
-`BackendShaderArtifact::Layout` 仍是独占包装，名称映射、绑定句柄身份和参数组定位不共享。
-缓存命中也必须完成当前 artifact 的映射与 carrier 解析；开启 RHI 校验时 BindingHandle 不可跨包装使用。
-
-D3D12 以最终 serialized Root Signature 完整字节为 key，Explicit 原样使用 carrier，
-Implicit 仍生成并序列化现有拓扑；只在未命中时调用 `CreateRootSignature`。
-不对 descriptor 数量归档，不做 carrier 版本转换或语义归一化，字节不同的等价布局可以不合并。
-Vulkan 以有序 set-layout 缓存对象身份、push ranges（stage/offset/size）和创建 flags 为 key，
-保留 empty set holes。条目持有 set-layout 引用，使 key 中的身份始终有效；immutable sampler
-继续走已有设备 sampler 缓存。两种缓存都以 hash 定位、完整 key 判等，不用 artifact identity 或
-`ResolvedLayoutHash` 代替 native 身份。
-
-缓存表管理条目分配但不占侵入式引用计数；全部操作及引用增减要求单线程，不使用锁或原子计数。
-最后一个使用者释放时从表中移除条目并销毁 native 对象；Vulkan 先销毁 pipeline layout，再释放
-set layouts。创建失败不保留条目，之后允许重试。包装 Destroy 只释放自己的引用，不能销毁其他
-包装共享的 native 对象；共享对象的 debug name 取最近一次设置的名称。
-
-调用方仍须保证 GPU 已完成使用，PSO/参数集不再借用包装，再释放布局；本缓存不实现延迟销毁。
-Device 关闭前所有外部引用必须释放，Debug 检查缓存为空。Vulkan 关闭顺序是 descriptor allocator、
-pipeline layout cache、set-layout cache、sampler cache，最后销毁 device。
+Destroy 幂等，部分创建失败由局部 owner 释放已创建的资源。没有新增全局共享状态、隐式延迟销毁或异常恢复。
+调用方必须等 GPU 完成、录制引用退出、依赖对象释放后才能销毁布局或复用参数集。
+参数集初次绑定后由 validation 封存；完成全部使用后 `ResetBindingsForReuse()` 才能重新写入整个组。
+直接所有权与取消缓存都不能替代 fence 同步。
 
 ## 命令录制
 
@@ -711,7 +574,7 @@ view ID 在该 device 内单调且不复用。view 析构按局部 reverse index
 
 运行基线为 Vulkan 1.2 与 timelineSemaphore，不启用 dynamic rendering、imagelessFramebuffer、separateDepthStencilLayouts 或 synchronization2。depth-only 也使用 core depth/stencil layout，VMA 和 instance 使用 1.2；shader 编译策略的默认 SPIR-V target environment 同样为 Vulkan1_2。
 
-开启 RHI 校验时，ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改；封存状态仅存于校验包装。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。generation 是有效性标记，不能替代 layout/provider 的 native 寿命。
+开启 RHI 校验时，ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改；封存状态仅存于校验包装。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。数值 ID 不提供对象寿命保证，不能替代组布局、完整布局和资源的 native 寿命。
 
 ## 两个后端实现文件的分区
 
@@ -740,21 +603,18 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
   Vulkan 侧有完整实现。upload heap 无需 flush 可以解释，readback 的 invalidate 语义未覆盖。
 - **非 Win32/非 Apple 平台没有 surface 创建**（`vulkan_impl.cpp` 有 TODO 标记），走 `#else`
   后直接报错返回。
-- **`format_as(RenderObjectTag)` 漏了 `QueryPool` 与 `ShaderParameterSet`**，二者日志显示
-  `UNKNOWN`。
 - **Vulkan GPU-based validation 默认关闭**：部分驱动上会崩。
 
 ## 测试
 
 | 套件 | 覆盖 |
 |---|---|
-| `RadRayRenderShaderArtifact`、`RadRayShaderContract` | artifact 解码、wire 契约与 target-specific 映射 |
-| `RadRayRenderShaderLayout` | layout policy、identity 与 artifact 生命周期边界 |
-| `PipelineLayoutCacheTest` | 布局缓存引用、回收与独立所有权 |
-| `D3D12DeviceFixture`、`DescriptorDirtyRangesD3D12Test` | D3D12 binding、descriptor、root constants 与原生布局缓存 |
-| `VulkanDeviceFixture`、`PipelineLayoutKeyVulkanTest` | Vulkan descriptor、immutable sampler、push constants 与原生布局缓存 |
+| `ExplicitBindingLayoutTest` | 双后端真实 dispatch/读回、不同 DX/VK 坐标、set 空洞、数组、各类 buffer、texture、普通/固定 sampler、动态偏移、部分及多块 push、组/参数集共享 |
+| `ExplicitLayoutOwnershipD3D12` | 通过原生 debug 消息观察独立创建与最终释放，不依赖句柄比较 |
+| `ExplicitLayoutOwnershipVulkan` | 测试侧函数表 probe 观察独立创建、私有空洞、幂等释放和部分失败清理 |
+| `DescriptorDirtyRangesD3D12Test` | 描述符 dirty range 合并与未初始化空洞 |
+| `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`、`VulkanSwapChainWsiTest` | 保留的交换链回收与 WSI 验证 |
 
-render 仅保留 shader 契约与布局测试，包括布局专用的 dispatch/读回；通用 RHI、设备、同步、
-render scope、swapchain 与独立 PSO smoke 不在当前测试覆盖范围内。
-
-后端不可用与初始化失败的判定统一见[GPU 测试规则](../guide/build-test.md#测试)；必测后端缺失不得算作通过。
+render 测试只使用版本控制的原始 stage 字节码和手写布局；artifact/contract 测试归 shader 模块。
+测试侧 probe/原生诊断负责观测，生产对象不添加测试计数。
+后端不可用与初始化失败的判定见[GPU 测试规则](../guide/build-test.md#测试)；必测后端缺失或跳过不得算作通过。

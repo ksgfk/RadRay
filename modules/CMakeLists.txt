@@ -1,5 +1,7 @@
 add_subdirectory(core)
-add_subdirectory(shader)
+if (RADRAY_BUILD_SHADER)
+    add_subdirectory(shader)
+endif()
 if (RADRAY_BUILD_SHADER_COMPILER)
     add_subdirectory(shader_compiler)
 endif()

@@ -6,7 +6,6 @@
 #include <mutex>
 
 #include <magic_enum/magic_enum.hpp>
-#include <radray/render/pipeline_layout_types.h>
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
 #endif
@@ -60,74 +59,41 @@ struct DescriptorCountsVulkan {
     uint64_t StorageImages{0};
     uint64_t Resources{0};
 
-    void Add(const ResolvedVulkanBinding& binding) noexcept {
-        using shader::ShaderBindingKind;
-        switch (binding.LogicalKind) {
-            case ShaderBindingKind::Sampler: Samplers += binding.Count; return;
-            case ShaderBindingKind::CBuffer:
+    void Add(const BindingDescriptor& binding) noexcept {
+        switch (binding.Kind) {
+            case BindingKind::Sampler: Samplers += binding.Count; return;
+            case BindingKind::CBuffer:
                 UniformBuffers += binding.Count;
-                if (binding.Placement == VulkanBufferDescriptorPlacement::Dynamic) DynamicUniformBuffers += binding.Count;
+                if (binding.Vulkan->Placement == VulkanBufferDescriptorPlacement::Dynamic) DynamicUniformBuffers += binding.Count;
                 break;
-            case ShaderBindingKind::StructuredBuffer:
-            case ShaderBindingKind::RWStructuredBuffer:
-            case ShaderBindingKind::RawBuffer:
-            case ShaderBindingKind::RWRawBuffer:
+            case BindingKind::StructuredBuffer:
+            case BindingKind::RWStructuredBuffer:
+            case BindingKind::RawBuffer:
+            case BindingKind::RWRawBuffer:
                 StorageBuffers += binding.Count;
-                if (binding.Placement == VulkanBufferDescriptorPlacement::Dynamic) DynamicStorageBuffers += binding.Count;
+                if (binding.Vulkan->Placement == VulkanBufferDescriptorPlacement::Dynamic) DynamicStorageBuffers += binding.Count;
                 break;
-            case ShaderBindingKind::Texture:
-            case ShaderBindingKind::TypedBuffer: SampledImages += binding.Count; break;
-            case ShaderBindingKind::RWTexture:
-            case ShaderBindingKind::RWTypedBuffer: StorageImages += binding.Count; break;
+            case BindingKind::Texture:
+            case BindingKind::TypedBuffer: SampledImages += binding.Count; break;
+            case BindingKind::RWTexture:
+            case BindingKind::RWTypedBuffer: StorageImages += binding.Count; break;
         }
         Resources += binding.Count;
     }
 };
 
-bool ValidateImmutableSamplerVulkan(const ValidationContext& context, const vulkan::DeviceVulkan& device,
-                                    const VulkanImmutableSamplerState& state) noexcept {
-    const auto& limits = device._properties.limits;
-    if (!std::isfinite(state.MipLodBias) || !std::isfinite(state.MaxAnisotropy) ||
-        !std::isfinite(state.MinLod) || !std::isfinite(state.MaxLod) || state.MinLod > state.MaxLod ||
-        state.MagFilter > shader::kShaderSamplerMaxFilter || state.MinFilter > shader::kShaderSamplerMaxFilter ||
-        state.MipmapMode > shader::kShaderSamplerMaxMipmapMode || state.AddressModeU > shader::kShaderSamplerMaxAddressMode ||
-        state.AddressModeV > shader::kShaderSamplerMaxAddressMode || state.AddressModeW > shader::kShaderSamplerMaxAddressMode ||
-        state.AnisotropyEnable > 1 || state.CompareEnable > 1 || state.CompareOp > shader::kShaderSamplerMaxCompareOp ||
-        state.BorderColor > shader::kShaderSamplerMaxBorderColor || state.ReductionMode > shader::kShaderSamplerMaxReductionMode ||
-        (state.Flags & ~shader::kShaderSamplerFlagMask))
-        return context.Reject("CreatePipelineLayout", "immutable sampler state is invalid");
-    if ((state.AnisotropyEnable && (!device._feature.samplerAnisotropy || state.MaxAnisotropy < 1 || state.MaxAnisotropy > limits.maxSamplerAnisotropy)) ||
-        std::abs(state.MipLodBias) > limits.maxSamplerLodBias ||
-        (state.ReductionMode != shader::kShaderSamplerReductionModeWeightedAverage && !device._extFeatures.feature12.samplerFilterMinmax))
-        return context.Reject("CreatePipelineLayout", "immutable sampler exceeds device capabilities");
-    const bool mirrorClamp = state.AddressModeU == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
-                             state.AddressModeV == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
-                             state.AddressModeW == shader::kShaderSamplerAddressModeMirrorClampToEdge;
-    if (mirrorClamp && !device._extFeatures.feature12.samplerMirrorClampToEdge)
-        return context.Reject("CreatePipelineLayout", "immutable sampler requires mirror clamp support");
-    if (state.Flags & shader::kShaderSamplerFlagUnnormalizedCoordinates) {
-        const auto clamp = [](uint32_t mode) { return mode == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE || mode == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER; };
-        if (state.MagFilter != state.MinFilter || state.MipmapMode != VK_SAMPLER_MIPMAP_MODE_NEAREST ||
-            state.MinLod != 0 || state.MaxLod != 0 || state.AnisotropyEnable || state.CompareEnable ||
-            !clamp(state.AddressModeU) || !clamp(state.AddressModeV))
-            return context.Reject("CreatePipelineLayout", "unnormalized sampler constraints are violated");
-    }
-    return true;
-}
-
 bool ValidateLayoutLimitsVulkan(const ValidationContext& context, const vulkan::DeviceVulkan& device,
-                                const ResolvedVulkanLayout& layout) noexcept {
+                                const PipelineLayoutDescriptor& layout) noexcept {
     const auto& limits = device._properties.limits;
-    if (layout.SetCount > limits.maxBoundDescriptorSets)
-        return context.Reject("CreatePipelineLayout", "set count exceeds maxBoundDescriptorSets");
     DescriptorCountsVulkan total;
     array<DescriptorCountsVulkan, 3> stages{};
     const ShaderStage stageTypes[] = {ShaderStage::Vertex, ShaderStage::Pixel, ShaderStage::Compute};
-    for (const auto& binding : layout.Bindings) {
-        total.Add(binding);
-        for (size_t i = 0; i < stages.size(); ++i)
-            if (binding.Stages.HasFlag(stageTypes[i])) stages[i].Add(binding);
-    }
+    for (const auto& group : layout.Groups)
+        for (const auto& binding : group.Layout->GetDesc().Bindings) {
+            total.Add(binding);
+            for (size_t i = 0; i < stages.size(); ++i)
+                if (binding.Stages.HasFlag(stageTypes[i])) stages[i].Add(binding);
+        }
     const auto fits = [&context](uint64_t count, uint32_t limit, std::string_view name) {
         return count <= limit || context.Reject("CreatePipelineLayout", fmt::format("{} exceeds {}", count, name));
     };
@@ -146,8 +112,6 @@ bool ValidateLayoutLimitsVulkan(const ValidationContext& context, const vulkan::
             !fits(stage.StorageImages, limits.maxPerStageDescriptorStorageImages, "maxPerStageDescriptorStorageImages") ||
             !fits(stage.Resources, limits.maxPerStageResources, "maxPerStageResources")) return false;
     }
-    for (const auto& sampler : layout.ImmutableSamplers)
-        if (!ValidateImmutableSamplerVulkan(context, device, sampler)) return false;
     return true;
 }
 #endif
@@ -440,75 +404,48 @@ public:
 };
 
 struct BindingInfo {
-    string Name;
-    BindingHandle Native;
-    uint32_t Group{0}, Binding{0}, Namespace{0}, Count{0};
-    shader::ShaderBindingKind Kind{shader::ShaderBindingKind::CBuffer};
-    bool Push{false}, Dynamic{false}, Immutable{false};
-    uint32_t PushSize{0};
+    uint32_t Binding{0}, Count{0};
+    BindingKind Kind{BindingKind::CBuffer};
+    bool Dynamic{false}, Immutable{false};
 };
-
+class BindingGroupLayoutValidation final : public ValidatedObject<BindingGroupLayout> {
+public:
+    using ValidatedObject::ValidatedObject;
+    vector<BindingDescriptor> Descriptors;
+    vector<BindingInfo> Bindings;
+    BindingGroupLayoutDescriptor GetDesc() const noexcept override { return {Descriptors}; }
+    Nullable<const BindingInfo*> Resolve(uint32_t id, std::string_view operation) const noexcept {
+        if (!Ready(operation)) return nullptr;
+        const auto found = std::find_if(Bindings.begin(), Bindings.end(), [&](const auto& b) { return b.Binding == id; });
+        if (found == Bindings.end()) {
+            Context->Reject(operation, "unknown group binding ID");
+            return nullptr;
+        }
+        return &*found;
+    }
+    void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
+};
 class PipelineLayoutValidation final : public ValidatedObject<PipelineLayout> {
 public:
     using ValidatedObject::ValidatedObject;
-    vector<BindingInfo> Bindings;
-    vector<uint32_t> Groups;
-#ifdef RADRAY_ENABLE_D3D12
-    vector<d3d12::ShaderParameterGroupLayoutD3D12> D3Groups;
-#endif
-#ifdef RADRAY_ENABLE_VULKAN
-    vector<const void*> VkGroups;
-#endif
-    BindingHandle FindBinding(std::string_view name) const noexcept override {
-        if (!Ready("FindBinding")) return {};
-        for (uint32_t i = 0; i < Bindings.size(); ++i)
-            if (Bindings[i].Name == name) return BindingHandleAccess::Make(i, reinterpret_cast<uintptr_t>(this));
-        return {};
-    }
-    Nullable<const BindingInfo*> Resolve(BindingHandle handle, bool push, std::string_view operation) const noexcept {
-        const auto index = BindingHandleAccess::RecordIndex(handle);
-        if (!Ready(operation)) return nullptr;
-        if (BindingHandleAccess::Generation(handle) != reinterpret_cast<uintptr_t>(this) || index >= Bindings.size() || Bindings[index].Push != push) {
-            Context->Reject(operation, "binding handle belongs to another layout or binding kind");
-            return nullptr;
-        }
-        return &Bindings[index];
-    }
-    bool HasGroup(uint32_t group) const noexcept { return std::find(Groups.begin(), Groups.end(), group) != Groups.end(); }
-    bool Compatible(uint32_t destination, const PipelineLayoutValidation& source, uint32_t sourceGroup) const noexcept {
-        if (!HasGroup(destination) || !source.HasGroup(sourceGroup)) return false;
-#ifdef RADRAY_ENABLE_D3D12
-        if (!D3Groups.empty()) {
-            const auto dst = std::find_if(D3Groups.begin(), D3Groups.end(), [&](const auto& group) { return group.GroupIndex == destination; });
-            const auto src = std::find_if(source.D3Groups.begin(), source.D3Groups.end(), [&](const auto& group) { return group.GroupIndex == sourceGroup; });
-            vector<uint32_t> mapping;
-            if (dst == D3Groups.end() || src == source.D3Groups.end() || !dst->MapTablesFrom(*src, mapping)) return false;
-        }
-#endif
-#ifdef RADRAY_ENABLE_VULKAN
-        if (!VkGroups.empty() && (source.VkGroups.empty() || VkGroups[destination] != source.VkGroups[sourceGroup])) return false;
-#endif
-        for (const auto& binding : Bindings) {
-            if (binding.Push || binding.Group != destination) continue;
-            const auto found = std::find_if(source.Bindings.begin(), source.Bindings.end(), [&](const auto& entry) {
-                return !entry.Push && entry.Group == sourceGroup && entry.Binding == binding.Binding && entry.Namespace == binding.Namespace;
-            });
-            if (found == source.Bindings.end() || found->Kind != binding.Kind || found->Count != binding.Count || found->Dynamic != binding.Dynamic || found->Immutable != binding.Immutable) return false;
-        }
-        return true;
+    vector<PipelineLayoutGroupDescriptor> Groups;
+    vector<PushConstantDescriptor> Pushes;
+    PipelineLayoutDescriptor GetDesc() const noexcept override { return {Groups, Pushes}; }
+    Nullable<BindingGroupLayoutValidation*> FindGroup(uint32_t slot) const noexcept {
+        const auto group = std::find_if(Groups.begin(), Groups.end(), [&](const auto& g) { return g.GroupSlot == slot; });
+        return group == Groups.end() ? Nullable<BindingGroupLayoutValidation*>{nullptr} : static_cast<BindingGroupLayoutValidation*>(group->Layout);
     }
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
 
 class ShaderParameterSetValidation final : public ValidatedObject<ShaderParameterSet> {
 public:
-    ShaderParameterSetValidation(shared_ptr<ValidationContext> context, unique_ptr<ShaderParameterSet> native, PipelineLayoutValidation* layout, uint32_t group)
-        : ValidatedObject(std::move(context), std::move(native)), Layout(layout), Group(group), Values(layout->Bindings.size()) {
+    ShaderParameterSetValidation(shared_ptr<ValidationContext> context, unique_ptr<ShaderParameterSet> native, BindingGroupLayoutValidation* layout)
+        : ValidatedObject(std::move(context), std::move(native)), Layout(layout), Values(layout->Bindings.size()) {
         AddDependency(layout);
         for (size_t i = 0; i < Values.size(); ++i) Values[i].resize(layout->Bindings[i].Count);
     }
-    PipelineLayoutValidation* Layout;
-    uint32_t Group;
+    BindingGroupLayoutValidation* Layout;
     bool Sealed{false};
     vector<vector<std::optional<ShaderParameterValue>>> Values;
     bool ValidateValue(const BindingInfo& binding, const ShaderParameterValue& value, std::string_view operation) const noexcept {
@@ -517,12 +454,12 @@ public:
             if (!native) return false;
             const auto desc = buffer->GetDesc();
             const auto kind = binding.Kind;
-            const auto usage = kind == shader::ShaderBindingKind::CBuffer ? BufferUse::CBuffer : kind == shader::ShaderBindingKind::RWStructuredBuffer || kind == shader::ShaderBindingKind::RWRawBuffer || kind == shader::ShaderBindingKind::RWTypedBuffer ? BufferUse::UnorderedAccess
-                                                                                                                                                                                                                                                             : BufferUse::Resource;
+            const auto usage = kind == BindingKind::CBuffer ? BufferUse::CBuffer : kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RWRawBuffer || kind == BindingKind::RWTypedBuffer ? BufferUse::UnorderedAccess
+                                                                                                                                                                                                     : BufferUse::Resource;
             if (!desc.Usage.HasFlag(usage) || !BufferRangeFits(desc, range)) return Context->Reject(operation, "buffer binding usage or range is invalid");
             const auto size = RangeSize(desc, range);
             const auto& limits = Context->NativeDevice->GetCapabilities().Limits;
-            if (kind == shader::ShaderBindingKind::CBuffer) {
+            if (kind == BindingKind::CBuffer) {
                 const auto alignment = std::max(uint64_t{1}, limits.CBufferOffsetAlignment);
                 if (range.Offset % alignment || (limits.MaxUniformBufferRange && size > limits.MaxUniformBufferRange)) return Context->Reject(operation, "constant buffer range or alignment is invalid");
             } else if (range.Offset % std::max(uint64_t{1}, limits.StorageBufferOffsetAlignment) && Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
@@ -530,28 +467,28 @@ public:
             }
             if (texel && (!ValidEnum(format) || format == TextureFormat::UNKNOWN || IsDepthStencilFormat(format) || range.Offset % GetTextureFormatBytesPerPixel(format) || size % GetTextureFormatBytesPerPixel(format)))
                 return Context->Reject(operation, "texel buffer format or range is invalid");
-            if ((kind == shader::ShaderBindingKind::StructuredBuffer || kind == shader::ShaderBindingKind::RWStructuredBuffer) && (!stride || size % stride || range.Offset % stride))
+            if ((kind == BindingKind::StructuredBuffer || kind == BindingKind::RWStructuredBuffer) && (!stride || size % stride || range.Offset % stride))
                 return Context->Reject(operation, "structured buffer stride or range is invalid");
-            if ((kind == shader::ShaderBindingKind::RawBuffer || kind == shader::ShaderBindingKind::RWRawBuffer) && (range.Offset % 4 || size % 4))
+            if ((kind == BindingKind::RawBuffer || kind == BindingKind::RWRawBuffer) && (range.Offset % 4 || size % 4))
                 return Context->Reject(operation, "raw buffer range is not four-byte aligned");
             return true;
         };
         switch (binding.Kind) {
-            case shader::ShaderBindingKind::CBuffer:
-            case shader::ShaderBindingKind::StructuredBuffer:
-            case shader::ShaderBindingKind::RWStructuredBuffer:
-            case shader::ShaderBindingKind::RawBuffer:
-            case shader::ShaderBindingKind::RWRawBuffer: {
+            case BindingKind::CBuffer:
+            case BindingKind::StructuredBuffer:
+            case BindingKind::RWStructuredBuffer:
+            case BindingKind::RawBuffer:
+            case BindingKind::RWRawBuffer: {
                 const auto* input = std::get_if<ShaderBufferBinding>(&value);
                 return input ? validateBuffer(input->Target, input->Range, false, input->StructureByteStride, TextureFormat::UNKNOWN) : Context->Reject(operation, "binding requires ShaderBufferBinding");
             }
-            case shader::ShaderBindingKind::TypedBuffer:
-            case shader::ShaderBindingKind::RWTypedBuffer: {
+            case BindingKind::TypedBuffer:
+            case BindingKind::RWTypedBuffer: {
                 const auto* input = std::get_if<ShaderTexelBufferBinding>(&value);
                 return input ? validateBuffer(input->Target, input->Range, true, 0, input->Format) : Context->Reject(operation, "binding requires ShaderTexelBufferBinding");
             }
-            case shader::ShaderBindingKind::Texture:
-            case shader::ShaderBindingKind::RWTexture: {
+            case BindingKind::Texture:
+            case BindingKind::RWTexture: {
                 const auto* input = std::get_if<TextureView*>(&value);
                 if (!input) return Context->Reject(operation, "binding requires TextureView");
                 const auto native = Lookup(*Context, *input, operation);
@@ -559,10 +496,10 @@ public:
                 const auto desc = (*input)->GetDesc();
                 const auto target = Lookup(*Context, desc.Target, operation);
                 if (!target) return false;
-                const auto expected = binding.Kind == shader::ShaderBindingKind::RWTexture ? TextureViewUsage::UnorderedAccess : TextureViewUsage::Resource;
+                const auto expected = binding.Kind == BindingKind::RWTexture ? TextureViewUsage::UnorderedAccess : TextureViewUsage::Resource;
                 return desc.Usage == expected || Context->Reject(operation, "texture view usage does not match the binding");
             }
-            case shader::ShaderBindingKind::Sampler: {
+            case BindingKind::Sampler: {
                 const auto* input = std::get_if<Sampler*>(&value);
                 return input ? bool(Lookup(*Context, *input, operation)) : Context->Reject(operation, "binding requires Sampler");
             }
@@ -580,15 +517,15 @@ public:
                    value);
         return value;
     }
-    bool Set(BindingHandle handle, uint32_t element, ShaderParameterValue value) noexcept override {
+    bool Set(uint32_t bindingId, uint32_t element, ShaderParameterValue value) noexcept override {
         if (!Ready("Set")) return false;
-        const auto binding = Layout->Resolve(handle, false, "Set");
+        const auto binding = Layout->Resolve(bindingId, "Set");
         if (!binding) return false;
-        if (Sealed || binding.Get()->Group != Group || element >= binding.Get()->Count || binding.Get()->Immutable)
+        if (Sealed || element >= binding.Get()->Count || binding.Get()->Immutable)
             return Context->Reject("Set", "parameter set is sealed, or group, array element, or immutable slot is invalid");
         if (!ValidateValue(*binding.Get(), value, "Set")) return false;
-        if (!Real()->Set(binding.Get()->Native, element, Unwrap(value))) return false;
-        Values[BindingHandleAccess::RecordIndex(handle)][element] = value;
+        if (!Real()->Set(bindingId, element, Unwrap(value))) return false;
+        Values[static_cast<size_t>(binding.Get() - Layout->Bindings.data())][element] = value;
         return true;
     }
     bool FlushWrites() noexcept override { return Ready("FlushWrites") && Real()->FlushWrites(); }
@@ -792,81 +729,84 @@ public:
         }
         const auto set = WrapperOf<ShaderParameterSetValidation>(*this->Context, input, "BindShaderParameterSet");
         if (!set) return;
-        if (!Layout.Get()->Compatible(group, *set.Get()->Layout, set.Get()->Group)) {
-            this->Context->Reject("BindShaderParameterSet", "parameter group layouts are incompatible");
+        const auto target = Layout.Get()->FindGroup(group);
+        if (!target) {
+            this->Context->Reject("BindShaderParameterSet", "unknown group slot");
             return;
         }
-        for (size_t i = 0; i < set.Get()->Layout->Bindings.size(); ++i) {
-            const auto& binding = set.Get()->Layout->Bindings[i];
-            if (binding.Push || binding.Immutable || binding.Group != set.Get()->Group) continue;
-            for (const auto& value : set.Get()->Values[i])
-                if (!value || !set.Get()->ValidateValue(binding, *value, "BindShaderParameterSet")) {
-                    this->Context->Reject("BindShaderParameterSet", "required descriptor has not been initialized or is no longer valid");
+        for (const auto& expected : target.Get()->Bindings) {
+            if (expected.Immutable) continue;
+            const auto actual = set.Get()->Layout->Resolve(expected.Binding, "BindShaderParameterSet");
+            if (!actual || actual.Get()->Kind != expected.Kind || actual.Get()->Count < expected.Count) {
+                this->Context->Reject("BindShaderParameterSet", "group slot cannot accept the supplied resource type or count");
+                return;
+            }
+            const auto index = static_cast<size_t>(actual.Get() - set.Get()->Layout->Bindings.data());
+            for (uint32_t element = 0; element < expected.Count; ++element) {
+                const auto& value = set.Get()->Values[index][element];
+                if (!value || !set.Get()->ValidateValue(expected, *value, "BindShaderParameterSet")) {
+                    this->Context->Reject("BindShaderParameterSet", "required resource is unset or invalid");
                     return;
                 }
+            }
         }
-        vector<ShaderParameterDynamicOffset> nativeOffsets;
         unordered_set<uint32_t> seen;
-        size_t expected = 0;
-        for (const auto& binding : Layout.Get()->Bindings)
-            if (!binding.Push && binding.Group == group && binding.Dynamic) ++expected;
+        size_t expectedCount = 0;
+        for (const auto& binding : target.Get()->Bindings)
+            if (binding.Dynamic) ++expectedCount;
         for (const auto& offset : offsets) {
-            const auto binding = Layout.Get()->Resolve(offset.Binding, false, "BindShaderParameterSet");
-            if (!binding) return;
-            const auto index = BindingHandleAccess::RecordIndex(offset.Binding);
-            if (binding.Get()->Group != group || !binding.Get()->Dynamic || !seen.insert(index).second) {
-                this->Context->Reject("BindShaderParameterSet", "dynamic offsets have duplicate or unexpected bindings");
+            const auto binding = target.Get()->Resolve(offset.BindingId, "BindShaderParameterSet");
+            if (!binding || !binding.Get()->Dynamic || offset.ArrayIndex != 0 || !seen.insert(offset.BindingId).second) {
+                this->Context->Reject("BindShaderParameterSet", "unexpected or duplicate dynamic offset");
                 return;
             }
-            const auto& source = set.Get()->Layout->Bindings;
-            const auto found = std::find_if(source.begin(), source.end(), [&](const auto& value) { return !value.Push && value.Group == set.Get()->Group && value.Binding == binding.Get()->Binding && value.Namespace == binding.Get()->Namespace; });
-            if (found == source.end()) {
-                this->Context->Reject("BindShaderParameterSet", "dynamic binding has no source descriptor");
-                return;
-            }
-            const auto sourceIndex = static_cast<size_t>(found - source.begin());
-            const auto& value = set.Get()->Values[sourceIndex][0];
+            const auto source = set.Get()->Layout->Resolve(offset.BindingId, "BindShaderParameterSet");
+            if (!source) return;
+            const auto index = static_cast<size_t>(source.Get() - set.Get()->Layout->Bindings.data());
+            const auto& value = set.Get()->Values[index][0];
             const auto* buffer = value ? std::get_if<ShaderBufferBinding>(&*value) : nullptr;
             if (!buffer) {
-                this->Context->Reject("BindShaderParameterSet", "dynamic buffer has not been initialized");
+                this->Context->Reject("BindShaderParameterSet", "dynamic buffer is unset");
                 return;
             }
             const auto desc = buffer->Target->GetDesc();
             const auto& limits = this->Context->NativeDevice->GetCapabilities().Limits;
-            const auto alignment = binding.Get()->Kind == shader::ShaderBindingKind::CBuffer ? limits.CBufferOffsetAlignment : limits.StorageBufferOffsetAlignment;
-            if (offset.Offset % std::max(uint64_t{1}, alignment) || offset.Offset > desc.Size - buffer->Range.Offset || RangeSize(desc, buffer->Range) > desc.Size - buffer->Range.Offset - offset.Offset) {
-                this->Context->Reject("BindShaderParameterSet", "dynamic buffer offset exceeds the buffer or is not aligned");
+            const auto alignment = binding.Get()->Kind == BindingKind::CBuffer ? limits.CBufferOffsetAlignment : limits.StorageBufferOffsetAlignment;
+            if (offset.Offset % std::max(uint64_t{1}, alignment) || offset.Offset > desc.Size - buffer->Range.Offset ||
+                RangeSize(desc, buffer->Range) > desc.Size - buffer->Range.Offset - offset.Offset) {
+                this->Context->Reject("BindShaderParameterSet", "dynamic buffer offset exceeds range or alignment");
                 return;
             }
-            nativeOffsets.push_back({binding.Get()->Native, offset.Offset});
         }
-        if (seen.size() != expected) {
+        if (seen.size() != expectedCount) {
             this->Context->Reject("BindShaderParameterSet", "each dynamic binding requires exactly one offset");
             return;
         }
-        this->Real()->BindShaderParameterSet(group, set.Get()->Real(), nativeOffsets);
+        this->Real()->BindShaderParameterSet(group, set.Get()->Real(), offsets);
         this->AddDependency(set.Get());
         set.Get()->Sealed = true;
         BoundSets[group] = set.Get();
     }
-    bool SetPushConstants(BindingHandle handle, std::span<const byte> data) noexcept override {
+    bool SetPushConstants(uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept override {
         if (!Active("SetPushConstants")) return false;
         if (!Layout) return this->Context->Reject("SetPushConstants", "bind a pipeline before push constants");
-        const auto binding = Layout.Get()->Resolve(handle, true, "SetPushConstants");
-        if (!binding) return false;
-        if (data.empty() || data.size() != binding.Get()->PushSize || data.size() % 4) return this->Context->Reject("SetPushConstants", "push constants require the complete declared block");
-        return this->Real()->SetPushConstants(binding.Get()->Native, data);
+        const auto& pushes = Layout.Get()->Pushes;
+        const auto push = std::find_if(pushes.begin(), pushes.end(), [&](const auto& p) { return p.PushId == pushId; });
+        if (push == pushes.end() || byteOffset % 4 || data.empty() || data.size() % 4 || byteOffset > push->Size || data.size() > push->Size - byteOffset)
+            return this->Context->Reject("SetPushConstants", "push ID, alignment or range is invalid");
+        return this->Real()->SetPushConstants(pushId, byteOffset, data);
     }
     bool ParametersReady(std::string_view operation) const noexcept {
-        for (const auto group : Layout.Get()->Groups) {
-            const bool required = std::any_of(Layout.Get()->Bindings.begin(), Layout.Get()->Bindings.end(), [&](const auto& binding) { return !binding.Push && !binding.Immutable && binding.Group == group; });
-            if (!required) continue;
-            const auto found = BoundSets.find(group);
-            if (found == BoundSets.end() || !this->Context->Find(found->second) || !found->second->Ready(operation)) return this->Context->Reject(operation, "pipeline parameter group is not bound or has been destroyed");
+        for (const auto& group : Layout.Get()->Groups) {
+            auto* layout = static_cast<BindingGroupLayoutValidation*>(group.Layout);
+            if (std::none_of(layout->Bindings.begin(), layout->Bindings.end(), [](const auto& b) { return !b.Immutable; })) continue;
+            const auto found = BoundSets.find(group.GroupSlot);
+            if (found == BoundSets.end() || !this->Context->Find(found->second) || !found->second->Ready(operation))
+                return this->Context->Reject(operation, "parameter group is not bound or was destroyed");
             const auto& set = *found->second;
             for (size_t i = 0; i < set.Values.size(); ++i) {
                 const auto& binding = set.Layout->Bindings[i];
-                if (binding.Push || binding.Immutable || binding.Group != set.Group) continue;
+                if (binding.Immutable) continue;
                 for (const auto& value : set.Values[i])
                     if (!value || !set.ValidateValue(binding, *value, operation)) return false;
             }
@@ -1500,63 +1440,7 @@ public:
     }
 };
 
-void AddPush(PipelineLayoutValidation& layout, const ResolvedPushConstantBlock& push) {
-    BindingInfo info;
-    info.Name = push.Name;
-    info.Native = layout.Real()->FindBinding(push.Name);
-    info.Group = push.RegisterSpace;
-    info.Binding = push.Register;
-    info.Push = true;
-    info.PushSize = push.Size;
-    layout.Bindings.push_back(std::move(info));
-}
-
-void BuildLayoutInfo(PipelineLayoutValidation& layout, const ResolvedD3D12Layout& resolved) {
-    for (const auto& binding : resolved.Bindings) {
-        BindingInfo info;
-        info.Name = binding.Name;
-        info.Native = layout.Real()->FindBinding(binding.Name);
-        info.Group = binding.Group;
-        info.Binding = binding.Binding;
-        info.Namespace = shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind));
-        info.Kind = binding.LogicalKind;
-        info.Count = binding.Count;
-        info.Dynamic = binding.Placement == shader::ShaderBindingPlacement::RootDescriptor;
-        info.Immutable = binding.Placement == shader::ShaderBindingPlacement::StaticSampler;
-        layout.Bindings.push_back(std::move(info));
-    }
-    uint32_t count = 0;
-    for (const auto& binding : resolved.Bindings) count = std::max(count, binding.Group + 1);
-    for (uint32_t group = 0; group < count; ++group) layout.Groups.push_back(group);
-    for (const auto& push : resolved.PushConstants) AddPush(layout, push);
-#ifdef RADRAY_ENABLE_D3D12
-    if (auto* native = dynamic_cast<d3d12::RootSigD3D12*>(layout.Real())) layout.D3Groups = native->_parameterGroups;
-#endif
-}
-
-void BuildLayoutInfo(PipelineLayoutValidation& layout, const ResolvedVulkanLayout& resolved) {
-    for (uint32_t group = 0; group < resolved.SetCount; ++group) layout.Groups.push_back(group);
-    for (const auto& binding : resolved.Bindings) {
-        BindingInfo info;
-        info.Name = binding.Name;
-        info.Native = layout.Real()->FindBinding(binding.Name);
-        info.Group = binding.Set;
-        info.Binding = binding.Binding;
-        info.Namespace = shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind));
-        info.Kind = binding.LogicalKind;
-        info.Count = binding.Count;
-        info.Dynamic = binding.Placement == VulkanBufferDescriptorPlacement::Dynamic;
-        info.Immutable = binding.ImmutableSamplerIndex != shader::kShaderNoSampler;
-        layout.Bindings.push_back(std::move(info));
-    }
-    if (resolved.PushBlock) AddPush(layout, *resolved.PushBlock);
-#ifdef RADRAY_ENABLE_VULKAN
-    if (auto* native = dynamic_cast<vulkan::PipelineLayoutVulkan*>(layout.Real()))
-        for (const auto& group : native->GetSetLayouts()) layout.VkGroups.push_back(group.Get());
-#endif
-}
-
-class DeviceValidation final : public Device, public D3D12PipelineLayoutFactory, public VulkanPipelineLayoutFactory {
+class DeviceValidation final : public Device {
 public:
     explicit DeviceValidation(shared_ptr<ValidationContext> context) : _context(std::move(context)) { _context->Owner = this; }
     ~DeviceValidation() noexcept override {
@@ -1739,120 +1623,109 @@ public:
         if (!result) return nullptr;
         return make_unique<ShaderValidation>(_context, result.Release());
     }
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& resolved) noexcept override {
-        if (!Ready("CreatePipelineLayout")) return nullptr;
-        auto* factory = dynamic_cast<D3D12PipelineLayoutFactory*>(_context->NativeDevice.get());
-        if (GetBackend() != RenderBackend::D3D12 || !factory) {
-            _context->Reject("CreatePipelineLayout", "layout target does not match device");
-            return nullptr;
-        }
-        const ShaderStages allowed = ShaderStage::Graphics | ShaderStage::Compute;
-        vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> registers;
-        vector<std::tuple<uint32_t, bool, ShaderStages>> tables;
-        uint64_t rootDwords = 0;
-        for (size_t i = 0; i < resolved.Bindings.size(); ++i) {
-            const auto& binding = resolved.Bindings[i];
-            if (!ValidEnum(binding.LogicalKind) || !ValidEnum(binding.Placement) || binding.Group == UINT32_MAX || !binding.Count || binding.Count - 1 > UINT32_MAX - binding.Binding || !binding.Stages || (binding.Stages & ~allowed) || (binding.Placement == shader::ShaderBindingPlacement::RootDescriptor && (binding.Count != 1 || !shader::CanBeRootDescriptor(binding.LogicalKind))) || (binding.Placement == shader::ShaderBindingPlacement::StaticSampler && (!resolved.HasExplicitCarrier() || binding.LogicalKind != shader::ShaderBindingKind::Sampler || binding.Count != 1))) {
-                _context->Reject("CreatePipelineLayout", "invalid D3D12 binding kind, placement, range, or stages");
+    Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept override {
+        if (!Ready("CreateBindingGroupLayout")) return nullptr;
+        const bool dx = GetBackend() == RenderBackend::D3D12;
+        unordered_set<uint32_t> ids;
+        std::optional<uint32_t> vkSet;
+        for (const auto& binding : desc.Bindings) {
+            if (!ValidEnum(binding.Kind) || !binding.Count || !binding.Stages ||
+                (binding.Stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}) || !ids.insert(binding.BindingId).second ||
+                (dx ? !binding.D3D12.has_value() : !binding.Vulkan.has_value())) {
+                _context->Reject("CreateBindingGroupLayout", "invalid kind, count, stages, duplicate ID or missing mapping");
                 return nullptr;
             }
-            const auto nameSpace = shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind));
-            if (i) {
-                const auto& previous = resolved.Bindings[i - 1];
-                if (std::tuple{previous.Group, shader::GetWireBindingNamespace(static_cast<uint32_t>(previous.LogicalKind)), previous.Binding} >= std::tuple{binding.Group, nameSpace, binding.Binding}) {
-                    _context->Reject("CreatePipelineLayout", "D3D12 bindings must be sorted and unique");
+            bool dynamic;
+            if (dx) {
+                const auto& native = *binding.D3D12;
+                if (!ValidEnum(native.Placement) || native.RegisterType != GetBindingRegisterClass(binding.Kind) || binding.Count - 1 > UINT32_MAX - native.Register) {
+                    _context->Reject("CreateBindingGroupLayout", "invalid D3D12 register class, placement or range");
+                    return nullptr;
+                }
+                dynamic = native.Placement == D3D12BufferPlacement::RootDescriptor;
+            } else {
+                const auto& native = *binding.Vulkan;
+                if (!ValidEnum(native.Placement) || native.Set == UINT32_MAX || (vkSet && *vkSet != native.Set)) {
+                    _context->Reject("CreateBindingGroupLayout", "group must occupy one Vulkan set with valid placement");
+                    return nullptr;
+                }
+                vkSet = native.Set;
+                dynamic = native.Placement == VulkanBufferDescriptorPlacement::Dynamic;
+            }
+            if ((dynamic && (binding.Count != 1 || !CanBeRootDescriptor(binding.Kind))) ||
+                (binding.ImmutableSampler && (binding.Kind != BindingKind::Sampler || binding.Count != 1 || !ValidateSampler(*binding.ImmutableSampler)))) {
+                _context->Reject("CreateBindingGroupLayout", "invalid dynamic buffer or immutable sampler");
+                return nullptr;
+            }
+        }
+        // Native coordinates must be unambiguous inside a group. This is creation validity, not cross-layout compatibility.
+        for (size_t i = 0; i < desc.Bindings.size(); ++i)
+            for (size_t j = 0; j < i; ++j) {
+                const auto& a = desc.Bindings[i];
+                const auto& b = desc.Bindings[j];
+                const bool overlap = dx ? (a.D3D12->Space == b.D3D12->Space && a.D3D12->RegisterType == b.D3D12->RegisterType &&
+                                           uint64_t(a.D3D12->Register) < uint64_t(b.D3D12->Register) + b.Count && uint64_t(b.D3D12->Register) < uint64_t(a.D3D12->Register) + a.Count)
+                                        : a.Vulkan->Binding == b.Vulkan->Binding;
+                if (overlap) {
+                    _context->Reject("CreateBindingGroupLayout", "native binding locations overlap");
                     return nullptr;
                 }
             }
-            registers.emplace_back(binding.Group, nameSpace, binding.Binding, binding.Binding + binding.Count - 1);
-            if (binding.Placement == shader::ShaderBindingPlacement::RootDescriptor)
-                rootDwords += 2;
-            else if (binding.Placement == shader::ShaderBindingPlacement::Table) {
-                const auto visibility = binding.Stages == ShaderStage::Vertex || binding.Stages == ShaderStage::Pixel ? binding.Stages : ShaderStages{ShaderStage::Graphics | ShaderStage::Compute};
-                const auto key = std::tuple{binding.Group, binding.LogicalKind == shader::ShaderBindingKind::Sampler, visibility};
-                if (std::find(tables.begin(), tables.end(), key) == tables.end()) {
-                    tables.push_back(key);
-                    ++rootDwords;
-                }
-            }
-        }
-        for (const auto& push : resolved.PushConstants) {
-            if (!push.Size || push.Size % 4 || push.Offset || !push.Stages || (push.Stages & ~allowed)) {
-                _context->Reject("CreatePipelineLayout", "invalid D3D12 push constant block");
-                return nullptr;
-            }
-            rootDwords += push.Size / 4;
-            registers.emplace_back(push.RegisterSpace, 0, push.Register, push.Register);
-        }
-        if (!resolved.HasExplicitCarrier()) {
-            if (rootDwords > 64) {
-                _context->Reject("CreatePipelineLayout", "D3D12 layout exceeds the 64 DWORD root signature budget");
-                return nullptr;
-            }
-            std::sort(registers.begin(), registers.end());
-            for (size_t i = 1; i < registers.size(); ++i) {
-                const auto& previous = registers[i - 1];
-                const auto& current = registers[i];
-                if (std::get<0>(previous) == std::get<0>(current) && std::get<1>(previous) == std::get<1>(current) && std::get<2>(current) <= std::get<3>(previous)) {
-                    _context->Reject("CreatePipelineLayout", "D3D12 register ranges overlap");
-                    return nullptr;
-                }
-            }
-        }
-        auto native = factory->CreatePipelineLayout(resolved);
+        auto native = _context->NativeDevice->CreateBindingGroupLayout(desc);
         if (!native) return nullptr;
-        auto result = make_unique<PipelineLayoutValidation>(_context, native.Release());
-        BuildLayoutInfo(*result, resolved);
+        auto result = make_unique<BindingGroupLayoutValidation>(_context, native.Release());
+        result->Descriptors.assign(desc.Bindings.begin(), desc.Bindings.end());
+        for (const auto& binding : desc.Bindings) result->Bindings.push_back({binding.BindingId, binding.Count, binding.Kind,
+                                                                              dx ? binding.D3D12->Placement == D3D12BufferPlacement::RootDescriptor : binding.Vulkan->Placement == VulkanBufferDescriptorPlacement::Dynamic,
+                                                                              binding.ImmutableSampler.has_value()});
         return result;
     }
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedVulkanLayout& resolved) noexcept override {
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override {
         if (!Ready("CreatePipelineLayout")) return nullptr;
-        auto* factory = dynamic_cast<VulkanPipelineLayoutFactory*>(_context->NativeDevice.get());
-        if (GetBackend() != RenderBackend::Vulkan || !factory) {
-            _context->Reject("CreatePipelineLayout", "layout target does not match device");
-            return nullptr;
-        }
-        vector<uint32_t> dynamic;
-        for (uint32_t i = 0; i < resolved.Bindings.size(); ++i) {
-            const auto& binding = resolved.Bindings[i];
-            if (!ValidEnum(binding.LogicalKind) || !ValidEnum(binding.Placement) || !binding.Count || binding.Count - 1 > UINT32_MAX - binding.Binding || !binding.Stages || (binding.Stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}) || binding.Set >= resolved.SetCount || (binding.Placement == VulkanBufferDescriptorPlacement::Dynamic && (binding.Count != 1 || !shader::CanBeRootDescriptor(binding.LogicalKind))) || (binding.ImmutableSamplerIndex != shader::kShaderNoSampler && (binding.LogicalKind != shader::ShaderBindingKind::Sampler || binding.Count != 1 || binding.ImmutableSamplerIndex >= resolved.ImmutableSamplers.size()))) {
-                _context->Reject("CreatePipelineLayout", "invalid Vulkan binding count, set, stages, dynamic placement, or immutable sampler");
+        vector<PipelineLayoutGroupDescriptor> converted;
+        vector<BindingGroupLayoutValidation*> dependencies;
+        unordered_set<uint32_t> slots, pushIds;
+        const bool dx = GetBackend() == RenderBackend::D3D12;
+        for (const auto& group : desc.Groups) {
+            const auto layout = WrapperOf<BindingGroupLayoutValidation>(*_context, group.Layout, "CreatePipelineLayout");
+            if (!layout) return nullptr;
+            if (!slots.insert(group.GroupSlot).second) {
+                _context->Reject("CreatePipelineLayout", "duplicate group slot");
                 return nullptr;
             }
-            if (i && std::pair{resolved.Bindings[i - 1].Set, resolved.Bindings[i - 1].Binding} >= std::pair{binding.Set, binding.Binding}) {
-                _context->Reject("CreatePipelineLayout", "Vulkan bindings must be sorted and unique");
+            converted.push_back({group.GroupSlot, layout.Get()->Real()});
+            dependencies.push_back(layout.Get());
+        }
+        for (const auto& push : desc.PushConstants) {
+            if (!pushIds.insert(push.PushId).second || !push.Size || push.Size % 4 || !push.Stages ||
+                (push.Stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}) ||
+                (dx ? !push.D3D12.has_value() : (!push.Vulkan || push.Vulkan->Offset % 4 || uint64_t(push.Vulkan->Offset) + push.Size > GetCapabilities().Limits.MaxPushConstantBytes))) {
+                _context->Reject("CreatePipelineLayout", "invalid push constant ID, mapping, stages or range");
                 return nullptr;
             }
-            if (binding.Placement == VulkanBufferDescriptorPlacement::Dynamic) dynamic.push_back(i);
         }
-        if (dynamic != resolved.DynamicOffsetOrder) {
-            _context->Reject("CreatePipelineLayout", "dynamic offset order does not match resolved bindings");
-            return nullptr;
-        }
-        if (resolved.PushBlock && (!resolved.PushBlock->Size || resolved.PushBlock->Size % 4 || resolved.PushBlock->Offset || !resolved.PushBlock->Stages || (resolved.PushBlock->Stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}) || uint64_t(resolved.PushBlock->Offset) + resolved.PushBlock->Size > GetCapabilities().Limits.MaxPushConstantBytes)) {
-            _context->Reject("CreatePipelineLayout", "invalid Vulkan push constant block");
+        if (!dx && desc.PushConstants.size() > 1) {
+            _context->Reject("CreatePipelineLayout", "Vulkan supports one push block");
             return nullptr;
         }
 #ifdef RADRAY_ENABLE_VULKAN
-        if (auto* device = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); device && !ValidateLayoutLimitsVulkan(*_context, *device, resolved)) return nullptr;
+        if (!dx && !ValidateLayoutLimitsVulkan(*_context, *static_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()), desc)) return nullptr;
 #endif
-        auto native = factory->CreatePipelineLayout(resolved);
+        auto native = _context->NativeDevice->CreatePipelineLayout({converted, desc.PushConstants});
         if (!native) return nullptr;
         auto result = make_unique<PipelineLayoutValidation>(_context, native.Release());
-        BuildLayoutInfo(*result, resolved);
+        result->Groups.assign(desc.Groups.begin(), desc.Groups.end());
+        result->Pushes.assign(desc.PushConstants.begin(), desc.PushConstants.end());
+        for (auto* dependency : dependencies) result->AddDependency(dependency);
         return result;
     }
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override {
         if (!Ready("CreateShaderParameterSet")) return nullptr;
-        const auto layout = WrapperOf<PipelineLayoutValidation>(*_context, desc.Layout, "CreateShaderParameterSet");
+        const auto layout = WrapperOf<BindingGroupLayoutValidation>(*_context, desc.Layout, "CreateShaderParameterSet");
         if (!layout) return nullptr;
-        if (!layout.Get()->HasGroup(desc.GroupIndex)) {
-            _context->Reject("CreateShaderParameterSet", "parameter group does not exist");
-            return nullptr;
-        }
-        auto result = _context->NativeDevice->CreateShaderParameterSet({layout.Get()->Real(), desc.GroupIndex});
-        if (!result) return nullptr;
-        return make_unique<ShaderParameterSetValidation>(_context, result.Release(), layout.Get(), desc.GroupIndex);
+        auto native = _context->NativeDevice->CreateShaderParameterSet({layout.Get()->Real()});
+        if (!native) return nullptr;
+        return make_unique<ShaderParameterSetValidation>(_context, native.Release(), layout.Get());
     }
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override {
         if (!Ready("CreateGraphicsPipelineState")) return nullptr;
@@ -1955,9 +1828,25 @@ public:
         return make_unique<ComputePipelineValidation>(_context, result.Release(), layout.Get());
     }
     bool ValidateSampler(const SamplerDescriptor& desc) const noexcept {
-        if (!ValidEnum(desc.AddressS) || !ValidEnum(desc.AddressT) || !ValidEnum(desc.AddressR) || !ValidEnum(desc.MinFilter) || !ValidEnum(desc.MagFilter) || !ValidEnum(desc.MipmapFilter) || (desc.Compare && !ValidEnum(*desc.Compare)) || !std::isfinite(desc.LodMin) || !std::isfinite(desc.LodMax) || desc.LodMin > desc.LodMax || desc.AnisotropyClamp > 16) return _context->Reject("CreateSampler", "sampler modes, LOD range, or anisotropy are invalid");
+        if (!ValidEnum(desc.AddressS) || !ValidEnum(desc.AddressT) || !ValidEnum(desc.AddressR) ||
+            !ValidEnum(desc.MinFilter) || !ValidEnum(desc.MagFilter) || !ValidEnum(desc.MipmapFilter) ||
+            !ValidEnum(desc.BorderColor) || !ValidEnum(desc.Reduction) || (desc.Compare && !ValidEnum(*desc.Compare)) ||
+            !std::isfinite(desc.LodMin) || !std::isfinite(desc.LodMax) || !std::isfinite(desc.MipLodBias) ||
+            desc.LodMin > desc.LodMax || desc.AnisotropyClamp > 16 ||
+            (desc.Compare && desc.Reduction != SamplerReductionMode::WeightedAverage))
+            return _context->Reject("CreateSampler", "sampler modes, LOD range, comparison reduction or anisotropy are invalid");
+        if (desc.UnnormalizedCoordinates && (desc.MinFilter != desc.MagFilter || desc.MipmapFilter != FilterMode::Nearest ||
+                                             desc.LodMin != 0 || desc.LodMax != 0 || desc.AnisotropyClamp > 1 || desc.Compare ||
+                                             (desc.AddressS != AddressMode::ClampToEdge && desc.AddressS != AddressMode::ClampToBorder) ||
+                                             (desc.AddressT != AddressMode::ClampToEdge && desc.AddressT != AddressMode::ClampToBorder)))
+            return _context->Reject("CreateSampler", "invalid unnormalized sampler configuration");
 #ifdef RADRAY_ENABLE_VULKAN
-        if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native && desc.AnisotropyClamp > 1 && (!native->_feature.samplerAnisotropy || desc.AnisotropyClamp > native->_properties.limits.maxSamplerAnisotropy)) return _context->Reject("CreateSampler", "sampler anisotropy exceeds device capabilities");
+        if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native) {
+            const auto& limits = native->_properties.limits;
+            if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
+                (desc.AnisotropyClamp > 1 && (!native->_feature.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)))
+                return _context->Reject("CreateSampler", "sampler exceeds Vulkan device capabilities");
+        }
 #endif
         return true;
     }

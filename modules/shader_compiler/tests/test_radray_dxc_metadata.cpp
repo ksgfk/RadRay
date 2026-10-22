@@ -630,7 +630,7 @@ TEST(RadRayDxcMetadata, DeclarationPayloadOwnersSurviveCrossStageMerge) {
     const vector<std::filesystem::path> includePaths = ShaderIncludePaths();
     const std::filesystem::path sourceRoot =
         std::filesystem::path{RADRAY_PROJECT_DIR} /
-        "modules/render/tests/data/shader_sources";
+        "modules/shader/tests/data/shader_sources";
     for (const std::string_view fixtureName :
          {"shared_cbuffer_type", "nested_cbuffer_roots"}) {
         const string fileName = string{fixtureName} + ".hlsl";

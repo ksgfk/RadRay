@@ -638,6 +638,8 @@ VkSamplerAddressMode MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
         case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        case AddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        case AddressMode::MirrorClampToEdge: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
     }
     Unreachable();
 }

@@ -643,6 +643,8 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        case AddressMode::ClampToBorder: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        case AddressMode::MirrorClampToEdge: Unreachable();
     }
     Unreachable();
 }
