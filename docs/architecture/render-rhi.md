@@ -225,6 +225,55 @@ Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `I
 `InstanceVulkan::IsValidationEnabled()` 与 `DXGIFactory::IsValidationEnabled()` 报告实际启用的验证状态；
 运行时据此区分验证不可用和后续设备初始化失败。
 
+## Vulkan API 与 Feature 策略
+
+Instance、物理设备与 VMA 以 Vulkan 1.2 为基线，SPIR-V target environment 为 `Vulkan1_2`。
+loader 或物理设备版本不足则初始化失败；设备支持更高版本不自动提高 API 请求或开启额外功能。
+无 feature 开关的核心能力按版本和 valid usage 使用；有开关的能力不论属于核心还是扩展，
+都按当前 RHI 需求查询后启用，规范要求支持也不等于默认开启。
+
+`vulkan_helper.h/.cpp` 内的 `GetRhiFeatureRequestsVulkan` 在创建设备前确定请求，
+`SelectDeviceFeaturesVulkan` 从零生成 Enabled，不把 Supported 整体复制到创建参数。
+请求集不新增公共配置接口：必需能力缺失时失败，可选能力缺失时保留回退或判为不可用。
+
+| RHI 需求 | Feature | 级别 |
+|---|---|---|
+| Fence / timeline 同步 | `timelineSemaphore` | 必需 |
+| UINT32 索引、CubeArray view | `fullDrawIndexUint32`、`imageCubeArray` | 可选 |
+| 光栅与混合状态 | `depthClamp`、`depthBiasClamp`、`fillModeNonSolid`、`independentBlend`、`dualSrcBlend` | 可选 |
+| 间接绘制 | `multiDrawIndirect`、`drawIndirectFirstInstance` | 可选 |
+| 普通与 immutable sampler | `samplerAnisotropy`、`samplerMirrorClampToEdge`、`samplerFilterMinmax` | 可选 |
+| Vertex / Pixel UAV 写入 | `vertexPipelineStoresAndAtomics`、`fragmentStoresAndAtomics` | 可选 |
+
+未列出的 feature 均关闭，包括全部 Vulkan 1.1 feature、`shaderOutputLayer`、`multiview`、
+`imagelessFramebuffer`、`separateDepthStencilLayouts`、`robustBufferAccess`、`hostQueryReset`、
+`uniformBufferStandardLayout`、扩展 subgroup 类型、BDA、indirect count、descriptor indexing、
+shader 动态资源索引、扩展数值类型和无格式 storage image 读写。
+Vulkan 的 `IsLayeredRenderingFromVertexShaderSupported` 返回 false；这不改变 D3D12 的能力报告。
+固定 descriptor 数组与参数集动态 offsets 继续支持，它们不隐含开启 shader 动态索引。
+调用方提供的 shader 必须满足此启用集：不使用未开启的 SPIR-V capability，storage image 使用合法显式格式，
+buffer 布局遵从未开启额外 layout feature 时的规则；render 不反射或改写字节码来补足能力。
+
+sampler 创建、RHI 校验、间接绘制和 UAV stage 报告读取 Enabled，而非硬件 Supported。
+未启用 `multiDrawIndirect` 时拆成单 draw；未启用 `drawIndirectFirstInstance` 时，间接参数的 firstInstance 必须为零。
+其余可选能力缺失时不能使用依赖它的 view、状态或 shader 操作；sampler 不满足启用能力时返回空。
+未来增加功能时同步更新请求、依赖检查和测试，不以设备版本或支持位代替请求。
+
+查询链和创建链分别由 `FeatureChainVulkan` 持有，使用 Features2 + Vulkan11 + Vulkan12 聚合结构，
+不重复挂接聚合结构覆盖的独立 feature 结构。创建链仅含 Enabled，`pEnabledFeatures=nullptr`；
+设备长期保存 Supported / Enabled 值快照，所有 `pNext` 清空。
+当前使用的核心 Features2 / Properties2 / 格式与内存属性查询、descriptor layout support、
+VMA 的 requirements2 / bind-memory2 以及 timeline 等待、计数查询入口缺失时拒绝初始化并清理 native 对象。
+
+保留 WSI、debug utils、portability 和 conservative rasterization 扩展规则；
+不请求或启用 `VK_GOOGLE_hlsl_functionality1`、`VK_GOOGLE_user_type`，缺少它们不阻止设备创建。
+正式工具链不依赖这两个扩展，外部与旧 shader 的离线兼容边界见 [Shader pipeline](shader-pipeline.md#target-lanes)。
+不再为已提升到 1.2 核心的 properties2、timeline、旧 maintenance1 路径请求冗余扩展。
+超出 1.2 的新功能须检查扩展、对应 feature 与入口；查询属性本身不启用功能。
+Vulkan11 / Vulkan12 properties 集中查询并保存，`maxMemoryAllocationSize` 来自 Vulkan11，
+物理设备至少 1.3 时保留 maintenance4 属性查询；`MaxBufferSize` 优先取非零 `maxBufferSize`，否则取前者。
+初始化日志输出实际启用集、官方 driver ID/name/info/conformance 与原始 `driverVersion`，不按厂商猜测版本编码。
+
 ## 绑定模型
 
 调用方定义 shader 与资源之间的 ABI，后端只按显式描述创建布局并执行绑定。
@@ -550,9 +599,9 @@ front-face winding 的影响不同。
 
 ## 直接附件与 Vulkan 原生缓存
 
-Instance、物理设备与 VMA 按 Vulkan 1.2 接入，低于该版本或缺少必需 timeline semaphore feature 时拒绝创建。
+初始化与能力选择遵从 [Vulkan API 与 Feature 策略](#vulkan-api-与-feature-策略)。
 传统单 subpass VkRenderPass/VkFramebuffer 是主路径；不启用 dynamic rendering、imageless framebuffer、
-separate depth/stencil layouts 或 synchronization2。SPIR-V 编译目标同样固定为 Vulkan1_2。
+separate depth/stencil layouts 或 synchronization2。
 
 公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
@@ -572,7 +621,7 @@ VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key �
 
 view ID 在该 device 内单调且不复用。view 析构按局部 reverse index 先检查所有相关 FB 没有 command use，再同步移除闲置 FB，最后调用 vkDestroyImageView。mutex 串行化 acquire/release/invalidate/trim，允许同 device 的多个独立宿主共同计数；缓存不持有业务 texture/view 或 device shared owner。
 
-运行基线为 Vulkan 1.2 与 timelineSemaphore，不启用 dynamic rendering、imagelessFramebuffer、separateDepthStencilLayouts 或 synchronization2。depth-only 也使用 core depth/stencil layout，VMA 和 instance 使用 1.2；shader 编译策略的默认 SPIR-V target environment 同样为 Vulkan1_2。
+depth-only 也使用 core depth/stencil layout，不引入独立 depth/stencil layout 路径。
 
 开启 RHI 校验时，ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改；封存状态仅存于校验包装。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。数值 ID 不提供对象寿命保证，不能替代组布局、完整布局和资源的 native 寿命。
 

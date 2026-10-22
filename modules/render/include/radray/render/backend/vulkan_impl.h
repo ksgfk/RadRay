@@ -47,12 +47,10 @@ struct QueueIndexInFamily {
     uint32_t IndexInFamily;
 };
 
-struct ExtFeaturesVulkan {
-    VkPhysicalDeviceVulkan11Features feature11;
-    VkPhysicalDeviceVulkan12Features feature12;
-};
-
 struct ExtPropertiesVulkan {
+    VkPhysicalDeviceVulkan11Properties Vulkan11{};
+    VkPhysicalDeviceVulkan12Properties Vulkan12{};
+    std::optional<VkPhysicalDeviceMaintenance4Properties> Maintenance4;
     std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
 };
 
@@ -349,8 +347,8 @@ public:
     unique_ptr<VulkanRenderPassCache> _renderPassCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
     unordered_map<SamplerDescriptor, unique_ptr<SamplerVulkan>> _samplerCache;
-    VkPhysicalDeviceFeatures _feature;
-    ExtFeaturesVulkan _extFeatures;
+    DeviceFeaturesVulkan _supportedFeatures;
+    DeviceFeaturesVulkan _enabledFeatures;
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
     RenderDeviceCapabilities _capabilities;

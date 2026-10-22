@@ -75,6 +75,14 @@ caller/build system 在一次 discovery、compile 或 multi-target batch 读取�
 include handler 按调用方提供的 ordered `-I` 路径读取 include、编译 stage、生成 bytecode 和
 metadata；任一 requested lane 失败，整个 batch 失败且不发布成功 lane。
 
+正式 SPIR-V 路径以 Vulkan 1.2 为目标，不传 `-fspv-reflect`。资源、类型与顶点输入语义等
+metadata 由 fork 的编译器内部 observer 独立收集，不依赖 GPU 字节码中的 GOOGLE 反射装饰。
+RHI 不启用 `VK_GOOGLE_hlsl_functionality1` 或 `VK_GOOGLE_user_type`；提交的 shader 不得声明
+对应 `SPV_GOOGLE_*` 扩展。旧版或外部产物应重新编译且不使用 `-fspv-reflect`，或在离线提取
+所需 metadata 后用 `spirv-opt --strip-nonsemantic` 清理，再按 Vulkan 1.2 校验并重新计算产物哈希。
+该清理也会移除其他非语义调试信息，不能无条件用于需要这些信息的调试产物。
+RHI 原样提交字节码，不做运行时 shader 改写；当前工具链与 wire ABI 不因这项设备策略改变。
+
 DXIL 与 SPIR-V 的 binding 数字不要求相等。DXIL 使用 `register`/`space` 语义，SPIR-V 使用
 `VK_BINDING(binding, set)` 展开的标准属性；`shaderlib/core/platform.hlsli` 只负责 target gate，
 不分配 RadRay 自己的编号。DXIL 的 `t0` 与 `s0` 可以共享数字坐标，但属于不同 register

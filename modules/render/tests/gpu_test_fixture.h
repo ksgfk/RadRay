@@ -5,6 +5,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdlib>
+#include <charconv>
 #include <gtest/gtest.h>
 
 #include <radray/render/rhi.h>
@@ -194,11 +195,23 @@ inline bool TryCreateDevice(
         if (enableValidation && (std::find(native->_layers.begin(), native->_layers.end(), "VK_LAYER_KHRONOS_validation") == native->_layers.end() ||
                                  native->_debugMessenger == VK_NULL_HANDLE))
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::ValidationUnavailable, DeviceSetupStage::Validation, "Vulkan validation layer or debug messenger is unavailable");
-        const auto selected = instance->SelectHighPerformancePhysicalDevice();
+        auto selected = instance->SelectHighPerformancePhysicalDevice();
+        if (const char* requested = std::getenv("RADRAY_TEST_VULKAN_ADAPTER_INDEX")) {
+            const std::string_view text{requested};
+            uint32_t index{};
+            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), index);
+            if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+                return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Adapter, "RADRAY_TEST_VULKAN_ADAPTER_INDEX must be an unsigned integer");
+            const auto adapters = instance->GetPhysicalDevices();
+            if (std::ranges::none_of(adapters, [index](const auto& adapter) { return adapter.Index == index; }))
+                return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Adapter, "Requested Vulkan adapter index is unavailable");
+            selected = index;
+        }
         if (!selected)
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::NoAdapter, DeviceSetupStage::Adapter, "No Vulkan physical device is available");
         for (const auto& adapter : instance->GetPhysicalDevices())
             if (adapter.Index == *selected) context.AdapterName = adapter.Name;
+        testing::Test::RecordProperty("vulkan_adapter_index", *selected);
 
         const VulkanCommandQueueDescriptor queues[]{
             VulkanCommandQueueDescriptor{QueueType::Direct, 1}};

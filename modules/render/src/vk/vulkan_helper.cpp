@@ -34,6 +34,99 @@
 
 namespace radray::render::vulkan {
 
+DeviceFeaturesVulkan::DeviceFeaturesVulkan() noexcept {
+    Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+}
+
+FeatureChainVulkan::FeatureChainVulkan(const DeviceFeaturesVulkan& features) noexcept
+    : Vulkan11(features.Vulkan11), Vulkan12(features.Vulkan12) {
+    Core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    Core.features = features.Core;
+    Core.pNext = &Vulkan11;
+    Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    Vulkan11.pNext = &Vulkan12;
+    Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    Vulkan12.pNext = nullptr;
+}
+
+DeviceFeaturesVulkan FeatureChainVulkan::Snapshot() const noexcept {
+    DeviceFeaturesVulkan result;
+    result.Core = Core.features;
+    result.Vulkan11 = Vulkan11;
+    result.Vulkan12 = Vulkan12;
+    result.Vulkan11.pNext = nullptr;
+    result.Vulkan12.pNext = nullptr;
+    return result;
+}
+
+void FeatureChainVulkan::ApplyTo(VkDeviceCreateInfo& createInfo) const noexcept {
+    createInfo.pNext = &Core;
+    createInfo.pEnabledFeatures = nullptr;
+}
+
+FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
+    using Requirement = FeatureRequirementVulkan;
+    return {
+        .FullDrawIndexUint32 = Requirement::Optional,
+        .ImageCubeArray = Requirement::Optional,
+        .DepthClamp = Requirement::Optional,
+        .DepthBiasClamp = Requirement::Optional,
+        .FillModeNonSolid = Requirement::Optional,
+        .IndependentBlend = Requirement::Optional,
+        .DualSrcBlend = Requirement::Optional,
+        .MultiDrawIndirect = Requirement::Optional,
+        .DrawIndirectFirstInstance = Requirement::Optional,
+        .SamplerAnisotropy = Requirement::Optional,
+        .VertexPipelineStoresAndAtomics = Requirement::Optional,
+        .FragmentStoresAndAtomics = Requirement::Optional,
+        .TimelineSemaphore = Requirement::Required,
+        .SamplerMirrorClampToEdge = Requirement::Optional,
+        .SamplerFilterMinmax = Requirement::Optional};
+}
+
+FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested) {
+    FeatureSelectionVulkan result;
+    auto select = [&](std::string_view name, FeatureRequirementVulkan requirement, VkBool32 support, VkBool32& enabled) {
+        if (requirement == FeatureRequirementVulkan::Disabled) return;
+        if (support) {
+            enabled = VK_TRUE;
+            result.EnabledNames.emplace_back(name);
+        } else if (requirement == FeatureRequirementVulkan::Required) {
+            result.MissingRequired.emplace_back(name);
+        }
+    };
+    auto& core = result.Enabled.Core;
+    auto& vulkan12 = result.Enabled.Vulkan12;
+    select("fullDrawIndexUint32", requested.FullDrawIndexUint32, supported.Core.fullDrawIndexUint32, core.fullDrawIndexUint32);
+    select("imageCubeArray", requested.ImageCubeArray, supported.Core.imageCubeArray, core.imageCubeArray);
+    select("depthClamp", requested.DepthClamp, supported.Core.depthClamp, core.depthClamp);
+    select("depthBiasClamp", requested.DepthBiasClamp, supported.Core.depthBiasClamp, core.depthBiasClamp);
+    select("fillModeNonSolid", requested.FillModeNonSolid, supported.Core.fillModeNonSolid, core.fillModeNonSolid);
+    select("independentBlend", requested.IndependentBlend, supported.Core.independentBlend, core.independentBlend);
+    select("dualSrcBlend", requested.DualSrcBlend, supported.Core.dualSrcBlend, core.dualSrcBlend);
+    select("multiDrawIndirect", requested.MultiDrawIndirect, supported.Core.multiDrawIndirect, core.multiDrawIndirect);
+    select("drawIndirectFirstInstance", requested.DrawIndirectFirstInstance, supported.Core.drawIndirectFirstInstance, core.drawIndirectFirstInstance);
+    select("samplerAnisotropy", requested.SamplerAnisotropy, supported.Core.samplerAnisotropy, core.samplerAnisotropy);
+    select("vertexPipelineStoresAndAtomics", requested.VertexPipelineStoresAndAtomics, supported.Core.vertexPipelineStoresAndAtomics, core.vertexPipelineStoresAndAtomics);
+    select("fragmentStoresAndAtomics", requested.FragmentStoresAndAtomics, supported.Core.fragmentStoresAndAtomics, core.fragmentStoresAndAtomics);
+    select("timelineSemaphore", requested.TimelineSemaphore, supported.Vulkan12.timelineSemaphore, vulkan12.timelineSemaphore);
+    select("samplerMirrorClampToEdge", requested.SamplerMirrorClampToEdge, supported.Vulkan12.samplerMirrorClampToEdge, vulkan12.samplerMirrorClampToEdge);
+    select("samplerFilterMinmax", requested.SamplerFilterMinmax, supported.Vulkan12.samplerFilterMinmax, vulkan12.samplerFilterMinmax);
+    return result;
+}
+
+std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept {
+    if (!functions.vkWaitSemaphores) return "vkWaitSemaphores";
+    if (!functions.vkGetSemaphoreCounterValue) return "vkGetSemaphoreCounterValue";
+    if (!functions.vkGetDescriptorSetLayoutSupport) return "vkGetDescriptorSetLayoutSupport";
+    if (!functions.vkGetBufferMemoryRequirements2) return "vkGetBufferMemoryRequirements2";
+    if (!functions.vkGetImageMemoryRequirements2) return "vkGetImageMemoryRequirements2";
+    if (!functions.vkBindBufferMemory2) return "vkBindBufferMemory2";
+    if (!functions.vkBindImageMemory2) return "vkBindImageMemory2";
+    return {};
+}
+
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept {
     auto count = std::max(requested, capabilities.minImageCount);
     if (capabilities.maxImageCount != 0) count = std::min(count, capabilities.maxImageCount);
