@@ -8,17 +8,17 @@
 #include <filesystem>
 #include <fstream>
 
-namespace radray::render {
+namespace radray::shader_tests {
 namespace {
 
 std::filesystem::path ShaderFixtureRoot() {
     return std::filesystem::path{RADRAY_PROJECT_DIR} /
-           "modules/render/tests/data/shader_sources";
+           "modules/shader/tests/data/shader_sources";
 }
 
 std::filesystem::path ShaderArtifactRoot() {
     return std::filesystem::path{RADRAY_PROJECT_DIR} /
-           "modules/render/tests/data/shader_artifacts";
+           "modules/shader/tests/data/shader_artifacts";
 }
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {
@@ -246,4 +246,4 @@ TEST(RadRayShaderContract, RawGoldenArtifactsAreVersionedAndTargetSpecific) {
 }
 
 }  // namespace
-}  // namespace radray::render
+}  // namespace radray::shader_tests

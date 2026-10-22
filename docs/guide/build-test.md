@@ -150,19 +150,21 @@ cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
 | `RADRAY_ENABLE_D3D12` | Windows 且 render 开启时默认 ON |
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
-| `RADRAY_BUILD_SHADER_COMPILER` | ON |
+| `RADRAY_BUILD_SHADER` | ON；独立 shader contract/decoder |
+| `RADRAY_BUILD_SHADER_COMPILER` | ON；要求 shader |
 | `RADRAY_BUILD_SHADER_TOOLS` | 独立构建 ON；子工程 OFF；要求 shader compiler |
 | `RADRAY_ENABLE_PROFILER` | 所有配置默认 ON；链接 Tracy client，见[性能采样](performance.md#性能采样tracy) |
 
 验证不带编译器的基础模块时使用独立目录：
 
 ```powershell
-cmake --preset win-x64-debug -B build_base_no_compiler -DRADRAY_BUILD_SHADER_COMPILER=OFF
+cmake --preset win-x64-debug -B build_base_no_compiler -DRADRAY_BUILD_SHADER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF
 cmake --build build_base_no_compiler --config Debug --parallel 8
 ctest --test-dir build_base_no_compiler -C Debug --output-on-failure
 ```
 
-该配置使 shader tools 一起关闭，不发现或部署 DXC。Vulkan 由 volk 加载，
+该配置关闭 shader/compiler/tools，render 及其测试仍可独立构建，不发现或部署 DXC。
+compiler=ON 且 shader=OFF、tools=ON 且 compiler=OFF 都明确报错；切换已有 build cache 时必须同时修改相关开关。Vulkan 由 volk 加载，
 `dumpbin /DEPENDENTS` 不能单独证明静态库依赖隔离。
 
 ## 作为子工程引用
@@ -178,8 +180,10 @@ ctest --test-dir build_base_no_compiler -C Debug --output-on-failure
 cmake_minimum_required(VERSION 3.25)
 project(MyApplication LANGUAGES CXX)
 
-# 运行时只消费预编译 shader artifact 时可关闭 compiler；默认仍开启。
+# 只使用原始 shader 字节码和显式布局。
+set(RADRAY_BUILD_SHADER OFF)
 set(RADRAY_BUILD_SHADER_COMPILER OFF)
+set(RADRAY_BUILD_SHADER_TOOLS OFF)
 add_subdirectory(external/RadRay)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE RadRay::render RadRay::window)
@@ -225,16 +229,17 @@ shaderlib 在 `share/RadRay/shaderlib/`。对应目录可由 `GNUInstallDirs` �
 不生成 ConfigVersion，不提供版本匹配或跨版本 ABI 承诺。
 
 ```cmake
-find_package(RadRay CONFIG REQUIRED COMPONENTS shader)
+find_package(RadRay CONFIG REQUIRED COMPONENTS render)
 add_executable(my_app main.cpp)
-target_link_libraries(my_app PRIVATE RadRay::shader)
+target_link_libraries(my_app PRIVATE RadRay::render)
 ```
 
 公开 targets 为 `RadRay::core`、`RadRay::shader`、`RadRay::window`、`RadRay::render`、
 `RadRay::shadercompiler`，以及 CLI 的 `RadRay::shader_compile`。源码构建提供相同别名，
 旧的实际 target 名称保留。组件为 `core`、`shader`、`window`、`render`、`shadercompiler`、
 `tools`；模块依赖自动加载，不指定组件时加载全部已安装组件。`RadRay_AVAILABLE_COMPONENTS`
-列出安装能力。支持重复/追加组件及标准 `OPTIONAL_COMPONENTS`；必需但未安装的组件失败。
+按实际生成 target 列出安装能力。render 组件只加载 core 和启用后端的外部包，无需 shader 或 DXC。
+支持重复/追加组件及标准 `OPTIONAL_COMPONENTS`；必需但未安装的组件失败。
 只请求 core 不查找图形或 DXC 包；静态库 PRIVATE 链接依赖仍通过 `find_dependency` 发现。
 
 消费者必须提供依赖前缀；移动 RadRay 安装目录后仍可消费，不依赖原源码和构建目录。
@@ -262,10 +267,10 @@ POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启
 | 目标 | suite 示例 |
 |---|---|
 | `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler` |
-| `test_radray_render` | `RadRayRenderShaderArtifact`、`RadRayShaderContract`、`RadRayRenderShaderLayout`、`PipelineLayoutCacheTest`、`D3D12DeviceFixture`、`VulkanDeviceFixture` |
+| `test_radray_render` | `ExplicitBindingLayoutTest`、`ExplicitLayoutOwnershipD3D12`、`ExplicitLayoutOwnershipVulkan`、`DescriptorDirtyRangesD3D12Test` |
 | `test_radray_render`（Vulkan） | `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`；Win32 另含 `VulkanSwapChainWsiTest` |
 | `test_radray_window`（Win32） | 用 `ctest -N` 查看当前注册用例 |
-| `test_radray_shader` | `RadRayShaderDiagnostics`（不依赖 compiler） |
+| `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderArtifact`、`RadRayShaderContract`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayShaderLibPass` |
 
 ```powershell
@@ -273,11 +278,24 @@ cmake --build --preset win-x64-debug --parallel 8
 ctest --preset win-x64-debug
 ```
 
-render 测试覆盖 shader artifact、契约、布局、binding、descriptor、布局缓存及 Vulkan 交换链回收；
-后端布局用例保留用于验证 offset、root constants 与 push constants 的 dispatch/读回，
-不覆盖完整通用 RHI 或完整 PSO smoke。
-测试直接读取预生成 artifact，不依赖 shader compiler 或 DXC runtime。compiler 开启时额外构建
-`radray_shader_fixture_generator`，用于显式更新 fixture；普通构建与测试不运行生成器。
+render 测试覆盖显式布局、各类资源、数组、固定 sampler、动态偏移、部分 push 更新、跨 PSO/布局共享，
+通过双后端真实 dispatch/读回和原生验证检查行为。三组绑定用例按 view/material/object 分层录制，
+在普通参数集切换及同一 object 参数集配合动态偏移两种路径下，验证只重绑 object 时其他组仍有效。
+参数集分配范围通过 D3D12 实际 CPU/GPU descriptor 区间和 Vulkan 测试侧原生分配调用记录验证，
+确保每个实例只分配所属组的 descriptors；Vulkan pool 可按页预留多个实例的容量。
+布局直接创建、释放和失败清理使用测试侧 probe 或原生 debug 消息观察，
+不在生产代码添加测试字段。交换链回收/WSI 测试保留。
+render 测试读取 `modules/render/tests/data/shader_bytecode/`，无需 shader/compiler/DXC。
+artifact golden 与 contract 测试位于 `modules/shader/tests/`。
+
+显式更新 fixture 时开启 compiler，然后手动构建并运行生成器：
+
+```powershell
+cmake --build --preset win-x64-debug --target radray_shader_fixture_generator
+& build/windows-x64-msvc/Debug/_build/Debug/radray_shader_fixture_generator.exe
+```
+
+生成器目标为 compiler 侧的 `EXCLUDE_FROM_ALL`；普通构建与测试不构建或调用它。
 GPU 用例区分后端未编译、无 adapter、缺验证层与初始化失败；可选后端不可用可跳过，
 原生资源、PSO、提交或读回错误必须失败。通过 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`
 将后端设为必测，`RADRAY_TEST_GPU_VALIDATION=1` 开启 GPU 验证。缺失与跳过必须单列，不能计为通过。
@@ -296,7 +314,7 @@ ctest --preset win-x64-debug-clangcl -R VulkanSwapChain --output-on-failure --ti
 ```
 
 `tools/run_render_validation.py --help` 提供已构建配置的串行 CTest 与后端证据收集；它不负责构建。
-D3D12 descriptor 正确性由 `D3D12DeviceFixture` 与 `DescriptorDirtyRangesD3D12Test` 覆盖。
+D3D12 descriptor 正确性由 `ExplicitBindingLayoutTest` 与 `DescriptorDirtyRangesD3D12Test` 覆盖。
 
 ## 编译数据库与文档检查
 

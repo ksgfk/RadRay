@@ -18,6 +18,20 @@
 
 namespace radray::render {
 
+BindingRegisterClass GetBindingRegisterClass(BindingKind kind) noexcept {
+    if (kind == BindingKind::CBuffer) return BindingRegisterClass::CBV;
+    if (kind == BindingKind::Sampler) return BindingRegisterClass::Sampler;
+    return IsWritableBinding(kind) ? BindingRegisterClass::UAV : BindingRegisterClass::SRV;
+}
+bool IsWritableBinding(BindingKind kind) noexcept {
+    return kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RWRawBuffer ||
+           kind == BindingKind::RWTypedBuffer || kind == BindingKind::RWTexture;
+}
+bool CanBeRootDescriptor(BindingKind kind) noexcept {
+    return kind == BindingKind::CBuffer || kind == BindingKind::StructuredBuffer ||
+           kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RawBuffer || kind == BindingKind::RWRawBuffer;
+}
+
 AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc) {
     AttachmentSignature result{{}, {}, desc.MultiSample.Count};
     for (const auto& color : desc.ColorTargets) result.Colors.push_back(color.Format);
@@ -617,6 +631,9 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
+        case RenderObjectTag::BindingGroupLayout: return "BindingGroupLayout";
+        case RenderObjectTag::ShaderParameterSet: return "ShaderParameterSet";
+        case RenderObjectTag::QueryPool: return "QueryPool";
         case RenderObjectTag::PipelineLayout: return "PipelineLayout";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";

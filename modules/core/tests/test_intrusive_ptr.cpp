@@ -85,7 +85,7 @@ public:
     explicit Derived(int* destroyCount) noexcept : Base(destroyCount) {}
 };
 
-/// 自定义钩子: 归零时先通知宿主再销毁。这是 PipelineLayoutCache 的形状 —— 宿主可能
+/// 自定义钩子: 归零时先通知宿主再销毁。宿主可能
 /// 先死, 那时 _owner 为空, 直接销毁。
 class OwnerTracked;
 
@@ -141,8 +141,8 @@ void IntrusivePtrRelease(OwnerTracked* obj) noexcept {
     }
 }
 
-/// 归零【不销毁】的接入方式: 对象由容器拥有, 计数只是租约。DescriptorSetLayoutCacheVulkan
-/// 的形状 —— 计数从 0 起, 一律经 RetainRef 交出, 归零时从宿主容器擦除。
+/// 归零【不销毁】的接入方式: 对象由容器拥有, 计数只是租约。
+/// 计数从 0 起, 一律经 RetainRef 交出, 归零时从宿主容器擦除。
 class Pooled;
 
 class Pool {

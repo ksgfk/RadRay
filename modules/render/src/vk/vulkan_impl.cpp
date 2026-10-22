@@ -1,6 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
 #include <radray/profiler.h>
-#include "pipeline_layout_cache_vulkan.h"
 #include "../texture_support_cache.h"
 
 #if RADRAY_ENABLE_MIMALLOC
@@ -27,41 +26,7 @@
 #include <excpt.h>
 #endif
 
-std::size_t std::hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan>::operator()(
-    const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept {
-    radray::HashCode hash;
-    hash.Add(key.Bindings.size());
-    for (const auto& binding : key.Bindings) {
-        hash.Add(binding.Binding);
-        hash.Add(static_cast<uint32_t>(binding.Type));
-        hash.Add(binding.Count);
-        hash.Add(binding.Stages);
-        hash.Add(binding.ImmutableSamplers.size());
-        for (VkSampler sampler : binding.ImmutableSamplers) {
-            hash.Add(std::hash<VkSampler>{}(sampler));
-        }
-    }
-    return hash.ToHashCode();
-}
-
-#if defined(VK_USE_PLATFORM_METAL_EXT)
-namespace radray {
-extern VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nativeHandler, const VkAllocationCallbacks* allocator) noexcept;
-}  // namespace radray
-#endif
-
 namespace radray::render::vulkan {
-
-void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept {
-    RADRAY_ASSERT(!layout->_cache->IsClosed());
-    layout->AddRef();
-}
-
-void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept {
-    if (layout->ReleaseRef()) {
-        layout->_cache->Evict(layout);
-    }
-}
 
 static Nullable<unique_ptr<InstanceVulkanImpl>> g_vkInstance = nullptr;
 
@@ -573,124 +538,6 @@ void VMA::DestroyImpl() noexcept {
 
 // == 描述符集 layout 缓存与分配器 ==
 
-DescriptorSetLayoutVulkan::DescriptorSetLayoutVulkan(
-    DescriptorSetLayoutCacheVulkan* cache,
-    DeviceVulkan* device,
-    VkDescriptorSetLayout layout) noexcept
-    : _cache(cache),
-      _device(device),
-      _layout(layout) {}
-
-DescriptorSetLayoutVulkan::~DescriptorSetLayoutVulkan() noexcept {
-    DestroyImpl();
-}
-
-void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
-    _device->_ftb.vkDestroyDescriptorSetLayout(
-        _device->_device,
-        _layout,
-        _device->GetAllocationCallbacks());
-    _layout = VK_NULL_HANDLE;
-    _device = nullptr;
-}
-
-void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept {
-    ++obj->_refCount;
-}
-
-void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept {
-    RADRAY_ASSERT(obj->_refCount > 0);
-    if (--obj->_refCount != 0) {
-        return;
-    }
-    obj->_cache->Evict(obj);
-}
-
-DescriptorSetLayoutCacheVulkan::DescriptorSetLayoutCacheVulkan(
-    DeviceVulkan* device) noexcept
-    : _device(device) {}
-
-DescriptorSetLayoutCacheVulkan::~DescriptorSetLayoutCacheVulkan() noexcept {
-    Destroy();
-}
-
-IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCreate(
-    std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept {
-    if (_device == nullptr) {
-        return nullptr;
-    }
-
-    Key key{};
-    key.Bindings.reserve(bindings.size());
-    for (const VkDescriptorSetLayoutBinding& binding : bindings) {
-        BindingKey bindingKey{
-            binding.binding,
-            binding.descriptorType,
-            binding.descriptorCount,
-            binding.stageFlags,
-            {}};
-        if (binding.pImmutableSamplers != nullptr) {
-            bindingKey.ImmutableSamplers.assign(
-                binding.pImmutableSamplers,
-                binding.pImmutableSamplers + binding.descriptorCount);
-        }
-        key.Bindings.push_back(std::move(bindingKey));
-    }
-    std::sort(
-        key.Bindings.begin(),
-        key.Bindings.end(),
-        [](const BindingKey& lhs, const BindingKey& rhs) noexcept {
-            return lhs.Binding < rhs.Binding;
-        });
-
-    if (const auto it = _layouts.find(key); it != _layouts.end()) {
-        return RetainRef(it->second.get());
-    }
-
-    VkDescriptorSetLayoutCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-    createInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
-
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    if (const VkResult vr = _device->_ftb.vkCreateDescriptorSetLayout(
-            _device->_device,
-            &createInfo,
-            _device->GetAllocationCallbacks(),
-            &layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
-        return nullptr;
-    }
-    const auto [it, inserted] = _layouts.try_emplace(
-        std::move(key),
-        make_unique<DescriptorSetLayoutVulkan>(this, _device, layout));
-    if (inserted) {
-        it->second->_key = &it->first;
-    } else {
-        RADRAY_ABORT("DescriptorSetLayoutCacheVulkan::GetOrCreate failed");
-        return nullptr;
-    }
-    return RetainRef(it->second.get());
-}
-
-void DescriptorSetLayoutCacheVulkan::Evict(DescriptorSetLayoutVulkan* layout) noexcept {
-    const auto it = _layouts.find(*layout->_key);
-    RADRAY_ASSERT(it != _layouts.end() && it->second.get() == layout);
-    _layouts.erase(it);
-}
-
-void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
-    for (const auto& [key, layout] : _layouts) {
-        (void)key;
-        RADRAY_ASSERT(layout->GetRefCount() == 0);
-    }
-    _layouts.clear();
-    _device = nullptr;
-}
-
 struct DescriptorSetAllocatorVulkan::Page {
     VkDescriptorPool Pool{VK_NULL_HANDLE};
     vector<VkDescriptorPoolSize> DescriptorCounts;
@@ -1175,8 +1022,6 @@ DeviceVulkan::DeviceVulkan(
       _physicalDevice(physicalDevice),
       _device(device),
       _renderPassCache(make_unique<VulkanRenderPassCache>(this)),
-      _descriptorSetLayoutCache(this),
-      _pipelineLayoutCache(make_unique<PipelineLayoutCacheVulkan>(this)),
       _descriptorSetAllocator(this) {}
 
 DeviceVulkan::~DeviceVulkan() noexcept {
@@ -1603,79 +1448,45 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
     return make_unique<ShaderModuleVulkan>(this, shaderModule, desc.Stages);
 }
 
-// The wire carries Vulkan enumerants directly and the decoder validates them against the bounds
-// named in the contract header. These assertions are the other half of that agreement: if Vulkan's
-// numbering ever moved, the decoder would silently start accepting or rejecting the wrong states.
-static_assert(VK_FILTER_NEAREST == 0);
-static_assert(VK_FILTER_LINEAR == shader::kShaderSamplerMaxFilter);
-static_assert(VK_SAMPLER_MIPMAP_MODE_NEAREST == 0);
-static_assert(VK_SAMPLER_MIPMAP_MODE_LINEAR == shader::kShaderSamplerMaxMipmapMode);
-static_assert(VK_SAMPLER_ADDRESS_MODE_REPEAT == 0);
-static_assert(VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT == 1);
-static_assert(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE == 2);
-static_assert(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER == 3);
-static_assert(
-    VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE ==
-    shader::kShaderSamplerAddressModeMirrorClampToEdge);
-static_assert(VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE == shader::kShaderSamplerMaxAddressMode);
-static_assert(VK_COMPARE_OP_NEVER == 0);
-static_assert(VK_COMPARE_OP_ALWAYS == shader::kShaderSamplerMaxCompareOp);
-static_assert(VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK == 0);
-static_assert(VK_BORDER_COLOR_INT_OPAQUE_WHITE == shader::kShaderSamplerMaxBorderColor);
-static_assert(
-    VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE ==
-    shader::kShaderSamplerReductionModeWeightedAverage);
-static_assert(VK_SAMPLER_REDUCTION_MODE_MAX == shader::kShaderSamplerMaxReductionMode);
-static_assert(VK_LOD_CLAMP_NONE == shader::kShaderSamplerLodClampNone);
-// Wire stage bits are contractually the ShaderStage bits, which is what lets MapType translate a
-// decoded stage mask without a second table.
-static_assert(static_cast<uint32_t>(ShaderStage::Vertex) == 0x1u);
-static_assert(static_cast<uint32_t>(ShaderStage::Pixel) == 0x2u);
-static_assert(static_cast<uint32_t>(ShaderStage::Compute) == 0x4u);
-
-// The native descriptor type is derived from the logical resource kind plus the resolved placement,
-// never from a single fused enum. That is what keeps uniform and storage buffers apart, keeps typed
-// buffers on the texel-buffer descriptor types instead of collapsing them onto images, and makes an
-// illegal dynamic placement a failure rather than a silent reclassification.
 static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
-    shader::ShaderBindingKind kind,
+    BindingKind kind,
     VulkanBufferDescriptorPlacement placement) noexcept {
     const bool dynamic = placement == VulkanBufferDescriptorPlacement::Dynamic;
     switch (kind) {
-        case shader::ShaderBindingKind::CBuffer:
+        case BindingKind::CBuffer:
             if (dynamic) {
                 return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
             }
             return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        case shader::ShaderBindingKind::StructuredBuffer:
-        case shader::ShaderBindingKind::RWStructuredBuffer:
-        case shader::ShaderBindingKind::RawBuffer:
-        case shader::ShaderBindingKind::RWRawBuffer:
+        case BindingKind::StructuredBuffer:
+        case BindingKind::RWStructuredBuffer:
+        case BindingKind::RawBuffer:
+        case BindingKind::RWRawBuffer:
             if (dynamic) {
                 return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        case shader::ShaderBindingKind::TypedBuffer:
+        case BindingKind::TypedBuffer:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-        case shader::ShaderBindingKind::RWTypedBuffer:
+        case BindingKind::RWTypedBuffer:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
-        case shader::ShaderBindingKind::Texture:
+        case BindingKind::Texture:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        case shader::ShaderBindingKind::RWTexture:
+        case BindingKind::RWTexture:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        case shader::ShaderBindingKind::Sampler:
+        case BindingKind::Sampler:
             if (dynamic) {
                 return std::nullopt;
             }
@@ -1686,212 +1497,179 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
 
 // == Device: pipeline layout and parameter set ==
 
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
-    const VulkanImmutableSamplerState& state) noexcept {
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = static_cast<VkFilter>(state.MagFilter);
-    samplerInfo.minFilter = static_cast<VkFilter>(state.MinFilter);
-    samplerInfo.mipmapMode = static_cast<VkSamplerMipmapMode>(state.MipmapMode);
-    samplerInfo.addressModeU = static_cast<VkSamplerAddressMode>(state.AddressModeU);
-    samplerInfo.addressModeV = static_cast<VkSamplerAddressMode>(state.AddressModeV);
-    samplerInfo.addressModeW = static_cast<VkSamplerAddressMode>(state.AddressModeW);
-    samplerInfo.mipLodBias = state.MipLodBias;
-    samplerInfo.anisotropyEnable = state.AnisotropyEnable != 0 ? VK_TRUE : VK_FALSE;
-    samplerInfo.maxAnisotropy = state.MaxAnisotropy;
-    samplerInfo.compareEnable = state.CompareEnable != 0 ? VK_TRUE : VK_FALSE;
-    samplerInfo.compareOp = static_cast<VkCompareOp>(state.CompareOp);
-    samplerInfo.minLod = state.MinLod;
-    samplerInfo.maxLod = state.MaxLod;
-    samplerInfo.borderColor = static_cast<VkBorderColor>(state.BorderColor);
-    samplerInfo.unnormalizedCoordinates =
-        (state.Flags & shader::kShaderSamplerFlagUnnormalizedCoordinates) != 0 ? VK_TRUE : VK_FALSE;
-    VkSamplerReductionModeCreateInfo reductionInfo{};
-    reductionInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
-    if (state.ReductionMode != shader::kShaderSamplerReductionModeWeightedAverage) {
-        reductionInfo.reductionMode = static_cast<VkSamplerReductionMode>(state.ReductionMode);
-        samplerInfo.pNext = &reductionInfo;
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const SamplerDescriptor& desc) noexcept {
+    const auto& limits = _properties.limits;
+    if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
+        (desc.AnisotropyClamp > 1 && (!_feature.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
+        (desc.Reduction != SamplerReductionMode::WeightedAverage && (!_extFeatures.feature12.samplerFilterMinmax || desc.Compare)) ||
+        ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !_extFeatures.feature12.samplerMirrorClampToEdge)) {
+        RADRAY_ERR_LOG("sampler exceeds Vulkan device capabilities");
+        return nullptr;
     }
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = MapTypeFilter(desc.MagFilter);
+    info.minFilter = MapTypeFilter(desc.MinFilter);
+    info.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
+    info.addressModeU = MapType(desc.AddressS);
+    info.addressModeV = MapType(desc.AddressT);
+    info.addressModeW = MapType(desc.AddressR);
+    info.mipLodBias = desc.MipLodBias;
+    info.anisotropyEnable = desc.AnisotropyClamp > 1;
+    info.maxAnisotropy = static_cast<float>(std::max(1u, desc.AnisotropyClamp));
+    info.compareEnable = desc.Compare.has_value();
+    info.compareOp = desc.Compare ? MapType(*desc.Compare) : VK_COMPARE_OP_NEVER;
+    info.minLod = desc.LodMin;
+    info.maxLod = desc.LodMax;
+    info.borderColor = static_cast<VkBorderColor>(desc.BorderColor);
+    info.unnormalizedCoordinates = desc.UnnormalizedCoordinates;
+    VkSamplerReductionModeCreateInfo reduction{};
+    reduction.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
+    reduction.reductionMode = static_cast<VkSamplerReductionMode>(desc.Reduction);
+    if (desc.Reduction != SamplerReductionMode::WeightedAverage) info.pNext = &reduction;
     VkSampler sampler = VK_NULL_HANDLE;
-    if (const auto vr = this->_ftb.vkCreateSampler(
-            this->_device,
-            &samplerInfo,
-            this->GetAllocationCallbacks(),
-            &sampler);
-        vr != VK_SUCCESS) {
+    const auto vr = _ftb.vkCreateSampler(_device, &info, GetAllocationCallbacks(), &sampler);
+    if (vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
     return make_unique<SamplerVulkan>(this, sampler);
 }
 
-Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
-    const ResolvedVulkanLayout& layout) noexcept {
-    vector<vector<ShaderParameterSetLayoutEntryVulkan>> groupEntries(layout.SetCount);
-    vector<uint32_t> entryIndexByBinding(layout.Bindings.size(), 0);
-    for (size_t bindingIndex = 0; bindingIndex < layout.Bindings.size(); ++bindingIndex) {
-        const auto& binding = layout.Bindings[bindingIndex];
-        auto& entries = groupEntries[binding.Set];
-        entryIndexByBinding[bindingIndex] = static_cast<uint32_t>(entries.size());
-        entries.push_back(ShaderParameterSetLayoutEntryVulkan{
-            .Binding = binding.Binding,
-            .LogicalKind = binding.LogicalKind,
-            .Placement = binding.Placement,
-            .Count = binding.Count,
-            .Stages = binding.Stages,
-            .DescriptorType = MapPipelineLayoutDescriptorTypeVulkan(binding.LogicalKind, binding.Placement).value(),
-            .ImmutableSamplerIndex = binding.ImmutableSamplerIndex});
-    }
-    VkPushConstantRange pushConstantRange{};
-    if (layout.PushBlock) {
-        pushConstantRange.stageFlags = MapType(layout.PushBlock->Stages);
-        pushConstantRange.offset = 0;
-        pushConstantRange.size = layout.PushBlock->Size;
-    }
-
-    auto result = make_unique<PipelineLayoutVulkan>(this);
-    result->_bindingNames.reserve(layout.Bindings.size());
-    for (const ResolvedVulkanBinding& binding : layout.Bindings) {
-        result->_bindingNames.push_back(BackendBindingName{
-            .Name = binding.Name,
-            .Location = {binding.Set, binding.Binding},
-            .Namespace =
-                shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
-    }
-    if (layout.PushBlock.has_value()) {
-        result->_pushConstantRange = pushConstantRange;
-        result->_pushConstantLocation = ShaderBindingLocation{
-            layout.PushBlock->RegisterSpace,
-            layout.PushBlock->Register};
-        // The push block shares the handle table with the descriptor bindings, so a caller reaches
-        // it by the same declaration name it uses for everything else. The record kind is what keeps
-        // them apart: a push handle names the push range, not a descriptor slot.
-        result->_bindingNames.push_back(BackendBindingName{
-            .Name = layout.PushBlock->Name,
-            .Location = result->_pushConstantLocation.value(),
-            .Namespace = 0,
-            .Kind = BackendBindingRecordKind::Push});
-    }
-
-    // Created up front and index aligned with the resolved sampler array, and reserved before the
-    // first push because VkDescriptorSetLayoutBinding only borrows a pointer into this vector: a
-    // reallocation while filling a later binding would dangle the earlier ones.
-    vector<VkSampler> immutableSamplers;
-    immutableSamplers.reserve(layout.ImmutableSamplers.size());
-    for (const VulkanImmutableSamplerState& state : layout.ImmutableSamplers) {
-        const auto sampler = GetOrCreateSamplerInternal(state);
-        if (!sampler.HasValue()) {
+Nullable<unique_ptr<BindingGroupLayout>> DeviceVulkan::CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept {
+    auto result = make_unique<BindingGroupLayoutVulkan>();
+    result->_device = this;
+    result->_bindings.assign(desc.Bindings.begin(), desc.Bindings.end());
+    for (const auto& binding : result->_bindings) {
+        if (!binding.Vulkan || !binding.Count) {
+            RADRAY_ERR_LOG("Vulkan binding mapping is missing or empty");
             return nullptr;
         }
-        immutableSamplers.push_back(sampler.Get()->_sampler);
     }
-
-    result->_dynamicEntryOrder.resize(layout.SetCount);
-    for (uint32_t bindingIndex : layout.DynamicOffsetOrder) {
-        const auto& binding = layout.Bindings[bindingIndex];
-        result->_dynamicEntryOrder[binding.Set].push_back(entryIndexByBinding[bindingIndex]);
-    }
-
-    vector<IntrusivePtr<DescriptorSetLayoutVulkan>> setLayoutRefs;
-    setLayoutRefs.reserve(layout.SetCount);
-    for (uint32_t setIndex = 0; setIndex < layout.SetCount; ++setIndex) {
-        auto& entries = groupEntries[setIndex];
-        size_t texelViewCount = 0;
-        vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(entries.size());
-        for (auto& entry : entries) {
-            if (entry.LogicalKind == shader::ShaderBindingKind::TypedBuffer ||
-                entry.LogicalKind == shader::ShaderBindingKind::RWTypedBuffer) {
-                entry.TexelBufferViewOffset = texelViewCount;
-                texelViewCount += entry.Count;
-            }
-            VkDescriptorSetLayoutBinding binding{};
-            binding.binding = entry.Binding;
-            binding.descriptorType = entry.DescriptorType;
-            binding.descriptorCount = entry.Count;
-            binding.stageFlags = MapType(entry.Stages);
-            if (entry.HasImmutableSampler()) {
-                binding.pImmutableSamplers =
-                    immutableSamplers.data() + entry.ImmutableSamplerIndex;
-            }
-            bindings.push_back(binding);
+    std::sort(result->_bindings.begin(), result->_bindings.end(), [](const auto& a, const auto& b) { return a.Vulkan->Binding < b.Vulkan->Binding; });
+    if (!result->_bindings.empty()) result->_set = result->_bindings.front().Vulkan->Set;
+    vector<VkDescriptorSetLayoutBinding> native;
+    vector<VkSampler> samplers;
+    samplers.reserve(result->_bindings.size());
+    size_t texelOffset = 0;
+    for (const auto& binding : result->_bindings) {
+        const auto& location = *binding.Vulkan;
+        const auto type = MapPipelineLayoutDescriptorTypeVulkan(binding.Kind, location.Placement);
+        if (!type || location.Set != result->_set || (location.Placement == VulkanBufferDescriptorPlacement::Dynamic && binding.Count != 1)) return nullptr;
+        ShaderParameterSetLayoutEntryVulkan entry{binding.BindingId, location.Binding, binding.Kind, location.Placement, binding.Count, *type, texelOffset};
+        if (binding.Kind == BindingKind::TypedBuffer || binding.Kind == BindingKind::RWTypedBuffer) texelOffset += binding.Count;
+        if (location.Placement == VulkanBufferDescriptorPlacement::Dynamic) result->_dynamicOrder.push_back(static_cast<uint32_t>(result->_entries.size()));
+        result->_entries.push_back(entry);
+        VkDescriptorSetLayoutBinding item{location.Binding, *type, binding.Count, MapType(binding.Stages), nullptr};
+        if (binding.ImmutableSampler) {
+            if (binding.Kind != BindingKind::Sampler || binding.Count != 1) return nullptr;
+            const auto sampler = GetOrCreateSamplerInternal(*binding.ImmutableSampler);
+            if (!sampler) return nullptr;
+            samplers.push_back(sampler.Get()->_sampler);
+            item.pImmutableSamplers = &samplers.back();
         }
-
-        IntrusivePtr<DescriptorSetLayoutVulkan> setLayout =
-            _descriptorSetLayoutCache.GetOrCreate(bindings);
-        if (!setLayout.HasValue()) {
-            RADRAY_ERR_LOG("vk descriptor set layout cache failed for set {}", setIndex);
-            return nullptr;
+        native.push_back(item);
+        auto pool = std::find_if(result->_poolSizes.begin(), result->_poolSizes.end(), [&](const auto& p) { return p.type == *type; });
+        if (pool == result->_poolSizes.end())
+            result->_poolSizes.push_back({*type, binding.Count});
+        else {
+            if (binding.Count > UINT32_MAX - pool->descriptorCount) return nullptr;
+            pool->descriptorCount += binding.Count;
         }
-        setLayoutRefs.push_back(std::move(setLayout));
     }
-    result->_parameterSetLayouts = std::move(groupEntries);
-
-    const std::span<const VkPushConstantRange> pushRanges = result->_pushConstantRange.has_value()
-                                                                ? std::span<const VkPushConstantRange>{&result->_pushConstantRange.value(), 1}
-                                                                : std::span<const VkPushConstantRange>{};
-    result->_nativeLayout = _pipelineLayoutCache->GetOrCreate(setLayoutRefs, pushRanges);
-    if (!result->_nativeLayout) return nullptr;
+    VkDescriptorSetLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    info.bindingCount = static_cast<uint32_t>(native.size());
+    info.pBindings = native.data();
+    VkDescriptorSetLayoutSupport support{};
+    support.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT;
+    _ftb.vkGetDescriptorSetLayoutSupport(_device, &info, &support);
+    if (!support.supported) {
+        RADRAY_ERR_LOG("Vulkan descriptor set layout is unsupported");
+        return nullptr;
+    }
+    const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
+    if (vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
+        return nullptr;
+    }
     return result;
 }
 
-Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const shader::SpirvShaderArtifactView& artifact,
-    const VulkanTargetLayoutOptions& options) noexcept {
-    const std::optional<ResolvedVulkanLayout> resolved = ResolveVulkanLayout(artifact, options);
-    if (!resolved.has_value()) {
+Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept {
+    auto result = make_unique<PipelineLayoutVulkan>(this);
+    result->_groups.assign(desc.Groups.begin(), desc.Groups.end());
+    result->_pushes.assign(desc.PushConstants.begin(), desc.PushConstants.end());
+    uint32_t setCount = 0;
+    for (const auto& slot : desc.Groups) {
+        const auto index = CastVkObject(slot.Layout)->_set;
+        if (index >= _properties.limits.maxBoundDescriptorSets) {
+            RADRAY_ERR_LOG("Vulkan descriptor set index exceeds device limit");
+            return nullptr;
+        }
+        setCount = std::max(setCount, index + 1);
+    }
+    vector<VkDescriptorSetLayout> handles(setCount, VK_NULL_HANDLE);
+    for (const auto& slot : desc.Groups) {
+        const auto* group = CastVkObject(slot.Layout);
+        if (handles[group->_set] != VK_NULL_HANDLE) {
+            RADRAY_ERR_LOG("Vulkan descriptor set indices overlap");
+            return nullptr;
+        }
+        handles[group->_set] = group->_layout;
+    }
+    if (std::find(handles.begin(), handles.end(), VK_NULL_HANDLE) != handles.end()) {
+        VkDescriptorSetLayoutCreateInfo empty{};
+        empty.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &empty, GetAllocationCallbacks(), &result->_emptySetLayout);
+        if (vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vkCreateDescriptorSetLayout (hole) failed: {}", vr);
+            return nullptr;
+        }
+        for (auto& handle : handles)
+            if (handle == VK_NULL_HANDLE) handle = result->_emptySetLayout;
+    }
+    if (desc.PushConstants.size() > 1) return nullptr;
+    vector<VkPushConstantRange> pushes;
+    for (const auto& push : desc.PushConstants) {
+        if (!push.Vulkan || !push.Size || push.Size % 4 || push.Vulkan->Offset % 4 ||
+            uint64_t(push.Vulkan->Offset) + push.Size > _properties.limits.maxPushConstantsSize) return nullptr;
+        pushes.push_back({MapType(push.Stages), push.Vulkan->Offset, push.Size});
+    }
+    VkPipelineLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    info.setLayoutCount = static_cast<uint32_t>(handles.size());
+    info.pSetLayouts = handles.data();
+    info.pushConstantRangeCount = static_cast<uint32_t>(pushes.size());
+    info.pPushConstantRanges = pushes.data();
+    const auto vr = _ftb.vkCreatePipelineLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
+    if (vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
-    return CreatePipelineLayout(resolved.value());
-}
-
-Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const ResolvedVulkanLayout& layout) noexcept {
-    auto pipelineLayout = CreatePipelineLayoutInternal(layout);
-    if (!pipelineLayout.HasValue()) {
-        return nullptr;
-    }
-    return unique_ptr<PipelineLayout>{pipelineLayout.Release()};
+    return result;
 }
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
     auto* layout = CastVkObject(desc.Layout);
 
-    const vector<ShaderParameterSetLayoutEntryVulkan>& entries =
-        layout->_parameterSetLayouts[desc.GroupIndex];
-    vector<VkDescriptorPoolSize> poolSizes;
-    poolSizes.reserve(entries.size());
-    for (const ShaderParameterSetLayoutEntryVulkan& entry : entries) {
-        auto poolSize = std::find_if(
-            poolSizes.begin(),
-            poolSizes.end(),
-            [&](const VkDescriptorPoolSize& value) noexcept {
-                return value.type == entry.DescriptorType;
-            });
-        if (poolSize == poolSizes.end()) {
-            poolSizes.push_back(VkDescriptorPoolSize{entry.DescriptorType, entry.Count});
-        } else {
-            poolSize->descriptorCount += entry.Count;
-        }
-    }
-
+    const auto& entries = layout->_entries;
     auto result = make_unique<ShaderParameterSetVulkan>();
     result->_device = this;
     result->_layout = layout;
-    result->_groupIndex = desc.GroupIndex;
     size_t texelViewCount = 0;
     for (const auto& entry : entries) {
-        if (entry.LogicalKind == shader::ShaderBindingKind::TypedBuffer ||
-            entry.LogicalKind == shader::ShaderBindingKind::RWTypedBuffer) {
+        if (entry.LogicalKind == BindingKind::TypedBuffer ||
+            entry.LogicalKind == BindingKind::RWTypedBuffer) {
             texelViewCount += entry.Count;
         }
     }
     result->_texelBufferViews.resize(texelViewCount);
 
-    const VkDescriptorSetLayout setLayout = layout->GetSetLayouts()[desc.GroupIndex]->Get();
+    const VkDescriptorSetLayout setLayout = layout->_layout;
     const auto allocation = _descriptorSetAllocator.Allocate(
-        DescriptorSetAllocatorVulkan::Request{setLayout, poolSizes});
+        DescriptorSetAllocatorVulkan::Request{setLayout, layout->_poolSizes});
     if (!allocation.has_value()) {
         return nullptr;
     }
@@ -1920,7 +1698,6 @@ void ShaderParameterSetVulkan::DestroyImpl() noexcept {
         _device->_descriptorSetAllocator.Destroy(_allocation);
     }
     _allocation = DescriptorSetAllocatorVulkan::Allocation::Invalid();
-    _groupIndex = 0;
     _layout = nullptr;
     _device = nullptr;
 }
@@ -1930,20 +1707,11 @@ void ShaderParameterSetVulkan::ResetBindingsForReuse() noexcept {
 }
 
 bool ShaderParameterSetVulkan::Set(
-    BindingHandle binding,
+    uint32_t bindingId,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
-    Nullable<const BackendBindingName*> record = &_layout->_bindingNames[BindingHandleAccess::RecordIndex(binding)];
-    const uint32_t bindingNumber = record.Get()->Location.Binding;
-    const auto& entries = _layout->_parameterSetLayouts[_groupIndex];
-    const auto entry = std::find_if(
-        entries.begin(),
-        entries.end(),
-        [&](const ShaderParameterSetLayoutEntryVulkan& value) noexcept {
-            return value.Binding == bindingNumber &&
-                   shader::GetWireBindingNamespace(static_cast<uint32_t>(value.LogicalKind)) ==
-                       record.Get()->Namespace;
-        });
+    const auto& entries = _layout->_entries;
+    const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.BindingId == bindingId; });
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = _allocation.Set;
@@ -1956,11 +1724,11 @@ bool ShaderParameterSetVulkan::Set(
     VkBufferView nativeBufferView = VK_NULL_HANDLE;
     unique_ptr<BufferViewVulkan> texelView;
     switch (entry->LogicalKind) {
-        case shader::ShaderBindingKind::CBuffer:
-        case shader::ShaderBindingKind::StructuredBuffer:
-        case shader::ShaderBindingKind::RWStructuredBuffer:
-        case shader::ShaderBindingKind::RawBuffer:
-        case shader::ShaderBindingKind::RWRawBuffer: {
+        case BindingKind::CBuffer:
+        case BindingKind::StructuredBuffer:
+        case BindingKind::RWStructuredBuffer:
+        case BindingKind::RawBuffer:
+        case BindingKind::RWRawBuffer: {
             const auto& buffer = std::get<ShaderBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             bufferInfo.buffer = native->_buffer;
@@ -1971,8 +1739,8 @@ bool ShaderParameterSetVulkan::Set(
             write.pBufferInfo = &bufferInfo;
             break;
         }
-        case shader::ShaderBindingKind::TypedBuffer:
-        case shader::ShaderBindingKind::RWTypedBuffer: {
+        case BindingKind::TypedBuffer:
+        case BindingKind::RWTypedBuffer: {
             const auto& buffer = std::get<ShaderTexelBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             VkBufferViewCreateInfo viewInfo{};
@@ -1992,17 +1760,17 @@ bool ShaderParameterSetVulkan::Set(
             write.pTexelBufferView = &nativeBufferView;
             break;
         }
-        case shader::ShaderBindingKind::Texture:
-        case shader::ShaderBindingKind::RWTexture: {
+        case BindingKind::Texture:
+        case BindingKind::RWTexture: {
             const auto* view = CastVkObject(std::get<TextureView*>(value));
             imageInfo.imageView = view->_imageView;
-            imageInfo.imageLayout = entry->LogicalKind == shader::ShaderBindingKind::RWTexture
+            imageInfo.imageLayout = entry->LogicalKind == BindingKind::RWTexture
                                         ? VK_IMAGE_LAYOUT_GENERAL
                                         : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format);
             write.pImageInfo = &imageInfo;
             break;
         }
-        case shader::ShaderBindingKind::Sampler: {
+        case BindingKind::Sampler: {
             const auto* sampler = CastVkObject(std::get<Sampler*>(value));
             imageInfo.sampler = sampler->_sampler;
             write.pImageInfo = &imageInfo;
@@ -2256,58 +2024,8 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     return make_unique<ComputePipelineVulkan>(this, rs, pipeline);
 }
 
-static VulkanImmutableSamplerState MakeSamplerStateVulkan(const SamplerDescriptor& desc) noexcept {
-    VulkanImmutableSamplerState state{};
-    state.MagFilter = MapTypeFilter(desc.MagFilter);
-    state.MinFilter = MapTypeFilter(desc.MinFilter);
-    state.MipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
-    state.AddressModeU = MapType(desc.AddressS);
-    state.AddressModeV = MapType(desc.AddressT);
-    state.AddressModeW = MapType(desc.AddressR);
-    state.AnisotropyEnable = desc.AnisotropyClamp > 1 ? VK_TRUE : VK_FALSE;
-    state.MaxAnisotropy = desc.AnisotropyClamp > 1 ? static_cast<float>(desc.AnisotropyClamp) : 1.0f;
-    state.CompareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
-    state.CompareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
-    state.MinLod = desc.LodMin;
-    state.MaxLod = desc.LodMax;
-    state.BorderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    state.ReductionMode = VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE;
-    return state;
-}
-
-size_t SamplerStateHashVulkan::operator()(const VulkanImmutableSamplerState& state) const noexcept {
-    HashCode hash;
-    const auto addFloat = [&hash](float value) {
-        // Numeric equality treats both zeros as equal; normalize their bits before hashing.
-        const auto bits = std::bit_cast<uint32_t>(value);
-        hash.Add((bits & 0x7fffffffu) == 0 ? 0u : bits);
-    };
-    hash.Add(state.MagFilter);
-    hash.Add(state.MinFilter);
-    hash.Add(state.MipmapMode);
-    hash.Add(state.AddressModeU);
-    hash.Add(state.AddressModeV);
-    hash.Add(state.AddressModeW);
-    addFloat(state.MipLodBias);
-    hash.Add(state.AnisotropyEnable);
-    addFloat(state.MaxAnisotropy);
-    hash.Add(state.CompareEnable);
-    hash.Add(state.CompareOp);
-    addFloat(state.MinLod);
-    addFloat(state.MaxLod);
-    hash.Add(state.BorderColor);
-    hash.Add(state.ReductionMode);
-    hash.Add(state.Flags);
-    return hash.ToHashCode();
-}
-
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
-    const SamplerDescriptor& desc) noexcept {
-    return CreateSamplerInternal(MakeSamplerStateVulkan(desc));
-}
-
 Nullable<SamplerVulkan*> DeviceVulkan::GetOrCreateSamplerInternal(
-    const VulkanImmutableSamplerState& state) noexcept {
+    const SamplerDescriptor& state) noexcept {
     if (const auto it = _samplerCache.find(state); it != _samplerCache.end()) {
         return it->second.get();
     }
@@ -2331,7 +2049,7 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
 
 Nullable<Sampler*> DeviceVulkan::GetOrCreateSampler(
     const SamplerDescriptor& desc) noexcept {
-    return GetOrCreateSamplerInternal(MakeSamplerStateVulkan(desc));
+    return GetOrCreateSamplerInternal(desc);
 }
 
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -2431,8 +2149,6 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 void DeviceVulkan::DestroyImpl() noexcept {
     _renderPassCache.reset();
     _descriptorSetAllocator.Clear();
-    _pipelineLayoutCache.reset();
-    _descriptorSetLayoutCache.Destroy();
     _samplerCache.clear();
     _vma.reset();
     for (auto&& i : _queues) {
@@ -3214,7 +2930,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
-
 }
 
 void QueueVulkan::Wait() noexcept {
@@ -3854,8 +3569,10 @@ static bool BindShaderParameterSetVulkan(
     ShaderParameterSet* parameterSet,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
     auto* set = static_cast<ShaderParameterSetVulkan*>(parameterSet);
-    const auto& destinationEntries = destinationLayout->_parameterSetLayouts[groupIndex];
-    const auto& dynamicEntryOrder = destinationLayout->_dynamicEntryOrder[groupIndex];
+    const auto slot = std::find_if(destinationLayout->_groups.begin(), destinationLayout->_groups.end(), [&](const auto& g) { return g.GroupSlot == groupIndex; });
+    const auto* group = CastVkObject(slot->Layout);
+    const auto& destinationEntries = group->_entries;
+    const auto& dynamicEntryOrder = group->_dynamicOrder;
 
     constexpr size_t kInlinePackedOffsets = 16;
     std::array<uint32_t, kInlinePackedOffsets> inlinePacked{};
@@ -3867,19 +3584,14 @@ static bool BindShaderParameterSetVulkan(
     }
     // 原生 offsets 必须按 layout 的 dynamic descriptor 顺序排列；调用方保证每项恰好提供一次。
     for (const auto& dynamicOffset : dynamicOffsets) {
-        Nullable<const BackendBindingName*> record = &destinationLayout->_bindingNames[BindingHandleAccess::RecordIndex(dynamicOffset.Binding)];
-        const auto slot = std::find_if(dynamicEntryOrder.begin(), dynamicEntryOrder.end(), [&](uint32_t entryIndex) noexcept {
-            const auto& entry = destinationEntries[entryIndex];
-            return entry.Binding == record.Get()->Location.Binding &&
-                   shader::GetWireBindingNamespace(static_cast<uint32_t>(entry.LogicalKind)) == record.Get()->Namespace;
-        });
-        packedDynamicOffsets[static_cast<size_t>(slot - dynamicEntryOrder.begin())] = dynamicOffset.Offset;
+        const auto offsetSlot = std::find_if(dynamicEntryOrder.begin(), dynamicEntryOrder.end(), [&](uint32_t index) { return destinationEntries[index].BindingId == dynamicOffset.BindingId; });
+        packedDynamicOffsets[static_cast<size_t>(offsetSlot - dynamicEntryOrder.begin())] = dynamicOffset.Offset;
     }
     device->_ftb.vkCmdBindDescriptorSets(
         commandBuffer->_cmdBuffer,
         bindPoint,
         destinationLayout->GetNative(),
-        groupIndex,
+        group->_set,
         1,
         &set->_allocation.Set,
         static_cast<uint32_t>(dynamicEntryOrder.size()),
@@ -3901,32 +3613,22 @@ void SimulateCommandEncoderVulkan::BindShaderParameterSet(
         dynamicOffsets);
 }
 
-static bool SetPushConstantsVulkan(
-    DeviceVulkan* device,
-    CommandBufferVulkan* commandBuffer,
-    PipelineLayoutVulkan* boundLayout,
-    BindingHandle binding,
-    std::span<const byte> data) noexcept {
-    (void)binding;
-    const auto& range = *boundLayout->_pushConstantRange;
-    device->_ftb.vkCmdPushConstants(
-        commandBuffer->_cmdBuffer,
-        boundLayout->GetNative(),
-        range.stageFlags,
-        range.offset,
-        range.size,
-        data.data());
+static bool SetPushConstantsVulkan(DeviceVulkan* device, CommandBufferVulkan* commandBuffer,
+                                   PipelineLayoutVulkan* boundLayout, uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept {
+    const auto push = std::find_if(boundLayout->_pushes.begin(), boundLayout->_pushes.end(), [&](const auto& p) { return p.PushId == pushId; });
+    device->_ftb.vkCmdPushConstants(commandBuffer->_cmdBuffer, boundLayout->GetNative(), MapType(push->Stages),
+                                    push->Vulkan->Offset + byteOffset, static_cast<uint32_t>(data.size()), data.data());
     return true;
 }
 
 bool SimulateCommandEncoderVulkan::SetPushConstants(
-    BindingHandle binding,
+    uint32_t pushId, uint32_t byteOffset,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
-        binding,
+        pushId, byteOffset,
         data);
 }
 
@@ -4026,13 +3728,13 @@ void SimulateComputeEncoderVulkan::BindShaderParameterSet(
 }
 
 bool SimulateComputeEncoderVulkan::SetPushConstants(
-    BindingHandle binding,
+    uint32_t pushId, uint32_t byteOffset,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
-        binding,
+        pushId, byteOffset,
         data);
 }
 
@@ -4916,53 +4618,33 @@ void ImageViewVulkan::DestroyImpl() noexcept {
 
 // == PipelineLayout / Pipeline / ShaderModule / Sampler ==
 
-PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept
-    : _device(device) {}
-
-PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
-    DestroyImpl();
+BindingGroupLayoutVulkan::~BindingGroupLayoutVulkan() noexcept { Destroy(); }
+bool BindingGroupLayoutVulkan::IsValid() const noexcept { return _layout != VK_NULL_HANDLE; }
+void BindingGroupLayoutVulkan::Destroy() noexcept {
+    if (_layout != VK_NULL_HANDLE) _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+    _layout = VK_NULL_HANDLE;
+    _bindings.clear();
+    _entries.clear();
+    _dynamicOrder.clear();
+    _poolSizes.clear();
+    _device = nullptr;
 }
-
-VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept {
-    return _nativeLayout->Layout;
-}
-
-std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> PipelineLayoutVulkan::GetSetLayouts() const noexcept {
-    return _nativeLayout->SetLayouts;
-}
-
-bool PipelineLayoutVulkan::IsValid() const noexcept {
-    return _device != nullptr && _nativeLayout.HasValue();
-}
-
-void PipelineLayoutVulkan::Destroy() noexcept {
-    DestroyImpl();
-}
-
-void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
-    _device->SetObjectName(name, GetNative());
-}
-
-BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noexcept {
-    const auto binding = std::find_if(
-        _bindingNames.begin(),
-        _bindingNames.end(),
-        [&](const BackendBindingName& value) noexcept { return value.Name == name; });
-    if (binding == _bindingNames.end()) {
-        return {};
-    }
-    return BindingHandleAccess::Make(
-        static_cast<uint32_t>(std::distance(_bindingNames.begin(), binding)),
-        reinterpret_cast<uintptr_t>(this));
-}
-
+void BindingGroupLayoutVulkan::SetDebugName(std::string_view name) noexcept { _device->SetObjectName(name, _layout); }
+BindingGroupLayoutDescriptor BindingGroupLayoutVulkan::GetDesc() const noexcept { return {_bindings}; }
+PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept : _device(device) {}
+PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept { DestroyImpl(); }
+VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept { return _layout; }
+bool PipelineLayoutVulkan::IsValid() const noexcept { return _layout != VK_NULL_HANDLE; }
+void PipelineLayoutVulkan::Destroy() noexcept { DestroyImpl(); }
+void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept { _device->SetObjectName(name, _layout); }
+PipelineLayoutDescriptor PipelineLayoutVulkan::GetDesc() const noexcept { return {_groups, _pushes}; }
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
-    _nativeLayout.Reset();
-    _parameterSetLayouts.clear();
-    _dynamicEntryOrder.clear();
-    _bindingNames.clear();
-    _pushConstantRange.reset();
-    _pushConstantLocation.reset();
+    if (_layout != VK_NULL_HANDLE) _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+    if (_emptySetLayout != VK_NULL_HANDLE) _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _emptySetLayout, _device->GetAllocationCallbacks());
+    _layout = VK_NULL_HANDLE;
+    _emptySetLayout = VK_NULL_HANDLE;
+    _groups.clear();
+    _pushes.clear();
     _device = nullptr;
 }
 

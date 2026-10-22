@@ -33,13 +33,12 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 shader         → core
 window         → core
 shadercompiler → shader, core                 可选
-render         → shader, core
+render         → core
 ```
 
-`radrayshader` 提供 compiler/render 共享 wire contract 与 artifact decoder，不依赖 DXC。
+`radrayshader` 提供 shader wire contract 与 artifact decoder，不依赖 DXC 或 render。
 可选 `radrayshadercompiler` 通过 RadRay DXC fork extension ABI 提供 discovery 与 typed variant
-compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)。render 解析
-artifact 不需要 compiler。
+compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)。render 接收原始字节码与显式布局，不依赖 shader 或 compiler。
 
 ## 文档索引
 
@@ -65,6 +64,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 保留价值与当前归属 |
 |---|---|
+| [显式 RHI 绑定布局转向与实施计划](../history/2026-10-22-explicit-rhi-binding-layout-rationale.md) | shader artifact 布局权威转向调用方定义的原因、实施前所有权快照、当时的接口与验收要求；当前直接所有权和取消缓存决定见 RHI 文档 |
 | [Runtime 完整归档](../history/2026-10-21-runtime-archive.md) | 源码恢复、设计与操作快照、草案附件及归档时验证入口 |
 | [Runtime 重写原因](../history/2026-10-21-runtime-rewrite-rationale.md) | 补丁叠加的基础问题、用户决策、源码核查与下一版方向 |
 | [旧渲染框架设计](../history/2026-09-14-render-framework-design.md) | a68237f 时的分层、数据流与重构范围 |

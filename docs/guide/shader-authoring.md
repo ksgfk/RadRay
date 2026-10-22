@@ -69,9 +69,8 @@ attribute 语义，不需要伪造另一 target 的槽位。ordinary graphics/co
 Local Root Signature、directly-indexed heaps 与多个 active Vulkan push blocks 不支持。
 
 作者不写 `[RootSignature]` 时，compiler 不猜一份公共 policy：DXIL artifact 不携带 serialized RS，
-D3D12 RHI 按 active bindings 生成 implicit descriptor-table layout；Vulkan 使用普通 descriptors。
-这不会禁止 dynamic cbuffer；具体 pipeline 仍可在 layout resolve 时对精确 declaration 选择合法的
-backend-specific placement。malformed policy、跨 stage 冲突、未覆盖 D3 active resource，或一个
+compiler 发布普通 descriptor 的 metadata。RHI 布局始终由调用方显式提供，
+dynamic/root buffer placement、固定 sampler 和 push 范围由该布局描述决定。malformed policy、跨 stage 冲突、未覆盖 D3 active resource，或一个
 已被 policy 指向的 active Vulkan declaration 无法关联/表示时会使编译失败，不回退到缺省路径。
 
 policy 相关的编译诊断：
@@ -107,7 +106,7 @@ VK_BINDING(7, 2) SamplerState LinearSampler : register(s0);
 
 SPIR-V lane 会把宏展开为标准 `vk::binding` 属性，DXIL lane 会展开为空；两套 target 的实际
 binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相等。compiler按canonical HLSL
-declaration identity关联RootSignature policy与两套槽位，caller不维护pairing table。
+declaration identity关联RootSignature policy与两套槽位；RHI 调用方在显式描述中分别填写 DX/VK 坐标。
 
 vertex位置使用`VK_LOCATION`。push declaration是唯一例外：它同时写DX `register()`与
 `VK_PUSH_CONSTANT`，但**不得**再写`VK_BINDING`，因为`vk::push_constant`与`vk::binding`不能
@@ -131,24 +130,21 @@ push block。一个SPIR-V Variant最多一条active logical push declaration。
 `vk::binding` 报 2113。检查发生在死资源剥除之后，未被使用的资源不受约束。
 
 不要在 pass 中手写 backend attribute、创建 numbered binding wrapper，或维护 sidecar metadata。
-HLSL declaration name 是 参数查询 identity；render layout 会为当前 artifact 生成不透明
-`BindingHandle`。descriptor与push declaration都通过`FindBinding(name)`取得handle；handle的group、
-binding、namespace或内部index都不是authoring ABI。
+HLSL declaration name 仍用于 compiler metadata 与工具查询；RHI 不提供按名绑定。
+调用方给每个组内资源分配 BindingId，并声明对应 Kind、Count、Stages 与 DX/VK 位置。
+对上述 AlbedoTexture，D3D12 映射是 SRV register 0 / space 0，Vulkan 映射是 set 2 / binding 6；
+BindingId 和完整布局的 GroupSlot 可以另外选值。数字命名空间与绑定 API 见
+[RHI 绑定模型](../architecture/render-rhi.md#绑定模型)。
 
-## Target layout modifier 不是 HLSL metadata
+## 调用方定义绑定 ABI
 
-concrete pipeline可以在program request中提供side-by-side D3D12/Vulkan layout recipe，但它不是第二套
-shader metadata。每个modifier只用“canonical declaration name + expected logical resource kind”选择
-一项：
+编写 shader 时同步维护调用方的显式组布局和 push 描述。布局可以是覆盖多个变体的稳定超集，
+不能因某次编译裁掉未使用资源而自动收缩。RootSignature policy 和 metadata 都不会自动写入 RHI；
+原始字节码与显式布局匹配、跨 pipeline 参数集兼容由调用方保证。
 
-- D3D12 Implicit：合法、count=1的buffer在descriptor table与root descriptor之间切换；Explicit
-  serialized RS不接受改写。
-- Vulkan：uniform/storage buffer在regular与dynamic descriptor之间切换；sampler可以指定完整
-  immutable sampler state，base已有immutable state时整体替换。
-
-不要通过group index、binding number、更新频率或命名约定推断placement。modifier不能改变资源
-kind/count、visibility、slot或push range；texture、typed texel buffer、storage image和push没有
-placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
+dynamic/root buffer 只支持单元素 constant/structured/raw buffer，typed buffer、texture 不能使用该 placement；
+普通 descriptor 数组继续使用 Count。固定 sampler 以完整 `SamplerDescriptor` 放在组布局中，不能 Set。
+Vulkan push 为一个逻辑块；D3D12 可有多个 root constant 块，按 PushId 做 4 字节对齐的部分更新。
 
 group 的语义属于具体调用方，不是 shaderlib 全局规则。
 数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
@@ -174,5 +170,5 @@ cmake --build --preset win-x64-debug --parallel 24
 ctest --preset win-x64-debug -R "RadRayShaderLibPass"
 ```
 
-render 侧的 shader 契约与布局测试使用预生成 artifact，并保留布局专用的 dispatch/读回验证，
-不覆盖完整 PSO smoke。测试入口及后端缺失、初始化失败与 skip 规则见[构建与测试](build-test.md#测试)。
+render 布局测试使用预编译原始 stage 字节码和手写布局，执行双后端 compute PSO、dispatch/读回；
+artifact/contract 测试在 shader 模块。测试入口及后端缺失、初始化失败与 skip 规则见[构建与测试](build-test.md#测试)。

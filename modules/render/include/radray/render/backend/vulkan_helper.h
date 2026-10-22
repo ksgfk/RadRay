@@ -118,6 +118,10 @@ struct VulkanObjectTrait<VkPipelineCache> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_CACHE;
 };
 template <>
+struct VulkanObjectTrait<VkDescriptorSetLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+};
+template <>
 struct VulkanObjectTrait<VkPipelineLayout> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
 };

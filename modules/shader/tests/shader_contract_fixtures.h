@@ -7,7 +7,7 @@
 
 #include <radray/shader/shader_compiler_contract.h>
 
-namespace radray::render::test {
+namespace radray::shader_tests::test {
 
 enum class FixtureResourceKind : uint8_t {
     Texture,
@@ -178,4 +178,4 @@ inline constexpr std::span<const ShaderContractFixture> GetShaderContractFixture
     return kShaderContractFixtures;
 }
 
-}  // namespace radray::render::test
+}  // namespace radray::shader_tests::test
