@@ -340,6 +340,68 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
     }
 }
 
+TEST(RadRayDxcMetadata, SpirvMetadataDoesNotRequireGoogleExtensions) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    for (const uint8_t optimize : {0, 1}) {
+        for (const uint8_t debugInfo : {0, 1}) {
+            SCOPED_TRACE(fmt::format("optimize={} debug={}", optimize, debugInfo));
+            const shader::CompilePolicy policy{.Optimize = optimize, .DebugInfo = debugInfo};
+            const auto source = CopyBytes(kGraphicsSource);
+            const auto discovery = client.DiscoverSourceContract(
+                shader::SourceContractRequest{
+                    .SourceName = "fixtures/google_free.hlsl",
+                    .RootSource = source,
+                    .Defines = {},
+                    .Targets = shader::ShaderTargetMask::SPIRV,
+                    .Policy = policy},
+                includePaths);
+            ASSERT_TRUE(discovery.Succeeded()) << discovery.Diagnostics;
+            const auto result = client.CompileVariant(
+                shader::CompileVariantRequest{
+                    .SourceName = "fixtures/google_free.hlsl",
+                    .RootSource = source,
+                    .Defines = {},
+                    .Assignments = {},
+                    .Targets = shader::ShaderTargetMask::SPIRV,
+                    .Policy = policy,
+                    .ExpectedContract = discovery.Value->Hash},
+                includePaths);
+            ASSERT_TRUE(result.Succeeded()) << result.Diagnostics;
+            ASSERT_EQ(result.Value->size(), 1u);
+            const auto& lane = result.Value->front();
+            ASSERT_EQ(lane.Target, shader::ShaderTarget::SPIRV);
+            ASSERT_EQ(lane.Stages.size(), 2u);
+            shader::WireMetadataEnvelope envelope{};
+            ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
+            std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+            EXPECT_TRUE(shader::ValidateWireMetadataEnvelope(lane.Metadata, lane.Target, envelope.GpuArtifact));
+            EXPECT_EQ(envelope.BindingRecords.Size, 2u * sizeof(shader::WireBindingRecord));
+            EXPECT_EQ(envelope.VertexInputRecords.Size, sizeof(shader::WireVertexInputRecord));
+            for (const auto& stage : lane.Stages) {
+                ASSERT_EQ(stage.Bytecode.size() % sizeof(uint32_t), 0u);
+                vector<uint32_t> words(stage.Bytecode.size() / sizeof(uint32_t));
+                ASSERT_GE(words.size(), 5u);
+                std::memcpy(words.data(), stage.Bytecode.data(), stage.Bytecode.size());
+                ASSERT_EQ(words[0], 0x07230203u);
+                for (size_t offset = 5; offset < words.size();) {
+                    const uint32_t count = words[offset] >> 16;
+                    ASSERT_GT(count, 0u);
+                    ASSERT_LE(count, words.size() - offset);
+                    if ((words[offset] & 0xffffu) == 10u) {
+                        const std::string_view text{reinterpret_cast<const char*>(words.data() + offset + 1), (count - 1) * sizeof(uint32_t)};
+                        const auto terminator = text.find('\0');
+                        ASSERT_NE(terminator, std::string_view::npos);
+                        EXPECT_FALSE(text.substr(0, terminator).starts_with("SPV_GOOGLE_"));
+                    }
+                    offset += count;
+                }
+            }
+        }
+    }
+}
+
 TEST(RadRayDxcMetadata, CrossTargetDiscoveryComparesFrontendContracts) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());

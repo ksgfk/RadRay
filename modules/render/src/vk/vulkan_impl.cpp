@@ -11,6 +11,8 @@
 #include <limits>
 #include <type_traits>
 
+#include <fmt/ranges.h>
+
 #include <radray/basic_math.h>
 #include <radray/hash.h>
 #include <radray/logger.h>
@@ -1140,7 +1142,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAll
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
     unique_ptr<FenceVulkan> result;
-    if (_extFeatures.feature12.timelineSemaphore) {
+    if (_enabledFeatures.Vulkan12.timelineSemaphore) {
         auto timeline = this->CreateTimelineSemaphore(0);
         if (timeline.HasValue()) {
             result = make_unique<FenceVulkan>(this, timeline.Release());
@@ -1500,9 +1502,9 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const SamplerDescriptor& desc) noexcept {
     const auto& limits = _properties.limits;
     if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
-        (desc.AnisotropyClamp > 1 && (!_feature.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
-        (desc.Reduction != SamplerReductionMode::WeightedAverage && (!_extFeatures.feature12.samplerFilterMinmax || desc.Compare)) ||
-        ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !_extFeatures.feature12.samplerMirrorClampToEdge)) {
+        (desc.AnisotropyClamp > 1 && (!_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
+        (desc.Reduction != SamplerReductionMode::WeightedAverage && (!_enabledFeatures.Vulkan12.samplerFilterMinmax || desc.Compare)) ||
+        ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !_enabledFeatures.Vulkan12.samplerMirrorClampToEdge)) {
         RADRAY_ERR_LOG("sampler exceeds Vulkan device capabilities");
         return nullptr;
     }
@@ -2081,7 +2083,7 @@ Nullable<unique_ptr<LegacySemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(
 }
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
-    if (!_extFeatures.feature12.timelineSemaphore) {
+    if (!_enabledFeatures.Vulkan12.timelineSemaphore) {
         RADRAY_ERR_LOG("vk feature timeline semaphore not supported");
         return nullptr;
     }
@@ -2171,6 +2173,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         RADRAY_ERR_LOG("volkInitialize failed");
         return nullptr;
     }
+    auto loaderCleanup = MakeScopeGuard([] { volkFinalize(); });
     uint32_t version = 0;
     if (!vkEnumerateInstanceVersion || vkEnumerateInstanceVersion(&version) != VK_SUCCESS || version < VK_API_VERSION_1_2) {
         RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
@@ -2200,7 +2203,6 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     unordered_set<string> needLayers;
     bool isValidFeatureExtEnable = false;
     needExts.emplace(VK_KHR_SURFACE_EXTENSION_NAME);
-    needExts.emplace(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     needExts.emplace(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
@@ -2318,7 +2320,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     appInfo.applicationVersion = desc.AppVersion;
     appInfo.pEngineName = desc.EngineName.data();
     appInfo.engineVersion = desc.EngineVersion;
-    appInfo.apiVersion = version;
+    appInfo.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -2337,40 +2339,15 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     } else if (hasDebugUtilsExt) {
         createInfo.pNext = &debugCreateInfo;
     }
-    if (version < VK_API_VERSION_1_2) {
-        RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult instanceCreateResult = VK_ERROR_UNKNOWN;
+    uint32_t instanceExceptionCode = 0;
+    if (!_TryCreateVkInstance(&createInfo, allocCbPtr, &instance, instanceCreateResult, instanceExceptionCode)) {
+        RADRAY_ERR_LOG("vkCreateInstance raised structured exception 0x{:08X}", instanceExceptionCode);
         return nullptr;
     }
-    uint32_t apiVersionsToTry[] = {VK_API_VERSION_1_2};
-    VkInstance instance = VK_NULL_HANDLE;
-    VkResult lastResult = VK_ERROR_UNKNOWN;
-    uint32_t lastExceptionCode = 0;
-    for (uint32_t apiVersion : apiVersionsToTry) {
-        appInfo.apiVersion = apiVersion;
-        VkResult vr = VK_ERROR_UNKNOWN;
-        uint32_t exceptionCode = 0;
-        if (!_TryCreateVkInstance(&createInfo, allocCbPtr, &instance, vr, exceptionCode)) {
-            lastExceptionCode = exceptionCode;
-            RADRAY_WARN_LOG(
-                "vkCreateInstance with api version {}.{}.{} raised SEH 0x{:08X}",
-                VK_VERSION_MAJOR(apiVersion),
-                VK_VERSION_MINOR(apiVersion),
-                VK_VERSION_PATCH(apiVersion),
-                exceptionCode);
-            continue;
-        }
-        if (vr == VK_SUCCESS) {
-            break;
-        } else {
-            lastResult = vr;
-            RADRAY_WARN_LOG("vkCreateInstance with api version {}.{}.{} failed: {}", VK_VERSION_MAJOR(apiVersion), VK_VERSION_MINOR(apiVersion), VK_VERSION_PATCH(apiVersion), vr);
-        }
-    }
-    if (instance == VK_NULL_HANDLE) {
-        if (lastExceptionCode != 0) {
-            RADRAY_ERR_LOG("vkCreateInstance raised structured exception 0x{:08X}", lastExceptionCode);
-        }
-        RADRAY_ERR_LOG("vkCreateInstance failed: {}", lastResult);
+    if (instanceCreateResult != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateInstance failed: {}", instanceCreateResult);
         return nullptr;
     }
     volkLoadInstanceOnly(instance);
@@ -2381,6 +2358,11 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         vector<string>{needLayers.begin(), needLayers.end()});
     result->_logCallback = desc.LogCallback;
     result->_logUserData = desc.LogUserData;
+    if (!vkGetPhysicalDeviceFeatures2 || !vkGetPhysicalDeviceProperties2 || !vkGetPhysicalDeviceMemoryProperties2 ||
+        !vkGetPhysicalDeviceFormatProperties2 || !vkGetPhysicalDeviceImageFormatProperties2) {
+        RADRAY_ERR_LOG("Vulkan 1.2 core physical device query entry points are required");
+        return nullptr;
+    }
     if (hasDebugUtilsExt) {
         debugCreateInfo.pUserData = result.get();
         if (vkCreateDebugUtilsMessengerEXT != nullptr) {
@@ -2402,6 +2384,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         }
     }
     g_vkInstance = std::move(result);
+    loaderCleanup.Dismiss();
     return g_vkInstance.Get();
 }
 
@@ -2532,18 +2515,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     if (IsValidateExtensions("VK_KHR_portability_subset", deviceExtsAvailable)) {
         needExts.emplace("VK_KHR_portability_subset");
     }
-    if (IsValidateExtensions(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, deviceExtsAvailable)) {
-        needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-    }
-    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_1) {
-        needExts.emplace(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
-    }
-    // DXC -fspv-reflect emits both corresponding OpExtension declarations.
-    needExts.emplace(VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME);
-    needExts.emplace(VK_GOOGLE_USER_TYPE_EXTENSION_NAME);
     VkPhysicalDeviceProperties2 deviceProperties2{};
     deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     deviceProperties2.pNext = nullptr;
+    extProperties->Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+    extProperties->Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+    AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan11);
+    AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan12);
+    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_3) {
+        auto& maintenance4 = extProperties->Maintenance4.emplace();
+        maintenance4.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
+        AddToHeadVulkanStruct(deviceProperties2, maintenance4);
+    }
     if (IsValidateExtensions(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, deviceExtsAvailable)) {
         needExts.emplace(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
         extProperties->conservativeRasterization = VkPhysicalDeviceConservativeRasterizationPropertiesEXT{};
@@ -2559,9 +2542,11 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             return nullptr;
         }
     }
-    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceProperties2) {
-        vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
-    }
+    vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
+    extProperties->Vulkan11.pNext = nullptr;
+    extProperties->Vulkan12.pNext = nullptr;
+    if (extProperties->Maintenance4) extProperties->Maintenance4->pNext = nullptr;
+    if (extProperties->conservativeRasterization) extProperties->conservativeRasterization->pNext = nullptr;
 
     vector<const char*> deviceExts{};
     deviceExts.reserve(needExts.size());
@@ -2569,10 +2554,18 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         deviceExts.emplace_back(ext.c_str());
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures{};
+    const auto requestedFeatures = GetRhiFeatureRequestsVulkan();
+    FeatureChainVulkan supportedChain;
+    vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &supportedChain.Core);
+    const auto supportedFeatures = supportedChain.Snapshot();
+    const auto selection = SelectDeviceFeaturesVulkan(supportedFeatures, requestedFeatures);
+    if (!selection.MissingRequired.empty()) {
+        RADRAY_ERR_LOG("Vulkan required features are unsupported: {}", fmt::join(selection.MissingRequired, ", "));
+        return nullptr;
+    }
+    FeatureChainVulkan enabledChain{selection.Enabled};
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = nullptr;
     deviceInfo.flags = 0;
     deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     deviceInfo.pQueueCreateInfos = queueInfos.data();
@@ -2580,32 +2573,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceInfo.ppEnabledLayerNames = nullptr;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
     deviceInfo.ppEnabledExtensionNames = deviceExts.data();
-    deviceInfo.pEnabledFeatures = &deviceFeatures;
-    auto extFeatures = make_unique<ExtFeaturesVulkan>();
-    VkPhysicalDeviceFeatures2 deviceFeatures2{};
-    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    deviceFeatures2.pNext = nullptr;
-    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceFeatures2) {
-        extFeatures->feature11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-        AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature11);
-
-        extFeatures->feature12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        extFeatures->feature12.pNext = nullptr;
-        if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2) {
-            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature12);
-        }
-
-        vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
-
-        if (!extFeatures->feature12.timelineSemaphore) {
-            RADRAY_ERR_LOG("Vulkan timelineSemaphore feature is required");
-            return nullptr;
-        }
-        extFeatures->feature12.imagelessFramebuffer = VK_FALSE;
-        extFeatures->feature12.separateDepthStencilLayouts = VK_FALSE;
-        deviceInfo.pNext = &deviceFeatures2;
-        deviceInfo.pEnabledFeatures = nullptr;
-    }
+    enabledChain.ApplyTo(deviceInfo);
 
     VkDevice device = VK_NULL_HANDLE;
     VkResult deviceCreateResult = VK_ERROR_UNKNOWN;
@@ -2629,6 +2597,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         selectPhyDevice.device,
         device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
+    if (const auto missing = GetMissingDeviceFunctionVulkan(deviceR->_ftb); !missing.empty()) {
+        RADRAY_ERR_LOG("Vulkan required core device entry point is missing: {}", missing);
+        return nullptr;
+    }
     VmaVulkanFunctions vmaFunctions{};
     VmaAllocatorCreateInfo vmaCreateInfo{};
     vmaCreateInfo.flags = 0;
@@ -2669,33 +2641,21 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
-    if (deviceInfo.pEnabledFeatures) {
-        deviceR->_feature = *deviceInfo.pEnabledFeatures;
-    } else {
-        deviceR->_feature = deviceFeatures2.features;
-    }
-    deviceR->_extFeatures = *extFeatures;
-    deviceR->_properties = selectPhyDevice.properties;
+    deviceR->_supportedFeatures = supportedFeatures;
+    deviceR->_enabledFeatures = enabledChain.Snapshot();
+    deviceR->_properties = deviceProperties2.properties;
     deviceR->_extProperties = *extProperties;
     {
         auto& caps = deviceR->_capabilities;
         const auto& limits = deviceR->_properties.limits;
-        VkPhysicalDeviceMaintenance3Properties allocationLimits{};
-        allocationLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
-        VkPhysicalDeviceMaintenance4Properties bufferLimits{};
-        bufferLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
-        VkPhysicalDeviceProperties2 properties{};
-        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        properties.pNext = &allocationLimits;
-        if (deviceR->_properties.apiVersion >= VK_API_VERSION_1_3) allocationLimits.pNext = &bufferLimits;
-        vkGetPhysicalDeviceProperties2(deviceR->_physicalDevice, &properties);
+        const auto maxBufferSize = extProperties->Maintenance4 ? extProperties->Maintenance4->maxBufferSize : 0;
         caps.Limits = {
             .MaxColorAttachments = limits.maxColorAttachments,
             .MaxTexture1DDimension = limits.maxImageDimension1D,
             .MaxTexture2DDimension = limits.maxImageDimension2D,
             .MaxTexture3DDimension = limits.maxImageDimension3D,
             .MaxTextureArrayLayers = limits.maxImageArrayLayers,
-            .MaxBufferSize = bufferLimits.maxBufferSize != 0 ? bufferLimits.maxBufferSize : allocationLimits.maxMemoryAllocationSize,
+            .MaxBufferSize = maxBufferSize != 0 ? maxBufferSize : extProperties->Vulkan11.maxMemoryAllocationSize,
             .MaxUniformBufferRange = limits.maxUniformBufferRange,
             .MaxPushConstantBytes = limits.maxPushConstantsSize,
             .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment,
@@ -2707,10 +2667,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             .SubresourceBarriers = true,
             .UavMemoryBarrier = true,
             .UavWriteStages = render::ShaderStage::Compute};
-        if (deviceR->_feature.fragmentStoresAndAtomics) {
+        if (deviceR->_enabledFeatures.Core.fragmentStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Pixel;
         }
-        if (deviceR->_feature.vertexPipelineStoresAndAtomics) {
+        if (deviceR->_enabledFeatures.Core.vertexPipelineStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
         }
         for (size_t index = 0; index < deviceR->_queues.size(); ++index) {
@@ -2739,10 +2699,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.MaxVertexInputBindings = deviceR->_properties.limits.maxVertexInputBindings;
         detail.IsUMA = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
         detail.VramBudget = GetPhysicalDeviceMemoryAllSize(selectPhyDevice.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-        const auto& f12 = deviceR->_extFeatures.feature12;
-        detail.IsLayeredRenderingFromVertexShaderSupported =
-            selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
-            f12.shaderOutputLayer;
+        detail.IsLayeredRenderingFromVertexShaderSupported = false;
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -2750,33 +2707,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_INFO_LOG("Vulkan API Version: {}.{}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion));
     }
     {
-        const auto& props = selectPhyDevice.properties;
-        uint32_t driverVersion = props.driverVersion;
-        uint32_t vendorID = props.vendorID;
-        string verStr;
-        // https://pcisig.com/membership/member-companies
-        switch (vendorID) {
-            case 0x10DE: {  // NVIDIA
-                uint32_t major = (driverVersion >> 22) & 0x3ff;
-                uint32_t minor = (driverVersion >> 14) & 0x0ff;
-                uint32_t patch = (driverVersion >> 6) & 0x0ff;
-                uint32_t build = driverVersion & 0x3f;
-                verStr = fmt::format("{}.{}.{}.{}", major, minor, patch, build);
-                break;
-            }
-            case 0x8086:  // Intel
-            case 0x1002:  // AMD
-            default: {
-                uint32_t variant = VK_API_VERSION_VARIANT(driverVersion);
-                uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
-                uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
-                uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
-                verStr = fmt::format("{}.{}.{}.{}", variant, major, minor, patch);
-                break;
-            }
-        }
-        RADRAY_INFO_LOG("Driver Version: {}", verStr);
+        const auto& driver = extProperties->Vulkan12;
+        const auto& conformance = driver.conformanceVersion;
+        RADRAY_INFO_LOG("Driver: id={}, name={}, info={}", static_cast<uint32_t>(driver.driverID), driver.driverName, driver.driverInfo);
+        RADRAY_INFO_LOG("Driver Version (raw): {}", deviceR->_properties.driverVersion);
+        RADRAY_INFO_LOG("Conformance Version: {}.{}.{}.{}", conformance.major, conformance.minor, conformance.subminor, conformance.patch);
     }
+    RADRAY_INFO_LOG("Enabled Features (API baseline 1.2): {}", fmt::join(selection.EnabledNames, ", "));
     deviceR->_textureSupportCache = detail::CacheCommonTextureSupport(*deviceR);
     RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
     RADRAY_INFO_LOG("Queue:");
@@ -2787,7 +2724,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             RADRAY_INFO_LOG("\t{}: {}", type, queues.size());
         }
     }
-    RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
     RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     RADRAY_INFO_LOG(
         "Layered Rendering From Vertex Shader: {}",
@@ -3642,7 +3578,7 @@ void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t ins
 
 void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
     auto* buffer = CastVkObject(argumentBuffer);
-    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+    const uint32_t maxBatchSize = _device->_enabledFeatures.Core.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
     for (uint32_t firstDraw = 0; firstDraw < drawCount;) {
@@ -3659,7 +3595,7 @@ void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t
 
 void SimulateCommandEncoderVulkan::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
     auto* buffer = CastVkObject(argumentBuffer);
-    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+    const uint32_t maxBatchSize = _device->_enabledFeatures.Core.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
     for (uint32_t firstDraw = 0; firstDraw < drawCount;) {

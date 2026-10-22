@@ -39,6 +39,65 @@
 
 namespace radray::render::vulkan {
 
+struct DeviceFeaturesVulkan {
+    DeviceFeaturesVulkan() noexcept;
+
+    VkPhysicalDeviceFeatures Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+enum class FeatureRequirementVulkan {
+    Disabled,
+    Optional,
+    Required
+};
+
+struct FeatureRequestsVulkan {
+    FeatureRequirementVulkan FullDrawIndexUint32{};
+    FeatureRequirementVulkan ImageCubeArray{};
+    FeatureRequirementVulkan DepthClamp{};
+    FeatureRequirementVulkan DepthBiasClamp{};
+    FeatureRequirementVulkan FillModeNonSolid{};
+    FeatureRequirementVulkan IndependentBlend{};
+    FeatureRequirementVulkan DualSrcBlend{};
+    FeatureRequirementVulkan MultiDrawIndirect{};
+    FeatureRequirementVulkan DrawIndirectFirstInstance{};
+    FeatureRequirementVulkan SamplerAnisotropy{};
+    FeatureRequirementVulkan VertexPipelineStoresAndAtomics{};
+    FeatureRequirementVulkan FragmentStoresAndAtomics{};
+    FeatureRequirementVulkan TimelineSemaphore{};
+    FeatureRequirementVulkan SamplerMirrorClampToEdge{};
+    FeatureRequirementVulkan SamplerFilterMinmax{};
+};
+
+struct FeatureSelectionVulkan {
+    DeviceFeaturesVulkan Enabled;
+    vector<std::string_view> MissingRequired;
+    vector<std::string_view> EnabledNames;
+};
+
+class FeatureChainVulkan {
+public:
+    explicit FeatureChainVulkan(const DeviceFeaturesVulkan& features = {}) noexcept;
+    FeatureChainVulkan(const FeatureChainVulkan&) = delete;
+    FeatureChainVulkan& operator=(const FeatureChainVulkan&) = delete;
+
+    DeviceFeaturesVulkan Snapshot() const noexcept;
+
+    void ApplyTo(VkDeviceCreateInfo& createInfo) const noexcept;
+
+    VkPhysicalDeviceFeatures2 Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept;
+
+FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested);
+
+std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept;
+
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
 
 template <class T>

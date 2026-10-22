@@ -268,7 +268,7 @@ POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启
 |---|---|
 | `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler` |
 | `test_radray_render` | `ExplicitBindingLayoutTest`、`ExplicitLayoutOwnershipD3D12`、`ExplicitLayoutOwnershipVulkan`、`DescriptorDirtyRangesD3D12Test` |
-| `test_radray_render`（Vulkan） | `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`；Win32 另含 `VulkanSwapChainWsiTest` |
+| `test_radray_render`（Vulkan） | `VulkanDeviceFeaturePolicy`、`VulkanDeviceFeatureConsumers`、`VulkanDeviceFeatureGpu`、`VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`；Win32 另含 `VulkanSwapChainWsiTest` |
 | `test_radray_window`（Win32） | 用 `ctest -N` 查看当前注册用例 |
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderArtifact`、`RadRayShaderContract`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayShaderLibPass` |
@@ -286,7 +286,21 @@ render 测试覆盖显式布局、各类资源、数组、固定 sampler、动�
 布局直接创建、释放和失败清理使用测试侧 probe 或原生 debug 消息观察，
 不在生产代码添加测试字段。交换链回收/WSI 测试保留。
 render 测试读取 `modules/render/tests/data/shader_bytecode/`，无需 shader/compiler/DXC。
+Vulkan feature 策略测试覆盖全支持时的精确请求集、逐位缺失、必需/可选分离、查询结果不变、
+独立创建链与无链接快照；consumer probe 验证 sampler 及 indirect batching / 单 draw 回退读取 Enabled。
+`VulkanDeviceFeatureGpu` 在启用 validation / synchronization validation 后分别测试物理设备索引 0、1，
+检查实际能力快照、UAV stages、buffer limits、普通/immutable sampler、timeline 等待及销毁。
+不存在的第二块设备单列跳过；已枚举 adapter 的设备创建失败必须失败，不能因为缺少 GOOGLE
+反射扩展而跳过。设置 `RADRAY_TEST_VULKAN_ADAPTER_INDEX` 可让公共 GPU fixture 显式选择设备，
+覆盖显式布局、dispatch/读回和 WSI；未设置时选择高性能设备，非法或不存在的指定索引必须失败。
+报告记录实际 adapter、索引、validation / synchronization validation 状态与原生错误计数。
+验收先分别构建 ClangCL Debug / Release，再运行上述 suites 和现有显式布局、传统 framebuffer、WSI 回归；
+另用 `RADRAY_ENABLE_VULKAN=OFF` 配置构建 render 测试，确认后端关闭时无 Vulkan 链接依赖。
 artifact golden 与 contract 测试位于 `modules/shader/tests/`。
+`RadRayDxcMetadata.SpirvMetadataDoesNotRequireGoogleExtensions` 检查优化/调试编译组合的原始
+SPIR-V 不声明 GOOGLE 反射扩展且独立 metadata 仍完整；render 的字节码回归不依赖 DXC。
+`VulkanShaderBytecode` 检查所有原始 SPIR-V fixture 及对齐/非对齐输入原样提交；
+`VulkanGpuTest` 使用无 GOOGLE 扩展的 VS/PS 完成传统 framebuffer 绘制并验证像素读回。
 
 显式更新 fixture 时开启 compiler，然后手动构建并运行生成器：
 
@@ -311,6 +325,19 @@ Vulkan 交换链的退休状态机与原生函数表故障测试不要求 GPU；
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'vulkan'
 cmake --build --preset win-x64-debug-clangcl --target test_radray_render --parallel 8
 ctest --preset win-x64-debug-clangcl -R VulkanSwapChain --output-on-failure --timeout 45
+```
+
+双 GPU P0 验收先用 `VulkanDeviceFeatureGpu` 的报告确认索引与设备名称，再分别指定索引运行
+Vulkan suites；Debug / Release 各自先构建后测试，不并发构建与测试。例如每个配置构建完成后：
+
+```powershell
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'vulkan'
+foreach ($adapterIndex in 0, 1) {
+    $env:RADRAY_TEST_VULKAN_ADAPTER_INDEX = "$adapterIndex"
+    ctest --preset win-x64-debug-clangcl -R 'Vulkan|ExplicitBindingLayoutTest.*<01-' -E 'ExplicitBindingLayoutTest.*<00-' --output-on-failure --timeout 60
+    if ($LASTEXITCODE -ne 0) { break }
+}
+Remove-Item Env:RADRAY_TEST_VULKAN_ADAPTER_INDEX
 ```
 
 `tools/run_render_validation.py --help` 提供已构建配置的串行 CTest 与后端证据收集；它不负责构建。

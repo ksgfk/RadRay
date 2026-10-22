@@ -1802,7 +1802,7 @@ public:
             return nullptr;
         }
 #ifdef RADRAY_ENABLE_VULKAN
-        if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native && desc.Primitive.Poly != PolygonMode::Fill && !native->_feature.fillModeNonSolid) {
+        if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native && desc.Primitive.Poly != PolygonMode::Fill && !native->_enabledFeatures.Core.fillModeNonSolid) {
             _context->Reject("CreateGraphicsPipelineState", "non-solid polygon mode is unsupported");
             return nullptr;
         }
@@ -1844,7 +1844,9 @@ public:
         if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native) {
             const auto& limits = native->_properties.limits;
             if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
-                (desc.AnisotropyClamp > 1 && (!native->_feature.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)))
+                (desc.AnisotropyClamp > 1 && (!native->_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
+                (desc.Reduction != SamplerReductionMode::WeightedAverage && !native->_enabledFeatures.Vulkan12.samplerFilterMinmax) ||
+                ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !native->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge))
                 return _context->Reject("CreateSampler", "sampler exceeds Vulkan device capabilities");
         }
 #endif
