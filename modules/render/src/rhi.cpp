@@ -10,6 +10,7 @@
 
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
+#include "d3d12/d3d12_diagnostics.h"
 #endif
 
 #ifdef RADRAY_ENABLE_VULKAN
@@ -299,6 +300,15 @@ void InstanceVulkan::ShutdownEnv() noexcept {
     return vulkan::ShutdownVulkanEnvImpl();
 #else
     RADRAY_ERR_LOG("Vulkan disable");
+#endif
+}
+
+Nullable<shared_ptr<DXGIDiagnosticContext>> DXGIDiagnosticContext::Create() {
+#ifdef RADRAY_ENABLE_D3D12
+    return d3d12::detail::CreateDiagnosticContext();
+#else
+    RADRAY_ERR_LOG("D3D12 disable");
+    return nullptr;
 #endif
 }
 

@@ -23,12 +23,11 @@ protected:
         ASSERT_TRUE(AddWindowAndChain());
     }
     void TearDown() override {
-        if (Context.Queue) Context.Queue->Wait();
+        Context.WaitAllQueues();
         Chains.clear();
         for (HWND window : Windows) ::DestroyWindow(window);
         Windows.clear();
         Context.Reset();
-        EXPECT_EQ(Context.ValidationErrors.load(), 0u);
         EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
     }
     void Pump() {
@@ -86,6 +85,7 @@ protected:
         CommandBuffer* commands[]{command.Get()};
         SwapChainSyncObject* waits[]{frame.GetWaitToDraw()};
         SwapChainSyncObject* signals[]{frame.GetReadyToPresent()};
+        test::GpuWorkGuard gpuWork{Context};
         Context.Queue->Submit({.CmdBuffers = commands, .WaitToExecute = waits, .ReadyToPresent = signals});
         const auto presented = chain.Present(std::move(frame));
         Context.Queue->Wait();

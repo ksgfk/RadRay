@@ -331,7 +331,6 @@ protected:
 
     void TearDown() override {
         Context.Reset();
-        EXPECT_EQ(Context.ValidationErrors.load(), 0u);
     }
 };
 
@@ -388,6 +387,7 @@ TEST_F(VulkanGpuTest, GoogleFreeGraphicsDrawsThroughTraditionalFramebuffer) {
     command->CopyTextureToBuffer(readback.get(), 0, target->Tex.get(), {0, 1, 0, 1});
     command->End();
     CommandBuffer* commands[]{command.get()};
+    test::GpuWorkGuard gpuWork{Context};
     Context.Queue->Submit({.CmdBuffers = commands});
     Context.Queue->Wait();
     const auto* pixels = static_cast<const uint8_t*>(readback->Map(0, rowPitch * 8));
@@ -448,6 +448,7 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
         EXPECT_FALSE(fence->WaitFor(1, 0));
         Fence* signals[]{fence.get()};
         uint64_t values[]{1};
+        test::GpuWorkGuard gpuWork{Context};
         Context.Queue->Submit({.SignalFences = signals, .SignalValues = values});
         EXPECT_TRUE(fence->WaitFor(1, 10000));
         EXPECT_EQ(fence->GetCompletedValue(), 1u);
@@ -477,7 +478,6 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
         }
         device->_enabledFeatures = expected.Enabled;
         Context.Queue->Wait();
-        EXPECT_EQ(Context.ValidationErrors.load(), 0u);
         RecordProperty("adapter_" + std::to_string(adapter.Index), adapter.Name);
     }
 }

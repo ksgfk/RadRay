@@ -180,6 +180,7 @@ protected:
 
     void SetUp() override {
         auto& table = Device._ftb;
+        table = {};
         table.vkCreateFence = Probe.CreateFence;
         table.vkDestroyFence = Probe.DestroyFence;
         table.vkGetFenceStatus = Probe.FenceStatus;

@@ -1,6 +1,10 @@
 #include "gpu_test_fixture.h"
 #include <filesystem>
 #include <fstream>
+#include <radray/scope_guard.h>
+#ifdef RADRAY_ENABLE_D3D12
+#include <dxgimessages.h>
+#endif
 
 namespace radray::render {
 namespace {
@@ -31,7 +35,6 @@ protected:
     }
     void TearDown() override {
         Context.Reset();
-        EXPECT_EQ(Context.ValidationErrors.load(), 0u);
     }
 };
 
@@ -80,6 +83,7 @@ TEST_P(ExplicitBindingLayoutTest, SharesGroupAndParametersAcrossPipelinesWithDif
             command->CopyBufferToBuffer(readback.get(), 0, output.get(), dynamic ? dynamicOffset : 0, 4);
             command->End();
             CommandBuffer* commands[]{command.get()};
+            test::GpuWorkGuard gpuWork{Context};
             Context.Queue->Submit({.CmdBuffers = commands});
             Context.Queue->Wait();
             auto* mapped = static_cast<uint32_t*>(readback->Map(0, 4));
@@ -185,6 +189,7 @@ TEST_P(ExplicitBindingLayoutTest, RetainsViewAndMaterialWhenOnlyObjectGroupIsReb
         command->CopyBufferToBuffer(readback.get(), 0, output.get(), 0, dispatchCount * stride);
         command->End();
         CommandBuffer* commands[]{command.get()};
+        test::GpuWorkGuard gpuWork{Context};
         Context.Queue->Submit({.CmdBuffers = commands});
         Context.Queue->Wait();
         auto* mapped = static_cast<uint32_t*>(readback->Map(0, dispatchCount * stride));
@@ -193,7 +198,6 @@ TEST_P(ExplicitBindingLayoutTest, RetainsViewAndMaterialWhenOnlyObjectGroupIsReb
         for (uint32_t i = 0; i < dispatchCount; ++i) EXPECT_EQ(mapped[i * wordsPerRecord], expected[i]) << "dispatch " << i;
         readback->Unmap();
         EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
-        EXPECT_EQ(Context.ValidationErrors.load(), 0u);
     }
 }
 
@@ -238,6 +242,7 @@ TEST_P(ExplicitBindingLayoutTest, IndependentD3D12PushBlocksAndSingleVulkanBlock
     command->CopyBufferToBuffer(readback.get(), 0, output.get(), 0, 4);
     command->End();
     CommandBuffer* commands[]{command.get()};
+    test::GpuWorkGuard gpuWork{Context};
     Context.Queue->Submit({.CmdBuffers = commands});
     Context.Queue->Wait();
     auto* mapped = static_cast<uint32_t*>(readback->Map(0, 4));
@@ -374,6 +379,7 @@ TEST_P(ExplicitBindingLayoutTest, SparseNativeSetArraysSamplersBuffersAndPartial
     command->CopyTextureToBuffer(readback.get(), 512, image.get(), {0, 1, 0, 1});
     command->End();
     CommandBuffer* commands[]{command.get()};
+    test::GpuWorkGuard gpuWork{Context};
     Context.Queue->Submit({.CmdBuffers = commands});
     Context.Queue->Wait();
     auto* mapped = static_cast<uint32_t*>(readback->Map(0, 1024));
@@ -572,44 +578,99 @@ TEST(ExplicitLayoutOwnershipVulkan, ParameterSetsAllocateOnlyTheirOwnGroupDescri
 #endif
 
 #ifdef RADRAY_ENABLE_D3D12
-TEST(ExplicitLayoutOwnershipD3D12, NativeDebugMessagesObserveIndependentCreationAndRelease) {
+
+TEST(ExplicitLayoutOwnershipD3D12, NativeObjectLifetimesRespectIndependentOwners) {
     test::DeviceContext context;
     if (!test::TryCreateDevice(RenderBackend::D3D12, context, true, false)) {
         if (test::SetupMustFail(context.Status, test::RequiredBackend(RenderBackend::D3D12))) FAIL() << context.Reason;
         GTEST_SKIP() << context.Reason;
     }
+    auto shutdown = MakeScopeGuard([&] {
+        context.Reset();
+        EXPECT_EQ(context.ValidationErrors.load(), 0u);
+    });
     auto& device = *static_cast<d3d12::DeviceD3D12*>(context.Device.get());
-    d3d12::ComPtr<ID3D12InfoQueue> messages;
-    ASSERT_TRUE(SUCCEEDED(device._device.As(&messages)));
-    ASSERT_TRUE(SUCCEEDED(messages->PushEmptyStorageFilter()));
-    messages->ClearStoredMessages();
+    size_t messageStart = 0;
     const auto count = [&](D3D12_MESSAGE_ID id) {
-        uint32_t result = 0;
-        for (UINT64 i = 0; i < messages->GetNumStoredMessagesAllowedByRetrievalFilter(); ++i) {
-            SIZE_T length = 0;
-            if (FAILED(messages->GetMessage(i, nullptr, &length))) continue;
-            vector<byte> storage(length);
-            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-            if (SUCCEEDED(messages->GetMessage(i, message, &length)) && message->ID == id) ++result;
-        }
-        return result;
+        EXPECT_TRUE(context.Diagnostics->Checkpoint());
+        return context.Diagnostics->Count(messageStart, d3d12::detail::DiagnosticSource::D3D12, static_cast<int32_t>(id));
     };
-    const auto binding = MakeBinding(1, BindingKind::CBuffer, 0, 0);
-    auto group = device.CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
-    const PipelineLayoutGroupDescriptor slot{3, group.get()};
-    auto first = device.CreatePipelineLayout({std::span{&slot, 1}, {}}).Unwrap();
-    auto second = device.CreatePipelineLayout({std::span{&slot, 1}, {}}).Unwrap();
-    EXPECT_EQ(count(D3D12_MESSAGE_ID_CREATE_ROOTSIGNATURE), 2u);
-    first->Destroy();
-    first->Destroy();
-    // The debug layer may defer destruction messages until its next API call.
-    EXPECT_FALSE(first->IsValid());
-    EXPECT_TRUE(group->IsValid());
-    EXPECT_TRUE(second->IsValid());
-    second.reset();
-    EXPECT_EQ(count(D3D12_MESSAGE_ID_DESTROY_ROOTSIGNATURE), 2u);
-    messages->PopStorageFilter();
-    EXPECT_EQ(context.ValidationErrors.load(), 0u);
+    const auto bytes = ReadStage("compute", RenderBackend::D3D12);
+    ASSERT_FALSE(bytes.empty());
+    auto shader = device.CreateShader({bytes, ShaderBlobCategory::DXIL, ShaderStage::Compute}).Unwrap();
+    for (const bool distinctDescription : {false, true}) {
+        SCOPED_TRACE(distinctDescription);
+        messageStart = context.Diagnostics->CheckpointAndMark();
+        const auto binding = MakeBinding(1, BindingKind::RWStructuredBuffer, 2, 6);
+        auto group = device.CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
+        const PipelineLayoutGroupDescriptor slot{3, group.get()};
+        const PushConstantDescriptor unusedPush{77, 4, ShaderStage::Compute, PushConstantDescriptor::D3D12Location{9, 0}, {}};
+        auto first = device.CreatePipelineLayout({std::span{&slot, 1}, {}}).Unwrap();
+        const auto firstCreateMessages = count(D3D12_MESSAGE_ID_CREATE_ROOTSIGNATURE);
+        auto second = device.CreatePipelineLayout({std::span{&slot, 1}, distinctDescription ? std::span{&unusedPush, 1} : std::span<const PushConstantDescriptor>{}}).Unwrap();
+        ASSERT_NE(first.get(), second.get());
+        d3d12::ComPtr<IUnknown> firstIdentity, secondIdentity;
+        ASSERT_TRUE(SUCCEEDED(static_cast<d3d12::RootSigD3D12*>(first.get())->_rootSignature.As(&firstIdentity)));
+        ASSERT_TRUE(SUCCEEDED(static_cast<d3d12::RootSigD3D12*>(second.get())->_rootSignature.As(&secondIdentity)));
+        const uint32_t nativeObjects = firstIdentity.Get() == secondIdentity.Get() ? 1u : 2u;
+        if (distinctDescription) EXPECT_EQ(nativeObjects, 2u);
+        firstIdentity.Reset();
+        secondIdentity.Reset();
+        RecordProperty(distinctDescription ? "distinct_description_native_objects" : "same_description_native_objects", nativeObjects);
+        const auto createMessages = count(D3D12_MESSAGE_ID_CREATE_ROOTSIGNATURE);
+        ASSERT_GE(firstCreateMessages, 1u);
+        if (context.GpuValidationEnabled) {
+            EXPECT_GE(createMessages, nativeObjects);
+        } else {
+            EXPECT_EQ(createMessages, nativeObjects);
+        }
+        RecordProperty(distinctDescription ? "distinct_description_create_messages" : "same_description_create_messages", static_cast<int>(createMessages));
+        first->Destroy();
+        first->Destroy();
+        EXPECT_FALSE(first->IsValid());
+        EXPECT_TRUE(group->IsValid());
+        ASSERT_TRUE(second->IsValid());
+        EXPECT_EQ(count(D3D12_MESSAGE_ID_DESTROY_ROOTSIGNATURE), nativeObjects == 1 ? 0u : firstCreateMessages);
+        {
+            auto pipeline = device.CreateComputePipelineState({second.get(), {shader.get(), "CSMain"}}).Unwrap();
+            auto output = device.CreateBuffer({.Size = 4, .Memory = MemoryType::Device, .Usage = BufferUse::UnorderedAccess | BufferUse::CopySource}).Unwrap();
+            auto readback = device.CreateBuffer({.Size = 4, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
+            auto parameters = device.CreateShaderParameterSet({group.get()}).Unwrap();
+            ASSERT_TRUE(parameters->Set(1, 0, ShaderBufferBinding{output.get(), {0, 4}, 4}));
+            ASSERT_TRUE(parameters->FlushWrites());
+            auto allocator = device.CreateCommandAllocator(context.Queue).Unwrap();
+            auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+            command->Begin();
+            const ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{output.get(), BufferState::Undefined, BufferState::UnorderedAccess};
+            command->ResourceBarrier(std::span{&toUav, 1});
+            auto encoder = command->BeginComputePass().Unwrap();
+            encoder->BindComputePipelineState(pipeline.get());
+            encoder->BindShaderParameterSet(3, parameters.get());
+            encoder->Dispatch(1, 1, 1);
+            command->EndComputePass(std::move(encoder));
+            const ResourceBarrierDescriptor toCopy = BarrierBufferDescriptor{output.get(), BufferState::UnorderedAccess, BufferState::CopySource};
+            command->ResourceBarrier(std::span{&toCopy, 1});
+            command->CopyBufferToBuffer(readback.get(), 0, output.get(), 0, 4);
+            command->End();
+            CommandBuffer* commands[]{command.get()};
+            test::GpuWorkGuard gpuWork{context};
+            context.Queue->Submit({.CmdBuffers = commands});
+            context.Queue->Wait();
+            const auto* value = static_cast<const uint32_t*>(readback->Map(0, 4));
+            ASSERT_NE(value, nullptr);
+            readback->InvalidateMappedRange({0, 4});
+            EXPECT_EQ(*value, 0x12345678u);
+            readback->Unmap();
+        }
+        second->Destroy();
+        second->Destroy();
+        EXPECT_FALSE(second->IsValid());
+        EXPECT_TRUE(group->IsValid());
+        first.reset();
+        second.reset();
+        context.Queue->Wait();
+        EXPECT_EQ(count(D3D12_MESSAGE_ID_DESTROY_ROOTSIGNATURE), createMessages);
+    }
 }
 
 TEST(ExplicitLayoutOwnershipD3D12, ParameterSetsAllocateOnlyTheirOwnGroupDescriptors) {
