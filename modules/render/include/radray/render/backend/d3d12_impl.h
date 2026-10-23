@@ -334,6 +334,8 @@ public:
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
 
+    AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
@@ -393,7 +395,6 @@ public:
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     SamplerCache _samplerCache;
     RenderDeviceCapabilities _capabilities;
-    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
@@ -592,6 +593,7 @@ public:
 
 public:
     CmdListD3D12* _cmdList;
+    vector<vector<D3D12_RENDER_PASS_ENDING_ACCESS_RESOLVE_SUBRESOURCE_PARAMETERS>> _resolveSubresources;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
 };

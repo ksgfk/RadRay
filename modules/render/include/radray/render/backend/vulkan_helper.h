@@ -70,6 +70,7 @@ struct FeatureRequestsVulkan {
     FeatureRequirementVulkan SamplerMirrorClampToEdge{};
     FeatureRequirementVulkan SamplerFilterMinmax{};
     FeatureRequirementVulkan ImagelessFramebuffer{};
+    FeatureRequirementVulkan SeparateDepthStencilLayouts{};
 };
 
 struct FeatureSelectionVulkan {
@@ -259,7 +260,7 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
 
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept;
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept;
-VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format = TextureFormat::UNKNOWN) noexcept;
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format = TextureFormat::UNKNOWN, TextureAspect aspect = TextureAspect::Auto, bool separate = false) noexcept;
 VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;

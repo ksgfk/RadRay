@@ -1,6 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
 #include <radray/profiler.h>
-#include "../texture_support_cache.h"
 
 #if RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
@@ -734,6 +733,7 @@ RenderPassExecutionKeyVulkan RenderPassExecutionKeyVulkan::Build(const RenderPas
     for (size_t i = 0; i < scope.Colors.size(); ++i) {
         key.ColorAttachments[i].Load = scope.Colors[i].Load;
         key.ColorAttachments[i].Store = scope.Colors[i].Store;
+        key.ColorAttachments[i].Resolve = bool(scope.Colors[i].ResolveTarget);
     }
     if (scope.DepthStencil) {
         const auto& depth = *scope.DepthStencil;
@@ -743,7 +743,11 @@ RenderPassExecutionKeyVulkan RenderPassExecutionKeyVulkan::Build(const RenderPas
         const bool stencil = d.Format == TextureFormat::D24_UNORM_S8_UINT || d.Format == TextureFormat::D32_FLOAT_S8_UINT;
         d.StencilLoad = stencil ? depth.StencilLoad : LoadAction::DontCare;
         d.StencilStore = stencil ? depth.StencilStore : StoreAction::Discard;
-        d.ReadOnly = depth.ReadOnly;
+        d.Usage = depth.View->GetDesc().Usage;
+        if (depth.Resolve) {
+            d.DepthResolve = depth.Resolve->DepthMode;
+            d.StencilResolve = depth.Resolve->StencilMode;
+        }
     }
     return key;
 }
@@ -761,6 +765,7 @@ size_t RenderPassKeyHashVulkan::operator()(const RenderPassExecutionKeyVulkan& k
         h.Add(c.SampleCount);
         h.Add(c.Load);
         h.Add(c.Store);
+        h.Add(c.Resolve);
     }
     h.Add(key.DepthStencilAttachment.has_value());
     if (key.DepthStencilAttachment) {
@@ -771,7 +776,9 @@ size_t RenderPassKeyHashVulkan::operator()(const RenderPassExecutionKeyVulkan& k
         h.Add(d.DepthStore);
         h.Add(d.StencilLoad);
         h.Add(d.StencilStore);
-        h.Add(d.ReadOnly);
+        h.Add(d.Usage);
+        h.Add(d.DepthResolve);
+        h.Add(d.StencilResolve);
     }
     return h.ToHashCode();
 }
@@ -782,6 +789,8 @@ size_t FramebufferKeyHashVulkan::operator()(const FramebufferKeyVulkan& key) con
     h.Add(key.Signature.DepthStencil.has_value());
     if (key.Signature.DepthStencil) h.Add(*key.Signature.DepthStencil);
     h.Add(key.Signature.Samples);
+    h.Add(key.Formats.size());
+    for (auto f : key.Formats) h.Add(f);
     h.Add(key.Views.size());
     for (auto id : key.Views) h.Add(id);
     h.Add(key.Attachments.size());
@@ -859,13 +868,14 @@ IntrusivePtr<NativeFramebufferVulkan> VulkanRenderPassCache::Acquire(const Frame
         info.layers = key.Layers;
         vector<VkFormat> formats;
         vector<VkFramebufferAttachmentImageInfo> attachments;
-        VkFramebufferAttachmentsCreateInfo attachmentInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO};
+        VkFramebufferAttachmentsCreateInfo attachmentInfo{};
+        attachmentInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
         if (IsImageless()) {
             formats.reserve(key.Attachments.size());
             attachments.reserve(key.Attachments.size());
             for (size_t i = 0; i < key.Attachments.size(); ++i) {
                 const auto& source = key.Attachments[i];
-                formats.push_back(MapType(i < key.Signature.Colors.size() ? key.Signature.Colors[i] : *key.Signature.DepthStencil));
+                formats.push_back(MapType(key.Formats[i]));
                 attachments.push_back({VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO, nullptr,
                                        source.Flags, source.Usage, source.Width, source.Height, source.Layers,
                                        1, &formats.back()});
@@ -996,6 +1006,7 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
         }
         attachments.push_back(VkAttachmentDescription2{
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .pNext = nullptr,
             .flags = 0,
             .format = MapType(color.Format),
             .samples = MapSampleCount(color.SampleCount),
@@ -1007,12 +1018,17 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
             .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
         colorReferences.push_back(VkAttachmentReference2{
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+            .pNext = nullptr,
             .attachment = static_cast<uint32_t>(attachments.size() - 1),
             .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT});
     }
 
     VkAttachmentReference2 depthReference{};
+    VkAttachmentDescriptionStencilLayout stencilDescription{};
+    stencilDescription.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT;
+    VkAttachmentReferenceStencilLayout stencilReference{};
+    stencilReference.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_STENCIL_LAYOUT;
     if (desc.DepthStencilAttachment.has_value()) {
         const RenderPassDepthStencilAttachmentDescriptor& depth = desc.DepthStencilAttachment.value();
         if (!IsDepthStencilFormat(depth.Format) || depth.SampleCount == 0) {
@@ -1021,14 +1037,20 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
         }
         const bool hasStencil = depth.Format == TextureFormat::D24_UNORM_S8_UINT ||
                                 depth.Format == TextureFormat::D32_FLOAT_S8_UINT;
-        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
-                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
+        if ((IsDepthReadOnly(depth.Usage) && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store)) ||
+            (hasStencil && IsStencilReadOnly(depth.Usage) && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store))) {
             RADRAY_ERR_LOG("vk read-only depth/stencil attachment must preserve its contents");
             return VK_NULL_HANDLE;
         }
-        const VkImageLayout layout = depth.ReadOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+        const VkImageLayout layout = separate ? TextureStateToLayout(IsDepthReadOnly(depth.Usage) ? TextureState::DepthRead : TextureState::DepthWrite, depth.Format, TextureAspect::Depth, true) : TextureViewUsageToLayout(depth.Usage);
+        if (separate && hasStencil) {
+            stencilDescription.stencilInitialLayout = stencilDescription.stencilFinalLayout = TextureStateToLayout(IsStencilReadOnly(depth.Usage) ? TextureState::DepthRead : TextureState::DepthWrite, depth.Format, TextureAspect::Stencil, true);
+            stencilReference.stencilLayout = stencilDescription.stencilInitialLayout;
+        }
         attachments.push_back(VkAttachmentDescription2{
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .pNext = nullptr,
             .flags = 0,
             .format = MapType(depth.Format),
             .samples = MapSampleCount(depth.SampleCount),
@@ -1040,13 +1062,63 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
             .finalLayout = layout});
         depthReference = VkAttachmentReference2{
             .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+            .pNext = nullptr,
             .attachment = static_cast<uint32_t>(attachments.size() - 1),
             .layout = layout,
             .aspectMask = static_cast<VkImageAspectFlags>(GetTextureFormatAspects(depth.Format).value())};
+        if (separate && hasStencil) {
+            attachments.back().pNext = &stencilDescription;
+            depthReference.pNext = &stencilReference;
+        }
     }
 
+    vector<VkAttachmentReference2> resolveReferences;
+    bool hasColorResolve = false;
+    for (const auto& color : desc.ColorAttachments) {
+        VkAttachmentReference2 ref{VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, nullptr, VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT};
+        if (color.Resolve) {
+            hasColorResolve = true;
+            ref.attachment = static_cast<uint32_t>(attachments.size());
+            attachments.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, nullptr, 0, MapType(color.Format), VK_SAMPLE_COUNT_1_BIT,
+                                   VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+        }
+        resolveReferences.push_back(ref);
+    }
+    VkSubpassDescriptionDepthStencilResolve dsResolve{};
+    dsResolve.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+    VkAttachmentReference2 dsResolveReference{};
+    dsResolveReference.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+    VkAttachmentDescriptionStencilLayout resolveStencilDesc{};
+    resolveStencilDesc.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT;
+    VkAttachmentReferenceStencilLayout resolveStencilRef{};
+    resolveStencilRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_STENCIL_LAYOUT;
+    if (desc.DepthStencilAttachment && (desc.DepthStencilAttachment->DepthResolve != ResolveMode::None || desc.DepthStencilAttachment->StencilResolve != ResolveMode::None)) {
+        const auto& ds = *desc.DepthStencilAttachment;
+        const bool stencil = GetTextureFormatAspects(ds.Format).HasFlag(TextureAspect::Stencil);
+        const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+        const auto layout = TextureStateToLayout(TextureState::AttachmentResolveDestination, ds.Format, TextureAspect::Depth, separate);
+        dsResolveReference.attachment = static_cast<uint32_t>(attachments.size());
+        dsResolveReference.layout = layout;
+        dsResolveReference.aspectMask = GetTextureFormatAspects(ds.Format).value();
+        attachments.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, nullptr, 0, MapType(ds.Format), VK_SAMPLE_COUNT_1_BIT,
+                               VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+                               stencil ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                               stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE, layout, layout});
+        if (separate && stencil) {
+            resolveStencilDesc.stencilInitialLayout = resolveStencilDesc.stencilFinalLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+            resolveStencilRef.stencilLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+            attachments.back().pNext = &resolveStencilDesc;
+            dsResolveReference.pNext = &resolveStencilRef;
+        }
+        dsResolve.depthResolveMode = static_cast<VkResolveModeFlagBits>(ds.DepthResolve);
+        dsResolve.stencilResolveMode = static_cast<VkResolveModeFlagBits>(ds.StencilResolve);
+        dsResolve.pDepthStencilResolveAttachment = &dsResolveReference;
+    }
     VkSubpassDescription2 subpass{};
     subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+    subpass.pNext = dsResolve.pDepthStencilResolveAttachment ? &dsResolve : nullptr;
+    subpass.pResolveAttachments = hasColorResolve ? resolveReferences.data() : nullptr;
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
     subpass.pColorAttachments = colorReferences.empty() ? nullptr : colorReferences.data();
@@ -1107,10 +1179,25 @@ static VkImageUsageFlags _TextureUsageFlags(TextureUses usage) noexcept {
     return result;
 }
 
-TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
-    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
-        if (cachedQuery == query) return cachedSupport;
+AttachmentResolveSupport DeviceVulkan::QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept {
+    if (samples <= 1 || (samples & (samples - 1))) return {};
+    const bool depth = IsDepthStencilFormat(format);
+    const auto support = QueryTextureSupport({TextureDimension::Dim2D, format, depth ? TextureUse::DepthStencilWrite : TextureUse::RenderTarget});
+    if (!support.Supported || !(support.SampleCounts.value() & samples) || !support.SampleCounts.HasFlag(SampleCount::X1)) return {};
+    AttachmentResolveSupport result;
+    if (!depth)
+        result.ColorAverage = !IsUintFormat(format) && !IsSintFormat(format);
+    else {
+        const auto& props = _extProperties.Vulkan12;
+        result.DepthModes = ResolveModes{props.supportedDepthResolveModes};
+        if (GetTextureFormatAspects(format).HasFlag(TextureAspect::Stencil)) result.StencilModes = ResolveModes{props.supportedStencilResolveModes};
+        result.IndependentResolve = props.independentResolve != 0;
+        result.IndependentResolveNone = props.independentResolveNone != 0;
     }
+    return result;
+}
+
+TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
     if (!IsValidTextureSupportQuery(query)) return {};
     VkPhysicalDeviceImageFormatInfo2 info{};
     info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
@@ -1137,6 +1224,7 @@ TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& quer
     }
     result.Supported = bool(result.SampleCounts);
     result.LinearFiltering = (flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    result.MinMaxFiltering = _enabledFeatures.Vulkan12.samplerFilterMinmax && (flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT) != 0;
     result.Blending = (flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
     result.MaxWidth = limits.maxExtent.width;
     result.MaxHeight = limits.maxExtent.height;
@@ -1464,10 +1552,13 @@ std::pair<bool, string> DeviceVulkan::ValidateTextureView(const TextureViewDescr
         case TextureViewUsage::UnorderedAccess: required = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT; break;
         case TextureViewUsage::RenderTarget: required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT; break;
         case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthReadStencilWrite:
+        case TextureViewUsage::DepthWriteStencilRead:
         case TextureViewUsage::DepthWrite: required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT; break;
         case TextureViewUsage::UNKNOWN: return {false, "Vulkan view usage is invalid"};
     }
-    VkFormatProperties2 properties{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+    VkFormatProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
     vkGetPhysicalDeviceFormatProperties2(_physicalDevice, MapType(desc.Format), &properties);
     if ((properties.formatProperties.optimalTilingFeatures & required) != required)
         return {false, "Vulkan view format does not support the requested usage"};
@@ -1858,7 +1949,7 @@ bool ShaderParameterSetVulkan::Set(
             imageInfo.imageView = view->_imageView;
             imageInfo.imageLayout = entry->LogicalKind == BindingKind::RWTexture
                                         ? VK_IMAGE_LAYOUT_GENERAL
-                                        : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format);
+                                        : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format, static_cast<TextureAspect>(view->_nativeRange.Aspects.value()), _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0);
             write.pImageInfo = &imageInfo;
             break;
         }
@@ -2053,7 +2144,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     dynStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
     dynStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
     dynStates.emplace_back(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
-    dynStates.emplace_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
     VkPipelineDynamicStateCreateInfo dynStateInfo{};
     dynStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynStateInfo.pNext = nullptr;
@@ -2483,7 +2573,7 @@ void ShutdownVulkanEnvImpl() noexcept {
     volkFinalize();
 }
 
-Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc) {
+Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc, const FeatureRequestsVulkan& requestedFeatures) {
     if (!g_vkInstance.HasValue()) {
         RADRAY_ERR_LOG("vk env not init");
         return nullptr;
@@ -2644,7 +2734,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         deviceExts.emplace_back(ext.c_str());
     }
 
-    const auto requestedFeatures = GetRhiFeatureRequestsVulkan();
     FeatureChainVulkan supportedChain;
     vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &supportedChain.Core);
     const auto supportedFeatures = supportedChain.Snapshot();
@@ -2757,8 +2846,17 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             .IndirectDraw = true,
             .IndirectDispatch = true,
             .SubresourceBarriers = true,
+            .IndependentDepthStencilTransitions = deviceR->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0,
             .UavMemoryBarrier = true,
             .UavWriteStages = render::ShaderStage::Compute};
+        caps.Features.SamplerAnisotropy = deviceR->_enabledFeatures.Core.samplerAnisotropy != 0;
+        caps.Features.SamplerAnisotropyPointMip = caps.Features.SamplerAnisotropy;
+        caps.Features.SamplerMirrorClampToEdge = deviceR->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge != 0;
+        caps.Features.SamplerFilterMinmax = deviceR->_enabledFeatures.Vulkan12.samplerFilterMinmax != 0;
+        caps.Features.SamplerUnnormalizedCoordinates = caps.Features.SamplerIntegerBorderColor = true;
+        caps.Limits.MaxSamplerAnisotropy = caps.Features.SamplerAnisotropy ? limits.maxSamplerAnisotropy : 1.0f;
+        caps.Limits.MinSamplerLodBias = -limits.maxSamplerLodBias;
+        caps.Limits.MaxSamplerLodBias = limits.maxSamplerLodBias;
         if (deviceR->_enabledFeatures.Core.fragmentStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Pixel;
         }
@@ -2806,7 +2904,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_INFO_LOG("Conformance Version: {}.{}.{}.{}", conformance.major, conformance.minor, conformance.subminor, conformance.patch);
     }
     RADRAY_INFO_LOG("Enabled Features (API baseline 1.2): {}", fmt::join(selection.EnabledNames, ", "));
-    deviceR->_textureSupportCache = detail::CacheCommonTextureSupport(*deviceR);
     RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
     RADRAY_INFO_LOG("Queue:");
     for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
@@ -3152,32 +3249,36 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             dstStageMask |= dstStage;
         } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
             auto tex = CastVkObject(tb->Target);
-            auto& imgBarrier = imageBarriers.emplace_back();
-            imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            imgBarrier.pNext = nullptr;
-            imgBarrier.srcAccessMask = TextureStateToAccessFlags(tb->Before);
-            imgBarrier.dstAccessMask = TextureStateToAccessFlags(tb->After);
-            imgBarrier.oldLayout = TextureStateToLayout(tb->Before, tex->_format);
-            imgBarrier.newLayout = TextureStateToLayout(tb->After, tex->_format);
-            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.image = tex->_image;
             const auto normalized = ResolveSubresourceRange(tex->GetDesc(), tb->Range);
-            // This backend uses coupled depth/stencil layouts, so transitions cover both aspects.
-            imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-            imgBarrier.subresourceRange.baseMipLevel = normalized.BaseMipLevel;
-            imgBarrier.subresourceRange.levelCount = normalized.MipLevelCount;
-            imgBarrier.subresourceRange.baseArrayLayer = normalized.BaseArrayLayer;
-            imgBarrier.subresourceRange.layerCount = normalized.ArrayLayerCount;
-
-            auto srcStage = shaderStages(TextureStateToPipelineStageFlags(tb->Before, true), tb->BeforeStages);
-            auto dstStage = shaderStages(TextureStateToPipelineStageFlags(tb->After, false), tb->AfterStages);
-            // 如果是 swapchain image 从 undefined 转换, 增加 src stage 确保之前的写入操作都能被正确同步
-            if (tex->_isSwapchainImage && tb->Before == TextureState::Undefined) {
-                srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+            const auto allAspects = GetTextureFormatAspects(tex->_format);
+            if (!separate && allAspects.HasFlag(TextureAspect::Stencil) && normalized.Aspects != allAspects) {
+                RADRAY_ERR_LOG("Independent depth/stencil transition requires separateDepthStencilLayouts");
+                return;
             }
-            srcStageMask |= srcStage;
-            dstStageMask |= dstStage;
+            const auto add = [&](TextureAspects aspects, TextureStates before, TextureStates after) {
+                auto& imgBarrier = imageBarriers.emplace_back();
+                imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                imgBarrier.srcAccessMask = TextureStateToAccessFlags(before);
+                imgBarrier.dstAccessMask = TextureStateToAccessFlags(after);
+                const auto aspect = static_cast<TextureAspect>(aspects.value());
+                imgBarrier.oldLayout = TextureStateToLayout(before, tex->_format, aspect, separate);
+                imgBarrier.newLayout = TextureStateToLayout(after, tex->_format, aspect, separate);
+                imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imgBarrier.image = tex->_image;
+                imgBarrier.subresourceRange = {aspects.value(), normalized.BaseMipLevel, normalized.MipLevelCount, normalized.BaseArrayLayer, normalized.ArrayLayerCount};
+                auto srcStage = shaderStages(TextureStateToPipelineStageFlags(before, true), tb->BeforeStages);
+                if (tex->_isSwapchainImage && before == TextureState::Undefined) srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                srcStageMask |= srcStage;
+                dstStageMask |= shaderStages(TextureStateToPipelineStageFlags(after, false), tb->AfterStages);
+            };
+            if (separate && IsDepthStencilFormat(tex->_format)) {
+                for (auto aspect : {TextureAspect::Depth, TextureAspect::Stencil}) {
+                    if (normalized.Aspects.HasFlag(aspect)) add(aspect, TextureStateForAspect(tb->Before, aspect), TextureStateForAspect(tb->After, aspect));
+                }
+            } else
+                add(normalized.Aspects, tb->Before, tb->After);
         } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v); uav != nullptr) {
             uavMemoryBarrier = true;
             srcStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -3231,13 +3332,14 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     for (const auto& color : desc.Colors) signature.Colors.push_back(color.View->GetDesc().Format);
     if (desc.DepthStencil) signature.DepthStencil = desc.DepthStencil->View->GetDesc().Format;
     signature.Samples = (desc.Colors.empty() ? desc.DepthStencil->View : desc.Colors.front().View)->GetDesc().Target->GetDesc().SampleCount;
-    FramebufferKeyVulkan key{signature, {}, desc.Width, desc.Height, desc.Layers};
+    FramebufferKeyVulkan key{signature, {}, desc.Width, desc.Height, desc.Layers, {}, {}};
     vector<VkImageView> views;
     vector<uint64_t> newViewPins;
     const bool imageless = _device->_renderPassCache->IsImageless();
     const auto addView = [&](TextureView* raw) {
         auto* view = static_cast<ImageViewVulkan*>(raw);
         views.push_back(view->_imageView);
+        key.Formats.push_back(view->_mdesc.Format);
         if (std::find(_attachmentViewPins.begin(), _attachmentViewPins.end(), view->_viewId) == _attachmentViewPins.end() &&
             std::find(newViewPins.begin(), newViewPins.end(), view->_viewId) == newViewPins.end()) newViewPins.push_back(view->_viewId);
         if (imageless) {
@@ -3252,6 +3354,9 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     };
     for (const auto& color : desc.Colors) addView(color.View);
     if (desc.DepthStencil) addView(desc.DepthStencil->View);
+    for (const auto& color : desc.Colors)
+        if (color.ResolveTarget) addView(color.ResolveTarget.Get());
+    if (desc.DepthStencil && desc.DepthStencil->Resolve) addView(desc.DepthStencil->Resolve->Target);
     auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, signature), desc.Name);
     if (!pass) return nullptr;
     auto framebuffer = _device->_renderPassCache->Acquire(key, pass->Native, views, desc.Name);

@@ -160,6 +160,7 @@ struct RenderPassColorAttachmentDescriptor {
     LoadAction Load{LoadAction::DontCare};
     StoreAction Store{StoreAction::Store};
 
+    bool Resolve{false};
     friend bool operator==(const RenderPassColorAttachmentDescriptor&, const RenderPassColorAttachmentDescriptor&) noexcept = default;
 };
 
@@ -170,8 +171,8 @@ struct RenderPassDepthStencilAttachmentDescriptor {
     StoreAction DepthStore{};
     LoadAction StencilLoad{};
     StoreAction StencilStore{};
-    // Read-only depth/stencil requires Load/Store and a DepthRead framebuffer view.
-    bool ReadOnly{false};
+    TextureViewUsage Usage{TextureViewUsage::DepthWrite};
+    ResolveMode DepthResolve{ResolveMode::None}, StencilResolve{ResolveMode::None};
 
     friend bool operator==(const RenderPassDepthStencilAttachmentDescriptor&, const RenderPassDepthStencilAttachmentDescriptor&) noexcept = default;
 };
@@ -201,6 +202,7 @@ struct FramebufferKeyVulkan {
     vector<uint64_t> Views;
     uint32_t Width, Height, Layers;
     vector<FramebufferAttachmentVulkan> Attachments;
+    vector<TextureFormat> Formats;
     friend bool operator==(const FramebufferKeyVulkan&, const FramebufferKeyVulkan&) noexcept = default;
 };
 
@@ -298,6 +300,7 @@ public:
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+    AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
@@ -372,7 +375,6 @@ public:
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
     RenderDeviceCapabilities _capabilities;
-    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -1186,7 +1188,7 @@ public:
     VkSampler _sampler;
 };
 
-Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
+Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc, const FeatureRequestsVulkan& requestedFeatures = GetRhiFeatureRequestsVulkan());
 
 Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& desc);
 

@@ -313,9 +313,10 @@ loader 或物理设备版本不足则初始化失败；设备支持更高版本�
 | 普通与 immutable sampler | `samplerAnisotropy`、`samplerMirrorClampToEdge`、`samplerFilterMinmax` | 可选 |
 | Vertex / Pixel UAV 写入 | `vertexPipelineStoresAndAtomics`、`fragmentStoresAndAtomics` | 可选 |
 | Framebuffer 跨 view 复用 | `imagelessFramebuffer` | 可选，缺失时使用传统 framebuffer |
+| Depth/stencil 逐 aspect 转换 | `separateDepthStencilLayouts` | 可选，缺失时使用显式组合状态 |
 
 未列出的 feature 均关闭，包括全部 Vulkan 1.1 feature、`shaderOutputLayer`、`multiview`、
-`separateDepthStencilLayouts`、`robustBufferAccess`、`hostQueryReset`、
+`robustBufferAccess`、`hostQueryReset`、
 `uniformBufferStandardLayout`、扩展 subgroup 类型、BDA、indirect count、descriptor indexing、
 shader 动态资源索引、扩展数值类型和无格式 storage image 读写。
 Vulkan 的 `IsLayeredRenderingFromVertexShaderSupported` 返回 false；这不改变 D3D12 的能力报告。
@@ -377,8 +378,16 @@ Vulkan 映射包含 Set、Binding、Regular/Dynamic placement。一个组的全�
 `ShaderTexelBufferBinding`，同时携带格式；raw buffer 的 stride 为 0。Set 只更新指定数组元素。
 `ImmutableSampler` 直接持有 render 自有 `SamplerDescriptor`，归组布局，不能通过 Set 覆盖。
 固定与普通 sampler 使用相同 filter/address/LOD/bias/anisotropy/compare/border/reduction 语义；
-Vulkan 还支持合法的 unnormalized coordinates，D3D12 拒绝不能表达的 unnormalized、mirror-clamp 和整数 border。
-设备不支持的 sampler 能力返回失败，不静默降级。sampler cache key 包含这些字段。
+Vulkan 支持合法的 unnormalized coordinates 与整数 border，D3D12 拒绝这两种配置；D3D12 mirror-clamp 映射为 MIRROR_ONCE。
+普通、缓存、immutable sampler 在可选校验层复用相同参数检查：枚举、有限 LOD/bias、LOD 范围、anisotropy 上限，
+compare 只能搭配 WeightedAverage；unnormalized 必须满足 min/mag 相同、mip nearest、LOD 为零、禁止 compare/anisotropy 等限制。
+`DeviceFeatures` 报告 SamplerAnisotropy、SamplerAnisotropyPointMip、SamplerMirrorClampToEdge、SamplerFilterMinmax、
+SamplerUnnormalizedCoordinates 与 SamplerIntegerBorderColor；limits 报告 anisotropy 上限与 bias 范围。
+D3D12 的 anisotropy + nearest mip 还取决于 `AnisoFilterWithPointMipSupported`，不静默换为 linear mip；
+min/max reduction 依照设备 tiled-resource tier 的对应能力报告。Vulkan 读取实际 Enabled features。
+`TextureSupport::MinMaxFiltering` 还检查实际采样格式的支持，不能只复制设备 feature；Vulkan 整数格式是否支持同样以格式位为准。
+纹理与 sampler 的最终配对、坐标和 shader 使用方式由调用方检查，不增加 reflection 或自动配对系统。
+关闭 RHI 校验时调用方保证参数合法；native 创建失败仍返回空。sampler cache key 包含全部描述符字段。
 
 Shader 是否使用全部槽位不影响布局。调用方负责字节码与显式布局的 ABI 匹配，以及跨完整布局使用参数集时的
 原生兼容性。多个 PSO 可共享一个完整布局；多个完整布局可共享同一组布局和参数集。
@@ -519,8 +528,24 @@ read/write 的全局 memory dependency，不改变 layout，因此不会假设 t
 GENERAL。`SubresourceRange::Aspects` 选择 Color、Depth、Stencil，Auto 在归一化时展开为格式的全部
 aspects。采样 depth/stencil 默认只选 Depth，可显式选择 Stencil；DS attachment 必须包含全部 aspects。
 D3D12 transition 按选中 plane 展开 mip/layer；stencil SRV 使用对应 plane 与 X24/X32 类型映射。
-Vulkan 当前采用 coupled depth/stencil layout，转换会扩大至两个 aspects；不启用独立 DS layouts 时
-这是 [Vulkan barrier 规范](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageMemoryBarrier.html) 的要求。
+view 固定 depth/stencil 各 aspect 的写权限：`DepthRead` 全只读，`DepthWrite` 全可写，
+`DepthReadStencilWrite` 与 `DepthWriteStencilRead` 仅用于同时包含两种 aspects 的格式。
+barrier 描述实际 Before/After 状态，创建或绑定 view、Begin/End pass 不转换状态。`TextureState` 的两个同名混合状态
+只允许覆盖双 aspects，附加 ShaderRead 仅为只读 aspect 增加 shader 访问；单 aspect 的 DepthRead/DepthWrite 只指所选 aspect。
+
+`IndependentDepthStencilTransitions` 仅表示独立转换能力，不表示混合权限能力。Vulkan Enabled
+`separateDepthStencilLayouts` 时按 aspect 生成 barrier，并为 RenderPass2 使用独立 stencil layout 结构；
+关闭时仍以 Vulkan 1.1 混合组合 layout 支持两种混合权限，但 DS image 的 barrier 必须明确覆盖双 aspects、给出组合 Before/After。
+单 aspect 的独立转换明确拒绝，绝不扩大范围或猜测另一 aspect 状态；纯 depth 格式不受双 aspect 限制。
+D3D12 使用原有 plane subresource transitions，把混合状态拆到各 plane，未变化的 plane 不生成 transition。
+规则见 [Vulkan barrier 规范](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageMemoryBarrier.html)。
+
+Vulkan 单 aspect SRV 在独立路径使用对应 depth/stencil read-only layout，组合路径使用 DEPTH_STENCIL_READ_ONLY_OPTIMAL；
+后者依照[单 aspect 布局匹配规则](https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-image-layouts)
+与混合附件 layout 匹配。无需公共 descriptor layout 字段，Begin 不改写 descriptor。
+Vulkan 同时采样只读附件的保证限于 fragment shader 读取当前 fragment 对应的样本；任意坐标、其他 shader 阶段
+的同时访问不在本路径契约内。无 shader reflection 时由调用方保证这种访问方式，见
+[只读附件采样规则](https://docs.vulkan.org/spec/latest/chapters/renderpass.html#renderpass-feedbackloop)。该后端限制不施加于 D3D12。
 DepthRead 的 Vulkan access mask 同时覆盖 attachment read/write：传统只读附件的 Store 操作仍使用
 depth/stencil write access，离开只读 pass 的 barrier 必须等待该操作；这不会允许 PSO 写入只读附件。
 该要求见 [VkAttachmentStoreOp](https://docs.vulkan.org/refpages/latest/refpages/source/VkAttachmentStoreOp.html)。
@@ -528,7 +553,7 @@ depth/stencil write access，离开只读 pass 的 barrier 必须等待该操作
 
 `BarrierTextureDescriptor::Range` 是纹理 barrier 范围的唯一来源，默认 `SubresourceRange::AllSub()`
 覆盖整张纹理；count 为 `SubresourceRange::All` 时表示从对应 base 到末尾。两个后端使用归一化后的
-范围，D3D12 全范围 transition 使用整资源 barrier，部分范围按 plane/mip/layer 展开；D3D12 UAV
+范围，D3D12 transition 按 plane/mip/layer 展开；D3D12 UAV
 barrier 仍作用于整资源。
 
 Buffer barrier 携带 `BufferRange`，Vulkan 映射 offset/size，D3D12 legacy barrier 保守转换整 buffer。
@@ -571,9 +596,9 @@ Direct queue；`GetCommandQueue` 只查询已创建的 slot，不再隐式增加
 D3D12 无法报告专用物理引擎，Dedicated 为 false。buffer size 报告 backend 的资源大小上限，
 不保证当前预算下的 allocation 一定成功。
 
-`QueryTextureSupport` 的 key 为 dimension + format + usage，返回 sample mask、filter/blend
-事实及该组合的 extent/layer/mip/resource-size 上限。常见 2D 组合在 device 创建时缓存；其余
-查询直接读取 native device/physical-device 能力，不修改缓存。D3D12 查询 format support 与
+`QueryTextureSupport` 的查询条件为 dimension + format + usage，返回 sample mask、filter/blend
+事实及该组合的 extent/layer/mip/resource-size 上限。每次查询直接读取 native device/physical-device
+能力，device 创建时不预热，也不缓存查询结果。D3D12 查询 format support 与
 MSAA quality；Vulkan 查询相同 image flags/usage 的 image format properties。`Resource` 只映射
 sampled usage，RHI 没有 input attachment 使用接口。
 
@@ -693,24 +718,26 @@ front-face winding 的影响不同。
 初始化与能力选择遵从 [Vulkan API 与 Feature 策略](#vulkan-api-与-feature-策略)。
 单 subpass VkRenderPass 使用 Vulkan 1.2 核心 RenderPass2 创建与 begin/end 接口；附件操作、layout
 和 PSO 兼容语义不变。Framebuffer 在 device 初始化时按 Enabled 固定为 imageless 或传统模式，
-不新增公共模式开关；不启用 dynamic rendering、separate depth/stencil layouts 或 synchronization2。
+不新增公共模式开关；独立 depth/stencil layouts 同样读取 Enabled，不启用 dynamic rendering 或 synchronization2。
 
 公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
-PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；只读 scope 仍要求 PSO 关闭写入。
+PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；resolve 也不进入光栅化签名，同一 PSO 可用于兼容的有/无 resolve pass。只读 aspect 必须 Load + Store，拒绝 Clear/Discard，PSO 按 depth/stencil 分别检查写入。pass 没有重复的 ReadOnly 字段；DSV flags、原生 render pass flags 和布局从 view 权限推导。
 
 `CommandBuffer::BeginRenderPass(desc)` 经可选校验后获取原生对象并开始录制，无独立准备阶段或 token。
 未处于 recording、已有 active encoder、附件校验或原生对象获取失败时返回 `nullptr`，不录制 clear/Begin，
 不改变 active encoder，调用方可以修正描述后重试。描述及其 span 只借用到调用返回；附件 owner 仍须存活至命令真实完成。
 调用方在 BeginRenderPass 前录制附件 barrier，失败时仍负责处理这些已录制的状态转换。
-D3D12 首次 Begin 时缓存该命令的 `ID3D12GraphicsCommandList4`，附件描述仅在调用内保留；
-局部 area 的 clear 在所有校验完成后先用带 rect 的 Clear，再进入 preserve 的 native pass。Vulkan 使用 renderArea，
+D3D12 首次 Begin 时缓存该命令的 `ID3D12GraphicsCommandList4`；附件描述调用时被原生快照，resolve subresource 参数数组由 encoder 保持到 EndRenderPass。
+局部 area（含 pass 尺寸小于 mip）的 clear 在所有校验完成后用带 rect 的 Clear，Load/Discard 保守映射为 preserve；
+pass 只覆盖 view 的部分 layers 时使用局部 RTV/DSV，避免清除其余层。Vulkan 使用 renderArea，
 只有 pass 和 framebuffer 均获取成功后才加入命令的去重引用。
 
-VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、depth read-only；depth-only 格式规范化无 stencil 的操作。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
+VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、view 权限、resolve 槽位与模式；depth-only 格式规范化无 stencil 的操作。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
 
-传统 framebuffer key 包含有序稳定 view ID、兼容签名及 extent/layers。Imageless key 不含 view ID，
-改为兼容签名、framebuffer extent/layers 和各附件实际 image flags、view 有效 usage、所选 mip 尺寸及
+实际附件顺序固定为颜色源、可选 DS 源、按颜色槽顺序排列的 resolve 目标、可选 DS resolve 目标。
+传统 framebuffer key 包含所有源/目标的有序稳定 view ID、实际附件格式、光栅化签名及 extent/layers。Imageless key 不含 view ID，
+改为相同的有序格式/光栅化签名、framebuffer extent/layers 和各附件实际 image flags、view 有效 usage、所选 mip 尺寸及
 view 层数；两者均不依赖某个 load/store 版本的 pass 指针。Imageless 创建时各附件的 `pViewFormats`
 只声明该槽位实际使用的 view 格式，不是纹理创建时的允许格式集合；Begin 通过
 `VkRenderPassAttachmentBeginInfo` 提供实际 views。同约束的新 view 可复用旧 framebuffer。
@@ -726,7 +753,41 @@ view ID 在该 device 内单调且不复用。两种模式均按 command epoch �
 acquire/release/invalidate/trim 和附件使用计数；缓存不持有业务 texture/view 或 device shared owner。
 调用方继续持有附件 owner，校验包装保留 command → view → texture 依赖，不新增隐式 GPU 等待。
 
-depth-only 也使用 core depth/stencil layout，不引入独立 depth/stencil layout 路径。
+### 附件 resolve 与内容保留
+
+颜色附件的可空 `ResolveTarget` 只提供非整数格式 Average（含设备支持的归一化、浮点、sRGB）。
+DS 附件的可选 `DepthStencilResolveDescriptor` 携带完整 DS 目标 view 与 DepthMode/StencilMode：None、SampleZero、Average、Min、Max；
+至少一个模式非 None，缺失 aspect 必须为 None。`QueryAttachmentResolveSupport(format, samples)` 返回颜色 Average、
+DS 模式集合及 IndependentResolve/IndependentResolveNone 组合约束；调用方选择模式，后端不替换或模拟。
+源/目标 view 格式、mip 尺寸和 view 层数必须相同，源 MSAA、目标单采样；目标为 RenderTarget 或完整可写 DepthWrite view，
+不得与当前其他附件非法重叠。resolve 覆盖 pass render area、同坐标目标，无独立目标偏移。
+
+附件 resolve 与 `ResolveTexture` 独立命令不同：源保持附件状态，目标由调用方准备 `AttachmentResolveDestination`，
+不能用独立命令的 ResolveDestination 替代。End 不转换为 ShaderRead。DS 目标覆盖的两种 aspects 都必须显式准备目标状态；
+None 保留内容，不恢复其此前资源状态。
+
+| 对象 | pass 完成后的内容保证 |
+|---|---|
+| 源 Store | 保留所选 aspect 的全部 MSAA samples |
+| 源 Discard | render area 内不保证，但 resolve 必须先读取有效源；后端可以保留更多 |
+| resolve 目标 | 保存 render area 内结果，无目标 Discard 选项 |
+| render area 外 | 保留源和目标原内容；调用方先初始化，不能用 Undefined 放弃内容 |
+| 目标 None aspect | 整个所选子资源内容不变 |
+| 源未 resolve aspect | 继续遵守其自身 Load/Store |
+
+这些是结束后的值保证，不允许 pass 内通过别名并发访问这些区域。
+Vulkan 颜色使用 pResolveAttachments，DS 使用 VkSubpassDescriptionDepthStencilResolve，按设备 modes、
+independentResolve 与 independentResolveNone 检查；目标使用 Load/Store 保留既有内容、initial/final layout 不变。
+颜色与 DS resolve 都按 COLOR_ATTACHMENT_OUTPUT 和 color-attachment read/write 同步，DS 源状态保守包含 resolve 的读取阶段；
+只读附件 Load/Store 仍有原生访问，不等于无写 access。参见
+[Render pass resolve](https://docs.vulkan.org/spec/latest/chapters/renderpass.html)。
+
+D3D12 使用 ending access RESOLVE，为实际处理的 plane/layer 持有 subresource/rectangle 数组；Store 设置 PreserveResolveSource，
+局部区域 Discard 也保守保留源。能力查询要求 RenderPassesValid、ProgrammableSamplePositionsTier、格式/MSAA 支持，
+depth 报告 Average/Min/Max，stencil 报告 Min/Max，无 SampleZero；实际格式支持决定可用性。能力不足明确拒绝，
+不降级独立命令或 shader 模拟。原生规则见 [ResolveSubresourceRegion](https://microsoft.github.io/DirectX-Specs/d3d/ProgrammableSamplePositions.html#resolvesubresourceregion)。
+resolve 目标与源一起参与两种 framebuffer cache、失效索引和 command 去重引用；End、EndRenderPass、Submit 不释放引用，
+Reset/释放前已提交工作必须真实完成，失败的 Begin 不留下 pins。不新增隐式 GPU 等待。
 
 开启 RHI 校验时，ShaderParameterSet 初次绑定后成为封存的 descriptor 版本，Set 拒绝原地修改；封存状态仅存于校验包装。调用者确认全部引用 epoch 已结束以后可 ResetBindingsForReuse，Vulkan 同时释放旧 typed buffer views；重新借出时完整写入整个组。数值 ID 不提供对象寿命保证，不能替代组布局、完整布局和资源的 native 寿命。
 
@@ -763,6 +824,7 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
 | 套件 | 覆盖 |
 |---|---|
+| `AttachmentOperations` | 混合 DS 权限与同 fragment SRV、PSO 拒绝、局部颜色/DS resolve、逐 sample 源保留、区域外/未 resolve aspect、sampler 普通/immutable 读回与能力限制 |
 | `ExplicitBindingLayoutTest` | 双后端真实 dispatch/读回、不同 DX/VK 坐标、set 空洞、数组、各类 buffer、texture、普通/固定 sampler、动态偏移、部分及多块 push、组/参数集共享 |
 | `ExplicitLayoutOwnershipD3D12` | 通过原生 debug 消息观察独立创建与最终释放，不依赖句柄比较 |
 | `ExplicitLayoutOwnershipVulkan` | 测试侧函数表 probe 观察独立创建、私有空洞、幂等释放和部分失败清理 |

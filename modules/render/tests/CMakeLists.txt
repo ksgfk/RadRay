@@ -1,4 +1,5 @@
 set(radray_render_test_sources
+    test_attachment_operations.cpp
     test_texture_views.cpp
     test_vulkan_render_objects.cpp
     test_vulkan_device_features.cpp

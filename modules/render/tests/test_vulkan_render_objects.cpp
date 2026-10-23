@@ -11,6 +11,9 @@ struct RenderObjectProbe {
     uintptr_t NextHandle{100};
     vector<VkAttachmentDescription2> PassAttachments;
     vector<VkAttachmentReference2> ColorReferences;
+    vector<VkAttachmentReference2> ResolveReferences;
+    std::optional<VkAttachmentReference2> DepthResolveReference;
+    VkResolveModeFlagBits DepthMode{}, StencilMode{};
     std::optional<VkAttachmentReference2> DepthReference;
     vector<FramebufferAttachmentVulkan> Constraints;
     vector<VkFormat> Formats;
@@ -44,6 +47,17 @@ struct RenderObjectProbe {
             p.ColorReferences.clear();
             for (uint32_t i = 0; i < subpass.colorAttachmentCount; ++i) p.ColorReferences.push_back(subpass.pColorAttachments[i]);
             p.DepthReference = subpass.pDepthStencilAttachment ? std::optional{*subpass.pDepthStencilAttachment} : std::nullopt;
+            p.ResolveReferences.clear();
+            if (subpass.pResolveAttachments)
+                p.ResolveReferences.assign(subpass.pResolveAttachments, subpass.pResolveAttachments + subpass.colorAttachmentCount);
+            p.DepthResolveReference.reset();
+            if (subpass.pNext) {
+                const auto* resolve = static_cast<const VkSubpassDescriptionDepthStencilResolve*>(subpass.pNext);
+                EXPECT_EQ(resolve->sType, VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE);
+                p.DepthMode = resolve->depthResolveMode;
+                p.StencilMode = resolve->stencilResolveMode;
+                p.DepthResolveReference = *resolve->pDepthStencilResolveAttachment;
+            }
             if (p.FailPass) return VK_ERROR_OUT_OF_HOST_MEMORY;
             *pass = p.Handle<VkRenderPass>();
             return VK_SUCCESS;
@@ -230,15 +244,127 @@ TEST(VulkanRenderObjects, MultipleCommandsIndependentlyRetainTheSameView) {
     view->Destroy();
 }
 
+TEST(VulkanRenderObjects, ResolveTargetsParticipateInKeysPinsAndFailureRecovery) {
+    for (const auto mode : {FramebufferModeVulkan::Traditional, FramebufferModeVulkan::Imageless}) {
+        RenderObjectProbe p{mode};
+        auto* source = p.AddTarget();
+        source->_image->_sampleCount = 4;
+        auto* target = p.AddTarget();
+        auto* otherTarget = p.AddTarget();
+        const auto render = [&](CommandBufferVulkan& command, ImageViewVulkan* destination) {
+            const RenderPassColorAttachment attachment{source, LoadAction::Load, StoreAction::Store, {}, destination};
+            auto encoder = command.BeginRenderPass({.Colors = std::span{&attachment, 1}, .Width = 8, .Height = 8});
+            if (!encoder) return false;
+            command.EndRenderPass(encoder.Release());
+            return true;
+        };
+        p.FailPass = true;
+        EXPECT_FALSE(render(p.Command, target));
+        p.FailPass = false;
+        p.FailFramebuffer = true;
+        EXPECT_FALSE(render(p.Command, target));
+        EXPECT_EQ(p.Begins, 0u);
+        EXPECT_TRUE(p.Command._attachmentViewPins.empty());
+        p.FailFramebuffer = false;
+        ASSERT_TRUE(render(p.Command, target));
+        const auto first = p.LastFramebuffer;
+        ASSERT_EQ(p.PassAttachments.size(), 2u);
+        EXPECT_EQ(p.PassAttachments[0].samples, VK_SAMPLE_COUNT_4_BIT);
+        EXPECT_EQ(p.PassAttachments[1].samples, VK_SAMPLE_COUNT_1_BIT);
+        EXPECT_EQ(p.PassAttachments[1].loadOp, VK_ATTACHMENT_LOAD_OP_LOAD);
+        EXPECT_EQ(p.PassAttachments[1].storeOp, VK_ATTACHMENT_STORE_OP_STORE);
+        ASSERT_TRUE(render(p.Command, otherTarget));
+        EXPECT_EQ(p.LastFramebuffer == first, mode == FramebufferModeVulkan::Imageless);
+        if (mode == FramebufferModeVulkan::Imageless)
+            EXPECT_EQ(p.BeginViews, (vector<VkImageView>{source->_imageView, otherTarget->_imageView}));
+        ASSERT_TRUE(render(p.Command, target));
+        EXPECT_EQ(p.Command._attachmentViewPins.size(), 3u);
+        CommandBufferVulkan other{&p.Device, &p.Queue, &p.Allocator, reinterpret_cast<VkCommandBuffer>(&p)};
+        other.Begin();
+        ASSERT_TRUE(render(other, target));
+        p.Command.End();
+        EXPECT_DEATH(target->Destroy(), "");
+        p.Command.Destroy();
+        EXPECT_DEATH(target->Destroy(), "");
+        other.Destroy();
+        target->Destroy();
+        EXPECT_EQ(p.FramebufferDestroys, mode == FramebufferModeVulkan::Imageless ? 0u : 1u);
+    }
+}
+
+TEST(VulkanRenderObjects, ResolveTargetConstraintsAndLiveBudgetAreNotBypassed) {
+    for (const auto mode : {FramebufferModeVulkan::Traditional, FramebufferModeVulkan::Imageless}) {
+        RenderObjectProbe p{mode};
+        p.Device._renderPassCache->SetBudget({.Framebuffers = 1});
+        auto* source = p.AddTarget();
+        source->_image->_sampleCount = 4;
+        auto* target = p.AddTarget();
+        auto* changed = p.AddTarget();
+        changed->_nativeUsage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        RenderPassColorAttachment attachment{source, LoadAction::Load, StoreAction::Store, {}, target};
+        const auto render = [&] {
+            auto encoder = p.Command.BeginRenderPass({.Colors = std::span{&attachment, 1}, .Width = 8, .Height = 8});
+            if (!encoder) return false;
+            p.Command.EndRenderPass(encoder.Release());
+            return true;
+        };
+        ASSERT_TRUE(render());
+        attachment.ResolveTarget = changed;
+        EXPECT_FALSE(render());
+        EXPECT_EQ(p.Begins, 1u);
+        EXPECT_EQ(p.Command._attachmentViewPins.size(), 2u);
+        p.Allocator.Reset();
+        EXPECT_TRUE(p.Command._attachmentViewPins.empty());
+        p.Command.Begin();
+        ASSERT_TRUE(render());
+        EXPECT_EQ(p.FramebufferDestroys, 1u);
+        EXPECT_EQ(p.Command._attachmentViewPins.size(), 2u);
+        if (mode == FramebufferModeVulkan::Imageless) {
+            ASSERT_EQ(p.Constraints.size(), 2u);
+            EXPECT_EQ(p.Constraints[1].Usage, changed->_nativeUsage);
+        }
+    }
+}
+
+TEST(VulkanRenderObjects, ResolveAttachmentOrderAndModesSeparateExecutionFromFramebufferCompatibility) {
+    RenderObjectProbe p{FramebufferModeVulkan::Imageless};
+    auto* color = p.AddTarget();
+    auto* depth = p.AddTarget(TextureFormat::D32_FLOAT_S8_UINT);
+    color->_image->_sampleCount = depth->_image->_sampleCount = 4;
+    auto* colorTarget = p.AddTarget();
+    auto* depthTarget = p.AddTarget(TextureFormat::D32_FLOAT_S8_UINT);
+    const RenderPassColorAttachment ca{color, LoadAction::Load, StoreAction::Store, {}, colorTarget};
+    RenderPassDepthStencilAttachment ds{depth, LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, {}, DepthStencilResolveDescriptor{depthTarget, ResolveMode::SampleZero, ResolveMode::None}};
+    for (const auto mode : {ResolveMode::SampleZero, ResolveMode::Min}) {
+        ds.Resolve->DepthMode = mode;
+        auto encoder = p.Command.BeginRenderPass({.Colors = std::span{&ca, 1}, .DepthStencil = ds, .Width = 8, .Height = 8}).Unwrap();
+        p.Command.EndRenderPass(std::move(encoder));
+        EXPECT_EQ(p.BeginViews, (vector<VkImageView>{color->_imageView, depth->_imageView, colorTarget->_imageView, depthTarget->_imageView}));
+        ASSERT_EQ(p.PassAttachments.size(), 4u);
+        ASSERT_EQ(p.ResolveReferences.size(), 1u);
+        EXPECT_EQ(p.ResolveReferences[0].attachment, 2u);
+        ASSERT_TRUE(p.DepthResolveReference);
+        EXPECT_EQ(p.DepthResolveReference->attachment, 3u);
+        EXPECT_EQ(p.DepthMode, static_cast<VkResolveModeFlagBits>(mode));
+        EXPECT_EQ(p.StencilMode, VK_RESOLVE_MODE_NONE);
+        EXPECT_EQ(p.PassAttachments[3].stencilLoadOp, VK_ATTACHMENT_LOAD_OP_LOAD);
+        EXPECT_EQ(p.PassAttachments[3].stencilStoreOp, VK_ATTACHMENT_STORE_OP_STORE);
+    }
+    EXPECT_EQ(p.FramebufferCreates, 1u);
+    EXPECT_EQ(p.PassCreates, 2u);
+    EXPECT_EQ(p.Command._attachmentViewPins.size(), 4u);
+}
+
 TEST(VulkanRenderObjects, RenderPass2PreservesAttachmentOperationsAndLayouts) {
     RenderObjectProbe p{FramebufferModeVulkan::Imageless};
     auto* color = p.AddTarget();
     auto* depth = p.AddTarget(TextureFormat::D32_FLOAT_S8_UINT);
+    depth->_mdesc.Usage = TextureViewUsage::DepthRead;
     const RenderPassColorAttachment colors[]{
         {color, LoadAction::Load, StoreAction::Store, {}},
         {p.AddTarget(TextureFormat::RGBA8_UINT), LoadAction::DontCare, StoreAction::Discard, {}}};
     auto encoder = p.Command.BeginRenderPass({.Colors = colors,
-                                              .DepthStencil = RenderPassDepthStencilAttachment{depth, LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, true, {}},
+                                              .DepthStencil = RenderPassDepthStencilAttachment{depth, LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, {}},
                                               .Width = 8,
                                               .Height = 8,
                                               .RenderArea = Rect{2, 3, 4, 5}})
@@ -350,11 +476,11 @@ TEST_P(VulkanRenderScopeGpu, DepthOnlyDepthStencilReadonlyAndMsaa) {
             command->Begin();
             const ResourceBarrierDescriptor toWrite = BarrierTextureDescriptor{texture.get(), TextureState::Undefined, TextureState::DepthWrite};
             command->ResourceBarrier(std::span{&toWrite, 1});
-            auto encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{write.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, false, {0.5f, 7}}, .Width = 8, .Height = 8}).Unwrap();
+            auto encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{write.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, {0.5f, 7}}, .Width = 8, .Height = 8}).Unwrap();
             command->EndRenderPass(std::move(encoder));
             const ResourceBarrierDescriptor toRead = BarrierTextureDescriptor{texture.get(), TextureState::DepthWrite, TextureState::DepthRead};
             command->ResourceBarrier(std::span{&toRead, 1});
-            encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{read.get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, true, {}}, .Width = 8, .Height = 8}).Unwrap();
+            encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{read.get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, {}}, .Width = 8, .Height = 8}).Unwrap();
             command->EndRenderPass(std::move(encoder));
             command->End();
             CommandBuffer* commands[]{command.get()};

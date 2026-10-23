@@ -41,7 +41,6 @@ std::optional<Win32Event> Win32Event::Create() noexcept {
     return std::make_optional(std::move(result));
 }
 
-
 std::string_view GetErrorName(HRESULT hr) noexcept {
     switch (hr) {
         case D3D12_ERROR_ADAPTER_NOT_FOUND: return "D3D12_ERROR_ADAPTER_NOT_FOUND";
@@ -591,7 +590,7 @@ D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::ResolveSource)) {
         result |= D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
     }
-    if (v.HasFlag(TextureState::ResolveDestination)) {
+    if (v.HasFlag(TextureState::ResolveDestination) || v.HasFlag(TextureState::AttachmentResolveDestination)) {
         result |= D3D12_RESOURCE_STATE_RESOLVE_DEST;
     }
     return result;
@@ -644,7 +643,7 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
         case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
         case AddressMode::ClampToBorder: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
-        case AddressMode::MirrorClampToEdge: Unreachable();
+        case AddressMode::MirrorClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
     }
     Unreachable();
 }
