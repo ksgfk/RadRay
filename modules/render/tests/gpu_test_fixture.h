@@ -325,8 +325,8 @@ inline bool TryCreateDevice(
     DeviceContext& context,
     bool enableValidation = false,
     bool enableRhiValidation = false,
-    array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> queueCounts = {1, 0, 0},
-    shared_ptr<DXGIDiagnosticContext> diagnosticContext = nullptr) {
+    [[maybe_unused]] array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> queueCounts = {1, 0, 0},
+    [[maybe_unused]] shared_ptr<DXGIDiagnosticContext> diagnosticContext = nullptr) {
     context.Reset();
     context.Finalized = false;
     context.ValidationErrors = 0;

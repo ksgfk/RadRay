@@ -1581,13 +1581,13 @@ public:
         const auto target = desc.Target->GetDesc();
         auto range = desc.Range;
         if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && range.ArrayLayerCount == SubresourceRange::All) range.ArrayLayerCount = 1;
-        if (!range.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) range.Aspects = TextureAspect::Depth;
+        if (!range.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(target.Format)) range.Aspects = TextureAspect::Depth;
         if (!ValidEnum(desc.Dim) || desc.Dim == TextureDimension::UNKNOWN || !ValidEnum(desc.Format) || desc.Format == TextureFormat::UNKNOWN || !ValidEnum(desc.Usage) || desc.Usage == TextureViewUsage::UNKNOWN) {
             _context->Reject("CreateTextureView", "invalid view enum");
             return nullptr;
         }
         const auto normalized = NormalizeSubresourceRange(target, range);
-        if (!normalized || !ValidEnum(desc.Dim) || desc.Dim == TextureDimension::UNKNOWN || NativeDimension(desc.Dim) != NativeDimension(target.Dim) || !ValidEnum(desc.Format) || desc.Format == TextureFormat::UNKNOWN || desc.Format != target.Format || !ValidEnum(desc.Usage) || desc.Usage == TextureViewUsage::UNKNOWN) {
+        if (!normalized || !ValidEnum(desc.Dim) || desc.Dim == TextureDimension::UNKNOWN || NativeDimension(desc.Dim) != NativeDimension(target.Dim) || !ValidEnum(desc.Format) || desc.Format == TextureFormat::UNKNOWN || !ValidEnum(desc.Usage) || desc.Usage == TextureViewUsage::UNKNOWN) {
             _context->Reject("CreateTextureView", "invalid texture view dimension, format, usage, or range");
             return nullptr;
         }
@@ -1608,6 +1608,19 @@ public:
         auto converted = desc;
         converted.Target = texture.Get();
         converted.Range = *normalized;
+        std::pair<bool, string> support{false, "texture view backend is unavailable"};
+#if defined(RADRAY_ENABLE_D3D12)
+        if (GetBackend() == RenderBackend::D3D12)
+            support = static_cast<d3d12::DeviceD3D12*>(_context->NativeDevice.get())->ValidateTextureView(converted);
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+        if (GetBackend() == RenderBackend::Vulkan)
+            support = static_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get())->ValidateTextureView(converted);
+#endif
+        if (!support.first) {
+            _context->Reject("CreateTextureView", support.second);
+            return nullptr;
+        }
         auto result = _context->NativeDevice->CreateTextureView(converted);
         if (!result) return nullptr;
         return make_unique<TextureViewValidation>(_context, result.Release(), desc.Target);

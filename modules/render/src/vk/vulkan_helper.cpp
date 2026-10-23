@@ -82,7 +82,8 @@ FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
         .FragmentStoresAndAtomics = Requirement::Optional,
         .TimelineSemaphore = Requirement::Required,
         .SamplerMirrorClampToEdge = Requirement::Optional,
-        .SamplerFilterMinmax = Requirement::Optional};
+        .SamplerFilterMinmax = Requirement::Optional,
+        .ImagelessFramebuffer = Requirement::Optional};
 }
 
 FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested) {
@@ -113,6 +114,7 @@ FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& su
     select("timelineSemaphore", requested.TimelineSemaphore, supported.Vulkan12.timelineSemaphore, vulkan12.timelineSemaphore);
     select("samplerMirrorClampToEdge", requested.SamplerMirrorClampToEdge, supported.Vulkan12.samplerMirrorClampToEdge, vulkan12.samplerMirrorClampToEdge);
     select("samplerFilterMinmax", requested.SamplerFilterMinmax, supported.Vulkan12.samplerFilterMinmax, vulkan12.samplerFilterMinmax);
+    select("imagelessFramebuffer", requested.ImagelessFramebuffer, supported.Vulkan12.imagelessFramebuffer, vulkan12.imagelessFramebuffer);
     return result;
 }
 
@@ -124,6 +126,9 @@ std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions
     if (!functions.vkGetImageMemoryRequirements2) return "vkGetImageMemoryRequirements2";
     if (!functions.vkBindBufferMemory2) return "vkBindBufferMemory2";
     if (!functions.vkBindImageMemory2) return "vkBindImageMemory2";
+    if (!functions.vkCreateRenderPass2) return "vkCreateRenderPass2";
+    if (!functions.vkCmdBeginRenderPass2) return "vkCmdBeginRenderPass2";
+    if (!functions.vkCmdEndRenderPass2) return "vkCmdEndRenderPass2";
     return {};
 }
 
@@ -131,6 +136,78 @@ uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilit
     auto count = std::max(requested, capabilities.minImageCount);
     if (capabilities.maxImageCount != 0) count = std::min(count, capabilities.maxImageCount);
     return count;
+}
+
+static uint32_t _ImageFormatCompatibilityClass(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::R8_SINT:
+        case TextureFormat::R8_UINT:
+        case TextureFormat::R8_SNORM:
+        case TextureFormat::R8_UNORM: return 8;
+        case TextureFormat::R16_SINT:
+        case TextureFormat::R16_UINT:
+        case TextureFormat::R16_SNORM:
+        case TextureFormat::R16_UNORM:
+        case TextureFormat::R16_FLOAT:
+        case TextureFormat::RG8_SINT:
+        case TextureFormat::RG8_UINT:
+        case TextureFormat::RG8_SNORM:
+        case TextureFormat::RG8_UNORM: return 16;
+        case TextureFormat::R32_SINT:
+        case TextureFormat::R32_UINT:
+        case TextureFormat::R32_FLOAT:
+        case TextureFormat::RG16_SINT:
+        case TextureFormat::RG16_UINT:
+        case TextureFormat::RG16_SNORM:
+        case TextureFormat::RG16_UNORM:
+        case TextureFormat::RG16_FLOAT:
+        case TextureFormat::RGBA8_SINT:
+        case TextureFormat::RGBA8_UINT:
+        case TextureFormat::RGBA8_SNORM:
+        case TextureFormat::RGBA8_UNORM:
+        case TextureFormat::RGBA8_UNORM_SRGB:
+        case TextureFormat::BGRA8_UNORM:
+        case TextureFormat::BGRA8_UNORM_SRGB:
+        case TextureFormat::RGB10A2_UINT:
+        case TextureFormat::RGB10A2_UNORM:
+        case TextureFormat::RG11B10_FLOAT: return 32;
+        case TextureFormat::RG32_SINT:
+        case TextureFormat::RG32_UINT:
+        case TextureFormat::RG32_FLOAT:
+        case TextureFormat::RGBA16_SINT:
+        case TextureFormat::RGBA16_UINT:
+        case TextureFormat::RGBA16_SNORM:
+        case TextureFormat::RGBA16_UNORM:
+        case TextureFormat::RGBA16_FLOAT: return 64;
+        case TextureFormat::RGBA32_SINT:
+        case TextureFormat::RGBA32_UINT:
+        case TextureFormat::RGBA32_FLOAT: return 128;
+        case TextureFormat::D16_UNORM: return 1001;
+        case TextureFormat::D32_FLOAT: return 1002;
+        case TextureFormat::D24_UNORM_S8_UINT: return 1003;
+        case TextureFormat::D32_FLOAT_S8_UINT: return 1004;
+        case TextureFormat::UNKNOWN: return 0;
+    }
+    return 0;
+}
+
+bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkImageCreateFlags flags) noexcept {
+    const auto imageClass = _ImageFormatCompatibilityClass(image);
+    if (!imageClass) return false;
+    if (!(flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) return image == view;
+    return imageClass == _ImageFormatCompatibilityClass(view);
+}
+
+VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept {
+    switch (usage) {
+        case TextureViewUsage::Resource: return VK_IMAGE_USAGE_SAMPLED_BIT;
+        case TextureViewUsage::UnorderedAccess: return VK_IMAGE_USAGE_STORAGE_BIT;
+        case TextureViewUsage::RenderTarget: return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthWrite: return VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        case TextureViewUsage::UNKNOWN: return 0;
+    }
+    return 0;
 }
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {

@@ -949,11 +949,21 @@ TEST(D3D12DiagnosticsSmoke, SwapChainTopologyKeepsDxgiAccountingHealthy) {
     desc.Width = 128;
     desc.Height = 96;
     desc.BackBufferCount = 3;
-    desc.Format = TextureFormat::BGRA8_UNORM;
+    desc.Format = TextureFormat::BGRA8_UNORM_SRGB;
     auto chain = context.Device->CreateSwapChain(desc);
     ASSERT_TRUE(chain);
     d3d12::ComPtr<ID3D12InfoQueue> messages;
     auto& native = *static_cast<d3d12::DeviceD3D12*>(context.Device.get());
+    {
+        auto& nativeChain = *static_cast<d3d12::SwapChainD3D12*>(chain.Get());
+        for (const auto& frame : nativeChain._frames) {
+            EXPECT_EQ(frame.image->_rawDesc.Format, DXGI_FORMAT_B8G8R8A8_UNORM);
+            EXPECT_EQ(frame.image->GetDesc().Format, TextureFormat::BGRA8_UNORM_SRGB);
+            const TextureViewDescriptor viewDesc{frame.image.get(), TextureDimension::Dim2D, desc.Format, {0, 1, 0, 1}, TextureViewUsage::RenderTarget};
+            EXPECT_TRUE(native.ValidateTextureView(viewDesc).first);
+            ASSERT_TRUE(context.Device->CreateTextureView(viewDesc));
+        }
+    }
     ASSERT_EQ(native._device.As(&messages), S_OK);
     ASSERT_EQ(messages->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "present checkpoint"), S_OK);
     d3d12::ComPtr<IDXGIInfoQueue> dxgi;

@@ -312,9 +312,10 @@ loader 或物理设备版本不足则初始化失败；设备支持更高版本�
 | 间接绘制 | `multiDrawIndirect`、`drawIndirectFirstInstance` | 可选 |
 | 普通与 immutable sampler | `samplerAnisotropy`、`samplerMirrorClampToEdge`、`samplerFilterMinmax` | 可选 |
 | Vertex / Pixel UAV 写入 | `vertexPipelineStoresAndAtomics`、`fragmentStoresAndAtomics` | 可选 |
+| Framebuffer 跨 view 复用 | `imagelessFramebuffer` | 可选，缺失时使用传统 framebuffer |
 
 未列出的 feature 均关闭，包括全部 Vulkan 1.1 feature、`shaderOutputLayer`、`multiview`、
-`imagelessFramebuffer`、`separateDepthStencilLayouts`、`robustBufferAccess`、`hostQueryReset`、
+`separateDepthStencilLayouts`、`robustBufferAccess`、`hostQueryReset`、
 `uniformBufferStandardLayout`、扩展 subgroup 类型、BDA、indirect count、descriptor indexing、
 shader 动态资源索引、扩展数值类型和无格式 storage image 读写。
 Vulkan 的 `IsLayeredRenderingFromVertexShaderSupported` 返回 false；这不改变 D3D12 的能力报告。
@@ -330,7 +331,7 @@ sampler 创建、RHI 校验、间接绘制和 UAV stage 报告读取 Enabled，�
 查询链和创建链分别由 `FeatureChainVulkan` 持有，使用 Features2 + Vulkan11 + Vulkan12 聚合结构，
 不重复挂接聚合结构覆盖的独立 feature 结构。创建链仅含 Enabled，`pEnabledFeatures=nullptr`；
 设备长期保存 Supported / Enabled 值快照，所有 `pNext` 清空。
-当前使用的核心 Features2 / Properties2 / 格式与内存属性查询、descriptor layout support、
+当前使用的核心 Features2 / Properties2 / 格式与内存属性查询、descriptor layout support、RenderPass2 创建与 begin/end、
 VMA 的 requirements2 / bind-memory2 以及 timeline 等待、计数查询入口缺失时拒绝初始化并清理 native 对象。
 
 保留 WSI、debug utils、portability 和 conservative rasterization 扩展规则；
@@ -580,7 +581,27 @@ sampled usage，RHI 没有 input attachment 使用接口。
 先校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
 非 Device texture memory 或不支持的 allocation hint 返回包含字段的 reason。
 validation 不替换 format，也不降低 sample count。资源不足/native create 失败仍返回空。
-上层 view 必须明确选择兼容格式；RHI 不提供自动 reinterpret 策略。
+`TextureViewDescriptor::Format` 是调用方请求的 view 格式，不要求等于 texture 的逻辑格式；公共 RHI
+不规定两后端格式兼容范围的交集，也不自动转换格式。`QueryTextureSupport` 仍查询纹理创建能力，
+不代表所有重解释 view 都可用。纹理描述不提供允许格式集合。
+
+开启 RHI 校验时，通用层检查 owner、枚举、维度、范围、aspect 与声明用途，再以解包后的描述调用
+所属后端的 `ValidateTextureView`。后端判定格式兼容及对应用途支持，失败记录原因并返回空。
+关闭校验时仍由调用方保证合法性，不增加常驻校验包装或全局状态。
+
+- Vulkan 自建 image 保留 mutable flag，格式重解释遵循 Vulkan 格式兼容类；depth/stencil 不与同字节数
+  的 color 格式混为一类。非 mutable image（包括当前 swapchain image）要求原生格式一致。
+  每个 view 用 `VkImageViewUsageCreateInfo` 将有效 usage 收窄为自身的 sampled、storage、color 或
+  depth/stencil attachment 用途，并检查该格式的 optimal-tiling feature。sRGB sampled view 不继承
+  同一 image 上其他 view 使用的 storage usage。Image/View 保存实际创建 flags、usage 和归一化子资源范围。
+- D3D12 自建资源保留现有 typeless 映射，按实际资源格式所属家族及 view 类型检查 DXGI format support；
+  fully typed 资源遵循其限制。保留深度/模板 SRV 的 plane 映射，以及 swapchain UNORM 存储到 sRGB RTV
+  的既有路径。例如 RGBA8_UNORM image 的 R32_UINT sampled view 可属于 Vulkan 同一兼容类，却不属于
+  D3D12 同一 typeless 家族；同一请求允许有不同后端结果。
+
+本路径不接入 `VkImageFormatListCreateInfo`；它可能帮助部分实现优化 mutable image，但不据此宣称已有
+性能问题或保证收益。原生规则见 [Vulkan view usage](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewUsageCreateInfo.html)
+与 [image format list](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_image_format_list.html)。
 
 ## 同步
 
@@ -670,8 +691,9 @@ front-face winding 的影响不同。
 ## 直接附件与 Vulkan 原生缓存
 
 初始化与能力选择遵从 [Vulkan API 与 Feature 策略](#vulkan-api-与-feature-策略)。
-传统单 subpass VkRenderPass/VkFramebuffer 是主路径；不启用 dynamic rendering、imageless framebuffer、
-separate depth/stencil layouts 或 synchronization2。
+单 subpass VkRenderPass 使用 Vulkan 1.2 核心 RenderPass2 创建与 begin/end 接口；附件操作、layout
+和 PSO 兼容语义不变。Framebuffer 在 device 初始化时按 Enabled 固定为 imageless 或传统模式，
+不新增公共模式开关；不启用 dynamic rendering、separate depth/stencil layouts 或 synchronization2。
 
 公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
@@ -685,11 +707,24 @@ D3D12 首次 Begin 时缓存该命令的 `ID3D12GraphicsCommandList4`，附件�
 局部 area 的 clear 在所有校验完成后先用带 rect 的 Clear，再进入 preserve 的 native pass。Vulkan 使用 renderArea，
 只有 pass 和 framebuffer 均获取成功后才加入命令的去重引用。
 
-VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、depth read-only；depth-only 格式规范化无 stencil 的操作。framebuffer key 包含有序稳定 view ID、兼容签名及 extent/layers，不依赖某个 load/store 版本的 pass 指针。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
+VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、depth read-only；depth-only 格式规范化无 stencil 的操作。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
+
+传统 framebuffer key 包含有序稳定 view ID、兼容签名及 extent/layers。Imageless key 不含 view ID，
+改为兼容签名、framebuffer extent/layers 和各附件实际 image flags、view 有效 usage、所选 mip 尺寸及
+view 层数；两者均不依赖某个 load/store 版本的 pass 指针。Imageless 创建时各附件的 `pViewFormats`
+只声明该槽位实际使用的 view 格式，不是纹理创建时的允许格式集合；Begin 通过
+`VkRenderPassAttachmentBeginInfo` 提供实际 views。同约束的新 view 可复用旧 framebuffer。
+Swapchain image 的 flags/usage 来自实际创建参数，其逻辑 usage 不再宣称未创建的 sampled 用途。
+预算耗尽或原生创建失败仍返回空，不静默切换 framebuffer 模式。
 
 每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、Return、CPU Submit 和取消通知都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶时 BeginRenderPass 返回空。缓存清理不等待 GPU idle。
 
-view ID 在该 device 内单调且不复用。view 析构按局部 reverse index 先检查所有相关 FB 没有 command use，再同步移除闲置 FB，最后调用 vkDestroyImageView。mutex 串行化 acquire/release/invalidate/trim，允许同 device 的多个独立宿主共同计数；缓存不持有业务 texture/view 或 device shared owner。
+view ID 在该 device 内单调且不复用。两种模式均按 command epoch 去重持有附件 view ID，缓存以独立
+使用计数跟踪这些引用；仅在 pass/framebuffer 获取成功后提交。End/Submit 不释放，原生命令池 Reset
+或 command buffer 释放后才解除，已提交命令必须先真实完成。view 销毁先检查独立使用计数，传统模式
+再按局部 reverse index 清理相关闲置 FB，imageless FB 不随 view 销毁失效。mutex 串行化
+acquire/release/invalidate/trim 和附件使用计数；缓存不持有业务 texture/view 或 device shared owner。
+调用方继续持有附件 owner，校验包装保留 command → view → texture 依赖，不新增隐式 GPU 等待。
 
 depth-only 也使用 core depth/stencil layout，不引入独立 depth/stencil layout 路径。
 

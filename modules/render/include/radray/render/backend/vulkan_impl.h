@@ -184,10 +184,23 @@ struct RenderPassExecutionKeyVulkan {
     friend bool operator==(const RenderPassExecutionKeyVulkan&, const RenderPassExecutionKeyVulkan&) noexcept = default;
 };
 
+enum class FramebufferModeVulkan {
+    Traditional,
+    Imageless
+};
+
+struct FramebufferAttachmentVulkan {
+    VkImageCreateFlags Flags{0};
+    VkImageUsageFlags Usage{0};
+    uint32_t Width{0}, Height{0}, Layers{0};
+    friend bool operator==(const FramebufferAttachmentVulkan&, const FramebufferAttachmentVulkan&) noexcept = default;
+};
+
 struct FramebufferKeyVulkan {
     AttachmentSignature Signature;
     vector<uint64_t> Views;
     uint32_t Width, Height, Layers;
+    vector<FramebufferAttachmentVulkan> Attachments;
     friend bool operator==(const FramebufferKeyVulkan&, const FramebufferKeyVulkan&) noexcept = default;
 };
 
@@ -229,11 +242,14 @@ public:
         size_t RenderPasses{256}, Framebuffers{1024};
         size_t IdleRenderPasses{128}, IdleFramebuffers{256};
     };
-    explicit VulkanRenderPassCache(DeviceVulkan* device) noexcept;
+    explicit VulkanRenderPassCache(DeviceVulkan* device, FramebufferModeVulkan mode = FramebufferModeVulkan::Traditional) noexcept;
     ~VulkanRenderPassCache() noexcept;
     IntrusivePtr<NativeRenderPassVulkan> Acquire(const RenderPassExecutionKeyVulkan& key, std::string_view name = {});
     IntrusivePtr<NativeFramebufferVulkan> Acquire(const FramebufferKeyVulkan& key, VkRenderPass pass, std::span<const VkImageView> views, std::string_view name = {});
     uint64_t AllocateViewId();
+    bool IsImageless() const noexcept { return _mode == FramebufferModeVulkan::Imageless; }
+    void PinViews(std::span<const uint64_t> views);
+    void UnpinViews(std::span<const uint64_t> views) noexcept;
     /// Called before native view destruction; rejects outstanding command references.
     void InvalidateView(uint64_t id);
     void SetBudget(Budget budget);
@@ -250,12 +266,14 @@ private:
     void EraseFramebuffer(NativeFramebufferVulkan* entry);
     void TrimLocked();
     DeviceVulkan* _device;
+    const FramebufferModeVulkan _mode;
     std::mutex _mutex;
     Budget _budget;
     uint64_t _nextViewId{1};
     unordered_map<RenderPassExecutionKeyVulkan, unique_ptr<NativeRenderPassVulkan>, RenderPassKeyHashVulkan> _passes;
     unordered_map<FramebufferKeyVulkan, unique_ptr<NativeFramebufferVulkan>, FramebufferKeyHashVulkan> _framebuffers;
     unordered_map<uint64_t, unordered_set<NativeFramebufferVulkan*>> _byView;
+    unordered_map<uint64_t, uint32_t> _viewCommandUses;
     list<NativeRenderPassVulkan*> _idlePasses;
     list<NativeFramebufferVulkan*> _idleFramebuffers;
 };
@@ -298,6 +316,8 @@ public:
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+
+    std::pair<bool, string> ValidateTextureView(const TextureViewDescriptor& desc) const;
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
@@ -489,6 +509,9 @@ public:
 #endif
     vector<IntrusivePtr<NativeRenderPassVulkan>> _passPins;
     vector<IntrusivePtr<NativeFramebufferVulkan>> _framebufferPins;
+    vector<uint64_t> _attachmentViewPins;
+
+    void ReleaseRenderScopeReferences() noexcept;
 };
 
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
@@ -971,6 +994,8 @@ public:
     TextureUses _usage{TextureUse::UNKNOWN};
     ResourceHints _hints{ResourceHint::None};
     bool _isSwapchainImage{false};
+    VkImageCreateFlags _createFlags{0};
+    VkImageUsageFlags _nativeUsage{0};
 };
 
 class ImageViewVulkan final : public TextureView {
@@ -998,7 +1023,9 @@ public:
     VkImageView _imageView;
     uint64_t _viewId{0};
     TextureViewDescriptor _mdesc;
+    SubresourceRange _nativeRange{};
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
+    VkImageUsageFlags _nativeUsage{0};
 };
 
 struct ShaderParameterSetLayoutEntryVulkan {

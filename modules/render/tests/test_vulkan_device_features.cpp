@@ -53,6 +53,7 @@ DeviceFeaturesVulkan ExpectedRhiFeatures() {
     result.Vulkan12.timelineSemaphore = VK_TRUE;
     result.Vulkan12.samplerMirrorClampToEdge = VK_TRUE;
     result.Vulkan12.samplerFilterMinmax = VK_TRUE;
+    result.Vulkan12.imagelessFramebuffer = VK_TRUE;
     return result;
 }
 
@@ -62,7 +63,7 @@ TEST(VulkanDeviceFeaturePolicy, AllSupportedEnablesExactlyRhiRequests) {
     const auto selection = SelectDeviceFeaturesVulkan(supported, GetRhiFeatureRequestsVulkan());
     EXPECT_TRUE(selection.MissingRequired.empty());
     EXPECT_EQ(FeatureBits(selection.Enabled), FeatureBits(ExpectedRhiFeatures()));
-    EXPECT_EQ(selection.EnabledNames.size(), 15u);
+    EXPECT_EQ(selection.EnabledNames.size(), 16u);
     EXPECT_EQ(FeatureBits(supported), before);
     EXPECT_EQ(selection.Enabled.Vulkan11.pNext, nullptr);
     EXPECT_EQ(selection.Enabled.Vulkan12.pNext, nullptr);
@@ -155,6 +156,9 @@ TEST(VulkanDeviceFeaturePolicy, MissingUsedCoreDeviceEntryPointsAreRejected) {
     functions.vkGetImageMemoryRequirements2 = reinterpret_cast<PFN_vkGetImageMemoryRequirements2>(stub);
     functions.vkBindBufferMemory2 = reinterpret_cast<PFN_vkBindBufferMemory2>(stub);
     functions.vkBindImageMemory2 = reinterpret_cast<PFN_vkBindImageMemory2>(stub);
+    functions.vkCreateRenderPass2 = reinterpret_cast<PFN_vkCreateRenderPass2>(stub);
+    functions.vkCmdBeginRenderPass2 = reinterpret_cast<PFN_vkCmdBeginRenderPass2>(stub);
+    functions.vkCmdEndRenderPass2 = reinterpret_cast<PFN_vkCmdEndRenderPass2>(stub);
     EXPECT_TRUE(GetMissingDeviceFunctionVulkan(functions).empty());
     auto checkMissing = [&](auto member, std::string_view name) {
         auto incomplete = functions;
@@ -168,6 +172,9 @@ TEST(VulkanDeviceFeaturePolicy, MissingUsedCoreDeviceEntryPointsAreRejected) {
     checkMissing(&VolkDeviceTable::vkGetImageMemoryRequirements2, "vkGetImageMemoryRequirements2");
     checkMissing(&VolkDeviceTable::vkBindBufferMemory2, "vkBindBufferMemory2");
     checkMissing(&VolkDeviceTable::vkBindImageMemory2, "vkBindImageMemory2");
+    checkMissing(&VolkDeviceTable::vkCreateRenderPass2, "vkCreateRenderPass2");
+    checkMissing(&VolkDeviceTable::vkCmdBeginRenderPass2, "vkCmdBeginRenderPass2");
+    checkMissing(&VolkDeviceTable::vkCmdEndRenderPass2, "vkCmdEndRenderPass2");
 }
 
 struct FeatureConsumerProbe {
@@ -335,9 +342,14 @@ protected:
 };
 
 class VulkanDeviceFeatureGpu : public VulkanGpuTest, public testing::WithParamInterface<uint32_t> {};
+class VulkanFramebufferGraphicsGpu : public VulkanGpuTest, public testing::WithParamInterface<FramebufferModeVulkan> {};
 
-TEST_F(VulkanGpuTest, GoogleFreeGraphicsDrawsThroughTraditionalFramebuffer) {
+TEST_P(VulkanFramebufferGraphicsGpu, GoogleFreeGraphicsDrawsThroughFramebuffer) {
     auto& device = *Context.Device;
+    auto& native = static_cast<DeviceVulkan&>(device);
+    if (GetParam() == FramebufferModeVulkan::Imageless && !native._enabledFeatures.Vulkan12.imagelessFramebuffer)
+        GTEST_SKIP() << "imagelessFramebuffer is unavailable";
+    native._renderPassCache = make_unique<VulkanRenderPassCache>(&native, GetParam());
     const auto root = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode";
     const auto vertexBytes = ReadBinaryFile(root / "no_resource_graphics.VSMain.spirv.bin");
     const auto pixelBytes = ReadBinaryFile(root / "no_resource_graphics.PSMain.spirv.bin");
@@ -424,6 +436,7 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
         const auto expected = SelectDeviceFeaturesVulkan(device->_supportedFeatures, GetRhiFeatureRequestsVulkan());
         EXPECT_TRUE(expected.MissingRequired.empty());
         EXPECT_EQ(FeatureBits(device->_enabledFeatures), FeatureBits(expected.Enabled));
+        EXPECT_EQ(device->_renderPassCache->IsImageless(), device->_enabledFeatures.Vulkan12.imagelessFramebuffer != 0);
         FeatureChainVulkan queried;
         vkGetPhysicalDeviceFeatures2(device->_physicalDevice, &queried.Core);
         EXPECT_EQ(FeatureBits(device->_supportedFeatures), FeatureBits(queried.Snapshot()));
@@ -483,6 +496,7 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
 }
 
 INSTANTIATE_TEST_SUITE_P(Adapters, VulkanDeviceFeatureGpu, testing::Values(0u, 1u));
+INSTANTIATE_TEST_SUITE_P(Modes, VulkanFramebufferGraphicsGpu, testing::Values(FramebufferModeVulkan::Traditional, FramebufferModeVulkan::Imageless));
 
 }  // namespace
 }  // namespace radray::render::vulkan
