@@ -352,6 +352,8 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    std::pair<bool, string> ValidateTextureView(const TextureViewDescriptor& desc) const;
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept override;

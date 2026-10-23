@@ -344,8 +344,8 @@ TEST(RadRayDxcMetadata, SpirvMetadataDoesNotRequireGoogleExtensions) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const auto includePaths = ShaderIncludePaths();
-    for (const uint8_t optimize : {0, 1}) {
-        for (const uint8_t debugInfo : {0, 1}) {
+    for (const auto optimize : {uint8_t{0}, uint8_t{1}}) {
+        for (const auto debugInfo : {uint8_t{0}, uint8_t{1}}) {
             SCOPED_TRACE(fmt::format("optimize={} debug={}", optimize, debugInfo));
             const shader::CompilePolicy policy{.Optimize = optimize, .DebugInfo = debugInfo};
             const auto source = CopyBytes(kGraphicsSource);

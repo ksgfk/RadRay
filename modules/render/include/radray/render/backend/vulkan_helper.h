@@ -69,6 +69,7 @@ struct FeatureRequestsVulkan {
     FeatureRequirementVulkan TimelineSemaphore{};
     FeatureRequirementVulkan SamplerMirrorClampToEdge{};
     FeatureRequirementVulkan SamplerFilterMinmax{};
+    FeatureRequirementVulkan ImagelessFramebuffer{};
 };
 
 struct FeatureSelectionVulkan {
@@ -97,6 +98,10 @@ FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept;
 FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested);
 
 std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept;
+
+bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkImageCreateFlags flags) noexcept;
+
+VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept;
 
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
 

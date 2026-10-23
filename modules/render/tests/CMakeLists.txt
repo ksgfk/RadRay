@@ -1,4 +1,6 @@
 set(radray_render_test_sources
+    test_texture_views.cpp
+    test_vulkan_render_objects.cpp
     test_vulkan_device_features.cpp
     test_swapchain_retirement_vulkan.cpp
     test_swapchain_wsi_vulkan.cpp

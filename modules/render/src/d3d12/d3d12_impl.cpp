@@ -1254,6 +1254,70 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     return result;
 }
 
+static DXGI_FORMAT _TextureViewFormat(const TextureViewDescriptor& desc, TextureAspects aspects) noexcept {
+    if (desc.Usage != TextureViewUsage::Resource) return MapType(desc.Format);
+    if (aspects == TextureAspect::Stencil) {
+        return desc.Target->GetDesc().Format == TextureFormat::D24_UNORM_S8_UINT
+                   ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
+                   : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+    }
+    return MapShaderResourceType(desc.Format);
+}
+
+std::pair<bool, string> DeviceD3D12::ValidateTextureView(const TextureViewDescriptor& desc) const {
+    const auto* texture = static_cast<const TextureD3D12*>(desc.Target);
+    const auto range = ResolveSubresourceRange(texture->GetDesc(), desc.Range);
+    const auto format = _TextureViewFormat(desc, range.Aspects);
+    const auto resourceFormat = texture->_rawDesc.Format;
+    const auto family = FormatToTypeless(MapType(desc.Format));
+    const bool swapchainSrgb = texture->_hints.HasFlag(ResourceHint::External) && desc.Usage == TextureViewUsage::RenderTarget &&
+                               ((resourceFormat == DXGI_FORMAT_R8G8B8A8_UNORM && format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) ||
+                                (resourceFormat == DXGI_FORMAT_B8G8R8A8_UNORM && format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB));
+    if (resourceFormat != format && resourceFormat != family && !swapchainSrgb)
+        return {false, "D3D12 view format does not belong to the resource's typed/typeless format family"};
+    if (desc.Usage != TextureViewUsage::Resource &&
+        (range.MipLevelCount != 1 || desc.Dim == TextureDimension::Cube || desc.Dim == TextureDimension::CubeArray))
+        return {false, "D3D12 attachment and UAV views require one mip and a non-cube view dimension"};
+    const auto flags = texture->_rawDesc.Flags;
+    D3D12_FORMAT_SUPPORT1 required{};
+    switch (desc.Usage) {
+        case TextureViewUsage::Resource:
+            if (flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)
+                return {false, "D3D12 resource denies shader resource views"};
+            break;
+        case TextureViewUsage::RenderTarget:
+            if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || IsDepthStencilFormat(desc.Format))
+                return {false, "D3D12 RTV requires a color format and ALLOW_RENDER_TARGET"};
+            required = D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
+            break;
+        case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthWrite:
+            if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) || !IsDepthStencilFormat(desc.Format) || desc.Dim == TextureDimension::Dim3D)
+                return {false, "D3D12 DSV requires a depth/stencil format, dimension and resource flag"};
+            required = D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL;
+            break;
+        case TextureViewUsage::UnorderedAccess:
+            if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) || range.Aspects != TextureAspect::Color)
+                return {false, "D3D12 UAV requires a color aspect and ALLOW_UNORDERED_ACCESS"};
+            required = D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
+            break;
+        case TextureViewUsage::UNKNOWN: return {false, "D3D12 view usage is invalid"};
+    }
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format, {}, {}};
+    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))))
+        return {false, "D3D12 view format support query failed"};
+    if ((support.Support1 & required) != required)
+        return {false, "D3D12 view format does not support the requested usage"};
+    if (desc.Usage == TextureViewUsage::Resource &&
+        ((support.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)) == 0 ||
+         (texture->_rawDesc.SampleDesc.Count > 1 && !(support.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD))))
+        return {false, "D3D12 SRV format does not support shader access for the resource's sample count"};
+    if (desc.Usage == TextureViewUsage::UnorderedAccess &&
+        (!(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) || !(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)))
+        return {false, "D3D12 UAV format does not support typed load/store"};
+    return {true, {}};
+}
+
 Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
@@ -1261,7 +1325,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
     const bool multisampled = tex->_rawDesc.SampleDesc.Count > 1;
     auto requestedRange = desc.Range;
     if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && requestedRange.ArrayLayerCount == SubresourceRange::All) requestedRange.ArrayLayerCount = 1;
-    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
+    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(tex->_format)) requestedRange.Aspects = TextureAspect::Depth;
     const auto range = ResolveSubresourceRange(tex->GetDesc(), requestedRange);
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
@@ -1276,8 +1340,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
             heapView = {heap, heapViewOpt.value()};
         }
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = MapShaderResourceType(desc.Format);
-        if (range.Aspects == TextureAspect::Stencil) srvDesc.Format = desc.Format == TextureFormat::D24_UNORM_S8_UINT ? DXGI_FORMAT_X24_TYPELESS_G8_UINT : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+        srvDesc.Format = _TextureViewFormat(desc, range.Aspects);
         srvDesc.Shader4ComponentMapping = range.Aspects == TextureAspect::Stencil
                                               ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
                                               : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;

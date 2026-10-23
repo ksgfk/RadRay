@@ -100,7 +100,7 @@ static std::optional<wstring> ToUtf16(uint32_t codepoint) noexcept {
 static void EmitTextInputUtf16(Win32Window* window, std::wstring_view text) noexcept {
     auto utf8 = ToUtf8(text);
     if (!utf8.has_value()) {
-        RADRAY_WARN_LOG(L"Win32Window cannot convert wstring to utf8 {}", text);
+        RADRAY_WARN_LOG("Win32Window cannot convert UTF-16 text to UTF-8 ({} code units)", text.size());
         return;
     }
 

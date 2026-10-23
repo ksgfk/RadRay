@@ -303,6 +303,33 @@ Vulkan feature 策略测试覆盖全支持时的精确请求集、逐位缺失�
 验收先分别构建 ClangCL Debug / Release，再运行上述 suites 和现有显式布局、传统 framebuffer、WSI 回归；
 另用 `RADRAY_ENABLE_VULKAN=OFF` 配置构建 render 测试，确认后端关闭时无 Vulkan 链接依赖。
 artifact golden 与 contract 测试位于 `modules/shader/tests/`。
+
+RenderPass2、view 格式契约与 framebuffer 回归使用以下 suites，同样链接到 `test_radray_render`：
+
+| Suite | 验证内容 |
+|---|---|
+| `TextureViewContractTest` | 双后端同格式与兼容格式、UNORM/sRGB 独立用途、后端兼容范围差异、depth/stencil plane、sRGB 清除读回、命令引用的销毁限制 |
+| `VulkanViewFormats` | Vulkan 格式兼容类与非 mutable 限制，depth/stencil 不与 color 混淆 |
+| `VulkanRenderObjects` | 测试侧 native probe 观察 RenderPass2 参数、缓存创建次数、约束区分、失败/预算、独立附件引用与销毁时序 |
+| `VulkanRenderScopeGpu` | 传统/imageless 两模式的 MRT、局部 clear/load/store、mip/layer、depth-only、DS、只读附件和 MSAA |
+| `VulkanFramebufferGraphicsGpu` | 两模式下现有 shader 的真实 graphics draw、PSO 与读回 |
+| `D3D12DiagnosticsSmoke` | 包含 swapchain UNORM 原生存储与逻辑 sRGB RTV 的回归 |
+
+`VulkanDeviceFeaturePolicy` 同时验证 imageless 为可选请求、缺失仍可创建设备，以及 RenderPass2 必需入口检查。
+传统/imageless GPU 测试在创建资源前选择缓存模式；不改 Supported/Enabled 快照。
+结构收益由 probe 比较相同附件约束的不同 views 所需的 framebuffer 创建数，不将 GTest 用作性能基准。
+非预期原生 validation 错误必须失败；不支持 imageless 的 GPU 用例明确跳过。
+
+```powershell
+cmake --build --preset win-x64-debug --target test_radray_render --parallel 8
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
+$env:RADRAY_TEST_GPU_VALIDATION = '1'
+ctest --preset win-x64-debug -R 'TextureViewContract|Vulkan|ExplicitBindingLayoutTest|D3D12Diagnostic|ExplicitLayoutOwnership' --output-on-failure --timeout 60
+```
+
+Release 使用对应 `win-x64-release` preset，仍先构建后测试。按上面的 adapter 环境变量逐设备运行；
+另在独立构建目录分别配置 `RADRAY_ENABLE_VULKAN=OFF` 和 `RADRAY_ENABLE_D3D12=OFF`，
+构建 render 测试并运行仍启用后端的 suites，确认后端专属校验不会引入已关闭后端的链接依赖。
 `RadRayDxcMetadata.SpirvMetadataDoesNotRequireGoogleExtensions` 检查优化/调试编译组合的原始
 SPIR-V 不声明 GOOGLE 反射扩展且独立 metadata 仍完整；render 的字节码回归不依赖 DXC。
 `VulkanShaderBytecode` 检查所有原始 SPIR-V fixture 及对齐/非对齐输入原样提交；
