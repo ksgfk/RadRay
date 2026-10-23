@@ -105,6 +105,12 @@ bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkI
 VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept;
 
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept;
+uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept;
+VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept;
+bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept;
+VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept;
 
 template <class T>
 struct VulkanObjectTrait {
@@ -216,11 +222,13 @@ requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::in
 auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&&... args) noexcept {
     uint32_t count = 0;
     f(std::forward<Args>(args)..., &count, nullptr);
+    out.clear();
     if (count == 0) {
         return;
     }
     out.resize(count);
     f(std::forward<Args>(args)..., &count, out.data());
+    out.resize(count);
     return;
 }
 
@@ -234,9 +242,14 @@ auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&
         if (err != VK_SUCCESS) {
             return err;
         }
+        if (count == 0) {
+            out.clear();
+            return VK_SUCCESS;
+        }
         out.resize(count);
         err = f(std::forward<Args>(args)..., &count, out.data());
     } while (err == VK_INCOMPLETE);
+    if (err == VK_SUCCESS) out.resize(count);
     return err;
 }
 

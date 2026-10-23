@@ -40,7 +40,6 @@ private:
     HANDLE _event{nullptr};
 };
 
-
 std::string_view GetErrorName(HRESULT hr) noexcept;
 
 void SetObjectName(std::string_view str, ID3D12Object* obj, D3D12MA::Allocation* alloc = nullptr) noexcept;
@@ -74,6 +73,8 @@ D3D12_STENCIL_OP MapType(StencilOperation v) noexcept;
 D3D12_INDEX_BUFFER_STRIP_CUT_VALUE MapType(IndexFormat v) noexcept;
 D3D12_RESOURCE_STATES MapType(BufferStates v) noexcept;
 D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept;
+D3D12_RESOURCE_STATES ResolveShaderResourceStatesD3D12(D3D12_RESOURCE_STATES states, ShaderStages stages, D3D12_COMMAND_LIST_TYPE type) noexcept;
+bool AreResourceStatesSupportedD3D12(D3D12_RESOURCE_STATES states, D3D12_COMMAND_LIST_TYPE type) noexcept;
 D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept;
 D3D12_RENDER_PASS_ENDING_ACCESS_TYPE MapType(StoreAction v) noexcept;
 D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;

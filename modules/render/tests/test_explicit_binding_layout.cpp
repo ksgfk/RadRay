@@ -1,4 +1,5 @@
 #include "gpu_test_fixture.h"
+#include "rhi_validation.h"
 #include <filesystem>
 #include <fstream>
 #include <radray/scope_guard.h>
@@ -101,6 +102,46 @@ TEST_P(ExplicitBindingLayoutTest, SharesGroupAndParametersAcrossPipelinesWithDif
         EXPECT_TRUE(parameters->Set(91, 0, ShaderBufferBinding{output.get(), {0, 4}, 4}));
     }
     EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+}
+
+TEST_P(ExplicitBindingLayoutTest, ImmutableSamplerOnlyGroupRequiresBindingOnVulkan) {
+    auto& device = *Context.Device;
+    const auto bytes = ReadStage("compute", GetParam());
+    ASSERT_FALSE(bytes.empty());
+    auto shader = device.CreateShader({bytes, GetParam() == RenderBackend::D3D12 ? ShaderBlobCategory::DXIL : ShaderBlobCategory::SPIRV, ShaderStage::Compute}).Unwrap();
+    const auto outputBinding = MakeBinding(0, BindingKind::RWStructuredBuffer, 2, 6);
+    auto samplerBinding = MakeBinding(1, BindingKind::Sampler, 0, 0, 1);
+    samplerBinding.ImmutableSampler = SamplerDescriptor{};
+    auto outputGroup = device.CreateBindingGroupLayout({std::span{&outputBinding, 1}}).Unwrap();
+    auto samplerGroup = device.CreateBindingGroupLayout({std::span{&samplerBinding, 1}}).Unwrap();
+    const PipelineLayoutGroupDescriptor slots[]{{0, outputGroup.get()}, {1, samplerGroup.get()}};
+    auto layout = device.CreatePipelineLayout({slots, {}}).Unwrap();
+    auto pipeline = device.CreateComputePipelineState({layout.get(), {shader.get(), "CSMain"}}).Unwrap();
+    auto output = device.CreateBuffer({.Size = 4, .Memory = MemoryType::Device, .Usage = BufferUse::UnorderedAccess}).Unwrap();
+    auto outputSet = device.CreateShaderParameterSet({outputGroup.get()}).Unwrap();
+    auto samplerSet = device.CreateShaderParameterSet({samplerGroup.get()}).Unwrap();
+    ASSERT_TRUE(outputSet->Set(0, 0, ShaderBufferBinding{output.get(), {0, 4}, 4}));
+    ASSERT_TRUE(outputSet->FlushWrites());
+    ASSERT_TRUE(samplerSet->FlushWrites());
+    auto allocator = device.CreateCommandAllocator(Context.Queue).Unwrap();
+    auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+    command->Begin();
+    const ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{output.get(), BufferState::Undefined, BufferState::UnorderedAccess};
+    command->ResourceBarrier(std::span{&toUav, 1});
+    auto encoder = command->BeginComputePass().Unwrap();
+    encoder->BindComputePipelineState(pipeline.get());
+    encoder->BindShaderParameterSet(0, outputSet.get(), {});
+    encoder->Dispatch(1, 1, 1);
+    const uint32_t expectedErrors = GetParam() == RenderBackend::Vulkan ? 2 : 0;
+    EXPECT_EQ(Context.RhiValidationErrors.load(), expectedErrors);
+    if (GetParam() == RenderBackend::Vulkan) {
+        encoder->BindShaderParameterSet(1, samplerSet.get(), {});
+        encoder->Dispatch(1, 1, 1);
+        EXPECT_EQ(Context.RhiValidationErrors.load(), expectedErrors);
+    }
+    command->EndComputePass(std::move(encoder));
+    command->End();
+    allocator->Reset();
 }
 
 TEST_P(ExplicitBindingLayoutTest, RetainsViewAndMaterialWhenOnlyObjectGroupIsRebound) {
@@ -465,6 +506,46 @@ public:
         Device._ftb.vkDestroyDevice = [](VkDevice, const VkAllocationCallbacks*) {};
     }
 };
+
+TEST(ExplicitLayoutOwnershipVulkan, ValidationCountsRegularAndDynamicDescriptorsSeparately) {
+    VulkanLayoutProbe probe;
+    probe.Device._vma = make_unique<vulkan::VMA>(nullptr);
+    auto& limits = probe.Device._properties.limits;
+    limits = {};
+    limits.maxBoundDescriptorSets = 1;
+    limits.maxDescriptorSetUniformBuffers = limits.maxDescriptorSetStorageBuffers = 2;
+    limits.maxDescriptorSetUniformBuffersDynamic = limits.maxDescriptorSetStorageBuffersDynamic = 1;
+    limits.maxPerStageDescriptorUniformBuffers = limits.maxPerStageDescriptorStorageBuffers = 3;
+    limits.maxPerStageResources = 3;
+    uint32_t errors = 0;
+    auto device = detail::CreateValidationDevice(shared_ptr<Device>{&probe.Device, [](Device*) {}},
+                                                 {.IsEnabled = true,
+                                                  .LogCallback = [](LogLevel, std::string_view, void* data) { ++*static_cast<uint32_t*>(data); },
+                                                  .LogUserData = &errors})
+                      .Unwrap();
+    for (auto kind : {BindingKind::CBuffer, BindingKind::RWStructuredBuffer}) {
+        SCOPED_TRACE(static_cast<uint32_t>(kind));
+        BindingDescriptor bindings[]{MakeBinding(0, kind, 0, 0), MakeBinding(1, kind, 2, 1, 0, true)};
+        bindings[0].Count = 2;
+        auto group = device->CreateBindingGroupLayout({bindings}).Unwrap();
+        const PipelineLayoutGroupDescriptor slot{0, group.get()};
+        EXPECT_TRUE(device->CreatePipelineLayout({std::span{&slot, 1}, {}}));
+        auto& regular = kind == BindingKind::CBuffer ? limits.maxDescriptorSetUniformBuffers : limits.maxDescriptorSetStorageBuffers;
+        auto& dynamic = kind == BindingKind::CBuffer ? limits.maxDescriptorSetUniformBuffersDynamic : limits.maxDescriptorSetStorageBuffersDynamic;
+        auto& stage = kind == BindingKind::CBuffer ? limits.maxPerStageDescriptorUniformBuffers : limits.maxPerStageDescriptorStorageBuffers;
+        regular = 1;
+        EXPECT_FALSE(device->CreatePipelineLayout({std::span{&slot, 1}, {}}));
+        regular = 2;
+        dynamic = 0;
+        EXPECT_FALSE(device->CreatePipelineLayout({std::span{&slot, 1}, {}}));
+        dynamic = 1;
+        stage = 2;
+        EXPECT_FALSE(device->CreatePipelineLayout({std::span{&slot, 1}, {}}));
+        stage = 3;
+    }
+    EXPECT_EQ(probe.PipelineCreates, 2u);
+    EXPECT_EQ(errors, 6u);
+}
 
 TEST(ExplicitLayoutOwnershipVulkan, IndependentNativeCreationBorrowingAndIdempotentDestruction) {
     VulkanLayoutProbe probe;

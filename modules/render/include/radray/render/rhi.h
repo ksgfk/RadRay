@@ -1362,9 +1362,11 @@ struct DeviceLimits {
     uint32_t MaxTextureArrayLayers{0};
     uint64_t MaxBufferSize{0};
     uint64_t MaxUniformBufferRange{0};
+    uint64_t MaxStorageBufferRange{0};
     uint32_t MaxPushConstantBytes{0};
     uint64_t CBufferOffsetAlignment{1};
     uint64_t StorageBufferOffsetAlignment{1};
+    uint64_t TexelBufferOffsetAlignment{1};
     float MaxSamplerAnisotropy{1};
     float MinSamplerLodBias{0}, MaxSamplerLodBias{0};
 };

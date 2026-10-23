@@ -965,7 +965,7 @@ TEST(D3D12DiagnosticsSmoke, SwapChainTopologyKeepsDxgiAccountingHealthy) {
         }
     }
     ASSERT_EQ(native._device.As(&messages), S_OK);
-    ASSERT_EQ(messages->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "present checkpoint"), S_OK);
+    ASSERT_TRUE(SUCCEEDED(messages->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "present checkpoint")));
     d3d12::ComPtr<IDXGIInfoQueue> dxgi;
     ASSERT_EQ(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgi)), S_OK);
     ASSERT_EQ(dxgi->AddApplicationMessage(DXGI_INFO_QUEUE_MESSAGE_SEVERITY_INFO, "present checkpoint"), S_OK);
@@ -973,7 +973,7 @@ TEST(D3D12DiagnosticsSmoke, SwapChainTopologyKeepsDxgiAccountingHealthy) {
     EXPECT_EQ(chain->Present({}).Status, SwapChainStatus::RetryLater);
     EXPECT_TRUE(context.Diagnostics->HasMarker(test::DiagnosticProbe::Source::D3D12, "present checkpoint"));
     EXPECT_TRUE(context.Diagnostics->HasMarker(test::DiagnosticProbe::Source::Dxgi, "present checkpoint"));
-    ASSERT_EQ(messages->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "wait checkpoint"), S_OK);
+    ASSERT_TRUE(SUCCEEDED(messages->AddApplicationMessage(D3D12_MESSAGE_SEVERITY_INFO, "wait checkpoint")));
     context.Queue->Wait();
     EXPECT_TRUE(context.Diagnostics->HasMarker(test::DiagnosticProbe::Source::D3D12, "wait checkpoint"));
     messages.Reset();

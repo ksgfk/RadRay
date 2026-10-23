@@ -2,6 +2,11 @@
 #include <filesystem>
 #include <fstream>
 
+#if defined(RADRAY_ENABLE_D3D12)
+#include <DXProgrammableCapture.h>
+#include <radray/scope_guard.h>
+#endif
+
 namespace radray::render {
 namespace {
 
@@ -167,6 +172,21 @@ TEST_P(AttachmentOperations, PartialFloatResolvePreservesOutsideEvenWithDiscard)
 
 TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea) {
     auto& device = *Context.Device;
+    const char* stagedReadbackSetting = std::getenv("RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK");
+    const bool stagedReadback = stagedReadbackSetting && std::string_view{stagedReadbackSetting} == "1";
+    RecordProperty("depth_resolve_staged_readback", stagedReadback ? "enabled" : "disabled");
+#if defined(RADRAY_ENABLE_D3D12)
+    const char* pixCaptureSetting = std::getenv("RADRAY_TEST_DEPTH_RESOLVE_PIX_CAPTURE");
+    const bool pixCapture = Backend() == RenderBackend::D3D12 && pixCaptureSetting && std::string_view{pixCaptureSetting} == "1";
+    RecordProperty("depth_resolve_pix_capture", pixCapture ? "enabled" : "disabled");
+    d3d12::ComPtr<IDXGraphicsAnalysis> graphicsAnalysis;
+    if (pixCapture) {
+        const auto result = ::DXGIGetDebugInterface1(0, IID_PPV_ARGS(&graphicsAnalysis));
+        ASSERT_TRUE(SUCCEEDED(result)) << fmt::format("PIX GPU capture interface unavailable ({:#010x}); launch this test through PIX with GPU Capture enabled", static_cast<uint32_t>(result));
+    }
+#endif
+    constexpr uint64_t kSnapshotBytes = 4096;
+    const uint64_t readbackBytes = stagedReadback ? 3 * kSnapshotBytes : kSnapshotBytes;
     const auto format = TextureFormat::D32_FLOAT_S8_UINT;
     const auto support = device.QueryAttachmentResolveSupport(format, 4);
     if (!support.DepthModes) GTEST_SKIP() << "4x depth/stencil attachment resolve unavailable";
@@ -181,6 +201,16 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
     ASSERT_FALSE(modes.empty());
     for (const auto& [depthMode, stencilMode] : modes) {
         SCOPED_TRACE(fmt::format("depth={}, stencil={}", depthMode, stencilMode));
+#if defined(RADRAY_ENABLE_D3D12)
+        const bool captureThisMode = pixCapture && depthMode == ResolveMode::Average && stencilMode == ResolveMode::None;
+        bool captureStarted = false;
+        const auto finishCapture = MakeScopeGuard([&] {
+            if (captureStarted) {
+                Context.Queue->Wait();
+                graphicsAnalysis->EndCapture();
+            }
+        });
+#endif
         auto source = Texture2D(format, 4, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource);
         auto target = Texture2D(format, 1, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource);
         auto sourceView = View(source.get(), TextureViewUsage::DepthWrite);
@@ -209,7 +239,7 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         auto computeLayout = device.CreatePipelineLayout({std::span{&slot, 1}, {}}).Unwrap();
         auto compute = device.CreateComputePipelineState({computeLayout.get(), {cs.get(), "CSMain"}}).Unwrap();
         auto output = device.CreateBuffer({.Size = 4096, .Memory = MemoryType::Device, .Usage = BufferUse::UnorderedAccess | BufferUse::CopySource}).Unwrap();
-        auto readback = device.CreateBuffer({.Size = 4096, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
+        auto readback = device.CreateBuffer({.Size = readbackBytes, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
         auto params = device.CreateShaderParameterSet({group.get()}).Unwrap();
         ASSERT_TRUE(params->Set(0, 0, sourceDepth.get()));
         ASSERT_TRUE(params->Set(1, 0, sourceStencil.get()));
@@ -219,21 +249,66 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         ASSERT_TRUE(params->FlushWrites());
         auto allocator = device.CreateCommandAllocator(Context.Queue).Unwrap();
         auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+        auto outputState = BufferState::Undefined;
+        const auto recordReadback = [&](uint64_t offset) {
+            const ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{output.get(), outputState, BufferState::UnorderedAccess};
+            command->ResourceBarrier(std::span{&toUav, 1});
+            auto reader = command->BeginComputePass().Unwrap();
+            reader->BindComputePipelineState(compute.get());
+            reader->BindShaderParameterSet(0, params.get(), {});
+            reader->Dispatch(1, 1, 1);
+            command->EndComputePass(std::move(reader));
+            const ResourceBarrierDescriptor toCopy = BarrierBufferDescriptor{output.get(), BufferState::UnorderedAccess, BufferState::CopySource};
+            command->ResourceBarrier(std::span{&toCopy, 1});
+            command->CopyBufferToBuffer(readback.get(), offset, output.get(), 0, kSnapshotBytes);
+            outputState = BufferState::CopySource;
+        };
+#if defined(RADRAY_ENABLE_D3D12)
+        if (captureThisMode) {
+            source->SetDebugName("DepthResolveSource4x");
+            target->SetDebugName("DepthResolveTarget1x");
+            output->SetDebugName("DepthResolveOutput");
+            readback->SetDebugName("DepthResolveReadback");
+        }
+#endif
         command->Begin();
         Barrier(command.get(), source.get(), TextureState::Undefined, TextureState::DepthWrite);
         Barrier(command.get(), target.get(), TextureState::Undefined, TextureState::DepthWrite);
         RenderPassDepthStencilAttachment attachment{targetView.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, {0.875f, 19}};
-        auto encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8}).Unwrap();
-        command->EndRenderPass(std::move(encoder));
-        attachment.View = sourceView.get();
-        attachment.Clear = {0.75f, 3};
-        encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8}).Unwrap();
-        command->EndRenderPass(std::move(encoder));
+        const auto clearAttachments = [&] {
+            attachment.View = targetView.get();
+            attachment.Clear = {0.875f, 19};
+            auto clear = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8}).Unwrap();
+            command->EndRenderPass(std::move(clear));
+            attachment.View = sourceView.get();
+            attachment.Clear = {0.75f, 3};
+            clear = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8}).Unwrap();
+            command->EndRenderPass(std::move(clear));
+        };
+        clearAttachments();
+#if defined(RADRAY_ENABLE_D3D12)
+        if (captureThisMode) {
+            Submit(command.get());
+            allocator->Reset();
+            graphicsAnalysis->BeginCapture();
+            captureStarted = true;
+            command->Begin();
+            clearAttachments();
+            RecordProperty("depth_resolve_pix_initialization_submit", "warmup_then_captured_clear");
+        }
+#endif
+        if (stagedReadback) {
+            Barrier(command.get(), source.get(), TextureState::DepthWrite, TextureState::ShaderRead);
+            Barrier(command.get(), target.get(), TextureState::DepthWrite, TextureState::ShaderRead);
+            recordReadback(kSnapshotBytes);
+            Barrier(command.get(), source.get(), TextureState::ShaderRead, TextureState::DepthWrite);
+            Barrier(command.get(), target.get(), TextureState::ShaderRead, TextureState::DepthWrite);
+        }
         Barrier(command.get(), source.get(), TextureState::DepthWrite, TextureState::DepthWrite);
         Barrier(command.get(), target.get(), TextureState::DepthWrite, TextureState::AttachmentResolveDestination);
         attachment.DepthLoad = attachment.StencilLoad = LoadAction::Load;
         attachment.Resolve = DepthStencilResolveDescriptor{targetView.get(), depthMode, stencilMode};
-        encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8, .RenderArea = Rect{2, 2, 4, 4}}).Unwrap();
+        auto encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8, .RenderArea = Rect{2, 2, 4, 4}}).Unwrap();
         encoder->SetViewport({0, 0, 8, 8, 0, 1});
         encoder->SetScissor({2, 2, 4, 4});
         for (uint32_t sample = 0; sample < 4; ++sample) {
@@ -245,21 +320,50 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         command->EndRenderPass(std::move(encoder));
         Barrier(command.get(), source.get(), TextureState::DepthWrite, TextureState::ShaderRead);
         Barrier(command.get(), target.get(), TextureState::AttachmentResolveDestination, TextureState::ShaderRead);
-        const ResourceBarrierDescriptor toUav = BarrierBufferDescriptor{output.get(), BufferState::Undefined, BufferState::UnorderedAccess};
-        command->ResourceBarrier(std::span{&toUav, 1});
-        auto reader = command->BeginComputePass().Unwrap();
-        reader->BindComputePipelineState(compute.get());
-        reader->BindShaderParameterSet(0, params.get(), {});
-        reader->Dispatch(1, 1, 1);
-        command->EndComputePass(std::move(reader));
-        const ResourceBarrierDescriptor toCopy = BarrierBufferDescriptor{output.get(), BufferState::UnorderedAccess, BufferState::CopySource};
-        command->ResourceBarrier(std::span{&toCopy, 1});
-        command->CopyBufferToBuffer(readback.get(), 0, output.get(), 0, 4096);
+        if (stagedReadback) recordReadback(2 * kSnapshotBytes);
+        recordReadback(0);
         test::GpuWorkGuard gpuWork{Context};
         Submit(command.get());
-        auto* data = static_cast<const float*>(readback->Map(0, 4096));
+        auto* data = static_cast<const float*>(readback->Map(0, readbackBytes));
         ASSERT_NE(data, nullptr);
-        readback->InvalidateMappedRange({0, 4096});
+        readback->InvalidateMappedRange({0, readbackBytes});
+        if (stagedReadback) {
+            const array<std::pair<std::string_view, uint64_t>, 3> snapshots{{{"initialized", kSnapshotBytes}, {"after_end_render_pass", 2 * kSnapshotBytes}, {"final", 0}}};
+            for (const auto& [stage, offset] : snapshots) {
+                SCOPED_TRACE(stage);
+                const auto* snapshot = data + offset / sizeof(float);
+                const auto* center = snapshot + (3 * 8 + 3) * 16;
+                float insideMin = center[3], insideMax = center[3];
+                float outsideMin = snapshot[3], outsideMax = snapshot[3];
+                string stencilRows;
+                for (uint32_t y = 0; y < 8; ++y) {
+                    for (uint32_t x = 0; x < 8; ++x) {
+                        const auto* value = snapshot + (y * 8 + x) * 16;
+                        const bool inside = x >= 2 && x < 6 && y >= 2 && y < 6;
+                        auto& minimum = inside ? insideMin : outsideMin;
+                        auto& maximum = inside ? insideMax : outsideMax;
+                        minimum = std::min(minimum, value[3]);
+                        maximum = std::max(maximum, value[3]);
+                        stencilRows += fmt::format("{}{}", x == 0 ? "" : " ", value[3]);
+                        if (offset == kSnapshotBytes) {
+                            EXPECT_FLOAT_EQ(value[2], 0.875f);
+                            EXPECT_FLOAT_EQ(value[3], 19.0f);
+                            for (uint32_t sample = 0; sample < 4; ++sample) {
+                                EXPECT_FLOAT_EQ(value[sample * 4], 0.75f);
+                                EXPECT_FLOAT_EQ(value[sample * 4 + 1], 3.0f);
+                            }
+                        }
+                    }
+                    stencilRows += '\n';
+                }
+                const auto observation = fmt::format("center_depth={} center_stencil={} outside_depth={} outside_stencil={} inside_stencil=[{},{}] outside_stencil=[{},{}] source_stencil=[{},{},{},{}]",
+                                                     center[2], center[3], snapshot[2], snapshot[3], insideMin, insideMax, outsideMin, outsideMax, center[1], center[5], center[9], center[13]);
+                fmt::print("depth-resolve probe depth={} stencil={} stage={} {}\n", depthMode, stencilMode, stage, observation);
+                RecordProperty(fmt::format("resolve_probe_{}_{}_{}", depthMode, stencilMode, stage), fmt::format("{}\nstencil rows:\n{}", observation, stencilRows));
+                if (offset == 2 * kSnapshotBytes)
+                    EXPECT_TRUE(std::equal(snapshot, snapshot + kSnapshotBytes / sizeof(float), data)) << "EndRenderPass snapshot differs from final readback";
+            }
+        }
         for (uint32_t y = 0; y < 8; ++y)
             for (uint32_t x = 0; x < 8; ++x)
                 for (uint32_t sample = 0; sample < 4; ++sample) {

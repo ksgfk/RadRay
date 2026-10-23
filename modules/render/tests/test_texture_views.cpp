@@ -63,6 +63,58 @@ TEST_P(TextureViewContractTest, BgraUnormSrgbPair) {
     ASSERT_TRUE(Context.Device->CreateTextureView(View(texture.get(), TextureFormat::BGRA8_UNORM_SRGB, TextureViewUsage::RenderTarget)));
 }
 
+TEST_P(TextureViewContractTest, NonArrayViewsSelectNonzeroArrayLayersOnVulkan) {
+    for (const bool is1D : {true, false}) {
+        auto texture = Context.Device->CreateTexture({.Dim = is1D ? TextureDimension::Dim1DArray : TextureDimension::Dim2DArray, .Width = 8, .Height = is1D ? 1u : 8u, .DepthOrArraySize = 4, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::Resource | TextureUse::RenderTarget}).Unwrap();
+        for (const auto usage : {TextureViewUsage::Resource, TextureViewUsage::RenderTarget}) {
+            TextureViewDescriptor desc{texture.get(), is1D ? TextureDimension::Dim1D : TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {1, 1, 0, 1}, usage};
+            if (GetParam() == RenderBackend::Vulkan) {
+                for (const auto count : {1u, SubresourceRange::All}) {
+                    desc.Range.ArrayLayerCount = count;
+                    auto view = Context.Device->CreateTextureView(desc);
+                    ASSERT_TRUE(view);
+                    EXPECT_EQ(view.Get()->GetDesc().Range.BaseArrayLayer, 1u);
+                    EXPECT_EQ(view.Get()->GetDesc().Range.ArrayLayerCount, 1u);
+                }
+            } else {
+                Reject(desc);
+            }
+            desc.Range.ArrayLayerCount = 2;
+            Reject(desc);
+            desc.Range = {4, 1, 0, 1};
+            Reject(desc);
+        }
+    }
+}
+
+TEST_P(TextureViewContractTest, CubeViewSelectsSecondCubeOnVulkan) {
+    auto texture = Context.Device->CreateTexture({.Dim = TextureDimension::CubeArray, .Width = 8, .Height = 8, .DepthOrArraySize = 12, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::Resource}).Unwrap();
+    TextureViewDescriptor desc{texture.get(), TextureDimension::Cube, TextureFormat::RGBA8_UNORM, {6, 6, 0, 1}, TextureViewUsage::Resource};
+    if (GetParam() == RenderBackend::Vulkan) {
+        auto view = Context.Device->CreateTextureView(desc);
+        ASSERT_TRUE(view);
+        EXPECT_EQ(view.Get()->GetDesc().Range.BaseArrayLayer, 6u);
+        EXPECT_EQ(view.Get()->GetDesc().Range.ArrayLayerCount, 6u);
+    } else {
+        Reject(desc);
+    }
+    desc.Range.ArrayLayerCount = 5;
+    Reject(desc);
+    desc.Range = {7, 6, 0, 1};
+    Reject(desc);
+}
+
+TEST_P(TextureViewContractTest, CubeViewsRequireCubeTexturesOnVulkan) {
+    auto texture = Context.Device->CreateTexture({.Dim = TextureDimension::Dim2DArray, .Width = 8, .Height = 8, .DepthOrArraySize = 6, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::Resource}).Unwrap();
+    for (const auto dimension : {TextureDimension::Cube, TextureDimension::CubeArray}) {
+        const TextureViewDescriptor desc{texture.get(), dimension, TextureFormat::RGBA8_UNORM, {0, 6, 0, 1}, TextureViewUsage::Resource};
+        if (GetParam() == RenderBackend::Vulkan)
+            Reject(desc);
+        else
+            ASSERT_TRUE(Context.Device->CreateTextureView(desc));
+    }
+}
+
 TEST_P(TextureViewContractTest, DepthAndStencilViewsKeepTheirPlanes) {
     auto texture = MakeTexture(TextureFormat::D32_FLOAT, TextureUse::Resource | TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite);
     ASSERT_TRUE(Context.Device->CreateTextureView(View(texture.get(), TextureFormat::D32_FLOAT, TextureViewUsage::Resource)));

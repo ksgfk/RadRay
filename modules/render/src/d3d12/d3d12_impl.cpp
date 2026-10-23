@@ -225,10 +225,8 @@ static std::optional<uint32_t> _SelectHighPerformanceAdapterIndex(IDXGIFactory4*
     ComPtr<IDXGIFactory6> factory6;
     if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(factory6.GetAddressOf())))) {
         ComPtr<IDXGIAdapter1> adapter;
-        for (
-            uint32_t adapterIndex = 0;
-            factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.ReleaseAndGetAddressOf())) != DXGI_ERROR_NOT_FOUND;
-            ++adapterIndex) {
+        for (uint32_t adapterIndex = 0;; ++adapterIndex) {
+            if (FAILED(factory6->EnumAdapterByGpuPreference(adapterIndex, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(adapter.ReleaseAndGetAddressOf())))) break;
             DXGI_ADAPTER_DESC1 desc{};
             if (FAILED(adapter->GetDesc1(&desc))) {
                 continue;
@@ -1143,7 +1141,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
         resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
-    if (desc.Memory == MemoryType::ReadBack) {
+    if (desc.Memory == MemoryType::ReadBack && !desc.Usage.HasFlag(BufferUse::Resource)) {
         resDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
     }
     UINT64 paddedSize;
@@ -1275,14 +1273,18 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
     return result;
 }
 
-static DXGI_FORMAT _TextureViewFormat(const TextureViewDescriptor& desc, TextureAspects aspects) noexcept {
-    if (desc.Usage != TextureViewUsage::Resource) return MapType(desc.Format);
-    if (aspects == TextureAspect::Stencil) {
+static DXGI_FORMAT _TexturePlaneFormat(const TextureViewDescriptor& desc, uint32_t plane) noexcept {
+    if (plane == 1) {
         return desc.Target->GetDesc().Format == TextureFormat::D24_UNORM_S8_UINT
                    ? DXGI_FORMAT_X24_TYPELESS_G8_UINT
                    : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
     }
     return MapShaderResourceType(desc.Format);
+}
+
+static DXGI_FORMAT _TextureViewFormat(const TextureViewDescriptor& desc, TextureAspects aspects) noexcept {
+    if (desc.Usage != TextureViewUsage::Resource) return MapType(desc.Format);
+    return _TexturePlaneFormat(desc, aspects == TextureAspect::Stencil ? 1 : 0);
 }
 
 std::pair<bool, string> DeviceD3D12::ValidateTextureView(const TextureViewDescriptor& desc) const {
@@ -1814,7 +1816,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(const Pip
     native.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
                             D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS | D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
     ComPtr<ID3DBlob> blob, errors;
-    auto hr = D3D12SerializeVersionedRootSignature(&native, blob.GetAddressOf(), errors.GetAddressOf());
+    auto hr = D3DX12SerializeVersionedRootSignature(&native, _features.HighestRootSignatureVersion(), blob.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr)) {
         RADRAY_ERR_LOG("root signature serialization failed: {} {}", hr, errors ? std::string_view{static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()} : std::string_view{});
         return nullptr;
@@ -2086,7 +2088,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     rawRaster.ConservativeRaster = desc.Primitive.Conservative ? D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON : D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
     D3D12_BLEND_DESC rawBlend{};
     rawBlend.AlphaToCoverageEnable = desc.MultiSample.AlphaToCoverageEnable;
-    rawBlend.IndependentBlendEnable = false;
+    rawBlend.IndependentBlendEnable = desc.ColorTargets.size() > 1;
     for (size_t i = 0; i < ArrayLength(rawBlend.RenderTarget); i++) {
         D3D12_RENDER_TARGET_BLEND_DESC& rtb = rawBlend.RenderTarget[i];
         if (i < desc.ColorTargets.size()) {
@@ -2508,6 +2510,10 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 
 void CmdListD3D12::Begin() noexcept {
     _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    if (_type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        const float blendConstants[4]{};
+        _cmdList->OMSetBlendFactor(blendConstants);
+    }
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
         ID3D12DescriptorHeap* descriptorHeaps[] = {
             _device->_gpuResHeap->GetNative(),
@@ -2536,10 +2542,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
     for (const auto& v : barriers) {
         if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
             auto buf = CastD3D12Object(bb->Target);
-            if (bb->Before.HasFlag(BufferState::HostRead) ||
-                bb->Before.HasFlag(BufferState::HostWrite) ||
-                bb->After.HasFlag(BufferState::HostRead) ||
-                bb->After.HasFlag(BufferState::HostWrite)) {
+            if (buf->_memory != MemoryType::Device && !buf->_usage.HasFlag(BufferUse::UnorderedAccess)) {
                 continue;
             }
             D3D12_RESOURCE_BARRIER raw{};
@@ -2552,8 +2555,10 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 raw.Transition.pResource = buf->_buf.Get();
                 raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                raw.Transition.StateBefore = MapType(bb->Before);
-                raw.Transition.StateAfter = MapType(bb->After);
+                raw.Transition.StateBefore = ResolveShaderResourceStatesD3D12(MapType(bb->Before), bb->BeforeStages, _type);
+                raw.Transition.StateAfter = ResolveShaderResourceStatesD3D12(MapType(bb->After), bb->AfterStages, _type);
+                if (bb->Before == BufferState::HostRead) raw.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+                if (bb->After == BufferState::HostRead) raw.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
                 if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
                     continue;
                 }
@@ -2576,8 +2581,8 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 for (uint32_t plane = 0; plane < planes; ++plane) {
                     const auto aspect = IsDepthStencilFormat(textureDesc.Format) ? (plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil) : TextureAspect::Color;
                     if (!range.Aspects.HasFlag(aspect)) continue;
-                    raw.Transition.StateBefore = MapType(TextureStateForAspect(tb->Before, aspect));
-                    raw.Transition.StateAfter = MapType(TextureStateForAspect(tb->After, aspect));
+                    raw.Transition.StateBefore = ResolveShaderResourceStatesD3D12(MapType(TextureStateForAspect(tb->Before, aspect)), tb->BeforeStages, _type);
+                    raw.Transition.StateAfter = ResolveShaderResourceStatesD3D12(MapType(TextureStateForAspect(tb->After, aspect)), tb->AfterStages, _type);
                     if (raw.Transition.StateBefore == raw.Transition.StateAfter) continue;
                     for (uint32_t layer = range.BaseArrayLayer; layer < range.BaseArrayLayer + range.ArrayLayerCount; ++layer) {
                         for (uint32_t mip = range.BaseMipLevel; mip < range.BaseMipLevel + range.MipLevelCount; ++mip) {
@@ -2684,7 +2689,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         }
         const bool fullSource = renderArea.X == 0 && renderArea.Y == 0 && renderArea.Width == std::max(1u, srcTexture->GetDesc().Width >> sr.BaseMipLevel) && renderArea.Height == std::max(1u, srcTexture->GetDesc().Height >> sr.BaseMipLevel);
         access.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_RESOLVE;
-        access.Resolve = {srcTexture->_tex.Get(), dstTexture->_tex.Get(), static_cast<UINT>(regions.size()), regions.data(), src->_rawFormat,
+        access.Resolve = {srcTexture->_tex.Get(), dstTexture->_tex.Get(), static_cast<UINT>(regions.size()), regions.data(), _TexturePlaneFormat(src->_desc, plane),
                           mode == ResolveMode::Min ? D3D12_RESOLVE_MODE_MIN : mode == ResolveMode::Max ? D3D12_RESOLVE_MODE_MAX
                                                                                                        : D3D12_RESOLVE_MODE_AVERAGE,
                           store == StoreAction::Store || !fullSource};
@@ -2833,6 +2838,8 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
     const D3D12_RESOURCE_DESC& dstDesc = dst->_rawDesc;
+    dstRange = ResolveSubresourceRange(dst->GetDesc(), dstRange);
+    const uint32_t plane = dstRange.Aspects == TextureAspect::Stencil ? 1 : 0;
 
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
@@ -2843,7 +2850,7 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
         uint32_t mipLevel = dstRange.BaseMipLevel + mip;
         for (uint32_t layer = 0; layer < layerCount; ++layer) {
             uint32_t arrayLayer = dstRange.BaseArrayLayer + layer;
-            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, dst->_rawDesc.MipLevels, arraySize);
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, plane, dst->_rawDesc.MipLevels, arraySize);
 
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
             UINT64 totalBytes = 0;
@@ -2869,6 +2876,8 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
     auto dst = CastD3D12Object(dst_);
     auto src = CastD3D12Object(src_);
     const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
+    srcRange = ResolveSubresourceRange(src->GetDesc(), srcRange);
+    const uint32_t plane = srcRange.Aspects == TextureAspect::Stencil ? 1 : 0;
 
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
@@ -2879,7 +2888,7 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
         uint32_t mipLevel = srcRange.BaseMipLevel + mip;
         for (uint32_t layer = 0; layer < layerCount; ++layer) {
             uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
-            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, 0, src->_rawDesc.MipLevels, arraySize);
+            UINT subres = D3D12CalcSubresource(mipLevel, arrayLayer, plane, src->_rawDesc.MipLevels, arraySize);
 
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
             UINT64 totalBytes = 0;

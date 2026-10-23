@@ -140,6 +140,85 @@ uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilit
     return count;
 }
 
+std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept {
+    const auto min = capabilities.minImageExtent;
+    const auto max = capabilities.maxImageExtent;
+    if (!max.width || !max.height || min.width > max.width || min.height > max.height) return std::nullopt;
+    const auto extent = capabilities.currentExtent.width == UINT32_MAX
+                            ? VkExtent2D{std::clamp(requested.width, min.width, max.width), std::clamp(requested.height, min.height, max.height)}
+                            : capabilities.currentExtent;
+    if (!extent.width || !extent.height) return std::nullopt;
+    return extent;
+}
+
+std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept {
+    if (desc.Primitive.UnclippedDepth && !features.Core.depthClamp) return "depth clamp is unsupported";
+    if (desc.Primitive.Poly != PolygonMode::Fill && !features.Core.fillModeNonSolid) return "non-solid polygon mode is unsupported";
+    if (desc.Primitive.Conservative && !conservativeRasterization) return "conservative rasterization is unsupported";
+    if (desc.DepthStencil) {
+        const auto& bias = desc.DepthStencil->DepthBias;
+        if ((bias.Constant != 0 || bias.SlopScale != 0) && bias.Clamp != 0 && !features.Core.depthBiasClamp) return "depth bias clamp is unsupported";
+    }
+    const auto dualSource = [](BlendFactor factor) {
+        return factor == BlendFactor::Src1 || factor == BlendFactor::OneMinusSrc1 || factor == BlendFactor::Src1Alpha || factor == BlendFactor::OneMinusSrc1Alpha;
+    };
+    for (const auto& target : desc.ColorTargets) {
+        if (!features.Core.independentBlend) {
+            const auto& first = desc.ColorTargets.front();
+            if (target.Blend != first.Blend || target.WriteMask != first.WriteMask) return "independent blend is unsupported";
+        }
+        if (target.Blend && !features.Core.dualSrcBlend) {
+            const auto& blend = *target.Blend;
+            if (dualSource(blend.Color.Src) || dualSource(blend.Color.Dst) || dualSource(blend.Alpha.Src) || dualSource(blend.Alpha.Dst)) return "dual-source blend is unsupported";
+        }
+    }
+    return std::nullopt;
+}
+
+uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept {
+    const auto available = GetTextureFormatAspects(format);
+    if (!aspects) aspects = available;
+    if (!std::has_single_bit(aspects.value()) || (aspects.value() & ~available.value())) return 0;
+    if (aspects == TextureAspect::Stencil) return 1;
+    if (aspects == TextureAspect::Depth) return format == TextureFormat::D16_UNORM ? 2 : 4;
+    return GetTextureFormatBytesPerPixel(format);
+}
+
+VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept {
+    constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (!(stages & mask)) return stages;
+    VkPipelineStageFlags selected = 0;
+    if (shaders) {
+        if (shaders.HasFlag(ShaderStage::Vertex)) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+        if (shaders.HasFlag(ShaderStage::Pixel)) selected |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (shaders.HasFlag(ShaderStage::Compute)) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    } else {
+        if (queueFlags & VK_QUEUE_GRAPHICS_BIT) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (queueFlags & VK_QUEUE_COMPUTE_BIT) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        selected &= stages;
+    }
+    return selected ? (stages & ~mask) | selected : 0;
+}
+
+bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept {
+    VkPipelineStageFlags allowed = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) allowed |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) allowed |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (queueFlags & VK_QUEUE_COMPUTE_BIT) allowed |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (queueFlags & VK_QUEUE_GRAPHICS_BIT) allowed |= VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    return stages != 0 && (stages & ~allowed) == 0;
+}
+
+VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept {
+    switch (stage) {
+        case QueryPipelineStage::Top: return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        case QueryPipelineStage::Bottom: return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        case QueryPipelineStage::Graphics: return VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+        case QueryPipelineStage::Compute: return VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    Unreachable();
+}
+
 static uint32_t _ImageFormatCompatibilityClass(TextureFormat format) noexcept {
     switch (format) {
         case TextureFormat::R8_SINT:
@@ -488,7 +567,7 @@ VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept {
 
 VkQueueFlags MapType(QueueType v) noexcept {
     switch (v) {
-        case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT;
+        case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
         case QueueType::Compute: return VK_QUEUE_COMPUTE_BIT;
         case QueueType::Copy: return VK_QUEUE_TRANSFER_BIT;
 

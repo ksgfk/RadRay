@@ -11,6 +11,8 @@ def main():
     args = parser.parse_args()
     data = root / "modules/render/tests/data"
     fixtures = (
+        ("command_contracts", "VSMain", "vs_6_0"),
+        ("command_contracts", "PSMain", "ps_6_0"),
         ("attachment_color", "VSMain", "vs_6_0"),
         ("attachment_color", "PSMain", "ps_6_0"),
         ("attachment_depth", "VSMain", "vs_6_0"),

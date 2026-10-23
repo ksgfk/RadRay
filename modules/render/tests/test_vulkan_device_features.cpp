@@ -2,6 +2,7 @@
 #include "rhi_validation.h"
 #include <filesystem>
 #include <radray/file.h>
+#include <radray/scope_guard.h>
 
 #if defined(RADRAY_ENABLE_VULKAN)
 
@@ -56,6 +57,132 @@ DeviceFeaturesVulkan ExpectedRhiFeatures() {
     result.Vulkan12.imagelessFramebuffer = VK_TRUE;
     result.Vulkan12.separateDepthStencilLayouts = VK_TRUE;
     return result;
+}
+
+TEST(VulkanInitialization, AllocatesMultipleQueuesAndSharesFamilyCapacity) {
+    const VkQueueFamilyProperties families[]{
+        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, .queueCount = 4, .timestampValidBits = 0, .minImageTransferGranularity = {}},
+        {.queueFlags = VK_QUEUE_COMPUTE_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}}};
+    std::array<uint32_t, 2> used{};
+    const auto direct = AllocateQueueIndicesVulkan(QueueType::Direct, 2, families, used);
+    ASSERT_EQ(direct.size(), 2u);
+    EXPECT_EQ(direct[0].Family, 0u);
+    EXPECT_EQ(direct[0].IndexInFamily, 0u);
+    EXPECT_EQ(direct[1].Family, 0u);
+    EXPECT_EQ(direct[1].IndexInFamily, 1u);
+    const auto compute = AllocateQueueIndicesVulkan(QueueType::Compute, 3, families, used);
+    ASSERT_EQ(compute.size(), 3u);
+    EXPECT_EQ(compute[0].Family, 0u);
+    EXPECT_EQ(compute[0].IndexInFamily, 2u);
+    EXPECT_EQ(compute[1].Family, 0u);
+    EXPECT_EQ(compute[1].IndexInFamily, 3u);
+    EXPECT_EQ(compute[2].Family, 1u);
+    EXPECT_EQ(compute[2].IndexInFamily, 0u);
+    const auto remaining = AllocateQueueIndicesVulkan(QueueType::Compute, 2, families, used);
+    ASSERT_EQ(remaining.size(), 1u);
+    EXPECT_EQ(remaining[0].Family, 1u);
+    EXPECT_EQ(remaining[0].IndexInFamily, 1u);
+    EXPECT_TRUE(AllocateQueueIndicesVulkan(QueueType::Copy, 1, families, used).empty());
+}
+
+TEST(VulkanInitialization, DirectRequiresBothGraphicsAndCompute) {
+    const VkQueueFamilyProperties families[]{
+        {.queueFlags = VK_QUEUE_GRAPHICS_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}},
+        {.queueFlags = VK_QUEUE_COMPUTE_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}},
+        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}}};
+    std::array<uint32_t, 3> used{};
+    const auto queues = AllocateQueueIndicesVulkan(QueueType::Direct, 2, families, used);
+    ASSERT_EQ(queues.size(), 1u);
+    EXPECT_EQ(queues[0].Family, 2u);
+    EXPECT_EQ(used, (std::array<uint32_t, 3>{0, 0, 1}));
+}
+
+TEST(VulkanInitialization, CopyAcceptsImplicitAndExplicitTransferSupport) {
+    const VkQueueFlags flags[]{VK_QUEUE_GRAPHICS_BIT, VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, VK_QUEUE_TRANSFER_BIT};
+    for (const auto flag : flags) {
+        SCOPED_TRACE(flag);
+        const VkQueueFamilyProperties family{.queueFlags = flag, .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}};
+        uint32_t used = 0;
+        const auto queues = AllocateQueueIndicesVulkan(QueueType::Copy, 1, std::span{&family, 1}, std::span{&used, 1});
+        ASSERT_EQ(queues.size(), 1u);
+        EXPECT_EQ(queues[0].Family, 0u);
+        EXPECT_EQ(queues[0].IndexInFamily, 0u);
+    }
+    const VkQueueFamilyProperties unsupported{.queueFlags = VK_QUEUE_SPARSE_BINDING_BIT, .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}};
+    uint32_t used = 0;
+    EXPECT_TRUE(AllocateQueueIndicesVulkan(QueueType::Copy, 1, std::span{&unsupported, 1}, std::span{&used, 1}).empty());
+    EXPECT_EQ(used, 0u);
+}
+
+TEST(VulkanInitialization, EnumerationUsesWrittenCountAndRetriesIncomplete) {
+    vector<uint32_t> values;
+    uint32_t attempts = 0;
+    const auto enumerate = [&](uint32_t* count, uint32_t* output) {
+        if (!output) {
+            *count = attempts == 0 ? 1 : 4;
+            return VK_SUCCESS;
+        }
+        output[0] = 17;
+        if (attempts++ == 0) return VK_INCOMPLETE;
+        output[1] = 29;
+        *count = 2;
+        return VK_SUCCESS;
+    };
+    EXPECT_EQ(EnumerateVectorFromVkFunc(values, enumerate), VK_SUCCESS);
+    EXPECT_EQ(attempts, 2u);
+    EXPECT_EQ(values, (vector<uint32_t>{17, 29}));
+}
+
+TEST(VulkanInitialization, EmptyEnumerationClearsPreviousResults) {
+    vector<uint32_t> values{1, 2, 3};
+    uint32_t calls = 0;
+    EXPECT_EQ(EnumerateVectorFromVkFunc(values, [&](uint32_t* count, uint32_t* output) {
+                  ++calls;
+                  EXPECT_EQ(output, nullptr);
+                  *count = 0;
+                  return VK_SUCCESS;
+              }),
+              VK_SUCCESS);
+    EXPECT_TRUE(values.empty());
+    EXPECT_EQ(calls, 1u);
+    values = {1, 2, 3};
+    EnumerateVectorFromVkFunc(values, [](uint32_t* count, uint32_t* output) {
+        EXPECT_EQ(output, nullptr);
+        *count = 0;
+    });
+    EXPECT_TRUE(values.empty());
+}
+
+TEST(VulkanInitialization, VoidEnumerationUsesWrittenCount) {
+    vector<uint32_t> values;
+    EnumerateVectorFromVkFunc(values, [](uint32_t* count, uint32_t* output) {
+        if (!output) {
+            *count = 3;
+        } else {
+            output[0] = 42;
+            *count = 1;
+        }
+    });
+    EXPECT_EQ(values, (vector<uint32_t>{42}));
+}
+
+TEST(VulkanInitialization, UnsupportedTimestampsAndCopyQueuesDoNotInitializeProfiler) {
+    InstanceVulkanImpl instance{VK_NULL_HANDLE, std::nullopt, {}, {}};
+    DeviceVulkan device{&instance, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    device._ftb = {};
+    device._ftb.vkCreateCommandPool = [](VkDevice, const VkCommandPoolCreateInfo*, const VkAllocationCallbacks*, VkCommandPool*) {
+        ADD_FAILURE() << "Unsupported queue must not create profiler command resources";
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    const VkQueueFlags flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    QueueVulkan direct{&device, VK_NULL_HANDLE, {}, QueueType::Direct, flags, 0};
+    QueueVulkan compute{&device, VK_NULL_HANDLE, {}, QueueType::Compute, flags, 0};
+    QueueVulkan copy{&device, VK_NULL_HANDLE, {}, QueueType::Copy, flags, 64};
+#ifdef RADRAY_ENABLE_PROFILER
+    EXPECT_EQ(direct._profilerContext, nullptr);
+    EXPECT_EQ(compute._profilerContext, nullptr);
+    EXPECT_EQ(copy._profilerContext, nullptr);
+#endif
 }
 
 TEST(VulkanDeviceFeaturePolicy, CoupledLayoutsDoNotRequireIndependentTransitions) {
@@ -306,6 +433,22 @@ TEST(VulkanDeviceFeatureConsumers, SamplersReadEnabledInsteadOfSupported) {
     EXPECT_EQ(probe.SamplerCalls, 4u);
 }
 
+TEST(VulkanDeviceFeatureConsumers, SamplerLodBiasUsesAdvertisedRange) {
+    FeatureConsumerProbe probe;
+    probe.Device._properties.limits.maxSamplerLodBias = 16;
+    for (const float bias : {-1.0f, 1.0f}) EXPECT_FALSE(probe.Device.CreateSampler({.MipLodBias = bias}));
+    EXPECT_EQ(probe.SamplerCalls, 0u);
+    EXPECT_TRUE(probe.Device.CreateSampler({}));
+    probe.Device._capabilities.Limits.MinSamplerLodBias = -16;
+    probe.Device._capabilities.Limits.MaxSamplerLodBias = 16;
+    for (const float bias : {-16.0f, 16.0f}) {
+        EXPECT_TRUE(probe.Device.CreateSampler({.MipLodBias = bias}));
+        EXPECT_EQ(probe.SamplerInfo.mipLodBias, bias);
+    }
+    for (const float bias : {-17.0f, 17.0f}) EXPECT_FALSE(probe.Device.CreateSampler({.MipLodBias = bias}));
+    EXPECT_EQ(probe.SamplerCalls, 3u);
+}
+
 TEST(VulkanDeviceFeatureConsumers, IndirectBatchingAndSingleDrawFallbackReadEnabled) {
     FeatureConsumerProbe probe;
     SimulateCommandEncoderVulkan encoder{&probe.Device, &probe.Command};
@@ -351,6 +494,50 @@ protected:
         Context.Reset();
     }
 };
+
+TEST_F(VulkanGpuTest, TexelOffsetsUseTheirOwnAlignment) {
+    auto& native = static_cast<DeviceVulkan&>(*Context.Device);
+    const auto original = native._capabilities.Limits;
+    const auto restore = MakeScopeGuard([&] { native._capabilities.Limits = original; });
+    const auto alignment = std::max(uint64_t{4}, original.TexelBufferOffsetAlignment);
+    auto device = render::detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto buffer = device->CreateBuffer({.Size = alignment * 4, .Memory = MemoryType::Device, .Usage = BufferUse::Resource | BufferUse::UnorderedAccess}).Unwrap();
+    for (const auto kind : {BindingKind::TypedBuffer, BindingKind::RWTypedBuffer}) {
+        BindingDescriptor binding{.BindingId = 0, .Kind = kind, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = {}, .Vulkan = VulkanBindingDescriptor{0, 0}, .ImmutableSampler = {}};
+        auto group = device->CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
+        auto parameters = device->CreateShaderParameterSet({group.get()}).Unwrap();
+        const ShaderTexelBufferBinding value{buffer.get(), {alignment, 4}, TextureFormat::R32_UINT};
+        native._capabilities.Limits.TexelBufferOffsetAlignment = alignment * 2;
+        native._capabilities.Limits.StorageBufferOffsetAlignment = alignment;
+        EXPECT_FALSE(parameters->Set(0, 0, value));
+        native._capabilities.Limits.TexelBufferOffsetAlignment = alignment;
+        native._capabilities.Limits.StorageBufferOffsetAlignment = alignment * 2;
+        EXPECT_TRUE(parameters->Set(0, 0, value));
+    }
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 2u);
+}
+
+TEST_F(VulkanGpuTest, StorageRangesRespectLimitForExplicitAndWholeBuffer) {
+    auto& native = static_cast<DeviceVulkan&>(*Context.Device);
+    const auto original = native._capabilities.Limits;
+    const auto restore = MakeScopeGuard([&] { native._capabilities.Limits = original; });
+    const auto size = std::max(uint64_t{64}, original.StorageBufferOffsetAlignment);
+    native._capabilities.Limits.MaxStorageBufferRange = size;
+    auto device = render::detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+    auto buffer = device->CreateBuffer({.Size = size * 4, .Memory = MemoryType::Device, .Usage = BufferUse::Resource | BufferUse::UnorderedAccess}).Unwrap();
+    for (const bool dynamic : {false, true})
+        for (const auto kind : {BindingKind::StructuredBuffer, BindingKind::RWStructuredBuffer, BindingKind::RawBuffer, BindingKind::RWRawBuffer}) {
+            BindingDescriptor binding{.BindingId = 0, .Kind = kind, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = {}, .Vulkan = VulkanBindingDescriptor{0, 0, dynamic ? VulkanBufferDescriptorPlacement::Dynamic : VulkanBufferDescriptorPlacement::Regular}, .ImmutableSampler = {}};
+            auto group = device->CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
+            auto parameters = device->CreateShaderParameterSet({group.get()}).Unwrap();
+            const uint32_t stride = kind == BindingKind::StructuredBuffer || kind == BindingKind::RWStructuredBuffer ? 4 : 0;
+            EXPECT_TRUE(parameters->Set(0, 0, ShaderBufferBinding{buffer.get(), {0, size}, stride}));
+            EXPECT_FALSE(parameters->Set(0, 0, ShaderBufferBinding{buffer.get(), {0, size + 4}, stride}));
+            EXPECT_FALSE(parameters->Set(0, 0, ShaderBufferBinding{buffer.get(), {0, BufferRange::All()}, stride}));
+            EXPECT_TRUE(parameters->Set(0, 0, ShaderBufferBinding{buffer.get(), {3 * size, BufferRange::All()}, stride}));
+        }
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 16u);
+}
 
 class VulkanDeviceFeatureGpu : public VulkanGpuTest, public testing::WithParamInterface<uint32_t> {};
 class VulkanFramebufferGraphicsGpu : public VulkanGpuTest, public testing::WithParamInterface<FramebufferModeVulkan> {};
@@ -424,6 +611,47 @@ TEST_P(VulkanFramebufferGraphicsGpu, GoogleFreeGraphicsDrawsThroughFramebuffer) 
     readback->Unmap();
 }
 
+TEST_P(VulkanDeviceFeatureGpu, CreatesMultipleQueuesWithStablePriorities) {
+    auto* initial = static_cast<DeviceVulkan*>(Context.Device.get());
+    const auto adapters = initial->_instance->GetPhysicalDevices();
+    if (GetParam() >= adapters.size()) GTEST_SKIP() << "Vulkan adapter index " << GetParam() << " is unavailable";
+    const auto& adapter = adapters[GetParam()];
+    RecordProperty("adapter", adapter.Name);
+    const VulkanCommandQueueDescriptor initialQueues[]{{QueueType::Direct, 1}};
+    auto selected = CreateDeviceVulkan({.PhysicalDeviceIndex = adapter.Index, .Queues = initialQueues});
+    ASSERT_TRUE(selected);
+    vector<VkQueueFamilyProperties> families;
+    EnumerateVectorFromVkFunc(families, vkGetPhysicalDeviceQueueFamilyProperties, selected.Get()->_physicalDevice);
+    vector<uint32_t> used(families.size(), 0);
+    const auto direct = AllocateQueueIndicesVulkan(QueueType::Direct, 1, families, used);
+    ASSERT_EQ(direct.size(), 1u);
+    const auto family = direct[0].Family;
+    const auto directCount = families[family].queueCount;
+    used[family] = directCount;
+    const auto compute = AllocateQueueIndicesVulkan(QueueType::Compute, 1, families, used);
+    if (directCount < 2 && compute.empty()) GTEST_SKIP() << "Adapter exposes only one usable queue";
+    vector<VulkanCommandQueueDescriptor> requests{{QueueType::Direct, directCount}};
+    if (!compute.empty()) requests.push_back({QueueType::Compute, 1});
+    auto created = CreateDeviceVulkan({.PhysicalDeviceIndex = adapter.Index, .Queues = requests});
+    ASSERT_TRUE(created);
+    for (uint32_t i = 0; i < directCount; ++i) {
+        auto queue = created.Get()->GetCommandQueue(QueueType::Direct, i);
+        ASSERT_TRUE(queue);
+        const auto* native = static_cast<QueueVulkan*>(queue.Get());
+        EXPECT_EQ(native->_family.Family, family);
+        EXPECT_EQ(native->_family.IndexInFamily, i);
+        queue.Get()->Wait();
+    }
+    if (!compute.empty()) {
+        auto queue = created.Get()->GetCommandQueue(QueueType::Compute, 0);
+        ASSERT_TRUE(queue);
+        const auto* native = static_cast<QueueVulkan*>(queue.Get());
+        EXPECT_EQ(native->_family.Family, compute[0].Family);
+        EXPECT_EQ(native->_family.IndexInFamily, compute[0].IndexInFamily);
+        queue.Get()->Wait();
+    }
+}
+
 TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
     auto* initial = static_cast<DeviceVulkan*>(Context.Device.get());
     const auto adapters = initial->_instance->GetPhysicalDevices();
@@ -457,16 +685,23 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
         EXPECT_EQ(device->_enabledFeatures.Vulkan12.pNext, nullptr);
         EXPECT_EQ(device->_extProperties.Vulkan11.pNext, nullptr);
         EXPECT_EQ(device->_extProperties.Vulkan12.pNext, nullptr);
-        if (device->_extProperties.Maintenance4) EXPECT_EQ(device->_extProperties.Maintenance4->pNext, nullptr);
         if (device->_extProperties.conservativeRasterization) EXPECT_EQ(device->_extProperties.conservativeRasterization->pNext, nullptr);
         const auto& caps = device->GetCapabilities();
         EXPECT_FALSE(caps.Detail.IsLayeredRenderingFromVertexShaderSupported);
         EXPECT_EQ(caps.Features.UavWriteStages.HasFlag(ShaderStage::Pixel), device->_enabledFeatures.Core.fragmentStoresAndAtomics != 0);
         EXPECT_EQ(caps.Features.UavWriteStages.HasFlag(ShaderStage::Vertex), device->_enabledFeatures.Core.vertexPipelineStoresAndAtomics != 0);
-        const auto bufferLimit = device->_extProperties.Maintenance4 ? device->_extProperties.Maintenance4->maxBufferSize : 0;
-        EXPECT_EQ(caps.Limits.MaxBufferSize, bufferLimit != 0 ? bufferLimit : device->_extProperties.Vulkan11.maxMemoryAllocationSize);
+        EXPECT_EQ(caps.Limits.MaxBufferSize, device->_extProperties.Vulkan11.maxMemoryAllocationSize);
+        EXPECT_EQ(caps.Limits.MaxStorageBufferRange, device->_properties.limits.maxStorageBufferRange);
+        EXPECT_EQ(caps.Limits.TexelBufferOffsetAlignment, device->_properties.limits.minTexelBufferOffsetAlignment);
         ASSERT_NE(device->_ftb.vkWaitSemaphores, nullptr);
         ASSERT_NE(device->_ftb.vkGetSemaphoreCounterValue, nullptr);
+        if (const auto* callbacks = device->GetAllocationCallbacks()) {
+            void* allocation = callbacks->pfnAllocation(callbacks->pUserData, 64, 16, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+            ASSERT_NE(allocation, nullptr);
+            void* resized = callbacks->pfnReallocation(callbacks->pUserData, allocation, 0, 16, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+            EXPECT_EQ(resized, nullptr);
+            if (resized) callbacks->pfnFree(callbacks->pUserData, resized);
+        }
         auto fence = device->CreateFence().Unwrap();
         EXPECT_EQ(fence->GetCompletedValue(), 0u);
         EXPECT_FALSE(fence->WaitFor(1, 0));

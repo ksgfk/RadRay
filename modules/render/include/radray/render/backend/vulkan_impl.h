@@ -47,10 +47,12 @@ struct QueueIndexInFamily {
     uint32_t IndexInFamily;
 };
 
+// Updates usedCounts; a partial result means the requested queue count is unavailable.
+vector<QueueIndexInFamily> AllocateQueueIndicesVulkan(QueueType type, uint32_t count, std::span<const VkQueueFamilyProperties> families, std::span<uint32_t> usedCounts);
+
 struct ExtPropertiesVulkan {
     VkPhysicalDeviceVulkan11Properties Vulkan11{};
     VkPhysicalDeviceVulkan12Properties Vulkan12{};
-    std::optional<VkPhysicalDeviceMaintenance4Properties> Maintenance4;
     std::optional<VkPhysicalDeviceConservativeRasterizationPropertiesEXT> conservativeRasterization;
 };
 
@@ -384,7 +386,8 @@ public:
         VkQueue queue,
         QueueIndexInFamily family,
         QueueType type,
-        VkQueueFlags queueFlags) noexcept;
+        VkQueueFlags queueFlags,
+        uint32_t timestampValidBits = 0) noexcept;
 
     ~QueueVulkan() noexcept override;
 
@@ -408,6 +411,7 @@ public:
     QueueIndexInFamily _family;
     QueueType _type;
     VkQueueFlags _queueFlags{0};
+    uint32_t _timestampValidBits{0};
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU timestamp context for this queue; null when unavailable.
     void* _profilerContext{nullptr};

@@ -328,6 +328,38 @@ MinMaxFiltering 的负面格式用例在设备所有受支持 RHI 采样格式�
 probe 验证 resolve 目标的有序附件、约束、缓存复用、去重引用、提前销毁、预算失败/重试；不增加生产观测字段。
 读回的误差只用于格式量化，测试结果不作帧率或带宽收益解释。
 
+`DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea` 可用
+`RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK=1` 开启分阶段读回，默认关闭。
+探针保留原始 render pass 与 ending resolve，在初始化后、resolve pass 的 `EndRenderPass` 后和最终检查前，
+通过现有 compute shader 将源逐 sample 与目标 depth/stencil 保存到读回缓冲的独立区域。
+三个快照在同一 command buffer 中录制，提交后统一等待队列完成，再映射读取；不依赖捕获工具。
+`EndRenderPass` 后的快照位于必要的 ShaderRead 转换之后。日志输出中央/区域外像素、目标 stencil 范围和中央源像素的四个 sample stencil，
+GTest XML 的 `resolve_probe_<depth>_<stencil>_<stage>` 属性额外保存完整 8×8 目标 stencil。
+测试检查初始化值以及 pass 结束快照与最终读回一致，原有内容断言继续执行。
+探针增加资源转换与 dispatch，排查时须对比开关两种运行，确认故障是否仍然复现。
+
+```powershell
+$env:RADRAY_TEST_D3D12_ADAPTER_INDEX = '0'
+$env:RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK = '1'
+ctest --preset win-x64-debug-clangcl -R 'AttachmentOperations.*DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea/0' --verbose
+Remove-Item Env:RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK, Env:RADRAY_TEST_D3D12_ADAPTER_INDEX
+```
+
+同一测试的 D3D12 参数可设置 `RADRAY_TEST_DEPTH_RESOLVE_PIX_CAPTURE=1`，仅捕获 Average depth / None stencil 组合，默认关闭。
+从 PIX 的 GPU Capture 启动 `test_radray_render.exe`，工作目录为仓库根，参数使用
+`--gtest_filter=BackendsAndFeatures/AttachmentOperations.DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea/0`。
+测试使用 Windows SDK 的 `IDXGraphicsAnalysis::BeginCapture/EndCapture`，捕获前与结束前等待队列完成，
+不需要 Present 或额外 WinPixEventRuntime 依赖；未由 PIX 注入时启用此开关会明确失败。
+仅在此捕获模式下先提交初始化 clear passes 并等待完成，再开始捕获并重新录制初始化 clear passes、原始 resolve pass 与读回。
+预热避免捕获起点快照读取尚未初始化的 DS 资源；捕获内的 clear 确保每次回放显式恢复源与目标初值，
+不依赖工具恢复 MSAA DS 初始内容，报告记录 `depth_resolve_pix_initialization_submit=warmup_then_captured_clear`。
+可同时开启分阶段读回，将结果与 PIX 中的 `DepthResolveTarget1x`、`DepthResolveReadback` 对照。
+捕获完成后在 PIX 保存为 `.wpix`，在同一 GPU/驱动下 Start Analysis，查看原始 BeginRenderPass 的 ending access、resolve 参数与目标 stencil。
+PIX 的临时捕获文件可能保存在系统临时目录；没有自动打开页面时先检查 `.wpix` 是否已经生成。
+如果分析时报告 NVIDIA profiler session 冲突，可在 PIX 设置中启用 Disable GPU Plugins（旧版为关闭 Enable GPU Plugins）后重新打开捕获；
+此选项关闭硬件性能插件，API 参数和资源正确性分析仍可使用。命令行对应 `open-capture <file> --disable-gpu-plugins`。
+接口与注入要求见 [PIX 程序控制捕获](https://devblogs.microsoft.com/pix/programmatic-capture/)。
+
 ```powershell
 cmake --build --preset win-x64-debug --target test_radray_render --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'

@@ -64,6 +64,17 @@ static VkSwapchainKHR _CreateVkSwapChain(
     VkImageUsageFlags& imageUsage,
     VkResult& result) noexcept {
     result = VK_ERROR_INITIALIZATION_FAILED;
+    const auto* queue = CastVkObject(desc.PresentQueue);
+    VkBool32 presentSupported = VK_FALSE;
+    if (auto vr = vkGetPhysicalDeviceSurfaceSupportKHR(device->_physicalDevice, queue->_family.Family, surface->_surface, &presentSupported); vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceSupportKHR failed: {}", vr);
+        result = vr;
+        return VK_NULL_HANDLE;
+    }
+    if (!presentSupported) {
+        RADRAY_ERR_LOG("Vulkan queue family {} does not support presentation to this surface", queue->_family.Family);
+        return VK_NULL_HANDLE;
+    }
     VkSurfaceCapabilitiesKHR surfaceProperties;
     if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->_physicalDevice, surface->_surface, &surfaceProperties);
         vr != VK_SUCCESS) {
@@ -81,12 +92,12 @@ static VkSwapchainKHR _CreateVkSwapChain(
             newValue);
         desc.BackBufferCount = newValue;
     }
-    if (surfaceProperties.currentExtent.width == 0xFFFFFFFF) {
-        swapchainSize.width = desc.Width;
-        swapchainSize.height = desc.Height;
-    } else {
-        swapchainSize = surfaceProperties.currentExtent;
+    const auto extent = ResolveSwapChainExtent({desc.Width, desc.Height}, surfaceProperties);
+    if (!extent) {
+        result = VK_NOT_READY;
+        return VK_NULL_HANDLE;
     }
+    swapchainSize = *extent;
     VkSurfaceTransformFlagBitsKHR preTransform;
     if (surfaceProperties.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
         preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -1682,7 +1693,7 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
 
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const SamplerDescriptor& desc) noexcept {
     const auto& limits = _properties.limits;
-    if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
+    if (desc.MipLodBias < _capabilities.Limits.MinSamplerLodBias || desc.MipLodBias > _capabilities.Limits.MaxSamplerLodBias ||
         (desc.AnisotropyClamp > 1 && (!_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
         (desc.Reduction != SamplerReductionMode::WeightedAverage && (!_enabledFeatures.Vulkan12.samplerFilterMinmax || desc.Compare)) ||
         ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !_enabledFeatures.Vulkan12.samplerMirrorClampToEdge)) {
@@ -1975,6 +1986,10 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
 // == Device: PSO / sampler / 同步原语 ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (const auto unsupported = GetUnsupportedGraphicsStateVulkan(desc, _enabledFeatures, _extProperties.conservativeRasterization.has_value())) {
+        RADRAY_ERR_LOG("Cannot create Vulkan graphics pipeline: {}", *unsupported);
+        return nullptr;
+    }
     vector<VkPipelineShaderStageCreateInfo> shaderStages;
     vector<string> entryPointsOwned;
     {
@@ -2143,7 +2158,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vector<VkDynamicState> dynStates;
     dynStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
     dynStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
-    dynStates.emplace_back(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
     VkPipelineDynamicStateCreateInfo dynStateInfo{};
     dynStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynStateInfo.pNext = nullptr;
@@ -2405,7 +2419,21 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         const char* requireLayer[] = {validName};
         if (IsValidateLayers(requireLayer, layerProps)) {
             needLayers.emplace(validName);
-            isValidFeatureExtEnable = true;
+            vector<VkExtensionProperties> layerExtProps;
+            if (EnumerateVectorFromVkFunc(layerExtProps, vkEnumerateInstanceExtensionProperties, validName) != VK_SUCCESS) {
+                RADRAY_ERR_LOG("vkEnumerateInstanceExtensionProperties failed for {}", validName);
+                return nullptr;
+            }
+            extProps.insert(extProps.end(), layerExtProps.begin(), layerExtProps.end());
+            if (desc.IsEnableSynchronizationValidation || desc.IsEnableGpuBasedValid) {
+                if (IsValidateExtensions(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME, extProps)) {
+                    needExts.emplace(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    isValidFeatureExtEnable = true;
+                } else {
+                    RADRAY_ERR_LOG("vk requested validation features require {}", VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    return nullptr;
+                }
+            }
         } else {
             RADRAY_WARN_LOG("vk unsupported layer: {}", validName);
         }
@@ -2449,6 +2477,10 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         [](void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
             RADRAY_UNUSED(pUserData);
             RADRAY_UNUSED(allocationScope);
+            if (size == 0) {
+                mi_free(pOriginal);
+                return nullptr;
+            }
             return mi_realloc_aligned(pOriginal, size, alignment);
         },
         [](void* pUserData, void* pMemory) { RADRAY_UNUSED(pUserData); mi_free(pMemory); },
@@ -2494,11 +2526,13 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     debugCreateInfo.pfnUserCallback = VKDebugUtilsMessengerCallback;
     debugCreateInfo.pUserData = nullptr;
 
+    const string appName{desc.AppName};
+    const string engineName{desc.EngineName};
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = desc.AppName.data();
+    appInfo.pApplicationName = appName.c_str();
     appInfo.applicationVersion = desc.AppVersion;
-    appInfo.pEngineName = desc.EngineName.data();
+    appInfo.pEngineName = engineName.c_str();
     appInfo.engineVersion = desc.EngineVersion;
     appInfo.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo createInfo{};
@@ -2573,6 +2607,25 @@ void ShutdownVulkanEnvImpl() noexcept {
     volkFinalize();
 }
 
+vector<QueueIndexInFamily> AllocateQueueIndicesVulkan(
+    QueueType type,
+    uint32_t count,
+    std::span<const VkQueueFamilyProperties> families,
+    std::span<uint32_t> usedCounts) {
+    vector<QueueIndexInFamily> result;
+    if (families.size() != usedCounts.size() || type >= QueueType::MAX_COUNT) return result;
+    const auto requiredFlags = MapType(type);
+    for (uint32_t family = 0; family < families.size() && result.size() < count; ++family) {
+        auto flags = families[family].queueFlags;
+        if (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) flags |= VK_QUEUE_TRANSFER_BIT;
+        if ((flags & requiredFlags) != requiredFlags) continue;
+        while (usedCounts[family] < families[family].queueCount && result.size() < count) {
+            result.push_back({family, usedCounts[family]++});
+        }
+    }
+    return result;
+}
+
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc, const FeatureRequestsVulkan& requestedFeatures) {
     if (!g_vkInstance.HasValue()) {
         RADRAY_ERR_LOG("vk env not init");
@@ -2610,19 +2663,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
     struct QueueRequest {
         QueueType rawType;
-        VkQueueFlags requiredFlag;
         uint32_t requiredCount;
         vector<QueueIndexInFamily> queueIndices;
     };
     vector<VkDeviceQueueCreateInfo> queueInfos;
     vector<float> queuePriorities;
     vector<QueueRequest> queueRequests;
-    struct QueueFamilyUsage {
-        uint32_t familyIndex;
-        VkQueueFlags flags;
-        uint32_t maxCount;
-        uint32_t usedCount;
-    };
     vector<VkQueueFamilyProperties> queueFamilyProps;
     {
         EnumerateVectorFromVkFunc(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
@@ -2630,33 +2676,22 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             RADRAY_ERR_LOG("vk no queue family found");
             return nullptr;
         }
-        vector<QueueFamilyUsage> families;
-        for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
-            families.push_back({i, queueFamilyProps[i].queueFlags, queueFamilyProps[i].queueCount, 0});
-        }
+        vector<uint32_t> usedCounts(queueFamilyProps.size(), 0);
         for (const auto& i : desc.Queues) {
+            if (i.Type >= QueueType::MAX_COUNT) {
+                RADRAY_ERR_LOG("vk invalid queue type: {}", i.Type);
+                return nullptr;
+            }
             auto& r = queueRequests.emplace_back();
             r.rawType = i.Type;
-            r.requiredFlag = MapType(i.Type);
-            if (r.requiredFlag) {
-                r.requiredCount = i.Count;
-            } else {
-                r.requiredCount = 0;
-                RADRAY_WARN_LOG("vk unsupported queue type: {}", VulkanQueueFlags{static_cast<std::underlying_type_t<VkQueueFlagBits>>(r.requiredFlag)});
-            }
+            r.requiredCount = i.Count;
         }
         for (auto& req : queueRequests) {
-            for (auto& fam : families) {
-                while ((fam.flags & req.requiredFlag) && fam.usedCount < fam.maxCount && req.queueIndices.size() < req.requiredCount) {
-                    req.queueIndices.emplace_back(QueueIndexInFamily{fam.familyIndex, fam.usedCount});
-                    fam.usedCount++;
-                    break;
-                }
-            }
+            req.queueIndices = AllocateQueueIndicesVulkan(req.rawType, req.requiredCount, queueFamilyProps, usedCounts);
         }
         for (const auto& i : queueRequests) {
             if (i.queueIndices.size() < i.requiredCount) {
-                RADRAY_ERR_LOG("vk not enough queue family for type: {}", VulkanQueueFlags{static_cast<std::underlying_type_t<VkQueueFlagBits>>(i.requiredFlag)});
+                RADRAY_ERR_LOG("vk not enough queues for type: {}", i.rawType);
                 return nullptr;
             }
         }
@@ -2670,15 +2705,25 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 }
             }
         }
+        size_t all = 0;
+        for (const auto& i : familyQueueCounts) {
+            all += i.second;
+        }
+        if (all == 0) {
+            RADRAY_ERR_LOG("vk at least one queue is required");
+            return nullptr;
+        }
+        queuePriorities.resize(all, 1.0f);
+        all = 0;
         for (const auto& [family, count] : familyQueueCounts) {
-            queuePriorities.resize(queuePriorities.size() + count, 1.0f);
             VkDeviceQueueCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
             info.pNext = nullptr;
             info.flags = 0;
             info.queueFamilyIndex = family;
             info.queueCount = count;
-            info.pQueuePriorities = queuePriorities.data() + (queuePriorities.size() - count);
+            info.pQueuePriorities = queuePriorities.data() + all;
+            all += count;
             queueInfos.push_back(info);
         }
     }
@@ -2702,11 +2747,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     extProperties->Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
     AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan11);
     AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan12);
-    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_3) {
-        auto& maintenance4 = extProperties->Maintenance4.emplace();
-        maintenance4.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
-        AddToHeadVulkanStruct(deviceProperties2, maintenance4);
-    }
     if (IsValidateExtensions(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, deviceExtsAvailable)) {
         needExts.emplace(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
         extProperties->conservativeRasterization = VkPhysicalDeviceConservativeRasterizationPropertiesEXT{};
@@ -2725,7 +2765,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
     extProperties->Vulkan11.pNext = nullptr;
     extProperties->Vulkan12.pNext = nullptr;
-    if (extProperties->Maintenance4) extProperties->Maintenance4->pNext = nullptr;
     if (extProperties->conservativeRasterization) extProperties->conservativeRasterization->pNext = nullptr;
 
     vector<const char*> deviceExts{};
@@ -2816,7 +2855,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 queuePtr,
                 j,
                 i.rawType,
-                queueFamilyProps[j.Family].queueFlags);
+                queueFamilyProps[j.Family].queueFlags,
+                queueFamilyProps[j.Family].timestampValidBits);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
@@ -2829,18 +2869,19 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     {
         auto& caps = deviceR->_capabilities;
         const auto& limits = deviceR->_properties.limits;
-        const auto maxBufferSize = extProperties->Maintenance4 ? extProperties->Maintenance4->maxBufferSize : 0;
         caps.Limits = {
             .MaxColorAttachments = limits.maxColorAttachments,
             .MaxTexture1DDimension = limits.maxImageDimension1D,
             .MaxTexture2DDimension = limits.maxImageDimension2D,
             .MaxTexture3DDimension = limits.maxImageDimension3D,
             .MaxTextureArrayLayers = limits.maxImageArrayLayers,
-            .MaxBufferSize = maxBufferSize != 0 ? maxBufferSize : extProperties->Vulkan11.maxMemoryAllocationSize,
+            .MaxBufferSize = extProperties->Vulkan11.maxMemoryAllocationSize,
             .MaxUniformBufferRange = limits.maxUniformBufferRange,
+            .MaxStorageBufferRange = limits.maxStorageBufferRange,
             .MaxPushConstantBytes = limits.maxPushConstantsSize,
             .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment,
-            .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment};
+            .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment,
+            .TexelBufferOffsetAlignment = limits.minTexelBufferOffsetAlignment};
         caps.Features = {
             .TimestampQueries = false,
             .IndirectDraw = true,
@@ -2855,8 +2896,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         caps.Features.SamplerFilterMinmax = deviceR->_enabledFeatures.Vulkan12.samplerFilterMinmax != 0;
         caps.Features.SamplerUnnormalizedCoordinates = caps.Features.SamplerIntegerBorderColor = true;
         caps.Limits.MaxSamplerAnisotropy = caps.Features.SamplerAnisotropy ? limits.maxSamplerAnisotropy : 1.0f;
-        caps.Limits.MinSamplerLodBias = -limits.maxSamplerLodBias;
-        caps.Limits.MaxSamplerLodBias = limits.maxSamplerLodBias;
+        const float maxSamplerLodBias = needExts.contains("VK_KHR_portability_subset") ? 0.0f : limits.maxSamplerLodBias;
+        caps.Limits.MinSamplerLodBias = -maxSamplerLodBias;
+        caps.Limits.MaxSamplerLodBias = maxSamplerLodBias;
         if (deviceR->_enabledFeatures.Core.fragmentStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Pixel;
         }
@@ -2874,7 +2916,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                                                   ? uint32_t{VK_QUEUE_GRAPHICS_BIT} | uint32_t{VK_QUEUE_COMPUTE_BIT}
                                                   : uint32_t{VK_QUEUE_GRAPHICS_BIT};
                 queueCaps.Dedicated &= (family.queueFlags & unwanted) == 0;
-                if (index == static_cast<size_t>(QueueType::Direct) && family.timestampValidBits > 0) caps.Features.TimestampQueries = true;
+                if (family.timestampValidBits > 0) caps.Features.TimestampQueries = true;
             }
         }
     }
@@ -2935,16 +2977,18 @@ QueueVulkan::QueueVulkan(
     VkQueue queue,
     QueueIndexInFamily family,
     QueueType type,
-    VkQueueFlags queueFlags) noexcept
+    VkQueueFlags queueFlags,
+    uint32_t timestampValidBits) noexcept
     : _device(device),
       _queue(queue),
       _family(family),
       _type(type),
-      _queueFlags(queueFlags) {
+      _queueFlags(queueFlags),
+      _timestampValidBits(timestampValidBits) {
 #ifdef RADRAY_ENABLE_PROFILER
     // Context creation records a calibration command buffer several times (implicit resets) and waits for
     // the queue; a transient, resettable pool is enough.
-    if ((_queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) return;
+    if (_type == QueueType::Copy || timestampValidBits == 0 || (_queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) return;
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -2964,6 +3008,8 @@ QueueVulkan::QueueVulkan(
         TracyVkContextName(static_cast<TracyVkCtx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
     }
     _device->_ftb.vkDestroyCommandPool(_device->_device, pool, _device->GetAllocationCallbacks());
+#else
+    RADRAY_UNUSED(timestampValidBits);
 #endif
 }
 
@@ -3213,14 +3259,8 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
-    const auto shaderStages = [](VkPipelineStageFlags native, ShaderStages stages) {
-        constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        if (!stages || !(native & mask)) return native;
-        VkPipelineStageFlags selected = 0;
-        if (stages.HasFlag(ShaderStage::Vertex)) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
-        if (stages.HasFlag(ShaderStage::Pixel)) selected |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        if (stages.HasFlag(ShaderStage::Compute)) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        return (native & ~mask) | selected;
+    const auto shaderStages = [this](VkPipelineStageFlags native, ShaderStages stages) {
+        return ResolveShaderPipelineStagesVulkan(native, stages, _cmdPool->_queue->_queueFlags);
     };
     VkPipelineStageFlags srcStageMask = 0;
     VkPipelineStageFlags dstStageMask = 0;
@@ -3448,12 +3488,13 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(dst->_format);
+    dstRange = ResolveSubresourceRange(dst->GetDesc(), dstRange);
+    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(dst->_format, dstRange.Aspects);
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
     bool is3D = dst->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
-    VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(dst->_rawFormat);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(dst->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const VkImageAspectFlags aspectMask = dstRange.Aspects.value();
     uint64_t bufferOffset = srcOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = dstRange.BaseMipLevel + mip;
@@ -3485,12 +3526,13 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
 void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(src->_format);
+    srcRange = ResolveSubresourceRange(src->GetDesc(), srcRange);
+    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(src->_format, srcRange.Aspects);
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
     bool is3D = src->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
-    VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(src->_rawFormat);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(src->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const VkImageAspectFlags aspectMask = srcRange.Aspects.value();
     uint64_t bufferOffset = dstOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = srcRange.BaseMipLevel + mip;
@@ -3585,21 +3627,7 @@ void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, 
 
 void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
     auto pool = CastVkObject(desc.Pool);
-    VkPipelineStageFlagBits stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    switch (desc.Stage) {
-        case QueryPipelineStage::Top:
-            stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            break;
-        case QueryPipelineStage::Bottom:
-            stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-            break;
-        case QueryPipelineStage::Graphics:
-            stage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-            break;
-        case QueryPipelineStage::Compute:
-            stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            break;
-    }
+    const auto stage = MapType(desc.Stage);
     _device->_ftb.vkCmdWriteTimestamp(_cmdBuffer, stage, pool->_pool, desc.Index);
 }
 
@@ -4453,6 +4481,10 @@ bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat fo
     VkResult createResult;
     VkImageUsageFlags imageUsage{};
     VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat, imageUsage, createResult);
+    if (newSwapchain == VK_NULL_HANDLE && createResult == VK_NOT_READY) {
+        _requiresRecreate = true;
+        return false;
+    }
     // Passing oldSwapchain retires it even when native creation fails.
     if (oldSwapchain != VK_NULL_HANDLE) {
         _retirement->Retire(_generation);
