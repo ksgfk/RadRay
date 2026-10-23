@@ -628,11 +628,26 @@ struct VulkanInstanceDescriptor {
     void* LogUserData{nullptr};
 };
 
+class DXGIDiagnosticContext {
+public:
+    virtual ~DXGIDiagnosticContext() noexcept = default;
+    DXGIDiagnosticContext(const DXGIDiagnosticContext&) = delete;
+    DXGIDiagnosticContext& operator=(const DXGIDiagnosticContext&) = delete;
+
+    static Nullable<shared_ptr<DXGIDiagnosticContext>> Create();
+
+protected:
+    DXGIDiagnosticContext() noexcept = default;
+};
+
 struct DXGIFactoryDescriptor {
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
     RenderLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
+    // Required with the debug layer. All concurrently live debug factories in
+    // the process must share this context, including factories retained by devices.
+    shared_ptr<DXGIDiagnosticContext> DiagnosticContext;
 };
 
 struct VulkanPhysicalDeviceInfo {

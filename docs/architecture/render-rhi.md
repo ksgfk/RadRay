@@ -93,28 +93,96 @@ HRESULT 检查成功时直接返回，仅失败时查询 `GetDeviceRemovedReason
 和设备移除原因。Submit 入口与 ExecuteCommandLists 返回后独立检查设备状态，因为设备移除后部分
 队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
 
-启用 D3D12 debug layer 时，诊断通道在内部 command signature、descriptor heap 和 queue 创建前
-建立。支持 `ID3D12InfoQueue1` 时使用 callback；否则由 `TryDrainValidationMessages` 轮询
-`ID3D12InfoQueue`。DXGI 消息另从 `IDXGIInfoQueue` 的 `DXGI_DEBUG_DXGI` producer 收集，
-两者进入同一个 `RenderLogCallback`。callback 可能来自其它线程，调用方必须保证日志接收者的
-线程安全与寿命，不在 callback 内调用 D3D12 或再次 Drain。
+### D3D12 / DXGI 诊断通道
 
-失败检查在终止前先收集验证消息，再报告 HRESULT 与设备状态。正常诊断边界覆盖原生对象创建、
-view/sampler 创建、descriptor `FlushWrites`、command list Close/Reset、allocator Reset、
-ExecuteCommandLists 和 Submit 收尾，以及 Present/ResizeBuffers。Fence 的新完成值和 `WaitFor`
-返回时收集 GPU 侧消息，因此调用方的完成轮询也能看到 GBV 诊断；收集不增加 GPU 等待。
-[GBV 输出发生在 GPU 执行后](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-d3d12-debug-layer-gpu-based-validation#debug-output)，
-提交时的一次收集不能代替完成后的收集。测试应在真实 GPU 完成并收集消息后断言验证错误数。
+诊断实现位于内部 `modules/render/src/d3d12/d3d12_diagnostics.h/.cpp`，没有全局注册表、
+函数内静态实例、全局锁或全局订阅者列表。`RenderLogCallback` 签名不变。
+调用方通过 `DXGIDiagnosticContext::Create()` 创建上下文，并传入
+`DXGIFactoryDescriptor::DiagnosticContext`；启用 debug layer 时缺少上下文会创建失败。
+同进程所有同时存活的验证 Factory **必须显式共享同一个上下文**，包括被 Device 保留的原生 Factory。
+上下文由调用方管理此共享关系，后端不自动发现或合并独立上下文；独立上下文不能隔离原生 DXGI producer。
+顺序运行的独立 case 可以各建上下文，但上个 case 的原生对象和通道必须先完成关闭。
 
-轮询按 retrieval filter 的可见消息数量和游标读取，只有消息成功记录后才推进游标；读取失败报告
-诊断并保留消息。活动队列不调用 `ClearStoredMessages`，避免删除 GBV 在读取期间追加的消息。
-调试队列取消固定消息数量上限，原生消息历史随诊断会话保留；游标避免正常重复输出。外部清空队列
-或修改 retrieval filter 会重新建立读取范围，filter 修改可能重放历史消息。应用应在开始验证前配置
-filter，并串行修改 filter/清空队列；外部清空后须在追加新消息前 Drain 一次，以重新建立游标。
-DXGI producer 属于进程级诊断，新 Device 从诊断通道建立时开始收集，避免重放其它 Device 的旧消息。
-实际发生的队列容量丢弃也会报告，不能被当作完整验证。
-销毁 Device 时，内部 queue、缓存、allocator 和 descriptor heap 清理后再次收集，最后才注销 callback
-并释放诊断接口，日志接收者必须存活至这一过程完成。
+上下文按原生 COM identity 共享 D3D12 通道，按 producer 共享 DXGI 通道，每个主动读取通道只有一个消费者。
+通道表、序号、锁、observer 和日志接收者均为上下文成员。Factory/Device 会话及订阅显式持有上下文；
+Factory 包装对象可以先释放，Device 继续持有会话。最后一个使用者关闭通道，最后一个强引用释放上下文。
+创建原生 Factory 前会话已经就绪，失败路径和最终释放仍在其生命周期内；测试也可在创建前订阅上下文。
+内部 `ObserveDiagnostics(context, observer)` 只订阅指定上下文；相同 callback/userData 只在该上下文内去重。
+关闭 validation 不建立会话。结构化 observer 与日志收到同一消息；消息保存来源、通道、producer、
+severity、category、原生 ID、自有描述字符串、HRESULT 与采集故障类型。测试计数、消息历史、
+预期匹配和自检均位于测试侧，不放入生产对象。
+
+D3D12 在创建原生 Device 后、创建内部资源前选择一种模式，活动期间不混用：
+
+| 初始化结果 | D3D12 采集 | DXGI 采集 |
+|---|---|---|
+| `ID3D12InfoQueue1` 查询及注册成功 | callback 立即分发日志与 observer | 关键节点同步读取 |
+| 查询返回 `E_NOINTERFACE` | 基础 `ID3D12InfoQueue` 在关键节点同步读取 | 关键节点同步读取 |
+| 其它查询错误或注册失败 | 初始化失败，保留可用失败诊断，不降级 | 保留可用失败诊断 |
+
+callback 使用 `D3D12_MESSAGE_CALLBACK_IGNORE_FILTERS`，不读取、清空、配置容量或维护 D3D12
+存储队列；该队列溢出不代表 callback 丢失。DXGI 只读取 `DXGI_DEBUG_DXGI` 与 `DXGI_DEBUG_APP`，
+不使用会重复聚合 D3D12 消息的 `DXGI_DEBUG_ALL`。
+
+#### 同步节点与生命周期
+
+没有后台 worker、定时扫描、扫描请求序号或后台自检。
+`detail::FlushDiagnostics(context)` 或 `detail::FlushDiagnostics(session)` 在调用线程读取和分发指定
+上下文中的通道，不扫描其他上下文；callback 模式只读取 DXGI，基础接口模式同时读取 D3D12 与 DXGI。
+它不增加 GPU 等待，也不承诺尚未产生的异步消息已经到达。
+
+同步节点集中于初始化完成/失败、Present 返回前、队列 Wait 完成后、Factory/Device/SwapChain
+生命周期变化及致命错误退出前。普通资源操作、描述符更新、Close/Reset 和 Submit 不散布读取。
+生命周期 scope 在变化前后收集，并在变化后更新 DXGI producer 容量。上下文的锁将主动读取与原生
+拓扑变化串行化；callback 不取得该串行锁。callback 在注册期间可由原生线程即时进入。
+
+Device 销毁先清理内部队列、allocator、heap、signature 等对象，保持采集有效；随后同步读取、
+关闭 D3D12 通道，再释放原生 Device/Factory 引用并末次读取 DXGI。最后持有者注销 callback 时，
+上下文保持有效直到原生 `UnregisterMessageCallback` 返回；该返回保证在途回调结束。
+注销失败立即终止，不能继续释放可能被回调使用的上下文。生产析构不隐式等待 GPU。
+
+callback 不调用 D3D API，上下文不引用 `DeviceD3D12*`。接收者可能运行在调用线程或原生线程，
+必须线程安全、不抛异常，不调用 RHI/D3D、再次采集或销毁相关对象。相同 callback/userData 共享
+日志出口；接收对象必须存活到相关会话结束。参见 [Microsoft callback 契约](https://microsoft.github.io/DirectX-Specs/d3d/MessageCallback.html)。
+覆盖从注册成功开始，不补采注册前消息，也不承诺注销后最终 native Device Release 的全部内部
+D3D12 消息；原生 Device 创建失败依靠 HRESULT 与 DXGI 诊断。
+
+#### 复制、清空与保守校验
+
+主动读取通道容量设为 **65,536 条**，push/pop 空 storage/retrieval filter；活动期间外部代码不得
+读取清空、修改容量或过滤器。DXGI 容量可能是多个原生队列的合计，新建原生对象后重新配置。
+APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留；基础 D3D12 关闭时恢复原容量。
+
+两类主动读取使用相同契约：
+
+1. 取得稳定计数快照（accepted、stored、discarded、denied），复制全部消息到自有内存，再次取快照。
+   两个快照必须完全相同；复制失败或期间有变化的批次不清空。
+2. 与上一次已知状态比较。累计计数必须不回退，discarded/denied 不变，新增 accepted 必须等于
+   新增 stored；溢出、外部清空和不能解释的变化均报告采集不完整。
+3. 完整复制的非空批次才执行 ClearStoredMessages，然后取快照。清空期间新增 accepted 必须等于
+   清空后剩余 stored，discarded/denied 不变。复制后、清空前到达并被删去的消息使校验失败；
+   清空后仍保留的新消息留给下一次读取。空批次同样检查外部清空和计数变化。
+
+快照最多尝试 3 次；单条最大 1 MiB，单批最多 65,536 条、描述文本总计最多 64 MiB。
+读取失败、超限、溢出、过滤器/容量破坏或计数异常使本会话永久不完整，后续仅尽力输出。
+同一通道的重复采集故障去重，类型或 HRESULT 变化另行报告。不再维护滚动游标、精确缺口数或恢复成功状态。
+有限容量和非原子清空无法保证永不丢失；无法确认完整性就必须失败，不能按零错误通过。
+
+#### 每个测试的统一收尾
+
+公共 `DeviceContext::Reset()` 幂等收尾。测试先停止并 join 自己的 CPU 线程，等待所有已创建的
+Direct/Compute/Copy 队列及 slot，再显式释放 fixture 成员。局部 GPU 资源在 Submit 前声明
+`GpuWorkGuard`，保证提前 ASSERT 返回也先等待、后析构。Reset 再次等待所有队列，完成检查点、
+Device/Factory 释放、通道关闭和末次 DXGI 读取；停止订阅后统一匹配、断言、记录报告，最后释放 probe。
+等待失败、设备移除或 30 秒超时会终止，不能继续作为成功收尾。
+
+正常用例要求零非预期 ERROR/CORRUPTION、零采集故障、成功检查点及 GPU 等待；warning 默认只记录。
+预期错误匹配来源、producer、ID、severity、数量和消息区间，采集故障还匹配故障类型和 HRESULT；
+仅声明的故障可豁免。断言由测试线程执行，日志和 callback 不决定测试通过。
+自检 marker 仅确认通路可用，不是完成屏障。同进程共享诊断通道的 case 必须串行执行。
+[GBV 在 GPU 执行后输出](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-d3d12-debug-layer-gpu-based-validation#debug-output)，
+因此必须先等待 GPU 再结算；sleep、连续空队列或 marker 都不能替代等待和生命周期关闭。
+真实 Win10 的计数及自然降级验收见[构建与测试](../guide/build-test.md#d3d12--dxgi-采集验收)。
 
 Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
 `Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
@@ -323,6 +391,8 @@ Shader 是否使用全部槽位不影响布局。调用方负责字节码与显�
 创建完整布局时先放 push constants，再组合各组的 root descriptors、tables 和固定 sampler；
 保存 GroupSlot 到本次 root parameter 编号的映射，序列化 RS 1.1 后直接 `CreateRootSignature`。
 `RootSigD3D12` 直接持有 `ComPtr<ID3D12RootSignature>`，序列化数据只作为创建输入。
+每次创建返回独立的 RHI owner 并调用原生创建接口，但相同描述可由 D3D12 复用同一 COM 对象；
+独立所有权指各 owner 持有并释放自身引用，不保证原生指针不同。销毁一个 owner 不影响另一个。
 根签名超过 64 DWORD 或原生创建失败返回空值。
 
 参数集每个 table 分配连续 CPU mirror 与 shader-visible 区间，组内 offset 不随完整布局变化。
@@ -662,6 +732,7 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 | `ExplicitLayoutOwnershipD3D12` | 通过原生 debug 消息观察独立创建与最终释放，不依赖句柄比较 |
 | `ExplicitLayoutOwnershipVulkan` | 测试侧函数表 probe 观察独立创建、私有空洞、幂等释放和部分失败清理 |
 | `DescriptorDirtyRangesD3D12Test` | 描述符 dirty range 合并与未初始化空洞 |
+| `D3D12DiagnosticsTest`、`D3D12DiagnosticsSmoke` | callback/基础队列、DXGI 原生错误、采集完整性 smoke |
 | `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`、`VulkanSwapChainWsiTest` | 保留的交换链回收与 WSI 验证 |
 
 render 测试只使用版本控制的原始 stage 字节码和手写布局；artifact/contract 测试归 shader 模块。

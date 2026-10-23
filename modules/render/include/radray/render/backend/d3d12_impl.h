@@ -3,7 +3,7 @@
 #ifdef RADRAY_ENABLE_D3D12
 
 #include <array>
-#include <atomic>
+#include <directx/d3d12sdklayers.h>
 
 #include <radray/allocator.h>
 
@@ -35,10 +35,15 @@ class GraphicsPsoD3D12;
 class ComputePsoD3D12;
 class SamplerD3D12;
 
+namespace detail {
+class DiagnosticSession;
+class DiagnosticChannel;
+}  // namespace detail
+
 class DescriptorHeap {
 public:
     DescriptorHeap(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept;
     DescriptorHeap(const DescriptorHeap&) = delete;
     DescriptorHeap& operator=(const DescriptorHeap&) = delete;
@@ -216,7 +221,7 @@ public:
     static_assert(is_desc_heap_view_like<Allocation>, "CpuDescriptorAllocator::Allocation is not a desc heap view like");
 
     CpuDescriptorAllocator(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         UINT basicSize,
         UINT keepFreePages) noexcept;
@@ -228,7 +233,7 @@ public:
 private:
     void TryReleaseFreePages() noexcept;
 
-    ID3D12Device* _device = nullptr;
+    DeviceD3D12* _device = nullptr;
     vector<unique_ptr<Page>> _pages;
     size_t _hint = 0;
     D3D12_DESCRIPTOR_HEAP_TYPE _type{};
@@ -257,7 +262,7 @@ public:
     static_assert(is_desc_heap_view_like<Allocation>, "GpuDescriptorAllocator::Allocation is not a desc heap view like");
 
     GpuDescriptorAllocator(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         UINT size) noexcept;
 
@@ -269,7 +274,7 @@ public:
     DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
 
 private:
-    ID3D12Device* _device;
+    DeviceD3D12* _device;
     unique_ptr<DescriptorHeap> _heap;
     FirstFitAllocator _allocator;
 };
@@ -283,7 +288,7 @@ public:
     DXGIFactoryImpl(
         ComPtr<IDXGIFactory4> factory,
         const DXGIFactoryDescriptor& desc,
-        bool validationEnabled) noexcept;
+        shared_ptr<detail::DiagnosticSession> diagnostics) noexcept;
 
     ~DXGIFactoryImpl() noexcept override;
 
@@ -302,6 +307,7 @@ public:
     ComPtr<IDXGIFactory4> _factory;
     DXGIFactoryDescriptor _desc;
     bool _validationEnabled{false};
+    shared_ptr<detail::DiagnosticSession> _diagnostics;
 };
 
 class DeviceD3D12 final : public Device {
@@ -311,7 +317,8 @@ public:
         ComPtr<IDXGIFactory4> dxgiFactory,
         ComPtr<IDXGIAdapter1> dxgiAdapter,
         ComPtr<D3D12MA::Allocator> mainAlloc,
-        const DXGIFactoryDescriptor& diagnostics) noexcept;
+        shared_ptr<detail::DiagnosticSession> diagnostics,
+        shared_ptr<detail::DiagnosticChannel> diagnosticChannel) noexcept;
 
     ~DeviceD3D12() noexcept override;
 
@@ -368,8 +375,6 @@ public:
 
     bool CreateQueues(const array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)>& counts) noexcept;
 
-    void TryDrainValidationMessages() noexcept;
-
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
@@ -391,11 +396,8 @@ public:
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
 
-    struct ValidationMessages;
-    unique_ptr<ValidationMessages> _validationMessages;
-    std::optional<DWORD> _infoQueueCallbackCookie;
-    Nullable<RenderLogCallback> _logCallback{};
-    Nullable<void*> _logUserData{};
+    shared_ptr<detail::DiagnosticSession> _diagnostics;
+    shared_ptr<detail::DiagnosticChannel> _diagnosticChannel;
 };
 
 class CmdQueueD3D12 final : public CommandQueue {
@@ -460,7 +462,6 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Fence> _fence;
-    mutable std::atomic<uint64_t> _drainedCompletedValue{0};
     uint64_t _fenceValue{0};
     Win32Event _event{};
 };
