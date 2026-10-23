@@ -1,6 +1,5 @@
 #include <radray/render/backend/d3d12_impl.h>
 #include <radray/profiler.h>
-#include "../texture_support_cache.h"
 #include "d3d12_diagnostics.h"
 
 #include <bit>
@@ -883,12 +882,19 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         .IndirectDraw = true,
         .IndirectDispatch = true,
         .SubresourceBarriers = true,
+        .IndependentDepthStencilTransitions = true,
         .UavMemoryBarrier = true,
         .UavWriteStages = render::ShaderStage::Pixel | render::ShaderStage::Compute};
     if (SUCCEEDED(fs.GetStatus()) &&
         fs.MaxSupportedFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) {
         caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
     }
+    caps.Features.SamplerAnisotropy = caps.Features.SamplerMirrorClampToEdge = true;
+    caps.Features.SamplerAnisotropyPointMip = fs.AnisoFilterWithPointMipSupported();
+    caps.Features.SamplerFilterMinmax = fs.TiledResourcesTier() >= D3D12_TILED_RESOURCES_TIER_2;
+    caps.Limits.MaxSamplerAnisotropy = D3D12_REQ_MAXANISOTROPY;
+    caps.Limits.MinSamplerLodBias = D3D12_MIP_LOD_BIAS_MIN;
+    caps.Limits.MaxSamplerLodBias = D3D12_MIP_LOD_BIAS_MAX;
     DXGI_ADAPTER_DESC1 memoryDesc{};
     if (SUCCEEDED(adapter->GetDesc1(&memoryDesc))) {
         const uint64_t memory = memoryDesc.DedicatedVideoMemory != 0 ? memoryDesc.DedicatedVideoMemory : memoryDesc.SharedSystemMemory;
@@ -896,7 +902,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                                              std::min(uint64_t{D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_C_TERM} * 1024 * 1024, memory / 4));
     }
     if (!result->CreateQueues(desc.QueueCounts)) return nullptr;
-    result->_textureSupportCache = radray::render::detail::CacheCommonTextureSupport(*result);
     if (result->_diagnostics && (!detail::FlushDiagnostics(result->_diagnostics) || !detail::IsDiagnosticHealthy(result->_diagnostics) ||
                                  !detail::IsDiagnosticHealthy(result->_diagnosticChannel))) return nullptr;
     RADRAY_INFO_LOG("=============================");
@@ -936,10 +941,25 @@ bool DeviceD3D12::CreateQueues(const array<uint32_t, static_cast<size_t>(QueueTy
     return true;
 }
 
-TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
-    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
-        if (cachedQuery == query) return cachedSupport;
+AttachmentResolveSupport DeviceD3D12::QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept {
+    if (samples <= 1 || (samples & (samples - 1)) || !_features.RenderPassesValid() || _features.ProgrammableSamplePositionsTier() == D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED) return {};
+    const bool depth = IsDepthStencilFormat(format);
+    const auto support = QueryTextureSupport({TextureDimension::Dim2D, format, depth ? TextureUse::DepthStencilWrite : TextureUse::RenderTarget});
+    if (!support.Supported || !(support.SampleCounts.value() & samples) || !support.SampleCounts.HasFlag(SampleCount::X1)) return {};
+    AttachmentResolveSupport result;
+    if (depth) {
+        result.DepthModes = ResolveMode::Average | ResolveMode::Min | ResolveMode::Max;
+        if (GetTextureFormatAspects(format).HasFlag(TextureAspect::Stencil)) result.StencilModes = ResolveMode::Min | ResolveMode::Max;
+        result.IndependentResolve = result.IndependentResolveNone = true;
+    } else {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT native{MapType(format), {}, {}};
+        if (SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &native, sizeof(native))))
+            result.ColorAverage = !IsUintFormat(format) && !IsSintFormat(format) && (native.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_RESOLVE) != 0;
     }
+    return result;
+}
+
+TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
     if (!IsValidTextureSupportQuery(query)) return {};
     const DXGI_FORMAT format = MapType(query.Format);
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format, {}, {}};
@@ -969,6 +989,7 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
         (sampledSupport.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)) == 0) return {};
     TextureSupport result{};
     result.LinearFiltering = (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
+    result.MinMaxFiltering = _capabilities.Features.SamplerFilterMinmax && result.LinearFiltering && !IsUintFormat(query.Format) && !IsSintFormat(query.Format);
     result.Blending = (support.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE) != 0;
     const bool is1D = query.Dimension == TextureDimension::Dim1D || query.Dimension == TextureDimension::Dim1DArray;
     const bool is3D = query.Dimension == TextureDimension::Dim3D;
@@ -1291,6 +1312,8 @@ std::pair<bool, string> DeviceD3D12::ValidateTextureView(const TextureViewDescri
             required = D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
             break;
         case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthReadStencilWrite:
+        case TextureViewUsage::DepthWriteStencilRead:
         case TextureViewUsage::DepthWrite:
             if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) || !IsDepthStencilFormat(desc.Format) || desc.Dim == TextureDimension::Dim3D)
                 return {false, "D3D12 DSV requires a depth/stencil format, dimension and resource flag"};
@@ -1462,7 +1485,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         heapView.GetHeap()->Create(tex->_tex.Get(), rtvDesc, heapView.GetStart());
         dxgiFormat = rtvDesc.Format;
-    } else if (desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite) {
+    } else if (IsDepthStencilViewUsage(desc.Usage)) {
         {
             auto heap = _cpuDsvAlloc.get();
             auto heapViewOpt = heap->Allocate(1);
@@ -1475,13 +1498,8 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
         dsvDesc.Format = MapType(desc.Format);
         dsvDesc.Flags = D3D12_DSV_FLAG_NONE;
-        const bool readOnlyDepth = desc.Usage == TextureViewUsage::DepthRead;
-        if (readOnlyDepth) {
-            dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_DEPTH);
-            if (IsStencilFormatDXGI(dsvDesc.Format)) {
-                dsvDesc.Flags = static_cast<D3D12_DSV_FLAGS>(dsvDesc.Flags | D3D12_DSV_FLAG_READ_ONLY_STENCIL);
-            }
-        }
+        if (IsDepthReadOnly(desc.Usage)) dsvDesc.Flags |= D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        if (IsStencilReadOnly(desc.Usage) && IsStencilFormatDXGI(dsvDesc.Format)) dsvDesc.Flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
         switch (desc.Dim) {
             case TextureDimension::Dim1D:
                 dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1D;
@@ -1649,10 +1667,10 @@ static D3D12_ROOT_PARAMETER_TYPE MapRootType(BindingRegisterClass kind) noexcept
         default: Unreachable();
     }
 }
-static std::optional<D3D12_SAMPLER_DESC> MakeSamplerD3D12(const SamplerDescriptor& desc) noexcept {
+static std::optional<D3D12_SAMPLER_DESC> MakeSamplerD3D12(const SamplerDescriptor& desc, const DeviceFeatures& features) noexcept {
     if (desc.MipLodBias < D3D12_MIP_LOD_BIAS_MIN || desc.MipLodBias > D3D12_MIP_LOD_BIAS_MAX ||
-        desc.UnnormalizedCoordinates || desc.AddressS == AddressMode::MirrorClampToEdge ||
-        desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge ||
+        desc.UnnormalizedCoordinates || (desc.AnisotropyClamp > 1 && desc.MipmapFilter == FilterMode::Nearest && !features.SamplerAnisotropyPointMip) ||
+        (desc.Reduction != SamplerReductionMode::WeightedAverage && !features.SamplerFilterMinmax) ||
         (static_cast<uint32_t>(desc.BorderColor) & 1u) || (desc.Compare && desc.Reduction != SamplerReductionMode::WeightedAverage)) {
         RADRAY_ERR_LOG("unsupported D3D12 sampler configuration");
         return std::nullopt;
@@ -1763,7 +1781,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(const Pip
         }
         for (const auto& binding : group->_bindings) {
             if (!binding.ImmutableSampler) continue;
-            const auto raw = MakeSamplerD3D12(*binding.ImmutableSampler);
+            const auto raw = MakeSamplerD3D12(*binding.ImmutableSampler, _capabilities.Features);
             if (!raw) return nullptr;
             D3D12_STATIC_SAMPLER_DESC sampler{};
             sampler.Filter = raw->Filter;
@@ -2185,7 +2203,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
 }
 
 Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
-    const auto raw = MakeSamplerD3D12(desc);
+    const auto raw = MakeSamplerD3D12(desc, _capabilities.Features);
     if (!raw) return nullptr;
     const auto& rawDesc = *raw;
     auto alloc = this->_cpuSamplerAlloc.get();
@@ -2551,39 +2569,24 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 raw.UAV.pResource = tex->_tex.Get();
             } else {
-                if (tb->Before == tb->After) {
-                    continue;
-                }
                 raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 raw.Transition.pResource = tex->_tex.Get();
-                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                raw.Transition.StateBefore = MapType(tb->Before);
-                raw.Transition.StateAfter = MapType(tb->After);
-                // D3D12 COMMON 和 PRESENT flag 完全一致
-                if (raw.Transition.StateBefore == D3D12_RESOURCE_STATE_COMMON && raw.Transition.StateAfter == D3D12_RESOURCE_STATE_COMMON) {
-                    if (tb->Before == TextureState::Present || tb->After == TextureState::Present) {
-                        continue;
-                    }
-                }
-                if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
-                    continue;
-                }
                 const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
-                const SubresourceRange allRange{0, layers, 0, tex->_rawDesc.MipLevels, GetTextureFormatAspects(textureDesc.Format)};
-                if (range != allRange) {
-                    const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
-                    for (uint32_t plane = 0; plane < planes; ++plane) {
-                        if (planes == 2 && !(range.Aspects.HasFlag(plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil))) continue;
-                        for (uint32_t layer = range.BaseArrayLayer; layer < range.BaseArrayLayer + range.ArrayLayerCount; ++layer) {
-                            for (uint32_t mip = range.BaseMipLevel; mip < range.BaseMipLevel + range.MipLevelCount; ++mip) {
-                                raw.Transition.Subresource = D3D12CalcSubresource(mip, layer, plane, tex->_rawDesc.MipLevels, layers);
-                                rawBarriers.push_back(raw);
-                            }
+                const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
+                for (uint32_t plane = 0; plane < planes; ++plane) {
+                    const auto aspect = IsDepthStencilFormat(textureDesc.Format) ? (plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil) : TextureAspect::Color;
+                    if (!range.Aspects.HasFlag(aspect)) continue;
+                    raw.Transition.StateBefore = MapType(TextureStateForAspect(tb->Before, aspect));
+                    raw.Transition.StateAfter = MapType(TextureStateForAspect(tb->After, aspect));
+                    if (raw.Transition.StateBefore == raw.Transition.StateAfter) continue;
+                    for (uint32_t layer = range.BaseArrayLayer; layer < range.BaseArrayLayer + range.ArrayLayerCount; ++layer) {
+                        for (uint32_t mip = range.BaseMipLevel; mip < range.BaseMipLevel + range.MipLevelCount; ++mip) {
+                            raw.Transition.Subresource = D3D12CalcSubresource(mip, layer, plane, tex->_rawDesc.MipLevels, layers);
+                            rawBarriers.push_back(raw);
                         }
                     }
-                    continue;
                 }
+                continue;
             }
             rawBarriers.push_back(raw);
         } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
@@ -2637,6 +2640,12 @@ void CmdListD3D12::PopDebugGroup() noexcept {
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    const bool hasResolve = std::any_of(desc.Colors.begin(), desc.Colors.end(), [](const auto& color) { return bool(color.ResolveTarget); }) ||
+                            (desc.DepthStencil && desc.DepthStencil->Resolve);
+    if (hasResolve && !_device->_features.RenderPassesValid()) {
+        RADRAY_ERR_LOG("D3D12 attachment resolve requires a runtime with valid render pass support");
+        return nullptr;
+    }
     if (!_renderPassList) {
         const HRESULT result = _cmdList->QueryInterface(IID_PPV_ARGS(_renderPassList.GetAddressOf()));
         if (FAILED(result)) {
@@ -2644,19 +2653,63 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
             return nullptr;
         }
     }
+    auto encoder = make_unique<CmdRenderPassD3D12>(this);
+    // BeginRenderPass snapshots attachment descriptors. Limit clear/discard to the pass layers.
+    vector<unique_ptr<TextureView>> layerViews;
+    const auto attachmentView = [&](TextureView* view) -> Nullable<TextureViewD3D12*> {
+        auto vd = view->GetDesc();
+        const auto range = ResolveSubresourceRange(vd.Target->GetDesc(), vd.Range);
+        if (range.ArrayLayerCount == desc.Layers) return CastD3D12Object(view);
+        vd.Range.ArrayLayerCount = desc.Layers;
+        auto subset = _device->CreateTextureView(vd);
+        if (!subset) return nullptr;
+        layerViews.push_back(subset.Release());
+        return CastD3D12Object(layerViews.back().get());
+    };
+    const auto renderArea = desc.RenderArea.value_or(Rect{0, 0, desc.Width, desc.Height});
+    const auto resolve = [&](TextureView* source, TextureView* target, ResolveMode mode, uint32_t plane, StoreAction store, D3D12_RENDER_PASS_ENDING_ACCESS& access) {
+        auto* src = CastD3D12Object(source);
+        auto* dst = CastD3D12Object(target);
+        auto* srcTexture = CastD3D12Object(src->_desc.Target);
+        auto* dstTexture = CastD3D12Object(dst->_desc.Target);
+        const auto sr = ResolveSubresourceRange(srcTexture->GetDesc(), src->_desc.Range);
+        const auto dr = ResolveSubresourceRange(dstTexture->GetDesc(), dst->_desc.Range);
+        auto& regions = encoder->_resolveSubresources.emplace_back();
+        for (uint32_t layer = 0; layer < desc.Layers; ++layer) {
+            regions.push_back({D3D12CalcSubresource(sr.BaseMipLevel, sr.BaseArrayLayer + layer, plane, srcTexture->_rawDesc.MipLevels, srcTexture->_rawDesc.DepthOrArraySize),
+                               D3D12CalcSubresource(dr.BaseMipLevel, dr.BaseArrayLayer + layer, plane, dstTexture->_rawDesc.MipLevels, dstTexture->_rawDesc.DepthOrArraySize),
+                               static_cast<UINT>(renderArea.X),
+                               static_cast<UINT>(renderArea.Y),
+                               {renderArea.X, renderArea.Y, renderArea.X + static_cast<LONG>(renderArea.Width), renderArea.Y + static_cast<LONG>(renderArea.Height)}});
+        }
+        const bool fullSource = renderArea.X == 0 && renderArea.Y == 0 && renderArea.Width == std::max(1u, srcTexture->GetDesc().Width >> sr.BaseMipLevel) && renderArea.Height == std::max(1u, srcTexture->GetDesc().Height >> sr.BaseMipLevel);
+        access.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_RESOLVE;
+        access.Resolve = {srcTexture->_tex.Get(), dstTexture->_tex.Get(), static_cast<UINT>(regions.size()), regions.data(), src->_rawFormat,
+                          mode == ResolveMode::Min ? D3D12_RESOLVE_MODE_MIN : mode == ResolveMode::Max ? D3D12_RESOLVE_MODE_MAX
+                                                                                                       : D3D12_RESOLVE_MODE_AVERAGE,
+                          store == StoreAction::Store || !fullSource};
+    };
     vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> colors;
     std::optional<D3D12_RENDER_PASS_DEPTH_STENCIL_DESC> depth;
     std::optional<D3D12_RECT> area;
     vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rectClears;
     D3D12_CLEAR_FLAGS depthClearFlags{};
     D3D12_CLEAR_VALUE depthClear{};
-    if (desc.RenderArea && (desc.RenderArea->X || desc.RenderArea->Y || desc.RenderArea->Width != desc.Width || desc.RenderArea->Height != desc.Height)) {
-        const auto& rect = *desc.RenderArea;
-        area = {rect.X, rect.Y, rect.X + static_cast<LONG>(rect.Width), rect.Y + static_cast<LONG>(rect.Height)};
-    }
+    const auto partial = [&](TextureView* view) {
+        const auto vd = view->GetDesc();
+        const auto td = vd.Target->GetDesc();
+        const auto range = ResolveSubresourceRange(td, vd.Range);
+        return renderArea.X || renderArea.Y || renderArea.Width != std::max(1u, td.Width >> range.BaseMipLevel) ||
+               renderArea.Height != std::max(1u, td.Height >> range.BaseMipLevel);
+    };
+    if (std::any_of(desc.Colors.begin(), desc.Colors.end(), [&](const auto& color) { return partial(color.View); }) ||
+        (desc.DepthStencil && partial(desc.DepthStencil->View)))
+        area = {renderArea.X, renderArea.Y, renderArea.X + static_cast<LONG>(renderArea.Width), renderArea.Y + static_cast<LONG>(renderArea.Height)};
     auto flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
     for (const auto& color : desc.Colors) {
-        auto* view = CastD3D12Object(color.View);
+        const auto selected = attachmentView(color.View);
+        if (!selected) return nullptr;
+        auto* view = selected.Get();
         D3D12_RENDER_PASS_RENDER_TARGET_DESC rt{};
         rt.cpuDescriptor = view->_heapView.HandleCpu();
         rt.BeginningAccess.Type = MapType(color.Load);
@@ -2667,11 +2720,18 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
             rectClears.push_back(rt);
             rt.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
         }
+        if (area) {
+            rt.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            rt.EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+        }
+        if (color.ResolveTarget) resolve(color.View, color.ResolveTarget.Get(), ResolveMode::Average, 0, color.Store, rt.EndingAccess);
         colors.push_back(rt);
     }
     if (desc.DepthStencil) {
         const auto& d = *desc.DepthStencil;
-        auto* view = CastD3D12Object(d.View);
+        const auto selected = attachmentView(d.View);
+        if (!selected) return nullptr;
+        auto* view = selected.Get();
         D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
         ds.cpuDescriptor = view->_heapView.HandleCpu();
         ds.DepthBeginningAccess.Type = MapType(d.DepthLoad);
@@ -2683,10 +2743,8 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         clear.DepthStencil = {d.Clear.Depth, static_cast<UINT8>(d.Clear.Stencil)};
         ds.DepthBeginningAccess.Clear.ClearValue = clear;
         ds.StencilBeginningAccess.Clear.ClearValue = clear;
-        if (d.ReadOnly) {
-            flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
-            if (IsStencilFormatDXGI(view->_rawFormat)) flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
-        }
+        if (IsDepthReadOnly(view->_desc.Usage)) flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
+        if (IsStencilReadOnly(view->_desc.Usage) && IsStencilFormatDXGI(view->_rawFormat)) flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
         if (area) {
             depthClear = clear;
             if (d.DepthLoad == LoadAction::Clear) {
@@ -2698,9 +2756,20 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
                 ds.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
             }
         }
+        if (area) {
+            ds.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+            ds.DepthEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+            if (IsStencilFormatDXGI(view->_rawFormat)) {
+                ds.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+                ds.StencilEndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+            }
+        }
+        if (d.Resolve) {
+            if (d.Resolve->DepthMode != ResolveMode::None) resolve(d.View, d.Resolve->Target, d.Resolve->DepthMode, 0, d.DepthStore, ds.DepthEndingAccess);
+            if (d.Resolve->StencilMode != ResolveMode::None) resolve(d.View, d.Resolve->Target, d.Resolve->StencilMode, 1, d.StencilStore, ds.StencilEndingAccess);
+        }
         depth = ds;
     }
-    auto encoder = make_unique<CmdRenderPassD3D12>(this);
     if (area) {
         for (const auto& clear : rectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*area);
         if (depthClearFlags) _cmdList->ClearDepthStencilView(depth->cpuDescriptor, depthClearFlags,
@@ -2791,7 +2860,7 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
             dstLoc.SubresourceIndex = subres;
 
             _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
-            bufferOffset = footprint.Offset + totalBytes;
+            bufferOffset = Align(footprint.Offset + totalBytes, uint64_t{D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT});
         }
     }
 }
@@ -2827,7 +2896,7 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
             dstLoc.PlacedFootprint = footprint;
 
             _cmdList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
-            bufferOffset = footprint.Offset + totalBytes;
+            bufferOffset = Align(footprint.Offset + totalBytes, uint64_t{D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT});
         }
     }
 }

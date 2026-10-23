@@ -40,6 +40,28 @@ AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor
     return result;
 }
 
+TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept {
+    const bool depthRead = states.HasFlag(TextureState::DepthReadStencilWrite);
+    const bool stencilRead = states.HasFlag(TextureState::DepthWriteStencilRead);
+    if (!depthRead && !stencilRead) return states;
+    const bool read = aspect == TextureAspect::Depth ? depthRead : stencilRead;
+    auto result = TextureStates{states.value() & ~(uint32_t(TextureState::DepthReadStencilWrite) | uint32_t(TextureState::DepthWriteStencilRead))};
+    if (!read) result = TextureStates{result.value() & ~uint32_t(TextureState::ShaderRead)};
+    result |= read ? TextureState::DepthRead : TextureState::DepthWrite;
+    return result;
+}
+
+bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept {
+    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthWrite ||
+           usage == TextureViewUsage::DepthReadStencilWrite || usage == TextureViewUsage::DepthWriteStencilRead;
+}
+bool IsDepthReadOnly(TextureViewUsage usage) noexcept {
+    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthReadStencilWrite;
+}
+bool IsStencilReadOnly(TextureViewUsage usage) noexcept {
+    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthWriteStencilRead;
+}
+
 std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept {
     if ((!desc.Colors.size() && !desc.DepthStencil) || !desc.Width || !desc.Height || !desc.Layers ||
         desc.Colors.size() > device.GetCapabilities().Limits.MaxColorAttachments) return std::nullopt;
@@ -76,13 +98,56 @@ std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDesc
     if (desc.DepthStencil) {
         const auto& d = *desc.DepthStencil;
         if (!validLoad(d.DepthLoad) || !validStore(d.DepthStore)) return std::nullopt;
-        if (!validate(d.View, d.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite, true)) return std::nullopt;
+        if (!d.View || !IsDepthStencilViewUsage(d.View->GetDesc().Usage) || !validate(d.View, d.View->GetDesc().Usage, true)) return std::nullopt;
         const auto format = d.View->GetDesc().Format;
         const bool stencil = format == TextureFormat::D24_UNORM_S8_UINT || format == TextureFormat::D32_FLOAT_S8_UINT;
         if (stencil && (!validLoad(d.StencilLoad) || !validStore(d.StencilStore))) return std::nullopt;
-        if (d.ReadOnly && (d.DepthLoad != LoadAction::Load || d.DepthStore != StoreAction::Store ||
-                           (stencil && (d.StencilLoad != LoadAction::Load || d.StencilStore != StoreAction::Store)))) return std::nullopt;
+        if ((IsDepthReadOnly(d.View->GetDesc().Usage) && (d.DepthLoad != LoadAction::Load || d.DepthStore != StoreAction::Store)) ||
+            (stencil && IsStencilReadOnly(d.View->GetDesc().Usage) && (d.StencilLoad != LoadAction::Load || d.StencilStore != StoreAction::Store))) return std::nullopt;
         signature.DepthStencil = format;
+    }
+    vector<TextureView*> attachments;
+    for (const auto& color : desc.Colors) attachments.push_back(color.View);
+    if (desc.DepthStencil) attachments.push_back(desc.DepthStencil->View);
+    const auto validateResolve = [&](TextureView* source, TextureView* target, ResolveMode depthMode, ResolveMode stencilMode) {
+        if (!target || !target->IsValid()) return false;
+        const auto src = source->GetDesc(), dst = target->GetDesc();
+        if (!dst.Target || !dst.Target->IsValid() || dst.Target->GetDevice() != &device || dst.Format != src.Format) return false;
+        const auto st = src.Target->GetDesc(), dt = dst.Target->GetDesc();
+        const bool depth = IsDepthStencilFormat(src.Format);
+        if (dst.Usage != (depth ? TextureViewUsage::DepthWrite : TextureViewUsage::RenderTarget) ||
+            st.SampleCount <= 1 || dt.SampleCount != 1 || dst.Range.MipLevelCount != 1 || dst.Range.BaseMipLevel >= dt.MipLevels || dst.Range.BaseMipLevel >= 32 ||
+            dst.Range.ArrayLayerCount != src.Range.ArrayLayerCount || dst.Range.BaseArrayLayer >= dt.DepthOrArraySize || dst.Range.ArrayLayerCount > dt.DepthOrArraySize - dst.Range.BaseArrayLayer ||
+            std::max(1u, st.Width >> src.Range.BaseMipLevel) != std::max(1u, dt.Width >> dst.Range.BaseMipLevel) ||
+            std::max(1u, st.Height >> src.Range.BaseMipLevel) != std::max(1u, dt.Height >> dst.Range.BaseMipLevel) ||
+            ResolveSubresourceRange(dt, dst.Range).Aspects != GetTextureFormatAspects(dst.Format)) return false;
+        const auto support = device.QueryAttachmentResolveSupport(src.Format, st.SampleCount);
+        if (!depth) {
+            if (!support.ColorAverage) return false;
+        } else {
+            const auto validMode = [](ResolveMode mode, ResolveModes modes) {
+                const auto bits = uint32_t(mode);
+                return mode == ResolveMode::None || (!(bits & (bits - 1)) && modes.HasFlag(mode));
+            };
+            if (!validMode(depthMode, support.DepthModes) || !validMode(stencilMode, support.StencilModes) ||
+                (depthMode == ResolveMode::None && stencilMode == ResolveMode::None)) return false;
+            if (GetTextureFormatAspects(src.Format).HasFlag(TextureAspect::Stencil) && depthMode != stencilMode) {
+                if ((depthMode == ResolveMode::None || stencilMode == ResolveMode::None) ? !support.IndependentResolveNone : !support.IndependentResolve) return false;
+            }
+        }
+        for (const auto* oldView : attachments) {
+            const auto old = oldView->GetDesc();
+            if (old.Target == dst.Target && old.Range.BaseMipLevel == dst.Range.BaseMipLevel &&
+                old.Range.BaseArrayLayer < dst.Range.BaseArrayLayer + dst.Range.ArrayLayerCount && dst.Range.BaseArrayLayer < old.Range.BaseArrayLayer + old.Range.ArrayLayerCount) return false;
+        }
+        attachments.push_back(target);
+        return true;
+    };
+    for (const auto& color : desc.Colors)
+        if (color.ResolveTarget && !validateResolve(color.View, color.ResolveTarget.Get(), ResolveMode::None, ResolveMode::None)) return std::nullopt;
+    if (desc.DepthStencil && desc.DepthStencil->Resolve) {
+        const auto& resolve = *desc.DepthStencil->Resolve;
+        if (!validateResolve(desc.DepthStencil->View, resolve.Target, resolve.DepthMode, resolve.StencilMode)) return std::nullopt;
     }
     signature.Samples = samples;
     return signature;
@@ -620,6 +685,8 @@ std::string_view format_as(BufferState v) noexcept {
     // 位标志枚举, 取值超出默认反射范围, 需按位反射。
     return EnumFlagBitNameOr(v);
 }
+
+std::string_view format_as(ResolveMode v) noexcept { return magic_enum::enum_name(v); }
 
 std::string_view format_as(TextureState v) noexcept {
     return EnumFlagBitNameOr(v);

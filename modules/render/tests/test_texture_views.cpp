@@ -87,6 +87,102 @@ TEST_P(TextureViewContractTest, DepthAndStencilViewsKeepTheirPlanes) {
     Reject(desc);
 }
 
+TEST_P(TextureViewContractTest, DepthStencilPermissionsBelongToViews) {
+    auto texture = MakeTexture(TextureFormat::D32_FLOAT_S8_UINT, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite);
+    for (const auto usage : {TextureViewUsage::DepthReadStencilWrite, TextureViewUsage::DepthWriteStencilRead}) {
+        auto view = Context.Device->CreateTextureView(View(texture.get(), TextureFormat::D32_FLOAT_S8_UINT, usage)).Unwrap();
+        RenderPassBeginDescriptor pass{.DepthStencil = RenderPassDepthStencilAttachment{view.get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, {}}, .Width = 8, .Height = 8};
+        EXPECT_TRUE(ValidateRenderScope(pass, *Context.Device));
+        if (IsDepthReadOnly(usage))
+            pass.DepthStencil->DepthLoad = LoadAction::Clear;
+        else
+            pass.DepthStencil->StencilLoad = LoadAction::Clear;
+        EXPECT_FALSE(ValidateRenderScope(pass, *Context.Device));
+        pass.DepthStencil->DepthLoad = pass.DepthStencil->StencilLoad = LoadAction::Load;
+        if (IsDepthReadOnly(usage))
+            pass.DepthStencil->DepthStore = StoreAction::Discard;
+        else
+            pass.DepthStencil->StencilStore = StoreAction::Discard;
+        EXPECT_FALSE(ValidateRenderScope(pass, *Context.Device));
+    }
+    auto depth = MakeTexture(TextureFormat::D32_FLOAT, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite);
+    Reject(View(depth.get(), TextureFormat::D32_FLOAT, TextureViewUsage::DepthReadStencilWrite));
+    Reject(View(depth.get(), TextureFormat::D32_FLOAT, TextureViewUsage::DepthWriteStencilRead));
+}
+
+class CoupledTextureViewContractTest : public TextureViewContractTest {
+protected:
+    void SetUp() override {
+        if (!test::TryCreateDevice(GetParam(), Context, true, true, {1, 0, 0}, nullptr, false)) {
+            if (test::SetupMustFail(Context.Status, test::RequiredBackend(GetParam()))) FAIL() << Context.Reason;
+            GTEST_SKIP() << Context.Reason;
+        }
+    }
+};
+TEST_P(CoupledTextureViewContractTest, SingleAspectTransitionRejectedBeforeRecording) {
+    EXPECT_FALSE(Context.Device->GetCapabilities().Features.IndependentDepthStencilTransitions);
+    auto texture = MakeTexture(TextureFormat::D32_FLOAT_S8_UINT, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite);
+    auto allocator = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
+    auto command = Context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
+    command->Begin();
+    const ResourceBarrierDescriptor rejected = BarrierTextureDescriptor{texture.get(), TextureState::Undefined, TextureState::DepthRead, {0, 1, 0, 1, TextureAspect::Depth}};
+    command->ResourceBarrier(std::span{&rejected, 1});
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 1u);
+    const ResourceBarrierDescriptor accepted = BarrierTextureDescriptor{texture.get(), TextureState::Undefined, TextureState::DepthReadStencilWrite};
+    command->ResourceBarrier(std::span{&accepted, 1});
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 1u);
+    auto view = Context.Device->CreateTextureView(View(texture.get(), TextureFormat::D32_FLOAT_S8_UINT, TextureViewUsage::DepthReadStencilWrite)).Unwrap();
+    auto encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{view.get(), LoadAction::Load, StoreAction::Store, LoadAction::Clear, StoreAction::Store, {0, 11}}, .Width = 8, .Height = 8}).Unwrap();
+    command->EndRenderPass(std::move(encoder));
+    command->End();
+    CommandBuffer* commands[]{command.get()};
+    test::GpuWorkGuard gpuWork{Context};
+    Context.Queue->Submit({.CmdBuffers = commands});
+    Context.Queue->Wait();
+    allocator->Reset();
+}
+INSTANTIATE_TEST_SUITE_P(FeatureDisabled, CoupledTextureViewContractTest, testing::Values(RenderBackend::Vulkan));
+
+TEST_P(TextureViewContractTest, MixedPermissionsAndIndependentAspectBarriers) {
+    auto& device = *Context.Device;
+    auto texture = MakeTexture(TextureFormat::D32_FLOAT_S8_UINT, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource);
+    auto write = device.CreateTextureView(View(texture.get(), TextureFormat::D32_FLOAT_S8_UINT, TextureViewUsage::DepthWrite)).Unwrap();
+    auto allocator = device.CreateCommandAllocator(Context.Queue).Unwrap();
+    auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+    vector<unique_ptr<TextureView>> mixedViews;
+    command->Begin();
+    const auto barrier = [&](TextureStates before, TextureStates after, TextureAspects aspects = TextureAspect::Auto) {
+        const ResourceBarrierDescriptor b = BarrierTextureDescriptor{texture.get(), before, after, {0, 1, 0, 1, aspects}};
+        command->ResourceBarrier(std::span{&b, 1});
+    };
+    barrier(TextureState::Undefined, TextureState::DepthWrite);
+    auto encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{write.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, {0.5f, 9}}, .Width = 8, .Height = 8}).Unwrap();
+    command->EndRenderPass(std::move(encoder));
+    for (const bool readDepth : {true, false}) {
+        const auto usage = readDepth ? TextureViewUsage::DepthReadStencilWrite : TextureViewUsage::DepthWriteStencilRead;
+        const auto mixed = readDepth ? TextureState::DepthReadStencilWrite : TextureState::DepthWriteStencilRead;
+        mixedViews.push_back(device.CreateTextureView(View(texture.get(), TextureFormat::D32_FLOAT_S8_UINT, usage)).Unwrap());
+        const auto aspect = readDepth ? TextureAspect::Depth : TextureAspect::Stencil;
+        if (device.GetCapabilities().Features.IndependentDepthStencilTransitions)
+            barrier(TextureState::DepthWrite, TextureState::DepthRead, aspect);
+        else
+            barrier(TextureState::DepthWrite, mixed);
+        encoder = command->BeginRenderPass({.DepthStencil = RenderPassDepthStencilAttachment{mixedViews.back().get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, {}}, .Width = 8, .Height = 8}).Unwrap();
+        command->EndRenderPass(std::move(encoder));
+        if (device.GetCapabilities().Features.IndependentDepthStencilTransitions)
+            barrier(TextureState::DepthRead, TextureState::DepthWrite, aspect);
+        else
+            barrier(mixed, TextureState::DepthWrite);
+    }
+    command->End();
+    CommandBuffer* commands[]{command.get()};
+    test::GpuWorkGuard gpuWork{Context};
+    Context.Queue->Submit({.CmdBuffers = commands});
+    Context.Queue->Wait();
+    allocator->Reset();
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+}
+
 TEST_P(TextureViewContractTest, SrgbAttachmentClearPreservesLinearStorageInterpretation) {
     auto texture = MakeTexture(TextureFormat::RGBA8_UNORM, TextureUse::RenderTarget | TextureUse::CopySource);
     auto view = Context.Device->CreateTextureView(View(texture.get(), TextureFormat::RGBA8_UNORM_SRGB, TextureViewUsage::RenderTarget)).Unwrap();

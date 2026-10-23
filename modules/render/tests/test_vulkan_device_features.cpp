@@ -54,7 +54,18 @@ DeviceFeaturesVulkan ExpectedRhiFeatures() {
     result.Vulkan12.samplerMirrorClampToEdge = VK_TRUE;
     result.Vulkan12.samplerFilterMinmax = VK_TRUE;
     result.Vulkan12.imagelessFramebuffer = VK_TRUE;
+    result.Vulkan12.separateDepthStencilLayouts = VK_TRUE;
     return result;
+}
+
+TEST(VulkanDeviceFeaturePolicy, CoupledLayoutsDoNotRequireIndependentTransitions) {
+    auto requests = GetRhiFeatureRequestsVulkan();
+    requests.SeparateDepthStencilLayouts = FeatureRequirementVulkan::Disabled;
+    EXPECT_FALSE(SelectDeviceFeaturesVulkan(AllSupportedFeatures(), requests).Enabled.Vulkan12.separateDepthStencilLayouts);
+    EXPECT_EQ(TextureStateToLayout(TextureState::DepthReadStencilWrite), VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL);
+    EXPECT_EQ(TextureStateToLayout(TextureState::DepthWriteStencilRead), VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL);
+    EXPECT_EQ(TextureStateToLayout(TextureState::DepthReadStencilWrite, TextureFormat::D32_FLOAT_S8_UINT, TextureAspect::Stencil, true), VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL);
+    EXPECT_EQ(TextureStateForAspect(TextureState::DepthReadStencilWrite | TextureState::ShaderRead, TextureAspect::Stencil), TextureState::DepthWrite);
 }
 
 TEST(VulkanDeviceFeaturePolicy, AllSupportedEnablesExactlyRhiRequests) {
@@ -63,7 +74,7 @@ TEST(VulkanDeviceFeaturePolicy, AllSupportedEnablesExactlyRhiRequests) {
     const auto selection = SelectDeviceFeaturesVulkan(supported, GetRhiFeatureRequestsVulkan());
     EXPECT_TRUE(selection.MissingRequired.empty());
     EXPECT_EQ(FeatureBits(selection.Enabled), FeatureBits(ExpectedRhiFeatures()));
-    EXPECT_EQ(selection.EnabledNames.size(), 16u);
+    EXPECT_EQ(selection.EnabledNames.size(), 17u);
     EXPECT_EQ(FeatureBits(supported), before);
     EXPECT_EQ(selection.Enabled.Vulkan11.pNext, nullptr);
     EXPECT_EQ(selection.Enabled.Vulkan12.pNext, nullptr);
@@ -476,10 +487,14 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
             binding.ImmutableSampler = samplerDesc;
             EXPECT_TRUE(device->CreateBindingGroupLayout({std::span{&binding, 1}}));
         }
-        auto validated = render::detail::CreateValidationDevice(Context.Device, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
-        device->_enabledFeatures.Core.samplerAnisotropy = VK_FALSE;
-        device->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge = VK_FALSE;
-        device->_enabledFeatures.Vulkan12.samplerFilterMinmax = VK_FALSE;
+        auto disabledRequests = GetRhiFeatureRequestsVulkan();
+        disabledRequests.SamplerAnisotropy = FeatureRequirementVulkan::Disabled;
+        disabledRequests.SamplerMirrorClampToEdge = FeatureRequirementVulkan::Disabled;
+        disabledRequests.SamplerFilterMinmax = FeatureRequirementVulkan::Disabled;
+        auto disabled = CreateDeviceVulkan({.PhysicalDeviceIndex = adapter.Index, .Queues = queues}, disabledRequests).Unwrap();
+        auto validated = render::detail::CreateValidationDevice(disabled, {.IsEnabled = true, .LogCallback = test::CaptureRhiValidationMessage, .LogUserData = &Context}).Unwrap();
+        EXPECT_FALSE(validated->GetCapabilities().Features.SamplerFilterMinmax);
+        EXPECT_FALSE(validated->QueryTextureSupport({TextureDimension::Dim2D, TextureFormat::R32_FLOAT, TextureUse::Resource}).MinMaxFiltering);
         for (size_t index = 1; index < samplers.size(); ++index) {
             const auto beforeSampler = Context.RhiValidationErrors.load();
             EXPECT_FALSE(validated->CreateSampler(samplers[index]));
@@ -489,7 +504,6 @@ TEST_P(VulkanDeviceFeatureGpu, MatchesPolicyAndCompletesTimeline) {
             EXPECT_FALSE(validated->CreateBindingGroupLayout({std::span{&binding, 1}}));
             EXPECT_GT(Context.RhiValidationErrors.load(), beforeLayout);
         }
-        device->_enabledFeatures = expected.Enabled;
         Context.Queue->Wait();
         RecordProperty("adapter_" + std::to_string(adapter.Index), adapter.Name);
     }

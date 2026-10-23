@@ -346,7 +346,18 @@ enum class TextureState : uint32_t {
     DepthWrite = DepthRead << 1,
     UnorderedAccess = DepthWrite << 1,
     ResolveSource = UnorderedAccess << 1,
-    ResolveDestination = ResolveSource << 1
+    ResolveDestination = ResolveSource << 1,
+    DepthReadStencilWrite = ResolveDestination << 1,
+    DepthWriteStencilRead = DepthReadStencilWrite << 1,
+    AttachmentResolveDestination = DepthWriteStencilRead << 1
+};
+
+enum class ResolveMode : uint32_t {
+    None = 0,
+    SampleZero = 1,
+    Average = 2,
+    Min = 4,
+    Max = 8,
 };
 
 enum class TextureViewUsage : uint32_t {
@@ -356,6 +367,8 @@ enum class TextureViewUsage : uint32_t {
     DepthRead,
     DepthWrite,
     UnorderedAccess,
+    DepthReadStencilWrite,
+    DepthWriteStencilRead,
 };
 
 enum class ResourceHint : uint32_t {
@@ -517,6 +530,9 @@ template <>
 struct is_flags<render::TextureState> : public std::true_type {};
 
 template <>
+struct is_flags<render::ResolveMode> : public std::true_type {};
+
+template <>
 struct is_flags<render::TextureAspect> : public std::true_type {};
 template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
@@ -533,6 +549,7 @@ using TextureUses = EnumFlags<render::TextureUse>;
 using SampleCountMask = EnumFlags<render::SampleCount>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
+using ResolveModes = EnumFlags<ResolveMode>;
 using ShaderStages = EnumFlags<ShaderStage>;
 using TextureAspects = EnumFlags<TextureAspect>;
 
@@ -905,6 +922,13 @@ struct RenderPassColorAttachment {
     LoadAction Load{LoadAction::DontCare};
     StoreAction Store{StoreAction::Store};
     ColorClearValue Clear{};
+    Nullable<TextureView*> ResolveTarget{nullptr};
+};
+
+struct DepthStencilResolveDescriptor {
+    TextureView* Target;
+    ResolveMode DepthMode{ResolveMode::None};
+    ResolveMode StencilMode{ResolveMode::None};
 };
 
 struct RenderPassDepthStencilAttachment {
@@ -913,8 +937,8 @@ struct RenderPassDepthStencilAttachment {
     StoreAction DepthStore{StoreAction::Store};
     LoadAction StencilLoad{LoadAction::DontCare};
     StoreAction StencilStore{StoreAction::Store};
-    bool ReadOnly{false};
     DepthStencilClearValue Clear{};
+    std::optional<DepthStencilResolveDescriptor> Resolve{};
 };
 
 /// Views and operations borrowed during BeginRenderPass; their owners survive the command epoch.
@@ -927,7 +951,7 @@ struct RenderPassBeginDescriptor {
     bool AllowUavWrites{false};
 };
 
-/// Single subpass, ordered color mapping, no input/resolve attachments or multiview.
+/// Rasterization attachment compatibility; execution-time resolves are excluded.
 struct AttachmentSignature {
     vector<TextureFormat> Colors;
     std::optional<TextureFormat> DepthStencil;
@@ -1050,9 +1074,9 @@ struct BindingDescriptor {
     BindingKind Kind{BindingKind::CBuffer};
     uint32_t Count{1};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::optional<D3D12BindingDescriptor> D3D12;
-    std::optional<VulkanBindingDescriptor> Vulkan;
-    std::optional<SamplerDescriptor> ImmutableSampler;
+    std::optional<D3D12BindingDescriptor> D3D12{};
+    std::optional<VulkanBindingDescriptor> Vulkan{};
+    std::optional<SamplerDescriptor> ImmutableSampler{};
 };
 
 /// Input spans are borrowed only until creation returns.
@@ -1341,6 +1365,8 @@ struct DeviceLimits {
     uint32_t MaxPushConstantBytes{0};
     uint64_t CBufferOffsetAlignment{1};
     uint64_t StorageBufferOffsetAlignment{1};
+    float MaxSamplerAnisotropy{1};
+    float MinSamplerLodBias{0}, MaxSamplerLodBias{0};
 };
 
 struct DeviceFeatures {
@@ -1348,8 +1374,12 @@ struct DeviceFeatures {
     bool IndirectDraw{false};
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
+    bool IndependentDepthStencilTransitions{false};
     bool UavMemoryBarrier{false};
     ShaderStages UavWriteStages{ShaderStage::UNKNOWN};
+    bool SamplerAnisotropy{false}, SamplerMirrorClampToEdge{false}, SamplerFilterMinmax{false};
+    bool SamplerAnisotropyPointMip{false};
+    bool SamplerUnnormalizedCoordinates{false}, SamplerIntegerBorderColor{false};
 };
 
 struct RenderDeviceCapabilities {
@@ -1368,12 +1398,20 @@ struct TextureSupportQuery {
 };
 
 struct TextureSupport {
-    bool Supported{false};
-    SampleCountMask SampleCounts{};
-    bool LinearFiltering{false};
-    bool Blending{false};
-    uint32_t MaxWidth{0}, MaxHeight{0}, MaxDepth{0}, MaxArrayLayers{0}, MaxMipLevels{0};
     uint64_t MaxResourceSize{0};
+    uint32_t MaxWidth{0}, MaxHeight{0}, MaxDepth{0};
+    uint32_t MaxArrayLayers{0}, MaxMipLevels{0};
+    SampleCountMask SampleCounts{};
+    bool Supported{false};
+    bool LinearFiltering{false};
+    bool MinMaxFiltering{false};
+    bool Blending{false};
+};
+
+struct AttachmentResolveSupport {
+    ResolveModes DepthModes{}, StencilModes{};
+    bool ColorAverage{false};
+    bool IndependentResolve{false}, IndependentResolveNone{false};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -1389,6 +1427,8 @@ public:
     virtual const RenderDeviceCapabilities& GetCapabilities() const noexcept = 0;
 
     virtual TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept = 0;
+
+    virtual AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept = 0;
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
@@ -1807,6 +1847,10 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept;
+bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept;
+bool IsDepthReadOnly(TextureViewUsage usage) noexcept;
+bool IsStencilReadOnly(TextureViewUsage usage) noexcept;
 std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept;
 AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
 
@@ -1822,6 +1866,7 @@ std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;
 std::string_view format_as(TextureState v) noexcept;
+std::string_view format_as(ResolveMode v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;

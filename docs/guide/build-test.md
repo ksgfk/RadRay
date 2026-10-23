@@ -308,6 +308,8 @@ RenderPass2、view 格式契约与 framebuffer 回归使用以下 suites，同�
 
 | Suite | 验证内容 |
 |---|---|
+| `AttachmentOperations` | D3D12 与 Vulkan 四种 feature/cache 组合；非均匀 MSAA resolve、源逐 sample 读回、sRGB、浮点、区域外/未 resolve aspect、局部 layers、混合权限 SRV/PSO、普通/immutable sampler 真采样 |
+| `CoupledTextureViewContractTest` | 禁用 separateDepthStencilLayouts 后合法组合与独立转换拒绝 |
 | `TextureViewContractTest` | 双后端同格式与兼容格式、UNORM/sRGB 独立用途、后端兼容范围差异、depth/stencil plane、sRGB 清除读回、命令引用的销毁限制 |
 | `VulkanViewFormats` | Vulkan 格式兼容类与非 mutable 限制，depth/stencil 不与 color 混淆 |
 | `VulkanRenderObjects` | 测试侧 native probe 观察 RenderPass2 参数、缓存创建次数、约束区分、失败/预算、独立附件引用与销毁时序 |
@@ -319,12 +321,18 @@ RenderPass2、view 格式契约与 framebuffer 回归使用以下 suites，同�
 传统/imageless GPU 测试在创建资源前选择缓存模式；不改 Supported/Enabled 快照。
 结构收益由 probe 比较相同附件约束的不同 views 所需的 framebuffer 创建数，不将 GTest 用作性能基准。
 非预期原生 validation 错误必须失败；不支持 imageless 的 GPU 用例明确跳过。
+`AttachmentOperations` 参数 0 为 D3D12，1/2 为 Vulkan imageless（独立/组合 DS），3/4 为传统 framebuffer（独立/组合 DS）。
+fixture 在 vkCreateDevice 前选择请求集，不在创建后伪造 Enabled；报告记录实际 separate_depth_stencil_layouts 与 imageless_framebuffer。
+D3D12 报告 render_passes_valid 与 programmable_sample_positions_tier；附件 resolve 能力不足的用例单列跳过。
+MinMaxFiltering 的负面格式用例在设备所有受支持 RHI 采样格式均支持时单列跳过，不能伪造格式能力。
+probe 验证 resolve 目标的有序附件、约束、缓存复用、去重引用、提前销毁、预算失败/重试；不增加生产观测字段。
+读回的误差只用于格式量化，测试结果不作帧率或带宽收益解释。
 
 ```powershell
 cmake --build --preset win-x64-debug --target test_radray_render --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
 $env:RADRAY_TEST_GPU_VALIDATION = '1'
-ctest --preset win-x64-debug -R 'TextureViewContract|Vulkan|ExplicitBindingLayoutTest|D3D12Diagnostic|ExplicitLayoutOwnership' --output-on-failure --timeout 60
+ctest --preset win-x64-debug -R 'AttachmentOperations|TextureViewContract|Vulkan|ExplicitBindingLayoutTest|D3D12Diagnostic|ExplicitLayoutOwnership' --output-on-failure --timeout 60
 ```
 
 Release 使用对应 `win-x64-release` preset，仍先构建后测试。按上面的 adapter 环境变量逐设备运行；
@@ -341,6 +349,14 @@ SPIR-V 不声明 GOOGLE 反射扩展且独立 metadata 仍完整；render 的字
 cmake --build --preset win-x64-debug --target radray_shader_fixture_generator
 & build/windows-x64-msvc/Debug/_build/Debug/radray_shader_fixture_generator.exe
 ```
+
+附件与 sampler 的小型 GPU fixture 直接从测试 HLSL 生成原始 DXIL/SPIR-V，显式更新使用：
+
+```powershell
+python tools/compile_attachment_fixtures.py
+```
+
+可用 `--dxc <path>` 指定已安装 DXC；脚本不下载依赖，普通构建/测试不调用脚本。
 
 生成器目标为 compiler 侧的 `EXCLUDE_FROM_ALL`；普通构建与测试不构建或调用它。
 GPU 用例区分后端未编译、无 adapter、缺验证层与初始化失败；可选后端不可用可跳过，
@@ -381,7 +397,7 @@ D3D12 descriptor 正确性由 `ExplicitBindingLayoutTest` 与 `DescriptorDirtyRa
 
 公共 GPU fixture 先创建 `DXGIDiagnosticContext` 并订阅结构化诊断，再将同一上下文传给 Factory，
 用唯一应用消息和同步检查点确认 D3D12/DXGI 通路。同一 case 同时创建多个 Factory 时，必须显式
-传入同一个上下文；`TryCreateDevice` 的最后一个参数接受共享上下文。顺序 case 各自创建并最终释放上下文。
+传入同一个上下文；`TryCreateDevice` 的 diagnosticContext 参数接受共享上下文。顺序 case 各自创建并最终释放上下文。
 没有后台自检。报告记录 callback/polling、原生 InfoQueue1 查询 HRESULT、native/base-interface-only
 选择、callback/checked_clear 策略、完整性、同步检查点、最终收尾、预期匹配及错误/警告数。
 `RADRAY_TEST_D3D12_ADAPTER_INDEX` 与 Vulkan 的同名索引变量分别选择各自枚举中的 adapter；

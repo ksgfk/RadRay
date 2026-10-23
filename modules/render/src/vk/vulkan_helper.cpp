@@ -83,7 +83,8 @@ FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
         .TimelineSemaphore = Requirement::Required,
         .SamplerMirrorClampToEdge = Requirement::Optional,
         .SamplerFilterMinmax = Requirement::Optional,
-        .ImagelessFramebuffer = Requirement::Optional};
+        .ImagelessFramebuffer = Requirement::Optional,
+        .SeparateDepthStencilLayouts = Requirement::Optional};
 }
 
 FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested) {
@@ -115,6 +116,7 @@ FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& su
     select("samplerMirrorClampToEdge", requested.SamplerMirrorClampToEdge, supported.Vulkan12.samplerMirrorClampToEdge, vulkan12.samplerMirrorClampToEdge);
     select("samplerFilterMinmax", requested.SamplerFilterMinmax, supported.Vulkan12.samplerFilterMinmax, vulkan12.samplerFilterMinmax);
     select("imagelessFramebuffer", requested.ImagelessFramebuffer, supported.Vulkan12.imagelessFramebuffer, vulkan12.imagelessFramebuffer);
+    select("separateDepthStencilLayouts", requested.SeparateDepthStencilLayouts, supported.Vulkan12.separateDepthStencilLayouts, vulkan12.separateDepthStencilLayouts);
     return result;
 }
 
@@ -204,6 +206,8 @@ VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept {
         case TextureViewUsage::UnorderedAccess: return VK_IMAGE_USAGE_STORAGE_BIT;
         case TextureViewUsage::RenderTarget: return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthReadStencilWrite:
+        case TextureViewUsage::DepthWriteStencilRead:
         case TextureViewUsage::DepthWrite: return VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
         case TextureViewUsage::UNKNOWN: return 0;
     }
@@ -362,6 +366,8 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept {
 }
 
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
+    if (v.HasFlag(TextureState::DepthReadStencilWrite) || v.HasFlag(TextureState::DepthWriteStencilRead))
+        return TextureStateToAccessFlags(TextureStateForAspect(v, TextureAspect::Depth)) | TextureStateToAccessFlags(TextureStateForAspect(v, TextureAspect::Stencil));
     VkAccessFlags access = 0;
     if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::ResolveSource)) {
         access |= VK_ACCESS_TRANSFER_READ_BIT;
@@ -375,12 +381,14 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::RenderTarget)) {
         access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     }
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::DepthWrite)) access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
     if (v.HasFlag(TextureState::DepthRead)) {
         // Traditional read-only attachments still perform store operations with write access.
         access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::DepthWrite)) {
-        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::UnorderedAccess)) {
         access |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -389,6 +397,8 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
 }
 
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept {
+    if (v.HasFlag(TextureState::DepthReadStencilWrite) || v.HasFlag(TextureState::DepthWriteStencilRead))
+        return TextureStateToPipelineStageFlags(TextureStateForAspect(v, TextureAspect::Depth), isSrc) | TextureStateToPipelineStageFlags(TextureStateForAspect(v, TextureAspect::Stencil), isSrc);
     VkPipelineStageFlags stage = 0;
     if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::CopyDestination) ||
         v.HasFlag(TextureState::ResolveSource) || v.HasFlag(TextureState::ResolveDestination)) {
@@ -399,11 +409,12 @@ VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSr
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     if (v.HasFlag(TextureState::RenderTarget)) {
         stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     }
     if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::DepthWrite)) {
-        stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     }
     if (v.HasFlag(TextureState::UnorderedAccess)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
@@ -425,7 +436,15 @@ VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSr
     return stage;
 }
 
-VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format) noexcept {
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format, TextureAspect aspect, bool separate) noexcept {
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) v = IsDepthStencilFormat(format) ? TextureStates{TextureState::DepthWrite} : TextureStates{TextureState::RenderTarget};
+    if (separate && (aspect == TextureAspect::Depth || aspect == TextureAspect::Stencil)) {
+        v = TextureStateForAspect(v, aspect);
+        if (v.HasFlag(TextureState::DepthWrite)) return aspect == TextureAspect::Depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+        if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::ShaderRead)) return aspect == TextureAspect::Depth ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    if (v.HasFlag(TextureState::DepthReadStencilWrite)) return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+    if (v.HasFlag(TextureState::DepthWriteStencilRead)) return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
     if (v.HasFlag(TextureState::Present)) {
         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
@@ -459,6 +478,8 @@ VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept {
         case TextureViewUsage::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         case TextureViewUsage::DepthRead: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         case TextureViewUsage::DepthWrite: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::DepthReadStencilWrite: return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::DepthWriteStencilRead: return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
         case TextureViewUsage::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
         case TextureViewUsage::UNKNOWN: return VK_IMAGE_LAYOUT_UNDEFINED;
     }

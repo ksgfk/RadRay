@@ -656,7 +656,7 @@ TEST_F(D3D12DiagnosticsReaders, CheckpointsObserversAndFaultsStayWithinTheirCont
 }
 
 TEST(D3D12DiagnosticsSmoke, DebugFactoryRequiresExplicitContext) {
-    EXPECT_FALSE(DXGIFactory::Create({.IsEnableDebugLayer = true}));
+    EXPECT_FALSE(DXGIFactory::Create({.IsEnableDebugLayer = true, .DiagnosticContext = {}}));
 }
 
 TEST(D3D12DiagnosticsSmoke, DiagnosticContextSurvivesFactoryUntilFinalDeviceCleanup) {

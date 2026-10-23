@@ -557,14 +557,15 @@ public:
             const auto writes = [](const StencilFaceState& face) {
                 return face.FailOp != StencilOperation::Keep || face.DepthFailOp != StencilOperation::Keep || face.PassOp != StencilOperation::Keep;
             };
-            WritesDepthStencil = depth.DepthWriteEnable || (depth.Stencil && depth.Stencil->WriteMask && (writes(depth.Stencil->Front) || writes(depth.Stencil->Back)));
+            WritesDepth = depth.DepthWriteEnable;
+            WritesStencil = depth.Stencil && depth.Stencil->WriteMask && (writes(depth.Stencil->Front) || writes(depth.Stencil->Back));
         }
     }
     PipelineLayoutValidation* Layout;
     AttachmentSignature Signature;
     vector<VertexBufferLayout> Buffers;
     PrimitiveState Primitive;
-    bool WritesDepthStencil{false};
+    bool WritesDepth{false}, WritesStencil{false};
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
 
@@ -822,10 +823,10 @@ public:
 
 class GraphicsEncoderValidation final : public EncoderValidation<GraphicsCommandEncoder> {
 public:
-    GraphicsEncoderValidation(shared_ptr<ValidationContext> context, unique_ptr<GraphicsCommandEncoder> native, CommandBufferValidation* command, AttachmentSignature signature, bool readOnlyDepth)
-        : EncoderValidation(std::move(context), std::move(native), command), Signature(std::move(signature)), ReadOnlyDepth(readOnlyDepth) {}
+    GraphicsEncoderValidation(shared_ptr<ValidationContext> context, unique_ptr<GraphicsCommandEncoder> native, CommandBufferValidation* command, AttachmentSignature signature, TextureViewUsage depthUsage)
+        : EncoderValidation(std::move(context), std::move(native), command), Signature(std::move(signature)), DepthUsage(depthUsage) {}
     AttachmentSignature Signature;
-    bool ReadOnlyDepth{false};
+    TextureViewUsage DepthUsage{TextureViewUsage::UNKNOWN};
     Nullable<GraphicsPipelineValidation*> Pipeline{nullptr};
     unordered_map<uint32_t, VertexBufferView> VertexBuffers;
     std::optional<IndexBufferView> IndexBuffer;
@@ -853,7 +854,7 @@ public:
             Context->Reject("BindGraphicsPipelineState", "pipeline attachment signature does not match render scope");
             return;
         }
-        if (ReadOnlyDepth && pipeline.Get()->WritesDepthStencil) {
+        if ((IsDepthReadOnly(DepthUsage) && pipeline.Get()->WritesDepth) || (IsStencilReadOnly(DepthUsage) && pipeline.Get()->WritesStencil)) {
             Context->Reject("BindGraphicsPipelineState", "pipeline writes a read-only depth/stencil attachment");
             return;
         }
@@ -997,11 +998,21 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferValidation::BeginRende
         const auto view = Lookup(*Context, color.View, "BeginRenderPass");
         if (!view) return nullptr;
         color.View = view.Get();
+        if (color.ResolveTarget) {
+            const auto target = Lookup(*Context, color.ResolveTarget.Get(), "BeginRenderPass");
+            if (!target) return nullptr;
+            color.ResolveTarget = target.Get();
+        }
     }
     if (converted.DepthStencil) {
         const auto view = Lookup(*Context, converted.DepthStencil->View, "BeginRenderPass");
         if (!view) return nullptr;
         converted.DepthStencil->View = view.Get();
+        if (converted.DepthStencil->Resolve) {
+            const auto target = Lookup(*Context, converted.DepthStencil->Resolve->Target, "BeginRenderPass");
+            if (!target) return nullptr;
+            converted.DepthStencil->Resolve->Target = target.Get();
+        }
     }
     const auto signature = ValidateRenderScope(desc, *Context->Owner.Get());
     if (!signature) {
@@ -1011,9 +1022,15 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferValidation::BeginRende
     converted.Colors = colors;
     auto native = Real()->BeginRenderPass(converted);
     if (!native) return nullptr;
-    auto encoder = make_unique<GraphicsEncoderValidation>(Context, native.Release(), this, *signature, desc.DepthStencil && desc.DepthStencil->ReadOnly);
-    for (const auto& color : desc.Colors) Pin(Context->Find(color.View).Get());
-    if (desc.DepthStencil) Pin(Context->Find(desc.DepthStencil->View).Get());
+    auto encoder = make_unique<GraphicsEncoderValidation>(Context, native.Release(), this, *signature, desc.DepthStencil ? desc.DepthStencil->View->GetDesc().Usage : TextureViewUsage::UNKNOWN);
+    for (const auto& color : desc.Colors) {
+        Pin(Context->Find(color.View).Get());
+        if (color.ResolveTarget) Pin(Context->Find(color.ResolveTarget.Get()).Get());
+    }
+    if (desc.DepthStencil) {
+        Pin(Context->Find(desc.DepthStencil->View).Get());
+        if (desc.DepthStencil->Resolve) Pin(Context->Find(desc.DepthStencil->Resolve->Target).Get());
+    }
     Active = encoder.get();
     return encoder;
 }
@@ -1073,7 +1090,10 @@ bool BufferStateUsage(BufferStates states, BufferUses usage) noexcept {
 }
 
 bool TextureStateUsage(TextureStates states, TextureUses usage) noexcept {
-    if (!states || (states.value() & ~((uint32_t(TextureState::ResolveDestination) << 1) - 1))) return false;
+    if ((states.HasFlag(TextureState::DepthReadStencilWrite) || states.HasFlag(TextureState::DepthWriteStencilRead)) &&
+        (!usage.HasFlag(TextureUse::DepthStencilRead) || !usage.HasFlag(TextureUse::DepthStencilWrite))) return false;
+    if (states.HasFlag(TextureState::AttachmentResolveDestination) && (!usage.HasFlag(TextureUse::RenderTarget) && !usage.HasFlag(TextureUse::DepthStencilWrite))) return false;
+    if (!states || (states.value() & ~((uint32_t(TextureState::AttachmentResolveDestination) << 1) - 1))) return false;
     const std::pair<TextureState, TextureUse> requirements[]{
         {TextureState::CopySource, TextureUse::CopySource}, {TextureState::CopyDestination, TextureUse::CopyDestination}, {TextureState::ShaderRead, TextureUse::Resource}, {TextureState::UnorderedAccess, TextureUse::UnorderedAccess}, {TextureState::RenderTarget, TextureUse::RenderTarget}, {TextureState::DepthRead, TextureUse::DepthStencilRead}, {TextureState::DepthWrite, TextureUse::DepthStencilWrite}, {TextureState::ResolveSource, TextureUse::CopySource}, {TextureState::ResolveDestination, TextureUse::CopyDestination}};
     for (const auto& [state, use] : requirements)
@@ -1096,7 +1116,17 @@ void CommandBufferValidation::ResourceBarrier(std::span<const ResourceBarrierDes
                 if ((value.BeforeStages.value() | value.AfterStages.value()) & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}.value()) return false;
             } else if constexpr (std::is_same_v<V, BarrierTextureDescriptor>) {
                 const auto desc = value.Target->GetDesc();
-                if (!NormalizeSubresourceRange(desc, value.Range) || !TextureStateUsage(value.Before, desc.Usage) || !TextureStateUsage(value.After, desc.Usage) || value.After.HasFlag(TextureState::Undefined)) return false;
+                const auto range = NormalizeSubresourceRange(desc, value.Range);
+                if (!range) return false;
+                const auto allAspects = GetTextureFormatAspects(desc.Format);
+                if (allAspects.HasFlag(TextureAspect::Stencil) && range->Aspects != allAspects && !Context->NativeDevice->GetCapabilities().Features.IndependentDepthStencilTransitions) return false;
+                for (const auto state : {value.Before, value.After}) {
+                    if (state.HasFlag(TextureState::AttachmentResolveDestination) && state != TextureState::AttachmentResolveDestination) return false;
+                    const auto mixed = state.value() & (uint32_t(TextureState::DepthReadStencilWrite) | uint32_t(TextureState::DepthWriteStencilRead));
+                    if (mixed && (!allAspects.HasFlag(TextureAspect::Stencil) || range->Aspects != allAspects ||
+                                  (mixed & (mixed - 1)) || (state.value() & ~(mixed | uint32_t(TextureState::ShaderRead))))) return false;
+                }
+                if (!TextureStateUsage(value.Before, desc.Usage) || !TextureStateUsage(value.After, desc.Usage) || value.After.HasFlag(TextureState::Undefined)) return false;
                 if ((value.BeforeStages.value() | value.AfterStages.value()) & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}.value()) return false;
             } else {
                 if (!Context->NativeDevice->GetCapabilities().Features.UavMemoryBarrier) return false;
@@ -1483,6 +1513,10 @@ public:
         }
         return _context->NativeDevice->QueryTextureSupport(query);
     }
+    AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override {
+        if (!Ready("QueryAttachmentResolveSupport") || !ValidEnum(format) || format == TextureFormat::UNKNOWN || samples <= 1 || (samples & (samples - 1))) return {};
+        return _context->NativeDevice->QueryAttachmentResolveSupport(format, samples);
+    }
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override {
         if (!Ready("GetCommandQueue")) return nullptr;
         if (!ValidEnum(type) || type == QueueType::MAX_COUNT) {
@@ -1598,9 +1632,14 @@ public:
         }
         const auto usage = desc.Usage == TextureViewUsage::Resource ? TextureUse::Resource : desc.Usage == TextureViewUsage::RenderTarget ? TextureUse::RenderTarget
                                                                                          : desc.Usage == TextureViewUsage::DepthRead      ? TextureUse::DepthStencilRead
-                                                                                         : desc.Usage == TextureViewUsage::DepthWrite     ? TextureUse::DepthStencilWrite
+                                                                                         : IsDepthStencilViewUsage(desc.Usage)            ? TextureUse::DepthStencilWrite
                                                                                                                                           : TextureUse::UnorderedAccess;
-        const bool depth = desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite;
+        const bool depth = IsDepthStencilViewUsage(desc.Usage);
+        const bool mixed = desc.Usage == TextureViewUsage::DepthReadStencilWrite || desc.Usage == TextureViewUsage::DepthWriteStencilRead;
+        if (mixed && (!GetTextureFormatAspects(target.Format).HasFlag(TextureAspect::Stencil) || !target.Usage.HasFlag(TextureUse::DepthStencilRead) || !target.Usage.HasFlag(TextureUse::DepthStencilWrite))) {
+            _context->Reject("CreateTextureView", "mixed permissions require depth/stencil format and read/write usage");
+            return nullptr;
+        }
         if (!target.Usage.HasFlag(usage) || (depth && (!IsDepthStencilFormat(desc.Format) || normalized->Aspects != GetTextureFormatAspects(desc.Format))) || (desc.Usage == TextureViewUsage::Resource && normalized->Aspects.HasFlag(TextureAspect::Depth) && normalized->Aspects.HasFlag(TextureAspect::Stencil)) || (desc.Usage == TextureViewUsage::UnorderedAccess && (target.SampleCount != 1 || IsDepthStencilFormat(desc.Format)))) {
             _context->Reject("CreateTextureView", "view usage or aspects are incompatible with the texture");
             return nullptr;
@@ -1853,16 +1892,17 @@ public:
                                              (desc.AddressS != AddressMode::ClampToEdge && desc.AddressS != AddressMode::ClampToBorder) ||
                                              (desc.AddressT != AddressMode::ClampToEdge && desc.AddressT != AddressMode::ClampToBorder)))
             return _context->Reject("CreateSampler", "invalid unnormalized sampler configuration");
-#ifdef RADRAY_ENABLE_VULKAN
-        if (auto* native = dynamic_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get()); native) {
-            const auto& limits = native->_properties.limits;
-            if (std::abs(desc.MipLodBias) > limits.maxSamplerLodBias ||
-                (desc.AnisotropyClamp > 1 && (!native->_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
-                (desc.Reduction != SamplerReductionMode::WeightedAverage && !native->_enabledFeatures.Vulkan12.samplerFilterMinmax) ||
-                ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !native->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge))
-                return _context->Reject("CreateSampler", "sampler exceeds Vulkan device capabilities");
-        }
-#endif
+        const auto& caps = _context->NativeDevice->GetCapabilities();
+        const auto& features = caps.Features;
+        if (desc.MipLodBias < caps.Limits.MinSamplerLodBias || desc.MipLodBias > caps.Limits.MaxSamplerLodBias ||
+            (desc.AnisotropyClamp > 1 && (!features.SamplerAnisotropy || desc.AnisotropyClamp > caps.Limits.MaxSamplerAnisotropy)) ||
+            (desc.AnisotropyClamp > 1 && desc.MipmapFilter == FilterMode::Nearest && !features.SamplerAnisotropyPointMip) ||
+            (desc.Reduction != SamplerReductionMode::WeightedAverage && !features.SamplerFilterMinmax) ||
+            (desc.UnnormalizedCoordinates && !features.SamplerUnnormalizedCoordinates) ||
+            ((static_cast<uint32_t>(desc.BorderColor) & 1u) && !features.SamplerIntegerBorderColor) ||
+            ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !features.SamplerMirrorClampToEdge))
+            return _context->Reject("CreateSampler", "sampler exceeds backend device capabilities");
+
         return true;
     }
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override {

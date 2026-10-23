@@ -12,12 +12,12 @@
 
 #include <radray/render/rhi.h>
 #include <radray/logger.h>
+#include "rhi_validation.h"
 
 #if defined(RADRAY_ENABLE_D3D12)
 #include <radray/render/backend/d3d12_impl.h>
 #include "d3d12/d3d12_diagnostics.h"
 #include <dxgidebug.h>
-#include "rhi_validation.h"
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
 #include <radray/render/backend/vulkan_impl.h>
@@ -326,7 +326,8 @@ inline bool TryCreateDevice(
     bool enableValidation = false,
     bool enableRhiValidation = false,
     [[maybe_unused]] array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> queueCounts = {1, 0, 0},
-    [[maybe_unused]] shared_ptr<DXGIDiagnosticContext> diagnosticContext = nullptr) {
+    [[maybe_unused]] shared_ptr<DXGIDiagnosticContext> diagnosticContext = nullptr,
+    [[maybe_unused]] bool separateDepthStencilLayouts = true, [[maybe_unused]] bool imagelessFramebuffer = true) {
     context.Reset();
     context.Finalized = false;
     context.ValidationErrors = 0;
@@ -400,6 +401,8 @@ inline bool TryCreateDevice(
         context.Device = device.Release();
         if (enableValidation) {
             auto* native = static_cast<d3d12::DeviceD3D12*>(context.Device.get());
+            testing::Test::RecordProperty("render_passes_valid", native->_features.RenderPassesValid());
+            testing::Test::RecordProperty("programmable_sample_positions_tier", static_cast<int>(native->_features.ProgrammableSamplePositionsTier()));
             d3d12::ComPtr<ID3D12InfoQueue> queue;
             context.ValidationEnabled = context.Factory->IsValidationEnabled() && native->_diagnosticChannel != nullptr;
             if (!context.ValidationEnabled || FAILED(native->_device.As(&queue)))
@@ -465,11 +468,21 @@ inline bool TryCreateDevice(
         VulkanDeviceDescriptor deviceDesc{};
         deviceDesc.PhysicalDeviceIndex = selected;
         deviceDesc.Queues = queues;
-        auto device = Device::Create(DeviceDescriptor{deviceDesc}, {.IsEnabled = enableRhiValidation, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
+        auto requests = vulkan::GetRhiFeatureRequestsVulkan();
+        if (!separateDepthStencilLayouts) requests.SeparateDepthStencilLayouts = vulkan::FeatureRequirementVulkan::Disabled;
+        if (!imagelessFramebuffer) requests.ImagelessFramebuffer = vulkan::FeatureRequirementVulkan::Disabled;
+        auto device = vulkan::CreateDeviceVulkan(deviceDesc, requests);
         if (!device.HasValue()) {
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "Vulkan device creation failed for an available adapter");
         }
+        testing::Test::RecordProperty("separate_depth_stencil_layouts", device.Get()->_enabledFeatures.Vulkan12.separateDepthStencilLayouts ? "enabled" : "disabled");
+        testing::Test::RecordProperty("imageless_framebuffer", device.Get()->_enabledFeatures.Vulkan12.imagelessFramebuffer ? "enabled" : "disabled");
         context.Device = device.Release();
+        if (enableRhiValidation) {
+            auto validated = radray::render::detail::CreateValidationDevice(context.Device, {.IsEnabled = true, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
+            if (!validated) return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "Vulkan validation wrapper failed");
+            context.Device = validated.Release();
+        }
 #else
         return RejectDeviceSetup(context, backend, DeviceSetupStatus::BackendNotBuilt, DeviceSetupStage::Backend, "Vulkan backend was not built");
 #endif
