@@ -39,7 +39,78 @@
 
 namespace radray::render::vulkan {
 
+struct DeviceFeaturesVulkan {
+    DeviceFeaturesVulkan() noexcept;
+
+    VkPhysicalDeviceFeatures Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+enum class FeatureRequirementVulkan {
+    Disabled,
+    Optional,
+    Required
+};
+
+struct FeatureRequestsVulkan {
+    FeatureRequirementVulkan FullDrawIndexUint32{};
+    FeatureRequirementVulkan ImageCubeArray{};
+    FeatureRequirementVulkan DepthClamp{};
+    FeatureRequirementVulkan DepthBiasClamp{};
+    FeatureRequirementVulkan FillModeNonSolid{};
+    FeatureRequirementVulkan IndependentBlend{};
+    FeatureRequirementVulkan DualSrcBlend{};
+    FeatureRequirementVulkan MultiDrawIndirect{};
+    FeatureRequirementVulkan DrawIndirectFirstInstance{};
+    FeatureRequirementVulkan SamplerAnisotropy{};
+    FeatureRequirementVulkan VertexPipelineStoresAndAtomics{};
+    FeatureRequirementVulkan FragmentStoresAndAtomics{};
+    FeatureRequirementVulkan TimelineSemaphore{};
+    FeatureRequirementVulkan SamplerMirrorClampToEdge{};
+    FeatureRequirementVulkan SamplerFilterMinmax{};
+    FeatureRequirementVulkan ImagelessFramebuffer{};
+    FeatureRequirementVulkan SeparateDepthStencilLayouts{};
+};
+
+struct FeatureSelectionVulkan {
+    DeviceFeaturesVulkan Enabled;
+    vector<std::string_view> MissingRequired;
+    vector<std::string_view> EnabledNames;
+};
+
+class FeatureChainVulkan {
+public:
+    explicit FeatureChainVulkan(const DeviceFeaturesVulkan& features = {}) noexcept;
+    FeatureChainVulkan(const FeatureChainVulkan&) = delete;
+    FeatureChainVulkan& operator=(const FeatureChainVulkan&) = delete;
+
+    DeviceFeaturesVulkan Snapshot() const noexcept;
+
+    void ApplyTo(VkDeviceCreateInfo& createInfo) const noexcept;
+
+    VkPhysicalDeviceFeatures2 Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept;
+
+FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested);
+
+std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept;
+
+bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkImageCreateFlags flags) noexcept;
+
+VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept;
+
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept;
+uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept;
+VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept;
+bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept;
+VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept;
 
 template <class T>
 struct VulkanObjectTrait {
@@ -118,6 +189,10 @@ struct VulkanObjectTrait<VkPipelineCache> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_CACHE;
 };
 template <>
+struct VulkanObjectTrait<VkDescriptorSetLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+};
+template <>
 struct VulkanObjectTrait<VkPipelineLayout> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
 };
@@ -147,11 +222,13 @@ requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::in
 auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&&... args) noexcept {
     uint32_t count = 0;
     f(std::forward<Args>(args)..., &count, nullptr);
+    out.clear();
     if (count == 0) {
         return;
     }
     out.resize(count);
     f(std::forward<Args>(args)..., &count, out.data());
+    out.resize(count);
     return;
 }
 
@@ -165,9 +242,14 @@ auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&
         if (err != VK_SUCCESS) {
             return err;
         }
+        if (count == 0) {
+            out.clear();
+            return VK_SUCCESS;
+        }
         out.resize(count);
         err = f(std::forward<Args>(args)..., &count, out.data());
     } while (err == VK_INCOMPLETE);
+    if (err == VK_SUCCESS) out.resize(count);
     return err;
 }
 
@@ -191,7 +273,7 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
 
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept;
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept;
-VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format = TextureFormat::UNKNOWN) noexcept;
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format = TextureFormat::UNKNOWN, TextureAspect aspect = TextureAspect::Auto, bool separate = false) noexcept;
 VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;

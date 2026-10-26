@@ -1,27 +1,17 @@
 #pragma once
 
-#include <radray/intrusive_ptr.h>
-
 #ifdef RADRAY_ENABLE_D3D12
 
 #include <array>
-#include <atomic>
-#include <limits>
+#include <directx/d3d12sdklayers.h>
 
 #include <radray/allocator.h>
-#include <radray/hash.h>
 
 #include <radray/render/backend/d3d12_helper.h>
-#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
 #include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
-
-class PipelineLayoutCacheD3D12;
-class CachedPipelineLayoutD3D12;
-void IntrusivePtrAddRef(CachedPipelineLayoutD3D12* layout) noexcept;
-void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept;
 
 class DescriptorHeap;
 struct DescriptorHeapView;
@@ -39,15 +29,21 @@ class QueryPoolD3D12;
 class TextureD3D12;
 class TextureViewD3D12;
 class RootSigD3D12;
+class BindingGroupLayoutD3D12;
 class ShaderParameterSetD3D12;
 class GraphicsPsoD3D12;
 class ComputePsoD3D12;
 class SamplerD3D12;
 
+namespace detail {
+class DiagnosticSession;
+class DiagnosticChannel;
+}  // namespace detail
+
 class DescriptorHeap {
 public:
     DescriptorHeap(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept;
     DescriptorHeap(const DescriptorHeap&) = delete;
     DescriptorHeap& operator=(const DescriptorHeap&) = delete;
@@ -225,7 +221,7 @@ public:
     static_assert(is_desc_heap_view_like<Allocation>, "CpuDescriptorAllocator::Allocation is not a desc heap view like");
 
     CpuDescriptorAllocator(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         UINT basicSize,
         UINT keepFreePages) noexcept;
@@ -237,7 +233,7 @@ public:
 private:
     void TryReleaseFreePages() noexcept;
 
-    ID3D12Device* _device = nullptr;
+    DeviceD3D12* _device = nullptr;
     vector<unique_ptr<Page>> _pages;
     size_t _hint = 0;
     D3D12_DESCRIPTOR_HEAP_TYPE _type{};
@@ -266,7 +262,7 @@ public:
     static_assert(is_desc_heap_view_like<Allocation>, "GpuDescriptorAllocator::Allocation is not a desc heap view like");
 
     GpuDescriptorAllocator(
-        ID3D12Device* device,
+        DeviceD3D12* device,
         D3D12_DESCRIPTOR_HEAP_TYPE type,
         UINT size) noexcept;
 
@@ -278,7 +274,7 @@ public:
     DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
 
 private:
-    ID3D12Device* _device;
+    DeviceD3D12* _device;
     unique_ptr<DescriptorHeap> _heap;
     FirstFitAllocator _allocator;
 };
@@ -292,7 +288,7 @@ public:
     DXGIFactoryImpl(
         ComPtr<IDXGIFactory4> factory,
         const DXGIFactoryDescriptor& desc,
-        bool validationEnabled) noexcept;
+        shared_ptr<detail::DiagnosticSession> diagnostics) noexcept;
 
     ~DXGIFactoryImpl() noexcept override;
 
@@ -311,16 +307,18 @@ public:
     ComPtr<IDXGIFactory4> _factory;
     DXGIFactoryDescriptor _desc;
     bool _validationEnabled{false};
+    shared_ptr<detail::DiagnosticSession> _diagnostics;
 };
 
-class DeviceD3D12 final : public Device, public detail::D3D12PipelineLayoutFactory {
+class DeviceD3D12 final : public Device {
 public:
     DeviceD3D12(
         ComPtr<ID3D12Device> device,
         ComPtr<IDXGIFactory4> dxgiFactory,
         ComPtr<IDXGIAdapter1> dxgiAdapter,
         ComPtr<D3D12MA::Allocator> mainAlloc,
-        const DXGIFactoryDescriptor& diagnostics) noexcept;
+        shared_ptr<detail::DiagnosticSession> diagnostics,
+        shared_ptr<detail::DiagnosticChannel> diagnosticChannel) noexcept;
 
     ~DeviceD3D12() noexcept override;
 
@@ -335,6 +333,8 @@ public:
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+
+    AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
@@ -354,11 +354,13 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    std::pair<bool, string> ValidateTextureView(const TextureViewDescriptor& desc) const;
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::DxilShaderArtifactView& artifact, const D3D12TargetLayoutOptions& options = {}) noexcept;
+    Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const ResolvedD3D12Layout& layout) noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -377,11 +379,6 @@ public:
 
     bool CreateQueues(const array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)>& counts) noexcept;
 
-    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
-    Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
-
-    void TryDrainValidationMessages() noexcept;
-
     ComPtr<ID3D12Device> _device;
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
@@ -396,19 +393,14 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
-    unique_ptr<PipelineLayoutCacheD3D12> _pipelineLayoutCache;
     SamplerCache _samplerCache;
     RenderDeviceCapabilities _capabilities;
-    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
 
-    struct ValidationMessages;
-    unique_ptr<ValidationMessages> _validationMessages;
-    std::optional<DWORD> _infoQueueCallbackCookie;
-    Nullable<RenderLogCallback> _logCallback{};
-    Nullable<void*> _logUserData{};
+    shared_ptr<detail::DiagnosticSession> _diagnostics;
+    shared_ptr<detail::DiagnosticChannel> _diagnosticChannel;
 };
 
 class CmdQueueD3D12 final : public CommandQueue {
@@ -473,7 +465,6 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Fence> _fence;
-    mutable std::atomic<uint64_t> _drainedCompletedValue{0};
     uint64_t _fenceValue{0};
     Win32Event _event{};
 };
@@ -590,7 +581,7 @@ public:
 
     void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
+    bool SetPushConstants(uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -602,6 +593,7 @@ public:
 
 public:
     CmdListD3D12* _cmdList;
+    vector<vector<D3D12_RENDER_PASS_ENDING_ACCESS_RESOLVE_SUBRESOURCE_PARAMETERS>> _resolveSubresources;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
 };
@@ -621,7 +613,7 @@ public:
 
     void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
+    bool SetPushConstants(uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
@@ -825,96 +817,42 @@ public:
     ShaderStages _stages{ShaderStage::UNKNOWN};
 };
 
-// Per-binding layout entry in D3D12 terms, built only from `ResolvedD3D12Layout`. The logical kind
-// stays the authority instead of being fused into a single backend enum: the descriptor range type,
-// the root parameter type, the required buffer usage and the value-compatibility rules are all
-// derived from it, and the resolved placement stays a separate axis so a root descriptor cannot
-// silently change the resource class.
+// Group-local descriptor storage is independent of pipeline root parameter indices.
 struct ShaderParameterSetLayoutEntryD3D12 {
     uint32_t Binding{0};
-    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
-    shader::ShaderBindingPlacement Placement{shader::ShaderBindingPlacement::Table};
+    BindingKind LogicalKind{BindingKind::CBuffer};
+    D3D12BufferPlacement Placement{D3D12BufferPlacement::Table};
     uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    // GetWireBindingNamespace(LogicalKind): 0 CBV, 1 SRV, 2 UAV, 3 sampler. Cached because both the
-    // canonical ordering and every BindingHandle lookup key on it.
-    uint32_t Namespace{0};
-
-    bool IsRootDescriptor() const noexcept {
-        return Placement == shader::ShaderBindingPlacement::RootDescriptor;
-    }
-    // A static sampler is declared by the root signature carrier itself, so it owns no descriptor
-    // slot and cannot be written through a parameter set.
-    bool IsStaticSampler() const noexcept {
-        return Placement == shader::ShaderBindingPlacement::StaticSampler;
-    }
-    bool IsSampler() const noexcept {
-        return LogicalKind == shader::ShaderBindingKind::Sampler;
-    }
-
-    friend bool operator==(const ShaderParameterSetLayoutEntryD3D12&, const ShaderParameterSetLayoutEntryD3D12&) noexcept = default;
+    bool Immutable{false};
+    uint32_t TableIndex{0};
+    uint32_t TableOffset{0};
+    uint32_t RootIndex{0};
+    bool IsRootDescriptor() const noexcept { return Placement == D3D12BufferPlacement::RootDescriptor; }
 };
-
-struct ShaderParameterBindingLayoutD3D12 {
-    struct DescriptorDestination {
-        uint32_t TableIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t TableLocalOffset{std::numeric_limits<uint32_t>::max()};
-        uint32_t ArrayElement{std::numeric_limits<uint32_t>::max()};
-
-        friend bool operator==(const DescriptorDestination&, const DescriptorDestination&) noexcept = default;
-    };
-    struct RootDescriptorDestination {
-        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        D3D12_ROOT_PARAMETER_TYPE Type{D3D12_ROOT_PARAMETER_TYPE_CBV};
-
-        friend bool operator==(const RootDescriptorDestination&, const RootDescriptorDestination&) noexcept = default;
-    };
-    vector<DescriptorDestination> DescriptorDestinations;
-    vector<RootDescriptorDestination> RootDescriptorDestinations;
-    vector<uint8_t> CoveredElements;
-};
-
 struct DescriptorTableBindingD3D12 {
-    struct Range {
-        D3D12_DESCRIPTOR_RANGE_TYPE Type{D3D12_DESCRIPTOR_RANGE_TYPE_SRV};
-        uint32_t Count{0};
-        uint32_t Binding{0};
-        // UINT32_MAX names the owning parameter group; other spaces are literal.
-        uint32_t Space{std::numeric_limits<uint32_t>::max()};
-        uint32_t Offset{0};
-        D3D12_DESCRIPTOR_RANGE_FLAGS Flags{D3D12_DESCRIPTOR_RANGE_FLAG_NONE};
-        friend bool operator==(const Range&, const Range&) noexcept = default;
-    };
-    struct Slot {
-        uint32_t Offset{0};
-        uint32_t Namespace{0};
-        uint32_t Binding{0};
-        uint32_t ArrayElement{0};
-        shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
-        shader::ShaderBindingPlacement Placement{shader::ShaderBindingPlacement::Table};
-        friend bool operator==(const Slot&, const Slot&) noexcept = default;
-    };
     D3D12_DESCRIPTOR_HEAP_TYPE HeapType{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
     D3D12_SHADER_VISIBILITY Visibility{D3D12_SHADER_VISIBILITY_ALL};
-    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
     uint32_t DescriptorCount{0};
-    vector<Range> Ranges;
-    vector<Slot> Slots;
-
-    bool IsStorageCompatible(const DescriptorTableBindingD3D12& other) const noexcept;
+    vector<D3D12_DESCRIPTOR_RANGE1> Ranges;
 };
-
+class BindingGroupLayoutD3D12 final : public BindingGroupLayout {
+public:
+    ~BindingGroupLayoutD3D12() noexcept override;
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+    BindingGroupLayoutDescriptor GetDesc() const noexcept override;
+    DeviceD3D12* _device{nullptr};
+    vector<BindingDescriptor> _bindings;
+    vector<ShaderParameterSetLayoutEntryD3D12> _entries;
+    vector<DescriptorTableBindingD3D12> _tables;
+    vector<uint32_t> _rootOrder;
+};
 struct ShaderParameterGroupLayoutD3D12 {
-    uint32_t GroupIndex{0};
-    vector<ShaderParameterSetLayoutEntryD3D12> Entries;
-    vector<ShaderParameterBindingLayoutD3D12> Bindings;
-    // Indices into `Entries` of the root-descriptor bindings, in entry order. Command-time dynamic
-    // offsets are matched against exactly this list so a missing or duplicated offset is a reported
-    // failure instead of a silent shift onto another binding's root parameter.
-    vector<uint32_t> RootDescriptorOrder;
-    vector<DescriptorTableBindingD3D12> Tables;
-
-    bool MapTablesFrom(const ShaderParameterGroupLayoutD3D12& source, vector<uint32_t>& mapping) const noexcept;
+    uint32_t GroupSlot{0};
+    BindingGroupLayoutD3D12* Layout{nullptr};
+    vector<uint32_t> TableRoots;
+    vector<uint32_t> BufferRoots;
 };
 
 struct DescriptorDirtyRangeD3D12 {
@@ -939,34 +877,25 @@ struct DescriptorTableStorageD3D12 {
 };
 
 struct PushConstantBindingD3D12 {
-    ShaderBindingLocation Location{};
-    uint32_t Num32BitValues{0};
-    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-    vector<uint32_t> RootParameterIndices;
+    uint32_t PushId{0};
+    uint32_t RootParameterIndex{0};
 };
-
 class RootSigD3D12 final : public PipelineLayout {
 public:
     RootSigD3D12() noexcept = default;
     ID3D12RootSignature* GetNative() const noexcept;
     ~RootSigD3D12() noexcept override;
-
     bool IsValid() const noexcept override;
-
     void Destroy() noexcept override;
-
     void SetDebugName(std::string_view name) noexcept override;
-
-    BindingHandle FindBinding(std::string_view name) const noexcept override;
-
-    Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(uint32_t groupIndex) const noexcept;
-
-public:
+    PipelineLayoutDescriptor GetDesc() const noexcept override;
+    Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(uint32_t groupSlot) const noexcept;
     DeviceD3D12* _device{nullptr};
+    vector<PipelineLayoutGroupDescriptor> _groups;
+    vector<PushConstantDescriptor> _pushes;
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
-    vector<BackendBindingName> _bindingNames;
     vector<PushConstantBindingD3D12> _pushConstantBindings;
-    IntrusivePtr<CachedPipelineLayoutD3D12> _nativeLayout;
+    ComPtr<ID3D12RootSignature> _rootSignature;
 };
 
 class ShaderParameterSetD3D12 final : public ShaderParameterSet {
@@ -978,7 +907,7 @@ public:
 
     void Destroy() noexcept override;
 
-    bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept override;
+    bool Set(uint32_t bindingId, uint32_t arrayElement, ShaderParameterValue value) noexcept override;
 
     bool FlushWrites() noexcept override;
 
@@ -986,10 +915,9 @@ public:
 
 public:
     DeviceD3D12* _device{nullptr};
-    RootSigD3D12* _layout{nullptr};
-    uint32_t _groupIndex{0};
-    // root descriptor 的 GPU 地址，与所属组的 RootDescriptorOrder 一一对应：
-    // 第 i 项对应 Entries[RootDescriptorOrder[i]]，不是原生 root parameter 下标。
+    BindingGroupLayoutD3D12* _layout{nullptr};
+    // root descriptor 的 GPU 地址，与所属组的 _rootOrder 一一对应：
+    // 第 i 项对应 _entries[_rootOrder[i]]，不是原生 root parameter 下标。
     // Set 写入 buffer GPU 地址 + BufferRange.Offset；Bind 时再加本次 dynamic offset。
     // 创建时为 0，使用前必须 Set；descriptor table 的参数不存放在这里。
     vector<D3D12_GPU_VIRTUAL_ADDRESS> _rootBindings;
@@ -1003,10 +931,6 @@ public:
     vector<D3D12_CPU_DESCRIPTOR_HANDLE> _copyDestinations;
     // 每段复制的 descriptor 个数，同时用作源区间和目标区间长度；单位不是字节。
     vector<UINT> _copyCounts;
-    // 跨 layout/group 绑定时，目标 group 的 table 下标 -> 本 set 的 _tables 下标。
-    // 第 i 个目标 table 使用 _tables[_tableMapping[i]] 的 GPU 区间，并绑定到目标的 root parameter。
-    // 每次跨布局绑定重新生成，容量复用；同 layout、同 group 时直接按相同下标绑定，不使用此数组。
-    vector<uint32_t> _tableMapping;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {
@@ -1083,6 +1007,7 @@ constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<Texture
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandAllocator* v) noexcept { return static_cast<CommandAllocatorD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
+constexpr auto CastD3D12Object(BindingGroupLayout* v) noexcept { return static_cast<BindingGroupLayoutD3D12*>(v); }
 constexpr auto CastD3D12Object(PipelineLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(ShaderParameterSet* v) noexcept { return static_cast<ShaderParameterSetD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }

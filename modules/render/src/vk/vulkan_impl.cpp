@@ -1,7 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
 #include <radray/profiler.h>
-#include "pipeline_layout_cache_vulkan.h"
-#include "../texture_support_cache.h"
 
 #if RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
@@ -11,6 +9,8 @@
 #include <bit>
 #include <limits>
 #include <type_traits>
+
+#include <fmt/ranges.h>
 
 #include <radray/basic_math.h>
 #include <radray/hash.h>
@@ -27,41 +27,7 @@
 #include <excpt.h>
 #endif
 
-std::size_t std::hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan>::operator()(
-    const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept {
-    radray::HashCode hash;
-    hash.Add(key.Bindings.size());
-    for (const auto& binding : key.Bindings) {
-        hash.Add(binding.Binding);
-        hash.Add(static_cast<uint32_t>(binding.Type));
-        hash.Add(binding.Count);
-        hash.Add(binding.Stages);
-        hash.Add(binding.ImmutableSamplers.size());
-        for (VkSampler sampler : binding.ImmutableSamplers) {
-            hash.Add(std::hash<VkSampler>{}(sampler));
-        }
-    }
-    return hash.ToHashCode();
-}
-
-#if defined(VK_USE_PLATFORM_METAL_EXT)
-namespace radray {
-extern VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nativeHandler, const VkAllocationCallbacks* allocator) noexcept;
-}  // namespace radray
-#endif
-
 namespace radray::render::vulkan {
-
-void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept {
-    RADRAY_ASSERT(!layout->_cache->IsClosed());
-    layout->AddRef();
-}
-
-void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept {
-    if (layout->ReleaseRef()) {
-        layout->_cache->Evict(layout);
-    }
-}
 
 static Nullable<unique_ptr<InstanceVulkanImpl>> g_vkInstance = nullptr;
 
@@ -94,11 +60,26 @@ static VkSwapchainKHR _CreateVkSwapChain(
     SwapChainDescriptor& desc,
     VkSwapchainKHR oldSwapchain,
     VkExtent2D& swapchainSize,
-    VkFormat& rawFormat) noexcept {
+    VkFormat& rawFormat,
+    VkImageUsageFlags& imageUsage,
+    VkResult& result) noexcept {
+    result = VK_ERROR_INITIALIZATION_FAILED;
+    const auto* queue = CastVkObject(desc.PresentQueue);
+    VkBool32 presentSupported = VK_FALSE;
+    if (auto vr = vkGetPhysicalDeviceSurfaceSupportKHR(device->_physicalDevice, queue->_family.Family, surface->_surface, &presentSupported); vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceSupportKHR failed: {}", vr);
+        result = vr;
+        return VK_NULL_HANDLE;
+    }
+    if (!presentSupported) {
+        RADRAY_ERR_LOG("Vulkan queue family {} does not support presentation to this surface", queue->_family.Family);
+        return VK_NULL_HANDLE;
+    }
     VkSurfaceCapabilitiesKHR surfaceProperties;
     if (auto vr = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device->_physicalDevice, surface->_surface, &surfaceProperties);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     const auto newValue = ResolveSwapChainImageCount(desc.BackBufferCount, surfaceProperties);
@@ -111,12 +92,12 @@ static VkSwapchainKHR _CreateVkSwapChain(
             newValue);
         desc.BackBufferCount = newValue;
     }
-    if (surfaceProperties.currentExtent.width == 0xFFFFFFFF) {
-        swapchainSize.width = desc.Width;
-        swapchainSize.height = desc.Height;
-    } else {
-        swapchainSize = surfaceProperties.currentExtent;
+    const auto extent = ResolveSwapChainExtent({desc.Width, desc.Height}, surfaceProperties);
+    if (!extent) {
+        result = VK_NOT_READY;
+        return VK_NULL_HANDLE;
     }
+    swapchainSize = *extent;
     VkSurfaceTransformFlagBitsKHR preTransform;
     if (surfaceProperties.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
         preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
@@ -138,6 +119,7 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = EnumerateVectorFromVkFunc(supportedFormats, vkGetPhysicalDeviceSurfaceFormatsKHR, device->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceFormatsKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     auto needFormatIter = std::ranges::find_if(supportedFormats, [rawFormat](VkSurfaceFormatKHR i) { return i.format == rawFormat; });
@@ -150,6 +132,7 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = EnumerateVectorFromVkFunc(supportedPresentModes, vkGetPhysicalDeviceSurfacePresentModesKHR, device->_physicalDevice, surface->_surface);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfacePresentModesKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
     VkPresentModeKHR needPresentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -195,12 +178,15 @@ static VkSwapchainKHR _CreateVkSwapChain(
     if (auto vr = device->_ftb.vkCreateSwapchainKHR(device->_device, &swapchianCreateInfo, device->GetAllocationCallbacks(), &swapchain);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed: {}", vr);
+        result = vr;
         return VK_NULL_HANDLE;
     }
+    result = VK_SUCCESS;
+    imageUsage = swapchianCreateInfo.imageUsage;
     return swapchain;
 }
 
-static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapchainSize, VkFormat rawFormat, TextureFormat format) noexcept {
+static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapchainSize, VkFormat rawFormat, TextureFormat format, VkImageUsageFlags imageUsage) noexcept {
     vector<VkImage> swapchainImages;
     if (auto vr = EnumerateVectorFromVkFunc(swapchainImages, swapChain->_device->_ftb.vkGetSwapchainImagesKHR, swapChain->_device->_device, swapChain->_swapchain);
         vr != VK_SUCCESS) {
@@ -212,6 +198,8 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
     for (VkImage img : swapchainImages) {
         SwapChainVulkan::Frame& f = frames.emplace_back();
         f.image = make_unique<ImageVulkan>(swapChain->_device, img, VK_NULL_HANDLE, VmaAllocationInfo{});
+        f.image->_hints = ResourceHint::External;
+        f.image->_isSwapchainImage = true;
         auto readyToPresentOpt = swapChain->AcquireSyncObjectFromPool();
         if (!readyToPresentOpt.HasValue()) {
             RADRAY_ERR_LOG("vk swapchain creation failed: cannot allocate present semaphore");
@@ -231,9 +219,9 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
         f.image->_sampleCount = 1;
         f.image->_format = format;
         f.image->_memory = MemoryType::Device;
-        f.image->_usage = TextureUse::RenderTarget | TextureUse::Resource | TextureUse::CopySource;
-        f.image->_hints = ResourceHint::External;
-        f.image->_isSwapchainImage = true;
+        f.image->_usage = TextureUse::RenderTarget;
+        if (imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) f.image->_usage |= TextureUse::CopySource;
+        f.image->_nativeUsage = imageUsage;
     }
     swapChain->_frames = std::move(frames);
     return true;
@@ -566,124 +554,6 @@ void VMA::DestroyImpl() noexcept {
 
 // == 描述符集 layout 缓存与分配器 ==
 
-DescriptorSetLayoutVulkan::DescriptorSetLayoutVulkan(
-    DescriptorSetLayoutCacheVulkan* cache,
-    DeviceVulkan* device,
-    VkDescriptorSetLayout layout) noexcept
-    : _cache(cache),
-      _device(device),
-      _layout(layout) {}
-
-DescriptorSetLayoutVulkan::~DescriptorSetLayoutVulkan() noexcept {
-    DestroyImpl();
-}
-
-void DescriptorSetLayoutVulkan::DestroyImpl() noexcept {
-    _device->_ftb.vkDestroyDescriptorSetLayout(
-        _device->_device,
-        _layout,
-        _device->GetAllocationCallbacks());
-    _layout = VK_NULL_HANDLE;
-    _device = nullptr;
-}
-
-void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept {
-    ++obj->_refCount;
-}
-
-void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept {
-    RADRAY_ASSERT(obj->_refCount > 0);
-    if (--obj->_refCount != 0) {
-        return;
-    }
-    obj->_cache->Evict(obj);
-}
-
-DescriptorSetLayoutCacheVulkan::DescriptorSetLayoutCacheVulkan(
-    DeviceVulkan* device) noexcept
-    : _device(device) {}
-
-DescriptorSetLayoutCacheVulkan::~DescriptorSetLayoutCacheVulkan() noexcept {
-    Destroy();
-}
-
-IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCreate(
-    std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept {
-    if (_device == nullptr) {
-        return nullptr;
-    }
-
-    Key key{};
-    key.Bindings.reserve(bindings.size());
-    for (const VkDescriptorSetLayoutBinding& binding : bindings) {
-        BindingKey bindingKey{
-            binding.binding,
-            binding.descriptorType,
-            binding.descriptorCount,
-            binding.stageFlags,
-            {}};
-        if (binding.pImmutableSamplers != nullptr) {
-            bindingKey.ImmutableSamplers.assign(
-                binding.pImmutableSamplers,
-                binding.pImmutableSamplers + binding.descriptorCount);
-        }
-        key.Bindings.push_back(std::move(bindingKey));
-    }
-    std::sort(
-        key.Bindings.begin(),
-        key.Bindings.end(),
-        [](const BindingKey& lhs, const BindingKey& rhs) noexcept {
-            return lhs.Binding < rhs.Binding;
-        });
-
-    if (const auto it = _layouts.find(key); it != _layouts.end()) {
-        return RetainRef(it->second.get());
-    }
-
-    VkDescriptorSetLayoutCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-    createInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
-
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    if (const VkResult vr = _device->_ftb.vkCreateDescriptorSetLayout(
-            _device->_device,
-            &createInfo,
-            _device->GetAllocationCallbacks(),
-            &layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
-        return nullptr;
-    }
-    const auto [it, inserted] = _layouts.try_emplace(
-        std::move(key),
-        make_unique<DescriptorSetLayoutVulkan>(this, _device, layout));
-    if (inserted) {
-        it->second->_key = &it->first;
-    } else {
-        RADRAY_ABORT("DescriptorSetLayoutCacheVulkan::GetOrCreate failed");
-        return nullptr;
-    }
-    return RetainRef(it->second.get());
-}
-
-void DescriptorSetLayoutCacheVulkan::Evict(DescriptorSetLayoutVulkan* layout) noexcept {
-    const auto it = _layouts.find(*layout->_key);
-    RADRAY_ASSERT(it != _layouts.end() && it->second.get() == layout);
-    _layouts.erase(it);
-}
-
-void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
-    for (const auto& [key, layout] : _layouts) {
-        (void)key;
-        RADRAY_ASSERT(layout->GetRefCount() == 0);
-    }
-    _layouts.clear();
-    _device = nullptr;
-}
-
 struct DescriptorSetAllocatorVulkan::Page {
     VkDescriptorPool Pool{VK_NULL_HANDLE};
     vector<VkDescriptorPoolSize> DescriptorCounts;
@@ -874,6 +744,7 @@ RenderPassExecutionKeyVulkan RenderPassExecutionKeyVulkan::Build(const RenderPas
     for (size_t i = 0; i < scope.Colors.size(); ++i) {
         key.ColorAttachments[i].Load = scope.Colors[i].Load;
         key.ColorAttachments[i].Store = scope.Colors[i].Store;
+        key.ColorAttachments[i].Resolve = bool(scope.Colors[i].ResolveTarget);
     }
     if (scope.DepthStencil) {
         const auto& depth = *scope.DepthStencil;
@@ -883,7 +754,11 @@ RenderPassExecutionKeyVulkan RenderPassExecutionKeyVulkan::Build(const RenderPas
         const bool stencil = d.Format == TextureFormat::D24_UNORM_S8_UINT || d.Format == TextureFormat::D32_FLOAT_S8_UINT;
         d.StencilLoad = stencil ? depth.StencilLoad : LoadAction::DontCare;
         d.StencilStore = stencil ? depth.StencilStore : StoreAction::Discard;
-        d.ReadOnly = depth.ReadOnly;
+        d.Usage = depth.View->GetDesc().Usage;
+        if (depth.Resolve) {
+            d.DepthResolve = depth.Resolve->DepthMode;
+            d.StencilResolve = depth.Resolve->StencilMode;
+        }
     }
     return key;
 }
@@ -901,6 +776,7 @@ size_t RenderPassKeyHashVulkan::operator()(const RenderPassExecutionKeyVulkan& k
         h.Add(c.SampleCount);
         h.Add(c.Load);
         h.Add(c.Store);
+        h.Add(c.Resolve);
     }
     h.Add(key.DepthStencilAttachment.has_value());
     if (key.DepthStencilAttachment) {
@@ -911,7 +787,9 @@ size_t RenderPassKeyHashVulkan::operator()(const RenderPassExecutionKeyVulkan& k
         h.Add(d.DepthStore);
         h.Add(d.StencilLoad);
         h.Add(d.StencilStore);
-        h.Add(d.ReadOnly);
+        h.Add(d.Usage);
+        h.Add(d.DepthResolve);
+        h.Add(d.StencilResolve);
     }
     return h.ToHashCode();
 }
@@ -922,18 +800,41 @@ size_t FramebufferKeyHashVulkan::operator()(const FramebufferKeyVulkan& key) con
     h.Add(key.Signature.DepthStencil.has_value());
     if (key.Signature.DepthStencil) h.Add(*key.Signature.DepthStencil);
     h.Add(key.Signature.Samples);
+    h.Add(key.Formats.size());
+    for (auto f : key.Formats) h.Add(f);
+    h.Add(key.Views.size());
     for (auto id : key.Views) h.Add(id);
+    h.Add(key.Attachments.size());
+    for (const auto& attachment : key.Attachments) {
+        h.Add(attachment.Flags);
+        h.Add(attachment.Usage);
+        h.Add(attachment.Width);
+        h.Add(attachment.Height);
+        h.Add(attachment.Layers);
+    }
     h.Add(key.Width);
     h.Add(key.Height);
     h.Add(key.Layers);
     return h.ToHashCode();
 }
-VulkanRenderPassCache::VulkanRenderPassCache(DeviceVulkan* device) noexcept : _device(device) {}
+VulkanRenderPassCache::VulkanRenderPassCache(DeviceVulkan* device, FramebufferModeVulkan mode) noexcept : _device(device), _mode(mode) {}
 VulkanRenderPassCache::~VulkanRenderPassCache() noexcept { Clear(); }
 uint64_t VulkanRenderPassCache::AllocateViewId() {
     std::lock_guard lock{_mutex};
     if (_nextViewId == UINT64_MAX) RADRAY_ABORT("Vulkan view identity exhausted");
     return _nextViewId++;
+}
+void VulkanRenderPassCache::PinViews(std::span<const uint64_t> views) {
+    std::lock_guard lock{_mutex};
+    for (auto id : views) ++_viewCommandUses[id];
+}
+void VulkanRenderPassCache::UnpinViews(std::span<const uint64_t> views) noexcept {
+    std::lock_guard lock{_mutex};
+    for (auto id : views) {
+        const auto found = _viewCommandUses.find(id);
+        if (found == _viewCommandUses.end() || !found->second) RADRAY_ABORT("invalid Vulkan attachment view use count");
+        if (--found->second == 0) _viewCommandUses.erase(found);
+    }
 }
 IntrusivePtr<NativeRenderPassVulkan> VulkanRenderPassCache::Acquire(const RenderPassExecutionKeyVulkan& key, std::string_view name) {
     std::lock_guard lock{_mutex};
@@ -976,6 +877,26 @@ IntrusivePtr<NativeFramebufferVulkan> VulkanRenderPassCache::Acquire(const Frame
         info.width = key.Width;
         info.height = key.Height;
         info.layers = key.Layers;
+        vector<VkFormat> formats;
+        vector<VkFramebufferAttachmentImageInfo> attachments;
+        VkFramebufferAttachmentsCreateInfo attachmentInfo{};
+        attachmentInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+        if (IsImageless()) {
+            formats.reserve(key.Attachments.size());
+            attachments.reserve(key.Attachments.size());
+            for (size_t i = 0; i < key.Attachments.size(); ++i) {
+                const auto& source = key.Attachments[i];
+                formats.push_back(MapType(key.Formats[i]));
+                attachments.push_back({VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENT_IMAGE_INFO, nullptr,
+                                       source.Flags, source.Usage, source.Width, source.Height, source.Layers,
+                                       1, &formats.back()});
+            }
+            attachmentInfo.attachmentImageInfoCount = static_cast<uint32_t>(attachments.size());
+            attachmentInfo.pAttachmentImageInfos = attachments.data();
+            info.pNext = &attachmentInfo;
+            info.flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
+            info.pAttachments = nullptr;
+        }
         VkFramebuffer native{};
         const auto result = _device->_ftb.vkCreateFramebuffer(_device->_device, &info, _device->GetAllocationCallbacks(), &native);
         if (result != VK_SUCCESS) {
@@ -1051,6 +972,7 @@ void VulkanRenderPassCache::EraseFramebuffer(NativeFramebufferVulkan* entry) {
 }
 void VulkanRenderPassCache::InvalidateView(uint64_t id) {
     std::lock_guard lock{_mutex};
+    if (_viewCommandUses.contains(id)) RADRAY_ABORT("Vulkan view destruction precedes command epoch completion");
     auto found = _byView.find(id);
     if (found == _byView.end()) return;
     for (auto* entry : found->second)
@@ -1072,7 +994,7 @@ void VulkanRenderPassCache::Trim() {
 }
 void VulkanRenderPassCache::Clear() {
     std::lock_guard lock{_mutex};
-    if (_idlePasses.size() != _passes.size() || _idleFramebuffers.size() != _framebuffers.size()) RADRAY_ABORT("Vulkan device closes with command render pass/framebuffer pins");
+    if (!_viewCommandUses.empty() || _idlePasses.size() != _passes.size() || _idleFramebuffers.size() != _framebuffers.size()) RADRAY_ABORT("Vulkan device closes with command render pass/framebuffer pins");
     while (!_idleFramebuffers.empty()) EraseFramebuffer(_idleFramebuffers.front());
     while (!_idlePasses.empty()) ErasePass(_idlePasses.front());
 }
@@ -1084,8 +1006,8 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
         return VK_NULL_HANDLE;
     }
 
-    vector<VkAttachmentDescription> attachments;
-    vector<VkAttachmentReference> colorReferences;
+    vector<VkAttachmentDescription2> attachments;
+    vector<VkAttachmentReference2> colorReferences;
     attachments.reserve(desc.ColorAttachments.size() + (desc.DepthStencilAttachment.has_value() ? 1u : 0u));
     colorReferences.reserve(desc.ColorAttachments.size());
     for (const RenderPassColorAttachmentDescriptor& color : desc.ColorAttachments) {
@@ -1093,7 +1015,9 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
             RADRAY_ERR_LOG("vk render pass has invalid color attachment format or sample count");
             return VK_NULL_HANDLE;
         }
-        attachments.push_back(VkAttachmentDescription{
+        attachments.push_back(VkAttachmentDescription2{
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .pNext = nullptr,
             .flags = 0,
             .format = MapType(color.Format),
             .samples = MapSampleCount(color.SampleCount),
@@ -1103,12 +1027,19 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
-        colorReferences.push_back(VkAttachmentReference{
+        colorReferences.push_back(VkAttachmentReference2{
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+            .pNext = nullptr,
             .attachment = static_cast<uint32_t>(attachments.size() - 1),
-            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+            .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT});
     }
 
-    VkAttachmentReference depthReference{};
+    VkAttachmentReference2 depthReference{};
+    VkAttachmentDescriptionStencilLayout stencilDescription{};
+    stencilDescription.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT;
+    VkAttachmentReferenceStencilLayout stencilReference{};
+    stencilReference.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_STENCIL_LAYOUT;
     if (desc.DepthStencilAttachment.has_value()) {
         const RenderPassDepthStencilAttachmentDescriptor& depth = desc.DepthStencilAttachment.value();
         if (!IsDepthStencilFormat(depth.Format) || depth.SampleCount == 0) {
@@ -1117,13 +1048,20 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
         }
         const bool hasStencil = depth.Format == TextureFormat::D24_UNORM_S8_UINT ||
                                 depth.Format == TextureFormat::D32_FLOAT_S8_UINT;
-        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
-                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
+        if ((IsDepthReadOnly(depth.Usage) && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store)) ||
+            (hasStencil && IsStencilReadOnly(depth.Usage) && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store))) {
             RADRAY_ERR_LOG("vk read-only depth/stencil attachment must preserve its contents");
             return VK_NULL_HANDLE;
         }
-        const VkImageLayout layout = depth.ReadOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        attachments.push_back(VkAttachmentDescription{
+        const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+        const VkImageLayout layout = separate ? TextureStateToLayout(IsDepthReadOnly(depth.Usage) ? TextureState::DepthRead : TextureState::DepthWrite, depth.Format, TextureAspect::Depth, true) : TextureViewUsageToLayout(depth.Usage);
+        if (separate && hasStencil) {
+            stencilDescription.stencilInitialLayout = stencilDescription.stencilFinalLayout = TextureStateToLayout(IsStencilReadOnly(depth.Usage) ? TextureState::DepthRead : TextureState::DepthWrite, depth.Format, TextureAspect::Stencil, true);
+            stencilReference.stencilLayout = stencilDescription.stencilInitialLayout;
+        }
+        attachments.push_back(VkAttachmentDescription2{
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2,
+            .pNext = nullptr,
             .flags = 0,
             .format = MapType(depth.Format),
             .samples = MapSampleCount(depth.SampleCount),
@@ -1133,28 +1071,81 @@ VkRenderPass VulkanRenderPassCache::CreatePass(const RenderPassExecutionKeyVulka
             .stencilStoreOp = hasStencil ? MapType(depth.StencilStore) : VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = layout,
             .finalLayout = layout});
-        depthReference = VkAttachmentReference{
+        depthReference = VkAttachmentReference2{
+            .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2,
+            .pNext = nullptr,
             .attachment = static_cast<uint32_t>(attachments.size() - 1),
-            .layout = layout};
+            .layout = layout,
+            .aspectMask = static_cast<VkImageAspectFlags>(GetTextureFormatAspects(depth.Format).value())};
+        if (separate && hasStencil) {
+            attachments.back().pNext = &stencilDescription;
+            depthReference.pNext = &stencilReference;
+        }
     }
 
-    VkSubpassDescription subpass{};
+    vector<VkAttachmentReference2> resolveReferences;
+    bool hasColorResolve = false;
+    for (const auto& color : desc.ColorAttachments) {
+        VkAttachmentReference2 ref{VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, nullptr, VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT};
+        if (color.Resolve) {
+            hasColorResolve = true;
+            ref.attachment = static_cast<uint32_t>(attachments.size());
+            attachments.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, nullptr, 0, MapType(color.Format), VK_SAMPLE_COUNT_1_BIT,
+                                   VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL});
+        }
+        resolveReferences.push_back(ref);
+    }
+    VkSubpassDescriptionDepthStencilResolve dsResolve{};
+    dsResolve.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE;
+    VkAttachmentReference2 dsResolveReference{};
+    dsResolveReference.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+    VkAttachmentDescriptionStencilLayout resolveStencilDesc{};
+    resolveStencilDesc.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_STENCIL_LAYOUT;
+    VkAttachmentReferenceStencilLayout resolveStencilRef{};
+    resolveStencilRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_STENCIL_LAYOUT;
+    if (desc.DepthStencilAttachment && (desc.DepthStencilAttachment->DepthResolve != ResolveMode::None || desc.DepthStencilAttachment->StencilResolve != ResolveMode::None)) {
+        const auto& ds = *desc.DepthStencilAttachment;
+        const bool stencil = GetTextureFormatAspects(ds.Format).HasFlag(TextureAspect::Stencil);
+        const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+        const auto layout = TextureStateToLayout(TextureState::AttachmentResolveDestination, ds.Format, TextureAspect::Depth, separate);
+        dsResolveReference.attachment = static_cast<uint32_t>(attachments.size());
+        dsResolveReference.layout = layout;
+        dsResolveReference.aspectMask = GetTextureFormatAspects(ds.Format).value();
+        attachments.push_back({VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, nullptr, 0, MapType(ds.Format), VK_SAMPLE_COUNT_1_BIT,
+                               VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
+                               stencil ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                               stencil ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE, layout, layout});
+        if (separate && stencil) {
+            resolveStencilDesc.stencilInitialLayout = resolveStencilDesc.stencilFinalLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+            resolveStencilRef.stencilLayout = VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+            attachments.back().pNext = &resolveStencilDesc;
+            dsResolveReference.pNext = &resolveStencilRef;
+        }
+        dsResolve.depthResolveMode = static_cast<VkResolveModeFlagBits>(ds.DepthResolve);
+        dsResolve.stencilResolveMode = static_cast<VkResolveModeFlagBits>(ds.StencilResolve);
+        dsResolve.pDepthStencilResolveAttachment = &dsResolveReference;
+    }
+    VkSubpassDescription2 subpass{};
+    subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+    subpass.pNext = dsResolve.pDepthStencilResolveAttachment ? &dsResolve : nullptr;
+    subpass.pResolveAttachments = hasColorResolve ? resolveReferences.data() : nullptr;
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = static_cast<uint32_t>(colorReferences.size());
     subpass.pColorAttachments = colorReferences.empty() ? nullptr : colorReferences.data();
     subpass.pDepthStencilAttachment = desc.DepthStencilAttachment.has_value() ? &depthReference : nullptr;
 
-    VkRenderPassCreateInfo info{};
-    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    VkRenderPassCreateInfo2 info{};
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
     info.attachmentCount = static_cast<uint32_t>(attachments.size());
     info.pAttachments = attachments.data();
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
 
     VkRenderPass pass = VK_NULL_HANDLE;
-    if (auto vr = _device->_ftb.vkCreateRenderPass(_device->_device, &info, _device->GetAllocationCallbacks(), &pass);
+    if (auto vr = _device->_ftb.vkCreateRenderPass2(_device->_device, &info, _device->GetAllocationCallbacks(), &pass);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateRenderPass failed: {}", vr);
+        RADRAY_ERR_LOG("vkCreateRenderPass2 failed: {}", vr);
         return VK_NULL_HANDLE;
     }
     return pass;
@@ -1168,8 +1159,6 @@ DeviceVulkan::DeviceVulkan(
       _physicalDevice(physicalDevice),
       _device(device),
       _renderPassCache(make_unique<VulkanRenderPassCache>(this)),
-      _descriptorSetLayoutCache(this),
-      _pipelineLayoutCache(make_unique<PipelineLayoutCacheVulkan>(this)),
       _descriptorSetAllocator(this) {}
 
 DeviceVulkan::~DeviceVulkan() noexcept {
@@ -1201,10 +1190,25 @@ static VkImageUsageFlags _TextureUsageFlags(TextureUses usage) noexcept {
     return result;
 }
 
-TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
-    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
-        if (cachedQuery == query) return cachedSupport;
+AttachmentResolveSupport DeviceVulkan::QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept {
+    if (samples <= 1 || (samples & (samples - 1))) return {};
+    const bool depth = IsDepthStencilFormat(format);
+    const auto support = QueryTextureSupport({TextureDimension::Dim2D, format, depth ? TextureUse::DepthStencilWrite : TextureUse::RenderTarget});
+    if (!support.Supported || !(support.SampleCounts.value() & samples) || !support.SampleCounts.HasFlag(SampleCount::X1)) return {};
+    AttachmentResolveSupport result;
+    if (!depth)
+        result.ColorAverage = !IsUintFormat(format) && !IsSintFormat(format);
+    else {
+        const auto& props = _extProperties.Vulkan12;
+        result.DepthModes = ResolveModes{props.supportedDepthResolveModes};
+        if (GetTextureFormatAspects(format).HasFlag(TextureAspect::Stencil)) result.StencilModes = ResolveModes{props.supportedStencilResolveModes};
+        result.IndependentResolve = props.independentResolve != 0;
+        result.IndependentResolveNone = props.independentResolveNone != 0;
     }
+    return result;
+}
+
+TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
     if (!IsValidTextureSupportQuery(query)) return {};
     VkPhysicalDeviceImageFormatInfo2 info{};
     info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
@@ -1231,6 +1235,7 @@ TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& quer
     }
     result.Supported = bool(result.SampleCounts);
     result.LinearFiltering = (flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    result.MinMaxFiltering = _enabledFeatures.Vulkan12.samplerFilterMinmax && (flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT) != 0;
     result.Blending = (flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
     result.MaxWidth = limits.maxExtent.width;
     result.MaxHeight = limits.maxExtent.height;
@@ -1288,7 +1293,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAll
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
     unique_ptr<FenceVulkan> result;
-    if (_extFeatures.feature12.timelineSemaphore) {
+    if (_enabledFeatures.Vulkan12.timelineSemaphore) {
         auto timeline = this->CreateTimelineSemaphore(0);
         if (timeline.HasValue()) {
             result = make_unique<FenceVulkan>(this, timeline.Release());
@@ -1370,12 +1375,14 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     auto presentQueue = CastVkObject(desc.PresentQueue);
     VkExtent2D swapchainSize{};
     VkFormat rawFormat = VK_FORMAT_UNDEFINED;
-    VkSwapchainKHR swapchain = _CreateVkSwapChain(this, surface.get(), desc, VK_NULL_HANDLE, swapchainSize, rawFormat);
+    VkResult createResult;
+    VkImageUsageFlags imageUsage{};
+    VkSwapchainKHR swapchain = _CreateVkSwapChain(this, surface.get(), desc, VK_NULL_HANDLE, swapchainSize, rawFormat, imageUsage, createResult);
     if (swapchain == VK_NULL_HANDLE) {
         return nullptr;
     }
     auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain, desc);
-    if (!_RefreshSwapChainImages(result.get(), swapchainSize, rawFormat, desc.Format)) {
+    if (!_RefreshSwapChainImages(result.get(), swapchainSize, rawFormat, desc.Format, imageUsage)) {
         return nullptr;
     }
     return result;
@@ -1519,6 +1526,8 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     }
     auto result = make_unique<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
     result->_rawFormat = imgInfo.format;
+    result->_createFlags = imgInfo.flags;
+    result->_nativeUsage = imgInfo.usage;
     result->_dim = desc.Dim;
     result->_width = desc.Width;
     result->_height = desc.Height;
@@ -1532,15 +1541,51 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     return result;
 }
 
+std::pair<bool, string> DeviceVulkan::ValidateTextureView(const TextureViewDescriptor& desc) const {
+    const auto* image = static_cast<const ImageVulkan*>(desc.Target);
+    if (!(image->_createFlags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
+            ? image->_rawFormat != MapType(desc.Format)
+            : !AreViewFormatsCompatibleVulkan(image->_format, desc.Format, image->_createFlags))
+        return {false, "Vulkan image and view formats are not compatible with the image creation flags"};
+    const auto usage = MapImageViewUsageVulkan(desc.Usage);
+    if (!usage || (image->_nativeUsage & usage) != usage)
+        return {false, "Vulkan image was not created with the requested view usage"};
+    if (desc.Dim == TextureDimension::CubeArray && !_enabledFeatures.Core.imageCubeArray)
+        return {false, "Vulkan imageCubeArray is not enabled"};
+    const auto range = ResolveSubresourceRange(image->GetDesc(), desc.Range);
+    if (desc.Usage != TextureViewUsage::Resource && range.MipLevelCount != 1)
+        return {false, "Vulkan attachment and storage views must select one mip level"};
+    if (desc.Usage == TextureViewUsage::RenderTarget && IsDepthStencilFormat(desc.Format))
+        return {false, "Vulkan color attachment view requires a color format"};
+    VkFormatFeatureFlags required{};
+    switch (desc.Usage) {
+        case TextureViewUsage::Resource: required = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT; break;
+        case TextureViewUsage::UnorderedAccess: required = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT; break;
+        case TextureViewUsage::RenderTarget: required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT; break;
+        case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthReadStencilWrite:
+        case TextureViewUsage::DepthWriteStencilRead:
+        case TextureViewUsage::DepthWrite: required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT; break;
+        case TextureViewUsage::UNKNOWN: return {false, "Vulkan view usage is invalid"};
+    }
+    VkFormatProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+    vkGetPhysicalDeviceFormatProperties2(_physicalDevice, MapType(desc.Format), &properties);
+    if ((properties.formatProperties.optimalTilingFeatures & required) != required)
+        return {false, "Vulkan view format does not support the requested usage"};
+    return {true, {}};
+}
+
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     auto image = CastVkObject(desc.Target);
     auto requestedRange = desc.Range;
     if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && requestedRange.ArrayLayerCount == SubresourceRange::All) requestedRange.ArrayLayerCount = 1;
-    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
+    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(image->_format)) requestedRange.Aspects = TextureAspect::Depth;
     const auto range = ResolveSubresourceRange(image->GetDesc(), requestedRange);
+    const VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, nullptr, MapImageViewUsageVulkan(desc.Usage)};
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    createInfo.pNext = nullptr;
+    createInfo.pNext = &usage;
     createInfo.flags = 0;
     createInfo.image = image->_image;
     createInfo.viewType = MapViewType(desc.Dim);
@@ -1564,7 +1609,9 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     }
     auto result = make_unique<ImageViewVulkan>(this, image, imageView);
     result->_mdesc = desc;
+    result->_nativeRange = range;
     result->_rawFormat = createInfo.format;
+    result->_nativeUsage = usage.usage;
     return result;
 }
 
@@ -1595,79 +1642,45 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
     return make_unique<ShaderModuleVulkan>(this, shaderModule, desc.Stages);
 }
 
-// The wire carries Vulkan enumerants directly and the decoder validates them against the bounds
-// named in the contract header. These assertions are the other half of that agreement: if Vulkan's
-// numbering ever moved, the decoder would silently start accepting or rejecting the wrong states.
-static_assert(VK_FILTER_NEAREST == 0);
-static_assert(VK_FILTER_LINEAR == shader::kShaderSamplerMaxFilter);
-static_assert(VK_SAMPLER_MIPMAP_MODE_NEAREST == 0);
-static_assert(VK_SAMPLER_MIPMAP_MODE_LINEAR == shader::kShaderSamplerMaxMipmapMode);
-static_assert(VK_SAMPLER_ADDRESS_MODE_REPEAT == 0);
-static_assert(VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT == 1);
-static_assert(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE == 2);
-static_assert(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER == 3);
-static_assert(
-    VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE ==
-    shader::kShaderSamplerAddressModeMirrorClampToEdge);
-static_assert(VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE == shader::kShaderSamplerMaxAddressMode);
-static_assert(VK_COMPARE_OP_NEVER == 0);
-static_assert(VK_COMPARE_OP_ALWAYS == shader::kShaderSamplerMaxCompareOp);
-static_assert(VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK == 0);
-static_assert(VK_BORDER_COLOR_INT_OPAQUE_WHITE == shader::kShaderSamplerMaxBorderColor);
-static_assert(
-    VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE ==
-    shader::kShaderSamplerReductionModeWeightedAverage);
-static_assert(VK_SAMPLER_REDUCTION_MODE_MAX == shader::kShaderSamplerMaxReductionMode);
-static_assert(VK_LOD_CLAMP_NONE == shader::kShaderSamplerLodClampNone);
-// Wire stage bits are contractually the ShaderStage bits, which is what lets MapType translate a
-// decoded stage mask without a second table.
-static_assert(static_cast<uint32_t>(ShaderStage::Vertex) == 0x1u);
-static_assert(static_cast<uint32_t>(ShaderStage::Pixel) == 0x2u);
-static_assert(static_cast<uint32_t>(ShaderStage::Compute) == 0x4u);
-
-// The native descriptor type is derived from the logical resource kind plus the resolved placement,
-// never from a single fused enum. That is what keeps uniform and storage buffers apart, keeps typed
-// buffers on the texel-buffer descriptor types instead of collapsing them onto images, and makes an
-// illegal dynamic placement a failure rather than a silent reclassification.
 static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
-    shader::ShaderBindingKind kind,
+    BindingKind kind,
     VulkanBufferDescriptorPlacement placement) noexcept {
     const bool dynamic = placement == VulkanBufferDescriptorPlacement::Dynamic;
     switch (kind) {
-        case shader::ShaderBindingKind::CBuffer:
+        case BindingKind::CBuffer:
             if (dynamic) {
                 return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
             }
             return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        case shader::ShaderBindingKind::StructuredBuffer:
-        case shader::ShaderBindingKind::RWStructuredBuffer:
-        case shader::ShaderBindingKind::RawBuffer:
-        case shader::ShaderBindingKind::RWRawBuffer:
+        case BindingKind::StructuredBuffer:
+        case BindingKind::RWStructuredBuffer:
+        case BindingKind::RawBuffer:
+        case BindingKind::RWRawBuffer:
             if (dynamic) {
                 return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        case shader::ShaderBindingKind::TypedBuffer:
+        case BindingKind::TypedBuffer:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-        case shader::ShaderBindingKind::RWTypedBuffer:
+        case BindingKind::RWTypedBuffer:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
-        case shader::ShaderBindingKind::Texture:
+        case BindingKind::Texture:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-        case shader::ShaderBindingKind::RWTexture:
+        case BindingKind::RWTexture:
             if (dynamic) {
                 return std::nullopt;
             }
             return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        case shader::ShaderBindingKind::Sampler:
+        case BindingKind::Sampler:
             if (dynamic) {
                 return std::nullopt;
             }
@@ -1678,212 +1691,179 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
 
 // == Device: pipeline layout and parameter set ==
 
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
-    const VulkanImmutableSamplerState& state) noexcept {
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = static_cast<VkFilter>(state.MagFilter);
-    samplerInfo.minFilter = static_cast<VkFilter>(state.MinFilter);
-    samplerInfo.mipmapMode = static_cast<VkSamplerMipmapMode>(state.MipmapMode);
-    samplerInfo.addressModeU = static_cast<VkSamplerAddressMode>(state.AddressModeU);
-    samplerInfo.addressModeV = static_cast<VkSamplerAddressMode>(state.AddressModeV);
-    samplerInfo.addressModeW = static_cast<VkSamplerAddressMode>(state.AddressModeW);
-    samplerInfo.mipLodBias = state.MipLodBias;
-    samplerInfo.anisotropyEnable = state.AnisotropyEnable != 0 ? VK_TRUE : VK_FALSE;
-    samplerInfo.maxAnisotropy = state.MaxAnisotropy;
-    samplerInfo.compareEnable = state.CompareEnable != 0 ? VK_TRUE : VK_FALSE;
-    samplerInfo.compareOp = static_cast<VkCompareOp>(state.CompareOp);
-    samplerInfo.minLod = state.MinLod;
-    samplerInfo.maxLod = state.MaxLod;
-    samplerInfo.borderColor = static_cast<VkBorderColor>(state.BorderColor);
-    samplerInfo.unnormalizedCoordinates =
-        (state.Flags & shader::kShaderSamplerFlagUnnormalizedCoordinates) != 0 ? VK_TRUE : VK_FALSE;
-    VkSamplerReductionModeCreateInfo reductionInfo{};
-    reductionInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
-    if (state.ReductionMode != shader::kShaderSamplerReductionModeWeightedAverage) {
-        reductionInfo.reductionMode = static_cast<VkSamplerReductionMode>(state.ReductionMode);
-        samplerInfo.pNext = &reductionInfo;
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const SamplerDescriptor& desc) noexcept {
+    const auto& limits = _properties.limits;
+    if (desc.MipLodBias < _capabilities.Limits.MinSamplerLodBias || desc.MipLodBias > _capabilities.Limits.MaxSamplerLodBias ||
+        (desc.AnisotropyClamp > 1 && (!_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
+        (desc.Reduction != SamplerReductionMode::WeightedAverage && (!_enabledFeatures.Vulkan12.samplerFilterMinmax || desc.Compare)) ||
+        ((desc.AddressS == AddressMode::MirrorClampToEdge || desc.AddressT == AddressMode::MirrorClampToEdge || desc.AddressR == AddressMode::MirrorClampToEdge) && !_enabledFeatures.Vulkan12.samplerMirrorClampToEdge)) {
+        RADRAY_ERR_LOG("sampler exceeds Vulkan device capabilities");
+        return nullptr;
     }
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = MapTypeFilter(desc.MagFilter);
+    info.minFilter = MapTypeFilter(desc.MinFilter);
+    info.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
+    info.addressModeU = MapType(desc.AddressS);
+    info.addressModeV = MapType(desc.AddressT);
+    info.addressModeW = MapType(desc.AddressR);
+    info.mipLodBias = desc.MipLodBias;
+    info.anisotropyEnable = desc.AnisotropyClamp > 1;
+    info.maxAnisotropy = static_cast<float>(std::max(1u, desc.AnisotropyClamp));
+    info.compareEnable = desc.Compare.has_value();
+    info.compareOp = desc.Compare ? MapType(*desc.Compare) : VK_COMPARE_OP_NEVER;
+    info.minLod = desc.LodMin;
+    info.maxLod = desc.LodMax;
+    info.borderColor = static_cast<VkBorderColor>(desc.BorderColor);
+    info.unnormalizedCoordinates = desc.UnnormalizedCoordinates;
+    VkSamplerReductionModeCreateInfo reduction{};
+    reduction.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
+    reduction.reductionMode = static_cast<VkSamplerReductionMode>(desc.Reduction);
+    if (desc.Reduction != SamplerReductionMode::WeightedAverage) info.pNext = &reduction;
     VkSampler sampler = VK_NULL_HANDLE;
-    if (const auto vr = this->_ftb.vkCreateSampler(
-            this->_device,
-            &samplerInfo,
-            this->GetAllocationCallbacks(),
-            &sampler);
-        vr != VK_SUCCESS) {
+    const auto vr = _ftb.vkCreateSampler(_device, &info, GetAllocationCallbacks(), &sampler);
+    if (vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
     return make_unique<SamplerVulkan>(this, sampler);
 }
 
-Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
-    const ResolvedVulkanLayout& layout) noexcept {
-    vector<vector<ShaderParameterSetLayoutEntryVulkan>> groupEntries(layout.SetCount);
-    vector<uint32_t> entryIndexByBinding(layout.Bindings.size(), 0);
-    for (size_t bindingIndex = 0; bindingIndex < layout.Bindings.size(); ++bindingIndex) {
-        const auto& binding = layout.Bindings[bindingIndex];
-        auto& entries = groupEntries[binding.Set];
-        entryIndexByBinding[bindingIndex] = static_cast<uint32_t>(entries.size());
-        entries.push_back(ShaderParameterSetLayoutEntryVulkan{
-            .Binding = binding.Binding,
-            .LogicalKind = binding.LogicalKind,
-            .Placement = binding.Placement,
-            .Count = binding.Count,
-            .Stages = binding.Stages,
-            .DescriptorType = MapPipelineLayoutDescriptorTypeVulkan(binding.LogicalKind, binding.Placement).value(),
-            .ImmutableSamplerIndex = binding.ImmutableSamplerIndex});
-    }
-    VkPushConstantRange pushConstantRange{};
-    if (layout.PushBlock) {
-        pushConstantRange.stageFlags = MapType(layout.PushBlock->Stages);
-        pushConstantRange.offset = 0;
-        pushConstantRange.size = layout.PushBlock->Size;
-    }
-
-    auto result = make_unique<PipelineLayoutVulkan>(this);
-    result->_bindingNames.reserve(layout.Bindings.size());
-    for (const ResolvedVulkanBinding& binding : layout.Bindings) {
-        result->_bindingNames.push_back(BackendBindingName{
-            .Name = binding.Name,
-            .Location = {binding.Set, binding.Binding},
-            .Namespace =
-                shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
-    }
-    if (layout.PushBlock.has_value()) {
-        result->_pushConstantRange = pushConstantRange;
-        result->_pushConstantLocation = ShaderBindingLocation{
-            layout.PushBlock->RegisterSpace,
-            layout.PushBlock->Register};
-        // The push block shares the handle table with the descriptor bindings, so a caller reaches
-        // it by the same declaration name it uses for everything else. The record kind is what keeps
-        // them apart: a push handle names the push range, not a descriptor slot.
-        result->_bindingNames.push_back(BackendBindingName{
-            .Name = layout.PushBlock->Name,
-            .Location = result->_pushConstantLocation.value(),
-            .Namespace = 0,
-            .Kind = BackendBindingRecordKind::Push});
-    }
-
-    // Created up front and index aligned with the resolved sampler array, and reserved before the
-    // first push because VkDescriptorSetLayoutBinding only borrows a pointer into this vector: a
-    // reallocation while filling a later binding would dangle the earlier ones.
-    vector<VkSampler> immutableSamplers;
-    immutableSamplers.reserve(layout.ImmutableSamplers.size());
-    for (const VulkanImmutableSamplerState& state : layout.ImmutableSamplers) {
-        const auto sampler = GetOrCreateSamplerInternal(state);
-        if (!sampler.HasValue()) {
+Nullable<unique_ptr<BindingGroupLayout>> DeviceVulkan::CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept {
+    auto result = make_unique<BindingGroupLayoutVulkan>();
+    result->_device = this;
+    result->_bindings.assign(desc.Bindings.begin(), desc.Bindings.end());
+    for (const auto& binding : result->_bindings) {
+        if (!binding.Vulkan || !binding.Count) {
+            RADRAY_ERR_LOG("Vulkan binding mapping is missing or empty");
             return nullptr;
         }
-        immutableSamplers.push_back(sampler.Get()->_sampler);
     }
-
-    result->_dynamicEntryOrder.resize(layout.SetCount);
-    for (uint32_t bindingIndex : layout.DynamicOffsetOrder) {
-        const auto& binding = layout.Bindings[bindingIndex];
-        result->_dynamicEntryOrder[binding.Set].push_back(entryIndexByBinding[bindingIndex]);
-    }
-
-    vector<IntrusivePtr<DescriptorSetLayoutVulkan>> setLayoutRefs;
-    setLayoutRefs.reserve(layout.SetCount);
-    for (uint32_t setIndex = 0; setIndex < layout.SetCount; ++setIndex) {
-        auto& entries = groupEntries[setIndex];
-        size_t texelViewCount = 0;
-        vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.reserve(entries.size());
-        for (auto& entry : entries) {
-            if (entry.LogicalKind == shader::ShaderBindingKind::TypedBuffer ||
-                entry.LogicalKind == shader::ShaderBindingKind::RWTypedBuffer) {
-                entry.TexelBufferViewOffset = texelViewCount;
-                texelViewCount += entry.Count;
-            }
-            VkDescriptorSetLayoutBinding binding{};
-            binding.binding = entry.Binding;
-            binding.descriptorType = entry.DescriptorType;
-            binding.descriptorCount = entry.Count;
-            binding.stageFlags = MapType(entry.Stages);
-            if (entry.HasImmutableSampler()) {
-                binding.pImmutableSamplers =
-                    immutableSamplers.data() + entry.ImmutableSamplerIndex;
-            }
-            bindings.push_back(binding);
+    std::sort(result->_bindings.begin(), result->_bindings.end(), [](const auto& a, const auto& b) { return a.Vulkan->Binding < b.Vulkan->Binding; });
+    if (!result->_bindings.empty()) result->_set = result->_bindings.front().Vulkan->Set;
+    vector<VkDescriptorSetLayoutBinding> native;
+    vector<VkSampler> samplers;
+    samplers.reserve(result->_bindings.size());
+    size_t texelOffset = 0;
+    for (const auto& binding : result->_bindings) {
+        const auto& location = *binding.Vulkan;
+        const auto type = MapPipelineLayoutDescriptorTypeVulkan(binding.Kind, location.Placement);
+        if (!type || location.Set != result->_set || (location.Placement == VulkanBufferDescriptorPlacement::Dynamic && binding.Count != 1)) return nullptr;
+        ShaderParameterSetLayoutEntryVulkan entry{binding.BindingId, location.Binding, binding.Kind, location.Placement, binding.Count, *type, texelOffset};
+        if (binding.Kind == BindingKind::TypedBuffer || binding.Kind == BindingKind::RWTypedBuffer) texelOffset += binding.Count;
+        if (location.Placement == VulkanBufferDescriptorPlacement::Dynamic) result->_dynamicOrder.push_back(static_cast<uint32_t>(result->_entries.size()));
+        result->_entries.push_back(entry);
+        VkDescriptorSetLayoutBinding item{location.Binding, *type, binding.Count, MapType(binding.Stages), nullptr};
+        if (binding.ImmutableSampler) {
+            if (binding.Kind != BindingKind::Sampler || binding.Count != 1) return nullptr;
+            const auto sampler = GetOrCreateSamplerInternal(*binding.ImmutableSampler);
+            if (!sampler) return nullptr;
+            samplers.push_back(sampler.Get()->_sampler);
+            item.pImmutableSamplers = &samplers.back();
         }
-
-        IntrusivePtr<DescriptorSetLayoutVulkan> setLayout =
-            _descriptorSetLayoutCache.GetOrCreate(bindings);
-        if (!setLayout.HasValue()) {
-            RADRAY_ERR_LOG("vk descriptor set layout cache failed for set {}", setIndex);
-            return nullptr;
+        native.push_back(item);
+        auto pool = std::find_if(result->_poolSizes.begin(), result->_poolSizes.end(), [&](const auto& p) { return p.type == *type; });
+        if (pool == result->_poolSizes.end())
+            result->_poolSizes.push_back({*type, binding.Count});
+        else {
+            if (binding.Count > UINT32_MAX - pool->descriptorCount) return nullptr;
+            pool->descriptorCount += binding.Count;
         }
-        setLayoutRefs.push_back(std::move(setLayout));
     }
-    result->_parameterSetLayouts = std::move(groupEntries);
-
-    const std::span<const VkPushConstantRange> pushRanges = result->_pushConstantRange.has_value()
-                                                                ? std::span<const VkPushConstantRange>{&result->_pushConstantRange.value(), 1}
-                                                                : std::span<const VkPushConstantRange>{};
-    result->_nativeLayout = _pipelineLayoutCache->GetOrCreate(setLayoutRefs, pushRanges);
-    if (!result->_nativeLayout) return nullptr;
+    VkDescriptorSetLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    info.bindingCount = static_cast<uint32_t>(native.size());
+    info.pBindings = native.data();
+    VkDescriptorSetLayoutSupport support{};
+    support.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_SUPPORT;
+    _ftb.vkGetDescriptorSetLayoutSupport(_device, &info, &support);
+    if (!support.supported) {
+        RADRAY_ERR_LOG("Vulkan descriptor set layout is unsupported");
+        return nullptr;
+    }
+    const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
+    if (vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
+        return nullptr;
+    }
     return result;
 }
 
-Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const shader::SpirvShaderArtifactView& artifact,
-    const VulkanTargetLayoutOptions& options) noexcept {
-    const std::optional<ResolvedVulkanLayout> resolved = ResolveVulkanLayout(artifact, options);
-    if (!resolved.has_value()) {
+Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept {
+    auto result = make_unique<PipelineLayoutVulkan>(this);
+    result->_groups.assign(desc.Groups.begin(), desc.Groups.end());
+    result->_pushes.assign(desc.PushConstants.begin(), desc.PushConstants.end());
+    uint32_t setCount = 0;
+    for (const auto& slot : desc.Groups) {
+        const auto index = CastVkObject(slot.Layout)->_set;
+        if (index >= _properties.limits.maxBoundDescriptorSets) {
+            RADRAY_ERR_LOG("Vulkan descriptor set index exceeds device limit");
+            return nullptr;
+        }
+        setCount = std::max(setCount, index + 1);
+    }
+    vector<VkDescriptorSetLayout> handles(setCount, VK_NULL_HANDLE);
+    for (const auto& slot : desc.Groups) {
+        const auto* group = CastVkObject(slot.Layout);
+        if (handles[group->_set] != VK_NULL_HANDLE) {
+            RADRAY_ERR_LOG("Vulkan descriptor set indices overlap");
+            return nullptr;
+        }
+        handles[group->_set] = group->_layout;
+    }
+    if (std::find(handles.begin(), handles.end(), VK_NULL_HANDLE) != handles.end()) {
+        VkDescriptorSetLayoutCreateInfo empty{};
+        empty.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &empty, GetAllocationCallbacks(), &result->_emptySetLayout);
+        if (vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG("vkCreateDescriptorSetLayout (hole) failed: {}", vr);
+            return nullptr;
+        }
+        for (auto& handle : handles)
+            if (handle == VK_NULL_HANDLE) handle = result->_emptySetLayout;
+    }
+    if (desc.PushConstants.size() > 1) return nullptr;
+    vector<VkPushConstantRange> pushes;
+    for (const auto& push : desc.PushConstants) {
+        if (!push.Vulkan || !push.Size || push.Size % 4 || push.Vulkan->Offset % 4 ||
+            uint64_t(push.Vulkan->Offset) + push.Size > _properties.limits.maxPushConstantsSize) return nullptr;
+        pushes.push_back({MapType(push.Stages), push.Vulkan->Offset, push.Size});
+    }
+    VkPipelineLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    info.setLayoutCount = static_cast<uint32_t>(handles.size());
+    info.pSetLayouts = handles.data();
+    info.pushConstantRangeCount = static_cast<uint32_t>(pushes.size());
+    info.pPushConstantRanges = pushes.data();
+    const auto vr = _ftb.vkCreatePipelineLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
+    if (vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
-    return CreatePipelineLayout(resolved.value());
-}
-
-Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const ResolvedVulkanLayout& layout) noexcept {
-    auto pipelineLayout = CreatePipelineLayoutInternal(layout);
-    if (!pipelineLayout.HasValue()) {
-        return nullptr;
-    }
-    return unique_ptr<PipelineLayout>{pipelineLayout.Release()};
+    return result;
 }
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
     auto* layout = CastVkObject(desc.Layout);
 
-    const vector<ShaderParameterSetLayoutEntryVulkan>& entries =
-        layout->_parameterSetLayouts[desc.GroupIndex];
-    vector<VkDescriptorPoolSize> poolSizes;
-    poolSizes.reserve(entries.size());
-    for (const ShaderParameterSetLayoutEntryVulkan& entry : entries) {
-        auto poolSize = std::find_if(
-            poolSizes.begin(),
-            poolSizes.end(),
-            [&](const VkDescriptorPoolSize& value) noexcept {
-                return value.type == entry.DescriptorType;
-            });
-        if (poolSize == poolSizes.end()) {
-            poolSizes.push_back(VkDescriptorPoolSize{entry.DescriptorType, entry.Count});
-        } else {
-            poolSize->descriptorCount += entry.Count;
-        }
-    }
-
+    const auto& entries = layout->_entries;
     auto result = make_unique<ShaderParameterSetVulkan>();
     result->_device = this;
     result->_layout = layout;
-    result->_groupIndex = desc.GroupIndex;
     size_t texelViewCount = 0;
     for (const auto& entry : entries) {
-        if (entry.LogicalKind == shader::ShaderBindingKind::TypedBuffer ||
-            entry.LogicalKind == shader::ShaderBindingKind::RWTypedBuffer) {
+        if (entry.LogicalKind == BindingKind::TypedBuffer ||
+            entry.LogicalKind == BindingKind::RWTypedBuffer) {
             texelViewCount += entry.Count;
         }
     }
     result->_texelBufferViews.resize(texelViewCount);
 
-    const VkDescriptorSetLayout setLayout = layout->GetSetLayouts()[desc.GroupIndex]->Get();
+    const VkDescriptorSetLayout setLayout = layout->_layout;
     const auto allocation = _descriptorSetAllocator.Allocate(
-        DescriptorSetAllocatorVulkan::Request{setLayout, poolSizes});
+        DescriptorSetAllocatorVulkan::Request{setLayout, layout->_poolSizes});
     if (!allocation.has_value()) {
         return nullptr;
     }
@@ -1912,7 +1892,6 @@ void ShaderParameterSetVulkan::DestroyImpl() noexcept {
         _device->_descriptorSetAllocator.Destroy(_allocation);
     }
     _allocation = DescriptorSetAllocatorVulkan::Allocation::Invalid();
-    _groupIndex = 0;
     _layout = nullptr;
     _device = nullptr;
 }
@@ -1922,20 +1901,11 @@ void ShaderParameterSetVulkan::ResetBindingsForReuse() noexcept {
 }
 
 bool ShaderParameterSetVulkan::Set(
-    BindingHandle binding,
+    uint32_t bindingId,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
-    Nullable<const BackendBindingName*> record = &_layout->_bindingNames[BindingHandleAccess::RecordIndex(binding)];
-    const uint32_t bindingNumber = record.Get()->Location.Binding;
-    const auto& entries = _layout->_parameterSetLayouts[_groupIndex];
-    const auto entry = std::find_if(
-        entries.begin(),
-        entries.end(),
-        [&](const ShaderParameterSetLayoutEntryVulkan& value) noexcept {
-            return value.Binding == bindingNumber &&
-                   shader::GetWireBindingNamespace(static_cast<uint32_t>(value.LogicalKind)) ==
-                       record.Get()->Namespace;
-        });
+    const auto& entries = _layout->_entries;
+    const auto entry = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.BindingId == bindingId; });
     VkWriteDescriptorSet write{};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = _allocation.Set;
@@ -1948,11 +1918,11 @@ bool ShaderParameterSetVulkan::Set(
     VkBufferView nativeBufferView = VK_NULL_HANDLE;
     unique_ptr<BufferViewVulkan> texelView;
     switch (entry->LogicalKind) {
-        case shader::ShaderBindingKind::CBuffer:
-        case shader::ShaderBindingKind::StructuredBuffer:
-        case shader::ShaderBindingKind::RWStructuredBuffer:
-        case shader::ShaderBindingKind::RawBuffer:
-        case shader::ShaderBindingKind::RWRawBuffer: {
+        case BindingKind::CBuffer:
+        case BindingKind::StructuredBuffer:
+        case BindingKind::RWStructuredBuffer:
+        case BindingKind::RawBuffer:
+        case BindingKind::RWRawBuffer: {
             const auto& buffer = std::get<ShaderBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             bufferInfo.buffer = native->_buffer;
@@ -1963,8 +1933,8 @@ bool ShaderParameterSetVulkan::Set(
             write.pBufferInfo = &bufferInfo;
             break;
         }
-        case shader::ShaderBindingKind::TypedBuffer:
-        case shader::ShaderBindingKind::RWTypedBuffer: {
+        case BindingKind::TypedBuffer:
+        case BindingKind::RWTypedBuffer: {
             const auto& buffer = std::get<ShaderTexelBufferBinding>(value);
             const auto* native = CastVkObject(buffer.Target);
             VkBufferViewCreateInfo viewInfo{};
@@ -1984,17 +1954,17 @@ bool ShaderParameterSetVulkan::Set(
             write.pTexelBufferView = &nativeBufferView;
             break;
         }
-        case shader::ShaderBindingKind::Texture:
-        case shader::ShaderBindingKind::RWTexture: {
+        case BindingKind::Texture:
+        case BindingKind::RWTexture: {
             const auto* view = CastVkObject(std::get<TextureView*>(value));
             imageInfo.imageView = view->_imageView;
-            imageInfo.imageLayout = entry->LogicalKind == shader::ShaderBindingKind::RWTexture
+            imageInfo.imageLayout = entry->LogicalKind == BindingKind::RWTexture
                                         ? VK_IMAGE_LAYOUT_GENERAL
-                                        : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format);
+                                        : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format, static_cast<TextureAspect>(view->_nativeRange.Aspects.value()), _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0);
             write.pImageInfo = &imageInfo;
             break;
         }
-        case shader::ShaderBindingKind::Sampler: {
+        case BindingKind::Sampler: {
             const auto* sampler = CastVkObject(std::get<Sampler*>(value));
             imageInfo.sampler = sampler->_sampler;
             write.pImageInfo = &imageInfo;
@@ -2016,6 +1986,10 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
 // == Device: PSO / sampler / 同步原语 ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (const auto unsupported = GetUnsupportedGraphicsStateVulkan(desc, _enabledFeatures, _extProperties.conservativeRasterization.has_value())) {
+        RADRAY_ERR_LOG("Cannot create Vulkan graphics pipeline: {}", *unsupported);
+        return nullptr;
+    }
     vector<VkPipelineShaderStageCreateInfo> shaderStages;
     vector<string> entryPointsOwned;
     {
@@ -2184,8 +2158,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vector<VkDynamicState> dynStates;
     dynStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
     dynStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
-    dynStates.emplace_back(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
-    dynStates.emplace_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
     VkPipelineDynamicStateCreateInfo dynStateInfo{};
     dynStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynStateInfo.pNext = nullptr;
@@ -2248,58 +2220,8 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     return make_unique<ComputePipelineVulkan>(this, rs, pipeline);
 }
 
-static VulkanImmutableSamplerState MakeSamplerStateVulkan(const SamplerDescriptor& desc) noexcept {
-    VulkanImmutableSamplerState state{};
-    state.MagFilter = MapTypeFilter(desc.MagFilter);
-    state.MinFilter = MapTypeFilter(desc.MinFilter);
-    state.MipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
-    state.AddressModeU = MapType(desc.AddressS);
-    state.AddressModeV = MapType(desc.AddressT);
-    state.AddressModeW = MapType(desc.AddressR);
-    state.AnisotropyEnable = desc.AnisotropyClamp > 1 ? VK_TRUE : VK_FALSE;
-    state.MaxAnisotropy = desc.AnisotropyClamp > 1 ? static_cast<float>(desc.AnisotropyClamp) : 1.0f;
-    state.CompareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
-    state.CompareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
-    state.MinLod = desc.LodMin;
-    state.MaxLod = desc.LodMax;
-    state.BorderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    state.ReductionMode = VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE;
-    return state;
-}
-
-size_t SamplerStateHashVulkan::operator()(const VulkanImmutableSamplerState& state) const noexcept {
-    HashCode hash;
-    const auto addFloat = [&hash](float value) {
-        // Numeric equality treats both zeros as equal; normalize their bits before hashing.
-        const auto bits = std::bit_cast<uint32_t>(value);
-        hash.Add((bits & 0x7fffffffu) == 0 ? 0u : bits);
-    };
-    hash.Add(state.MagFilter);
-    hash.Add(state.MinFilter);
-    hash.Add(state.MipmapMode);
-    hash.Add(state.AddressModeU);
-    hash.Add(state.AddressModeV);
-    hash.Add(state.AddressModeW);
-    addFloat(state.MipLodBias);
-    hash.Add(state.AnisotropyEnable);
-    addFloat(state.MaxAnisotropy);
-    hash.Add(state.CompareEnable);
-    hash.Add(state.CompareOp);
-    addFloat(state.MinLod);
-    addFloat(state.MaxLod);
-    hash.Add(state.BorderColor);
-    hash.Add(state.ReductionMode);
-    hash.Add(state.Flags);
-    return hash.ToHashCode();
-}
-
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
-    const SamplerDescriptor& desc) noexcept {
-    return CreateSamplerInternal(MakeSamplerStateVulkan(desc));
-}
-
 Nullable<SamplerVulkan*> DeviceVulkan::GetOrCreateSamplerInternal(
-    const VulkanImmutableSamplerState& state) noexcept {
+    const SamplerDescriptor& state) noexcept {
     if (const auto it = _samplerCache.find(state); it != _samplerCache.end()) {
         return it->second.get();
     }
@@ -2323,7 +2245,7 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
 
 Nullable<Sampler*> DeviceVulkan::GetOrCreateSampler(
     const SamplerDescriptor& desc) noexcept {
-    return GetOrCreateSamplerInternal(MakeSamplerStateVulkan(desc));
+    return GetOrCreateSamplerInternal(desc);
 }
 
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -2355,7 +2277,7 @@ Nullable<unique_ptr<LegacySemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(
 }
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
-    if (!_extFeatures.feature12.timelineSemaphore) {
+    if (!_enabledFeatures.Vulkan12.timelineSemaphore) {
         RADRAY_ERR_LOG("vk feature timeline semaphore not supported");
         return nullptr;
     }
@@ -2423,8 +2345,6 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 void DeviceVulkan::DestroyImpl() noexcept {
     _renderPassCache.reset();
     _descriptorSetAllocator.Clear();
-    _pipelineLayoutCache.reset();
-    _descriptorSetLayoutCache.Destroy();
     _samplerCache.clear();
     _vma.reset();
     for (auto&& i : _queues) {
@@ -2447,6 +2367,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         RADRAY_ERR_LOG("volkInitialize failed");
         return nullptr;
     }
+    auto loaderCleanup = MakeScopeGuard([] { volkFinalize(); });
     uint32_t version = 0;
     if (!vkEnumerateInstanceVersion || vkEnumerateInstanceVersion(&version) != VK_SUCCESS || version < VK_API_VERSION_1_2) {
         RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
@@ -2476,7 +2397,6 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     unordered_set<string> needLayers;
     bool isValidFeatureExtEnable = false;
     needExts.emplace(VK_KHR_SURFACE_EXTENSION_NAME);
-    needExts.emplace(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     needExts.emplace(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
@@ -2499,7 +2419,21 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         const char* requireLayer[] = {validName};
         if (IsValidateLayers(requireLayer, layerProps)) {
             needLayers.emplace(validName);
-            isValidFeatureExtEnable = true;
+            vector<VkExtensionProperties> layerExtProps;
+            if (EnumerateVectorFromVkFunc(layerExtProps, vkEnumerateInstanceExtensionProperties, validName) != VK_SUCCESS) {
+                RADRAY_ERR_LOG("vkEnumerateInstanceExtensionProperties failed for {}", validName);
+                return nullptr;
+            }
+            extProps.insert(extProps.end(), layerExtProps.begin(), layerExtProps.end());
+            if (desc.IsEnableSynchronizationValidation || desc.IsEnableGpuBasedValid) {
+                if (IsValidateExtensions(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME, extProps)) {
+                    needExts.emplace(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    isValidFeatureExtEnable = true;
+                } else {
+                    RADRAY_ERR_LOG("vk requested validation features require {}", VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+                    return nullptr;
+                }
+            }
         } else {
             RADRAY_WARN_LOG("vk unsupported layer: {}", validName);
         }
@@ -2543,6 +2477,10 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         [](void* pUserData, void* pOriginal, size_t size, size_t alignment, VkSystemAllocationScope allocationScope) -> void* {
             RADRAY_UNUSED(pUserData);
             RADRAY_UNUSED(allocationScope);
+            if (size == 0) {
+                mi_free(pOriginal);
+                return nullptr;
+            }
             return mi_realloc_aligned(pOriginal, size, alignment);
         },
         [](void* pUserData, void* pMemory) { RADRAY_UNUSED(pUserData); mi_free(pMemory); },
@@ -2588,13 +2526,15 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     debugCreateInfo.pfnUserCallback = VKDebugUtilsMessengerCallback;
     debugCreateInfo.pUserData = nullptr;
 
+    const string appName{desc.AppName};
+    const string engineName{desc.EngineName};
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    appInfo.pApplicationName = desc.AppName.data();
+    appInfo.pApplicationName = appName.c_str();
     appInfo.applicationVersion = desc.AppVersion;
-    appInfo.pEngineName = desc.EngineName.data();
+    appInfo.pEngineName = engineName.c_str();
     appInfo.engineVersion = desc.EngineVersion;
-    appInfo.apiVersion = version;
+    appInfo.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -2613,40 +2553,15 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     } else if (hasDebugUtilsExt) {
         createInfo.pNext = &debugCreateInfo;
     }
-    if (version < VK_API_VERSION_1_2) {
-        RADRAY_ERR_LOG("Vulkan 1.2 loader is required");
+    VkInstance instance = VK_NULL_HANDLE;
+    VkResult instanceCreateResult = VK_ERROR_UNKNOWN;
+    uint32_t instanceExceptionCode = 0;
+    if (!_TryCreateVkInstance(&createInfo, allocCbPtr, &instance, instanceCreateResult, instanceExceptionCode)) {
+        RADRAY_ERR_LOG("vkCreateInstance raised structured exception 0x{:08X}", instanceExceptionCode);
         return nullptr;
     }
-    uint32_t apiVersionsToTry[] = {VK_API_VERSION_1_2};
-    VkInstance instance = VK_NULL_HANDLE;
-    VkResult lastResult = VK_ERROR_UNKNOWN;
-    uint32_t lastExceptionCode = 0;
-    for (uint32_t apiVersion : apiVersionsToTry) {
-        appInfo.apiVersion = apiVersion;
-        VkResult vr = VK_ERROR_UNKNOWN;
-        uint32_t exceptionCode = 0;
-        if (!_TryCreateVkInstance(&createInfo, allocCbPtr, &instance, vr, exceptionCode)) {
-            lastExceptionCode = exceptionCode;
-            RADRAY_WARN_LOG(
-                "vkCreateInstance with api version {}.{}.{} raised SEH 0x{:08X}",
-                VK_VERSION_MAJOR(apiVersion),
-                VK_VERSION_MINOR(apiVersion),
-                VK_VERSION_PATCH(apiVersion),
-                exceptionCode);
-            continue;
-        }
-        if (vr == VK_SUCCESS) {
-            break;
-        } else {
-            lastResult = vr;
-            RADRAY_WARN_LOG("vkCreateInstance with api version {}.{}.{} failed: {}", VK_VERSION_MAJOR(apiVersion), VK_VERSION_MINOR(apiVersion), VK_VERSION_PATCH(apiVersion), vr);
-        }
-    }
-    if (instance == VK_NULL_HANDLE) {
-        if (lastExceptionCode != 0) {
-            RADRAY_ERR_LOG("vkCreateInstance raised structured exception 0x{:08X}", lastExceptionCode);
-        }
-        RADRAY_ERR_LOG("vkCreateInstance failed: {}", lastResult);
+    if (instanceCreateResult != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateInstance failed: {}", instanceCreateResult);
         return nullptr;
     }
     volkLoadInstanceOnly(instance);
@@ -2657,6 +2572,11 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         vector<string>{needLayers.begin(), needLayers.end()});
     result->_logCallback = desc.LogCallback;
     result->_logUserData = desc.LogUserData;
+    if (!vkGetPhysicalDeviceFeatures2 || !vkGetPhysicalDeviceProperties2 || !vkGetPhysicalDeviceMemoryProperties2 ||
+        !vkGetPhysicalDeviceFormatProperties2 || !vkGetPhysicalDeviceImageFormatProperties2) {
+        RADRAY_ERR_LOG("Vulkan 1.2 core physical device query entry points are required");
+        return nullptr;
+    }
     if (hasDebugUtilsExt) {
         debugCreateInfo.pUserData = result.get();
         if (vkCreateDebugUtilsMessengerEXT != nullptr) {
@@ -2678,6 +2598,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         }
     }
     g_vkInstance = std::move(result);
+    loaderCleanup.Dismiss();
     return g_vkInstance.Get();
 }
 
@@ -2686,7 +2607,26 @@ void ShutdownVulkanEnvImpl() noexcept {
     volkFinalize();
 }
 
-Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc) {
+vector<QueueIndexInFamily> AllocateQueueIndicesVulkan(
+    QueueType type,
+    uint32_t count,
+    std::span<const VkQueueFamilyProperties> families,
+    std::span<uint32_t> usedCounts) {
+    vector<QueueIndexInFamily> result;
+    if (families.size() != usedCounts.size() || type >= QueueType::MAX_COUNT) return result;
+    const auto requiredFlags = MapType(type);
+    for (uint32_t family = 0; family < families.size() && result.size() < count; ++family) {
+        auto flags = families[family].queueFlags;
+        if (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) flags |= VK_QUEUE_TRANSFER_BIT;
+        if ((flags & requiredFlags) != requiredFlags) continue;
+        while (usedCounts[family] < families[family].queueCount && result.size() < count) {
+            result.push_back({family, usedCounts[family]++});
+        }
+    }
+    return result;
+}
+
+Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc, const FeatureRequestsVulkan& requestedFeatures) {
     if (!g_vkInstance.HasValue()) {
         RADRAY_ERR_LOG("vk env not init");
         return nullptr;
@@ -2723,19 +2663,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
     struct QueueRequest {
         QueueType rawType;
-        VkQueueFlags requiredFlag;
         uint32_t requiredCount;
         vector<QueueIndexInFamily> queueIndices;
     };
     vector<VkDeviceQueueCreateInfo> queueInfos;
     vector<float> queuePriorities;
     vector<QueueRequest> queueRequests;
-    struct QueueFamilyUsage {
-        uint32_t familyIndex;
-        VkQueueFlags flags;
-        uint32_t maxCount;
-        uint32_t usedCount;
-    };
     vector<VkQueueFamilyProperties> queueFamilyProps;
     {
         EnumerateVectorFromVkFunc(queueFamilyProps, vkGetPhysicalDeviceQueueFamilyProperties, selectPhyDevice.device);
@@ -2743,33 +2676,22 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             RADRAY_ERR_LOG("vk no queue family found");
             return nullptr;
         }
-        vector<QueueFamilyUsage> families;
-        for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilyProps.size()); ++i) {
-            families.push_back({i, queueFamilyProps[i].queueFlags, queueFamilyProps[i].queueCount, 0});
-        }
+        vector<uint32_t> usedCounts(queueFamilyProps.size(), 0);
         for (const auto& i : desc.Queues) {
+            if (i.Type >= QueueType::MAX_COUNT) {
+                RADRAY_ERR_LOG("vk invalid queue type: {}", i.Type);
+                return nullptr;
+            }
             auto& r = queueRequests.emplace_back();
             r.rawType = i.Type;
-            r.requiredFlag = MapType(i.Type);
-            if (r.requiredFlag) {
-                r.requiredCount = i.Count;
-            } else {
-                r.requiredCount = 0;
-                RADRAY_WARN_LOG("vk unsupported queue type: {}", VulkanQueueFlags{static_cast<std::underlying_type_t<VkQueueFlagBits>>(r.requiredFlag)});
-            }
+            r.requiredCount = i.Count;
         }
         for (auto& req : queueRequests) {
-            for (auto& fam : families) {
-                while ((fam.flags & req.requiredFlag) && fam.usedCount < fam.maxCount && req.queueIndices.size() < req.requiredCount) {
-                    req.queueIndices.emplace_back(QueueIndexInFamily{fam.familyIndex, fam.usedCount});
-                    fam.usedCount++;
-                    break;
-                }
-            }
+            req.queueIndices = AllocateQueueIndicesVulkan(req.rawType, req.requiredCount, queueFamilyProps, usedCounts);
         }
         for (const auto& i : queueRequests) {
             if (i.queueIndices.size() < i.requiredCount) {
-                RADRAY_ERR_LOG("vk not enough queue family for type: {}", VulkanQueueFlags{static_cast<std::underlying_type_t<VkQueueFlagBits>>(i.requiredFlag)});
+                RADRAY_ERR_LOG("vk not enough queues for type: {}", i.rawType);
                 return nullptr;
             }
         }
@@ -2783,15 +2705,25 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 }
             }
         }
+        size_t all = 0;
+        for (const auto& i : familyQueueCounts) {
+            all += i.second;
+        }
+        if (all == 0) {
+            RADRAY_ERR_LOG("vk at least one queue is required");
+            return nullptr;
+        }
+        queuePriorities.resize(all, 1.0f);
+        all = 0;
         for (const auto& [family, count] : familyQueueCounts) {
-            queuePriorities.resize(queuePriorities.size() + count, 1.0f);
             VkDeviceQueueCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
             info.pNext = nullptr;
             info.flags = 0;
             info.queueFamilyIndex = family;
             info.queueCount = count;
-            info.pQueuePriorities = queuePriorities.data() + (queuePriorities.size() - count);
+            info.pQueuePriorities = queuePriorities.data() + all;
+            all += count;
             queueInfos.push_back(info);
         }
     }
@@ -2808,18 +2740,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     if (IsValidateExtensions("VK_KHR_portability_subset", deviceExtsAvailable)) {
         needExts.emplace("VK_KHR_portability_subset");
     }
-    if (IsValidateExtensions(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, deviceExtsAvailable)) {
-        needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
-    }
-    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_1) {
-        needExts.emplace(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
-    }
-    // DXC -fspv-reflect emits both corresponding OpExtension declarations.
-    needExts.emplace(VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME);
-    needExts.emplace(VK_GOOGLE_USER_TYPE_EXTENSION_NAME);
     VkPhysicalDeviceProperties2 deviceProperties2{};
     deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     deviceProperties2.pNext = nullptr;
+    extProperties->Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+    extProperties->Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+    AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan11);
+    AddToHeadVulkanStruct(deviceProperties2, extProperties->Vulkan12);
     if (IsValidateExtensions(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME, deviceExtsAvailable)) {
         needExts.emplace(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
         extProperties->conservativeRasterization = VkPhysicalDeviceConservativeRasterizationPropertiesEXT{};
@@ -2835,9 +2762,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             return nullptr;
         }
     }
-    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceProperties2) {
-        vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
-    }
+    vkGetPhysicalDeviceProperties2(selectPhyDevice.device, &deviceProperties2);
+    extProperties->Vulkan11.pNext = nullptr;
+    extProperties->Vulkan12.pNext = nullptr;
+    if (extProperties->conservativeRasterization) extProperties->conservativeRasterization->pNext = nullptr;
 
     vector<const char*> deviceExts{};
     deviceExts.reserve(needExts.size());
@@ -2845,10 +2773,17 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         deviceExts.emplace_back(ext.c_str());
     }
 
-    VkPhysicalDeviceFeatures deviceFeatures{};
+    FeatureChainVulkan supportedChain;
+    vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &supportedChain.Core);
+    const auto supportedFeatures = supportedChain.Snapshot();
+    const auto selection = SelectDeviceFeaturesVulkan(supportedFeatures, requestedFeatures);
+    if (!selection.MissingRequired.empty()) {
+        RADRAY_ERR_LOG("Vulkan required features are unsupported: {}", fmt::join(selection.MissingRequired, ", "));
+        return nullptr;
+    }
+    FeatureChainVulkan enabledChain{selection.Enabled};
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext = nullptr;
     deviceInfo.flags = 0;
     deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     deviceInfo.pQueueCreateInfos = queueInfos.data();
@@ -2856,32 +2791,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceInfo.ppEnabledLayerNames = nullptr;
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExts.size());
     deviceInfo.ppEnabledExtensionNames = deviceExts.data();
-    deviceInfo.pEnabledFeatures = &deviceFeatures;
-    auto extFeatures = make_unique<ExtFeaturesVulkan>();
-    VkPhysicalDeviceFeatures2 deviceFeatures2{};
-    deviceFeatures2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    deviceFeatures2.pNext = nullptr;
-    if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_1 && vkGetPhysicalDeviceFeatures2) {
-        extFeatures->feature11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-        AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature11);
-
-        extFeatures->feature12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        extFeatures->feature12.pNext = nullptr;
-        if (selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2) {
-            AddToHeadVulkanStruct(deviceFeatures2, extFeatures->feature12);
-        }
-
-        vkGetPhysicalDeviceFeatures2(selectPhyDevice.device, &deviceFeatures2);
-
-        if (!extFeatures->feature12.timelineSemaphore) {
-            RADRAY_ERR_LOG("Vulkan timelineSemaphore feature is required");
-            return nullptr;
-        }
-        extFeatures->feature12.imagelessFramebuffer = VK_FALSE;
-        extFeatures->feature12.separateDepthStencilLayouts = VK_FALSE;
-        deviceInfo.pNext = &deviceFeatures2;
-        deviceInfo.pEnabledFeatures = nullptr;
-    }
+    enabledChain.ApplyTo(deviceInfo);
 
     VkDevice device = VK_NULL_HANDLE;
     VkResult deviceCreateResult = VK_ERROR_UNKNOWN;
@@ -2905,6 +2815,10 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         selectPhyDevice.device,
         device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
+    if (const auto missing = GetMissingDeviceFunctionVulkan(deviceR->_ftb); !missing.empty()) {
+        RADRAY_ERR_LOG("Vulkan required core device entry point is missing: {}", missing);
+        return nullptr;
+    }
     VmaVulkanFunctions vmaFunctions{};
     VmaAllocatorCreateInfo vmaCreateInfo{};
     vmaCreateInfo.flags = 0;
@@ -2941,52 +2855,54 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 queuePtr,
                 j,
                 i.rawType,
-                queueFamilyProps[j.Family].queueFlags);
+                queueFamilyProps[j.Family].queueFlags,
+                queueFamilyProps[j.Family].timestampValidBits);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
     }
-    if (deviceInfo.pEnabledFeatures) {
-        deviceR->_feature = *deviceInfo.pEnabledFeatures;
-    } else {
-        deviceR->_feature = deviceFeatures2.features;
-    }
-    deviceR->_extFeatures = *extFeatures;
-    deviceR->_properties = selectPhyDevice.properties;
+    deviceR->_supportedFeatures = supportedFeatures;
+    deviceR->_enabledFeatures = enabledChain.Snapshot();
+    deviceR->_renderPassCache = make_unique<VulkanRenderPassCache>(deviceR.get(),
+                                                                   deviceR->_enabledFeatures.Vulkan12.imagelessFramebuffer ? FramebufferModeVulkan::Imageless : FramebufferModeVulkan::Traditional);
+    deviceR->_properties = deviceProperties2.properties;
     deviceR->_extProperties = *extProperties;
     {
         auto& caps = deviceR->_capabilities;
         const auto& limits = deviceR->_properties.limits;
-        VkPhysicalDeviceMaintenance3Properties allocationLimits{};
-        allocationLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
-        VkPhysicalDeviceMaintenance4Properties bufferLimits{};
-        bufferLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
-        VkPhysicalDeviceProperties2 properties{};
-        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        properties.pNext = &allocationLimits;
-        if (deviceR->_properties.apiVersion >= VK_API_VERSION_1_3) allocationLimits.pNext = &bufferLimits;
-        vkGetPhysicalDeviceProperties2(deviceR->_physicalDevice, &properties);
         caps.Limits = {
             .MaxColorAttachments = limits.maxColorAttachments,
             .MaxTexture1DDimension = limits.maxImageDimension1D,
             .MaxTexture2DDimension = limits.maxImageDimension2D,
             .MaxTexture3DDimension = limits.maxImageDimension3D,
             .MaxTextureArrayLayers = limits.maxImageArrayLayers,
-            .MaxBufferSize = bufferLimits.maxBufferSize != 0 ? bufferLimits.maxBufferSize : allocationLimits.maxMemoryAllocationSize,
+            .MaxBufferSize = extProperties->Vulkan11.maxMemoryAllocationSize,
             .MaxUniformBufferRange = limits.maxUniformBufferRange,
+            .MaxStorageBufferRange = limits.maxStorageBufferRange,
             .MaxPushConstantBytes = limits.maxPushConstantsSize,
             .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment,
-            .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment};
+            .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment,
+            .TexelBufferOffsetAlignment = limits.minTexelBufferOffsetAlignment};
         caps.Features = {
             .TimestampQueries = false,
             .IndirectDraw = true,
             .IndirectDispatch = true,
             .SubresourceBarriers = true,
+            .IndependentDepthStencilTransitions = deviceR->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0,
             .UavMemoryBarrier = true,
             .UavWriteStages = render::ShaderStage::Compute};
-        if (deviceR->_feature.fragmentStoresAndAtomics) {
+        caps.Features.SamplerAnisotropy = deviceR->_enabledFeatures.Core.samplerAnisotropy != 0;
+        caps.Features.SamplerAnisotropyPointMip = caps.Features.SamplerAnisotropy;
+        caps.Features.SamplerMirrorClampToEdge = deviceR->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge != 0;
+        caps.Features.SamplerFilterMinmax = deviceR->_enabledFeatures.Vulkan12.samplerFilterMinmax != 0;
+        caps.Features.SamplerUnnormalizedCoordinates = caps.Features.SamplerIntegerBorderColor = true;
+        caps.Limits.MaxSamplerAnisotropy = caps.Features.SamplerAnisotropy ? limits.maxSamplerAnisotropy : 1.0f;
+        const float maxSamplerLodBias = needExts.contains("VK_KHR_portability_subset") ? 0.0f : limits.maxSamplerLodBias;
+        caps.Limits.MinSamplerLodBias = -maxSamplerLodBias;
+        caps.Limits.MaxSamplerLodBias = maxSamplerLodBias;
+        if (deviceR->_enabledFeatures.Core.fragmentStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Pixel;
         }
-        if (deviceR->_feature.vertexPipelineStoresAndAtomics) {
+        if (deviceR->_enabledFeatures.Core.vertexPipelineStoresAndAtomics) {
             caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
         }
         for (size_t index = 0; index < deviceR->_queues.size(); ++index) {
@@ -3000,7 +2916,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                                                   ? uint32_t{VK_QUEUE_GRAPHICS_BIT} | uint32_t{VK_QUEUE_COMPUTE_BIT}
                                                   : uint32_t{VK_QUEUE_GRAPHICS_BIT};
                 queueCaps.Dedicated &= (family.queueFlags & unwanted) == 0;
-                if (index == static_cast<size_t>(QueueType::Direct) && family.timestampValidBits > 0) caps.Features.TimestampQueries = true;
+                if (family.timestampValidBits > 0) caps.Features.TimestampQueries = true;
             }
         }
     }
@@ -3015,10 +2931,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.MaxVertexInputBindings = deviceR->_properties.limits.maxVertexInputBindings;
         detail.IsUMA = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
         detail.VramBudget = GetPhysicalDeviceMemoryAllSize(selectPhyDevice.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-        const auto& f12 = deviceR->_extFeatures.feature12;
-        detail.IsLayeredRenderingFromVertexShaderSupported =
-            selectPhyDevice.properties.apiVersion >= VK_API_VERSION_1_2 &&
-            f12.shaderOutputLayer;
+        detail.IsLayeredRenderingFromVertexShaderSupported = false;
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -3026,34 +2939,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         RADRAY_INFO_LOG("Vulkan API Version: {}.{}.{}", VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion), VK_API_VERSION_PATCH(apiVersion));
     }
     {
-        const auto& props = selectPhyDevice.properties;
-        uint32_t driverVersion = props.driverVersion;
-        uint32_t vendorID = props.vendorID;
-        string verStr;
-        // https://pcisig.com/membership/member-companies
-        switch (vendorID) {
-            case 0x10DE: {  // NVIDIA
-                uint32_t major = (driverVersion >> 22) & 0x3ff;
-                uint32_t minor = (driverVersion >> 14) & 0x0ff;
-                uint32_t patch = (driverVersion >> 6) & 0x0ff;
-                uint32_t build = driverVersion & 0x3f;
-                verStr = fmt::format("{}.{}.{}.{}", major, minor, patch, build);
-                break;
-            }
-            case 0x8086:  // Intel
-            case 0x1002:  // AMD
-            default: {
-                uint32_t variant = VK_API_VERSION_VARIANT(driverVersion);
-                uint32_t major = VK_API_VERSION_MAJOR(driverVersion);
-                uint32_t minor = VK_API_VERSION_MINOR(driverVersion);
-                uint32_t patch = VK_API_VERSION_PATCH(driverVersion);
-                verStr = fmt::format("{}.{}.{}.{}", variant, major, minor, patch);
-                break;
-            }
-        }
-        RADRAY_INFO_LOG("Driver Version: {}", verStr);
+        const auto& driver = extProperties->Vulkan12;
+        const auto& conformance = driver.conformanceVersion;
+        RADRAY_INFO_LOG("Driver: id={}, name={}, info={}", static_cast<uint32_t>(driver.driverID), driver.driverName, driver.driverInfo);
+        RADRAY_INFO_LOG("Driver Version (raw): {}", deviceR->_properties.driverVersion);
+        RADRAY_INFO_LOG("Conformance Version: {}.{}.{}.{}", conformance.major, conformance.minor, conformance.subminor, conformance.patch);
     }
-    deviceR->_textureSupportCache = detail::CacheCommonTextureSupport(*deviceR);
+    RADRAY_INFO_LOG("Enabled Features (API baseline 1.2): {}", fmt::join(selection.EnabledNames, ", "));
     RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
     RADRAY_INFO_LOG("Queue:");
     for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
@@ -3063,7 +2955,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             RADRAY_INFO_LOG("\t{}: {}", type, queues.size());
         }
     }
-    RADRAY_INFO_LOG("Timeline Semaphore: {}", deviceR->_extFeatures.feature12.timelineSemaphore ? true : false);
     RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     RADRAY_INFO_LOG(
         "Layered Rendering From Vertex Shader: {}",
@@ -3086,16 +2977,18 @@ QueueVulkan::QueueVulkan(
     VkQueue queue,
     QueueIndexInFamily family,
     QueueType type,
-    VkQueueFlags queueFlags) noexcept
+    VkQueueFlags queueFlags,
+    uint32_t timestampValidBits) noexcept
     : _device(device),
       _queue(queue),
       _family(family),
       _type(type),
-      _queueFlags(queueFlags) {
+      _queueFlags(queueFlags),
+      _timestampValidBits(timestampValidBits) {
 #ifdef RADRAY_ENABLE_PROFILER
     // Context creation records a calibration command buffer several times (implicit resets) and waits for
     // the queue; a transient, resettable pool is enough.
-    if ((_queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) return;
+    if (_type == QueueType::Copy || timestampValidBits == 0 || (_queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) return;
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -3115,6 +3008,8 @@ QueueVulkan::QueueVulkan(
         TracyVkContextName(static_cast<TracyVkCtx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
     }
     _device->_ftb.vkDestroyCommandPool(_device->_device, pool, _device->GetAllocationCallbacks());
+#else
+    RADRAY_UNUSED(timestampValidBits);
 #endif
 }
 
@@ -3145,8 +3040,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<uint64_t> signalValues;
     vector<VkPipelineStageFlags> waitStages;
     bool useTimelineSubmit = false;
-    FenceVulkan* submitCompletionFence = nullptr;
-    uint64_t submitCompletionValue = 0;
 
     for (auto* syncObj : desc.WaitToExecute) {
         auto* waitSync = CastVkObject(syncObj);
@@ -3178,8 +3071,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         useTimelineSubmit = true;
         signalSemaphores.emplace_back(fenceObj->_fence->_semaphore);
         signalValues.emplace_back(signalValue);
-        submitCompletionFence = fenceObj;
-        submitCompletionValue = signalValue;
         if (signalValue + 1 > fenceObj->_fenceValue) {
             fenceObj->_fenceValue = signalValue + 1;
         }
@@ -3209,14 +3100,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, submitFence);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
-    }
-
-    if (submitCompletionFence != nullptr) {
-        for (auto* syncObj : desc.WaitToExecute) {
-            auto* waitSync = CastVkObject(syncObj);
-            waitSync->_pendingQueueFence = submitCompletionFence;
-            waitSync->_pendingQueueValue = submitCompletionValue;
-        }
     }
 }
 
@@ -3277,10 +3160,7 @@ void CommandAllocatorVulkan::Reset() noexcept {
     _used = false;
     if (_hasRenderScopes) {
         for (auto* child : _children) {
-            if (!child->_passPins.empty()) {
-                child->_framebufferPins.clear();
-                child->_passPins.clear();
-            }
+            child->ReleaseRenderScopeReferences();
         }
         _hasRenderScopes = false;
     }
@@ -3340,8 +3220,14 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
 #endif
     _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
     _cmdBuffer = VK_NULL_HANDLE;
+    ReleaseRenderScopeReferences();
+}
+
+void CommandBufferVulkan::ReleaseRenderScopeReferences() noexcept {
     _framebufferPins.clear();
     _passPins.clear();
+    _device->_renderPassCache->UnpinViews(_attachmentViewPins);
+    _attachmentViewPins.clear();
 }
 
 void CommandBufferVulkan::Begin() noexcept {
@@ -3373,14 +3259,8 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
-    const auto shaderStages = [](VkPipelineStageFlags native, ShaderStages stages) {
-        constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        if (!stages || !(native & mask)) return native;
-        VkPipelineStageFlags selected = 0;
-        if (stages.HasFlag(ShaderStage::Vertex)) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
-        if (stages.HasFlag(ShaderStage::Pixel)) selected |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        if (stages.HasFlag(ShaderStage::Compute)) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        return (native & ~mask) | selected;
+    const auto shaderStages = [this](VkPipelineStageFlags native, ShaderStages stages) {
+        return ResolveShaderPipelineStagesVulkan(native, stages, _cmdPool->_queue->_queueFlags);
     };
     VkPipelineStageFlags srcStageMask = 0;
     VkPipelineStageFlags dstStageMask = 0;
@@ -3409,32 +3289,36 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             dstStageMask |= dstStage;
         } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
             auto tex = CastVkObject(tb->Target);
-            auto& imgBarrier = imageBarriers.emplace_back();
-            imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            imgBarrier.pNext = nullptr;
-            imgBarrier.srcAccessMask = TextureStateToAccessFlags(tb->Before);
-            imgBarrier.dstAccessMask = TextureStateToAccessFlags(tb->After);
-            imgBarrier.oldLayout = TextureStateToLayout(tb->Before, tex->_format);
-            imgBarrier.newLayout = TextureStateToLayout(tb->After, tex->_format);
-            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            imgBarrier.image = tex->_image;
             const auto normalized = ResolveSubresourceRange(tex->GetDesc(), tb->Range);
-            // This backend uses coupled depth/stencil layouts, so transitions cover both aspects.
-            imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-            imgBarrier.subresourceRange.baseMipLevel = normalized.BaseMipLevel;
-            imgBarrier.subresourceRange.levelCount = normalized.MipLevelCount;
-            imgBarrier.subresourceRange.baseArrayLayer = normalized.BaseArrayLayer;
-            imgBarrier.subresourceRange.layerCount = normalized.ArrayLayerCount;
-
-            auto srcStage = shaderStages(TextureStateToPipelineStageFlags(tb->Before, true), tb->BeforeStages);
-            auto dstStage = shaderStages(TextureStateToPipelineStageFlags(tb->After, false), tb->AfterStages);
-            // 如果是 swapchain image 从 undefined 转换, 增加 src stage 确保之前的写入操作都能被正确同步
-            if (tex->_isSwapchainImage && tb->Before == TextureState::Undefined) {
-                srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            const bool separate = _device->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0;
+            const auto allAspects = GetTextureFormatAspects(tex->_format);
+            if (!separate && allAspects.HasFlag(TextureAspect::Stencil) && normalized.Aspects != allAspects) {
+                RADRAY_ERR_LOG("Independent depth/stencil transition requires separateDepthStencilLayouts");
+                return;
             }
-            srcStageMask |= srcStage;
-            dstStageMask |= dstStage;
+            const auto add = [&](TextureAspects aspects, TextureStates before, TextureStates after) {
+                auto& imgBarrier = imageBarriers.emplace_back();
+                imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                imgBarrier.srcAccessMask = TextureStateToAccessFlags(before);
+                imgBarrier.dstAccessMask = TextureStateToAccessFlags(after);
+                const auto aspect = static_cast<TextureAspect>(aspects.value());
+                imgBarrier.oldLayout = TextureStateToLayout(before, tex->_format, aspect, separate);
+                imgBarrier.newLayout = TextureStateToLayout(after, tex->_format, aspect, separate);
+                imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                imgBarrier.image = tex->_image;
+                imgBarrier.subresourceRange = {aspects.value(), normalized.BaseMipLevel, normalized.MipLevelCount, normalized.BaseArrayLayer, normalized.ArrayLayerCount};
+                auto srcStage = shaderStages(TextureStateToPipelineStageFlags(before, true), tb->BeforeStages);
+                if (tex->_isSwapchainImage && before == TextureState::Undefined) srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                srcStageMask |= srcStage;
+                dstStageMask |= shaderStages(TextureStateToPipelineStageFlags(after, false), tb->AfterStages);
+            };
+            if (separate && IsDepthStencilFormat(tex->_format)) {
+                for (auto aspect : {TextureAspect::Depth, TextureAspect::Stencil}) {
+                    if (normalized.Aspects.HasFlag(aspect)) add(aspect, TextureStateForAspect(tb->Before, aspect), TextureStateForAspect(tb->After, aspect));
+                }
+            } else
+                add(normalized.Aspects, tb->Before, tb->After);
         } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v); uav != nullptr) {
             uavMemoryBarrier = true;
             srcStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -3488,15 +3372,31 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     for (const auto& color : desc.Colors) signature.Colors.push_back(color.View->GetDesc().Format);
     if (desc.DepthStencil) signature.DepthStencil = desc.DepthStencil->View->GetDesc().Format;
     signature.Samples = (desc.Colors.empty() ? desc.DepthStencil->View : desc.Colors.front().View)->GetDesc().Target->GetDesc().SampleCount;
-    FramebufferKeyVulkan key{signature, {}, desc.Width, desc.Height, desc.Layers};
+    FramebufferKeyVulkan key{signature, {}, desc.Width, desc.Height, desc.Layers, {}, {}};
     vector<VkImageView> views;
+    vector<uint64_t> newViewPins;
+    const bool imageless = _device->_renderPassCache->IsImageless();
     const auto addView = [&](TextureView* raw) {
         auto* view = static_cast<ImageViewVulkan*>(raw);
         views.push_back(view->_imageView);
-        key.Views.push_back(view->_viewId);
+        key.Formats.push_back(view->_mdesc.Format);
+        if (std::find(_attachmentViewPins.begin(), _attachmentViewPins.end(), view->_viewId) == _attachmentViewPins.end() &&
+            std::find(newViewPins.begin(), newViewPins.end(), view->_viewId) == newViewPins.end()) newViewPins.push_back(view->_viewId);
+        if (imageless) {
+            const auto* image = view->_image;
+            const auto& range = view->_nativeRange;
+            key.Attachments.push_back({image->_createFlags, view->_nativeUsage,
+                                       std::max(1u, image->_width >> range.BaseMipLevel),
+                                       std::max(1u, image->_height >> range.BaseMipLevel), range.ArrayLayerCount});
+        } else {
+            key.Views.push_back(view->_viewId);
+        }
     };
     for (const auto& color : desc.Colors) addView(color.View);
     if (desc.DepthStencil) addView(desc.DepthStencil->View);
+    for (const auto& color : desc.Colors)
+        if (color.ResolveTarget) addView(color.ResolveTarget.Get());
+    if (desc.DepthStencil && desc.DepthStencil->Resolve) addView(desc.DepthStencil->Resolve->Target);
     auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, signature), desc.Name);
     if (!pass) return nullptr;
     auto framebuffer = _device->_renderPassCache->Acquire(key, pass->Native, views, desc.Name);
@@ -3525,22 +3425,29 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     encoder->_framebuffer = framebuffer.Get();
     const auto nativePass = pass->Native;
     const auto nativeFramebuffer = framebuffer->Native;
+    _device->_renderPassCache->PinViews(newViewPins);
+    _attachmentViewPins.insert(_attachmentViewPins.end(), newViewPins.begin(), newViewPins.end());
     if (std::none_of(_passPins.begin(), _passPins.end(), [&](const auto& pin) { return pin.Get() == pass.Get(); })) _passPins.push_back(std::move(pass));
     if (std::none_of(_framebufferPins.begin(), _framebufferPins.end(), [&](const auto& pin) { return pin.Get() == framebuffer.Get(); })) _framebufferPins.push_back(std::move(framebuffer));
     _cmdPool->_hasRenderScopes = true;
     VkRenderPassBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    const VkRenderPassAttachmentBeginInfo attachmentInfo{VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO, nullptr,
+                                                         static_cast<uint32_t>(views.size()), views.data()};
+    if (imageless) info.pNext = &attachmentInfo;
     info.renderPass = nativePass;
     info.framebuffer = nativeFramebuffer;
     info.renderArea = {{area.X, area.Y}, {area.Width, area.Height}};
     info.clearValueCount = static_cast<uint32_t>(clears.size());
     info.pClearValues = clears.data();
-    _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
+    const VkSubpassBeginInfo begin{VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO, nullptr, VK_SUBPASS_CONTENTS_INLINE};
+    _device->_ftb.vkCmdBeginRenderPass2(_cmdBuffer, &info, &begin);
     return encoder;
 }
 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
-    _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
+    const VkSubpassEndInfo end{VK_STRUCTURE_TYPE_SUBPASS_END_INFO, nullptr};
+    _device->_ftb.vkCmdEndRenderPass2(_cmdBuffer, &end);
     encoder.reset();
 }
 
@@ -3581,12 +3488,13 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(dst->_format);
+    dstRange = ResolveSubresourceRange(dst->GetDesc(), dstRange);
+    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(dst->_format, dstRange.Aspects);
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
     bool is3D = dst->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
-    VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(dst->_rawFormat);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(dst->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const VkImageAspectFlags aspectMask = dstRange.Aspects.value();
     uint64_t bufferOffset = srcOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = dstRange.BaseMipLevel + mip;
@@ -3618,12 +3526,13 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
 void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
-    const uint32_t bpp = GetTextureFormatBytesPerPixel(src->_format);
+    srcRange = ResolveSubresourceRange(src->GetDesc(), srcRange);
+    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(src->_format, srcRange.Aspects);
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
     bool is3D = src->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
-    VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(src->_rawFormat);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(src->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const VkImageAspectFlags aspectMask = srcRange.Aspects.value();
     uint64_t bufferOffset = dstOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
         uint32_t mipLevel = srcRange.BaseMipLevel + mip;
@@ -3718,21 +3627,7 @@ void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, 
 
 void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
     auto pool = CastVkObject(desc.Pool);
-    VkPipelineStageFlagBits stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-    switch (desc.Stage) {
-        case QueryPipelineStage::Top:
-            stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-            break;
-        case QueryPipelineStage::Bottom:
-            stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-            break;
-        case QueryPipelineStage::Graphics:
-            stage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
-            break;
-        case QueryPipelineStage::Compute:
-            stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            break;
-    }
+    const auto stage = MapType(desc.Stage);
     _device->_ftb.vkCmdWriteTimestamp(_cmdBuffer, stage, pool->_pool, desc.Index);
 }
 
@@ -3857,8 +3752,10 @@ static bool BindShaderParameterSetVulkan(
     ShaderParameterSet* parameterSet,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
     auto* set = static_cast<ShaderParameterSetVulkan*>(parameterSet);
-    const auto& destinationEntries = destinationLayout->_parameterSetLayouts[groupIndex];
-    const auto& dynamicEntryOrder = destinationLayout->_dynamicEntryOrder[groupIndex];
+    const auto slot = std::find_if(destinationLayout->_groups.begin(), destinationLayout->_groups.end(), [&](const auto& g) { return g.GroupSlot == groupIndex; });
+    const auto* group = CastVkObject(slot->Layout);
+    const auto& destinationEntries = group->_entries;
+    const auto& dynamicEntryOrder = group->_dynamicOrder;
 
     constexpr size_t kInlinePackedOffsets = 16;
     std::array<uint32_t, kInlinePackedOffsets> inlinePacked{};
@@ -3870,19 +3767,14 @@ static bool BindShaderParameterSetVulkan(
     }
     // 原生 offsets 必须按 layout 的 dynamic descriptor 顺序排列；调用方保证每项恰好提供一次。
     for (const auto& dynamicOffset : dynamicOffsets) {
-        Nullable<const BackendBindingName*> record = &destinationLayout->_bindingNames[BindingHandleAccess::RecordIndex(dynamicOffset.Binding)];
-        const auto slot = std::find_if(dynamicEntryOrder.begin(), dynamicEntryOrder.end(), [&](uint32_t entryIndex) noexcept {
-            const auto& entry = destinationEntries[entryIndex];
-            return entry.Binding == record.Get()->Location.Binding &&
-                   shader::GetWireBindingNamespace(static_cast<uint32_t>(entry.LogicalKind)) == record.Get()->Namespace;
-        });
-        packedDynamicOffsets[static_cast<size_t>(slot - dynamicEntryOrder.begin())] = dynamicOffset.Offset;
+        const auto offsetSlot = std::find_if(dynamicEntryOrder.begin(), dynamicEntryOrder.end(), [&](uint32_t index) { return destinationEntries[index].BindingId == dynamicOffset.BindingId; });
+        packedDynamicOffsets[static_cast<size_t>(offsetSlot - dynamicEntryOrder.begin())] = dynamicOffset.Offset;
     }
     device->_ftb.vkCmdBindDescriptorSets(
         commandBuffer->_cmdBuffer,
         bindPoint,
         destinationLayout->GetNative(),
-        groupIndex,
+        group->_set,
         1,
         &set->_allocation.Set,
         static_cast<uint32_t>(dynamicEntryOrder.size()),
@@ -3904,32 +3796,22 @@ void SimulateCommandEncoderVulkan::BindShaderParameterSet(
         dynamicOffsets);
 }
 
-static bool SetPushConstantsVulkan(
-    DeviceVulkan* device,
-    CommandBufferVulkan* commandBuffer,
-    PipelineLayoutVulkan* boundLayout,
-    BindingHandle binding,
-    std::span<const byte> data) noexcept {
-    (void)binding;
-    const auto& range = *boundLayout->_pushConstantRange;
-    device->_ftb.vkCmdPushConstants(
-        commandBuffer->_cmdBuffer,
-        boundLayout->GetNative(),
-        range.stageFlags,
-        range.offset,
-        range.size,
-        data.data());
+static bool SetPushConstantsVulkan(DeviceVulkan* device, CommandBufferVulkan* commandBuffer,
+                                   PipelineLayoutVulkan* boundLayout, uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept {
+    const auto push = std::find_if(boundLayout->_pushes.begin(), boundLayout->_pushes.end(), [&](const auto& p) { return p.PushId == pushId; });
+    device->_ftb.vkCmdPushConstants(commandBuffer->_cmdBuffer, boundLayout->GetNative(), MapType(push->Stages),
+                                    push->Vulkan->Offset + byteOffset, static_cast<uint32_t>(data.size()), data.data());
     return true;
 }
 
 bool SimulateCommandEncoderVulkan::SetPushConstants(
-    BindingHandle binding,
+    uint32_t pushId, uint32_t byteOffset,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
-        binding,
+        pushId, byteOffset,
         data);
 }
 
@@ -3943,7 +3825,7 @@ void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t ins
 
 void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
     auto* buffer = CastVkObject(argumentBuffer);
-    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+    const uint32_t maxBatchSize = _device->_enabledFeatures.Core.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
     for (uint32_t firstDraw = 0; firstDraw < drawCount;) {
@@ -3960,7 +3842,7 @@ void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t
 
 void SimulateCommandEncoderVulkan::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
     auto* buffer = CastVkObject(argumentBuffer);
-    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+    const uint32_t maxBatchSize = _device->_enabledFeatures.Core.multiDrawIndirect
                                       ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
                                       : 1u;
     for (uint32_t firstDraw = 0; firstDraw < drawCount;) {
@@ -4029,13 +3911,13 @@ void SimulateComputeEncoderVulkan::BindShaderParameterSet(
 }
 
 bool SimulateComputeEncoderVulkan::SetPushConstants(
-    BindingHandle binding,
+    uint32_t pushId, uint32_t byteOffset,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
-        binding,
+        pushId, byteOffset,
         data);
 }
 
@@ -4243,28 +4125,66 @@ bool SwapChainSyncObjectVulkan::IsValid() const noexcept {
 }
 
 void SwapChainSyncObjectVulkan::Destroy() noexcept {
-    this->ClearPendingQueueUse();
     _semaphore.reset();
 }
 
-bool SwapChainSyncObjectVulkan::IsPendingQueueUseComplete() const noexcept {
-    return _pendingQueueFence == nullptr ||
-           _pendingQueueFence->GetCompletedValue() >= _pendingQueueValue;
+// == SwapChain 与 QueryPool ==
+
+uint64_t SwapChainRetirementVulkan::BeginGeneration() {
+    RADRAY_ASSERT(_nextGeneration != UINT64_MAX);
+    const auto id = ++_nextGeneration;
+    _generations.push_back({id});
+    return id;
 }
 
-void SwapChainSyncObjectVulkan::ClearPendingQueueUse() noexcept {
-    _pendingQueueFence = nullptr;
-    _pendingQueueValue = 0;
+SwapChainRetirementVulkan::Generation& SwapChainRetirementVulkan::Find(uint64_t generation) noexcept {
+    const auto it = std::ranges::find(_generations, generation, &Generation::Id);
+    RADRAY_ASSERT(it != _generations.end());
+    return *it;
 }
 
-void SwapChainSyncObjectVulkan::WaitPendingQueueUse() noexcept {
-    if (_pendingQueueFence != nullptr) {
-        _pendingQueueFence->Wait(_pendingQueueValue);
-        this->ClearPendingQueueUse();
+void SwapChainRetirementVulkan::Acquire(uint64_t generation) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(!state.Retired);
+    ++state.PendingAcquires;
+}
+
+void SwapChainRetirementVulkan::CompleteAcquire(uint64_t generation, bool provesSuccessfulPresent) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(state.PendingAcquires != 0);
+    --state.PendingAcquires;
+    if (provesSuccessfulPresent) {
+        _completedPresentGeneration = std::max(_completedPresentGeneration, generation);
     }
 }
 
-// == SwapChain 与 QueryPool ==
+void SwapChainRetirementVulkan::QueuePresent(uint64_t generation) noexcept {
+    Find(generation).Presented = true;
+}
+
+void SwapChainRetirementVulkan::Retire(uint64_t generation) noexcept {
+    auto& state = Find(generation);
+    RADRAY_ASSERT(!state.Retired);
+    state.Retired = true;
+}
+
+vector<uint64_t> SwapChainRetirementVulkan::Collect() {
+    vector<uint64_t> ready;
+    std::erase_if(_generations, [&](const Generation& state) {
+        if (!state.Retired || state.PendingAcquires != 0 ||
+            (state.Presented && state.Id >= _completedPresentGeneration)) {
+            return false;
+        }
+        ready.push_back(state.Id);
+        return true;
+    });
+    return ready;
+}
+
+void SwapChainRetirementVulkan::Clear() noexcept {
+    _generations.clear();
+    _completedPresentGeneration = 0;
+}
 
 SwapChainVulkan::SwapChainVulkan(
     DeviceVulkan* device,
@@ -4277,18 +4197,21 @@ SwapChainVulkan::SwapChainVulkan(
       _surface(std::move(surface)),
       _swapchain(swapchain),
       _nativeHandler(desc.NativeHandler),
+      _retirement(make_unique<SwapChainRetirementVulkan>()),
       _width(desc.Width),
       _height(desc.Height),
       _backBufferCount(desc.BackBufferCount),
       _reqFormat(desc.Format),
-      _mode(desc.PresentMode) {}
+      _mode(desc.PresentMode) {
+    if (_swapchain != VK_NULL_HANDLE) _generation = _retirement->BeginGeneration();
+}
 
 SwapChainVulkan::~SwapChainVulkan() noexcept {
     this->DestroyImpl();
 }
 
 bool SwapChainVulkan::IsValid() const noexcept {
-    return _surface != nullptr && _swapchain != VK_NULL_HANDLE;
+    return _surface != nullptr && _swapchain != VK_NULL_HANDLE && _terminalResult == VK_SUCCESS;
 }
 
 void SwapChainVulkan::Destroy() noexcept {
@@ -4296,18 +4219,9 @@ void SwapChainVulkan::Destroy() noexcept {
 }
 
 Nullable<unique_ptr<SwapChainSyncObjectVulkan>> SwapChainVulkan::AcquireSyncObjectFromPool() noexcept {
-    for (auto it = _recycledSyncObjects.begin(); it != _recycledSyncObjects.end(); ++it) {
-        if ((*it)->IsPendingQueueUseComplete()) {
-            auto result = std::move(*it);
-            result->ClearPendingQueueUse();
-            _recycledSyncObjects.erase(it);
-            return result;
-        }
-    }
     if (!_recycledSyncObjects.empty()) {
-        auto result = std::move(_recycledSyncObjects.front());
-        _recycledSyncObjects.erase(_recycledSyncObjects.begin());
-        result->WaitPendingQueueUse();
+        auto result = std::move(_recycledSyncObjects.back());
+        _recycledSyncObjects.pop_back();
         return result;
     }
     auto semaphoreOpt = _device->CreateLegacySemaphore(0);
@@ -4321,20 +4235,104 @@ void SwapChainVulkan::RecycleSyncObject(unique_ptr<SwapChainSyncObjectVulkan> sy
     _recycledSyncObjects.emplace_back(std::move(syncObject));
 }
 
-void SwapChainVulkan::DestroyImpl() noexcept {
+Nullable<unique_ptr<LegacyFenceVulkan>> SwapChainVulkan::AcquireFenceFromPool() noexcept {
+    if (!_recycledAcquireFences.empty()) {
+        auto fence = std::move(_recycledAcquireFences.back());
+        _recycledAcquireFences.pop_back();
+        return fence;
+    }
+    return _device->CreateLegacyFence(0);
+}
+
+void SwapChainVulkan::RecordFailure(VkResult result) noexcept {
+    if (result == VK_ERROR_DEVICE_LOST ||
+        (result == VK_ERROR_SURFACE_LOST_KHR && _terminalResult != VK_ERROR_DEVICE_LOST)) {
+        _terminalResult = result;
+    }
+    if (result != VK_SUCCESS) _requiresRecreate = true;
+}
+
+void SwapChainVulkan::CollectRetired() noexcept {
+    if (_terminalResult == VK_ERROR_DEVICE_LOST) return;
+    for (auto it = _pendingAcquires.begin(); it != _pendingAcquires.end();) {
+        const VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, it->Fence->_fence);
+        if (status == VK_NOT_READY) {
+            ++it;
+            continue;
+        }
+        if (status != VK_SUCCESS) {
+            this->RecordFailure(status);
+            if (status != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkGetFenceStatus failed: {}", status);
+            return;
+        }
+        _retirement->CompleteAcquire(it->Generation, it->ProvesSuccessfulPresent);
+        if (it->PreviousAcquire) this->RecycleSyncObject(std::move(it->PreviousAcquire));
+        const VkResult reset = _device->_ftb.vkResetFences(_device->_device, 1, &it->Fence->_fence);
+        if (reset != VK_SUCCESS) {
+            this->RecordFailure(reset);
+            if (reset != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkResetFences failed: {}", reset);
+            return;
+        }
+        _recycledAcquireFences.push_back(std::move(it->Fence));
+        it = _pendingAcquires.erase(it);
+    }
+    for (const uint64_t generation : _retirement->Collect()) {
+        const auto it = std::ranges::find(_retiredGenerations, generation, &RetiredGeneration::Generation);
+        RADRAY_ASSERT(it != _retiredGenerations.end());
+        it->Frames.clear();
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, it->Swapchain, _device->GetAllocationCallbacks());
+        _retiredGenerations.erase(it);
+    }
+}
+
+void SwapChainVulkan::DrainAndClear() noexcept {
+    const bool hasResources = _swapchain != VK_NULL_HANDLE || !_retiredGenerations.empty() || !_pendingAcquires.empty();
+    if (hasResources && _terminalResult != VK_ERROR_DEVICE_LOST) {
+        const VkResult idle = _device->_ftb.vkDeviceWaitIdle(_device->_device);
+        this->RecordFailure(idle);
+        if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkDeviceWaitIdle failed: {}", idle);
+        if (_terminalResult != VK_ERROR_DEVICE_LOST) {
+            for (const auto& acquire : _pendingAcquires) {
+                const VkResult wait = _device->_ftb.vkWaitForFences(_device->_device, 1, &acquire.Fence->_fence, VK_TRUE, UINT64_MAX);
+                this->RecordFailure(wait);
+                if (wait == VK_ERROR_DEVICE_LOST) break;
+                if (wait != VK_SUCCESS) RADRAY_ABORT("vkWaitForFences failed: {}", wait);
+            }
+        }
+    }
     _outstandingAcquire.Reset();
+    _pendingAcquires.clear();
+    _recycledAcquireFences.clear();
     _recycledSyncObjects.clear();
     _frames.clear();
+    for (auto& retired : _retiredGenerations) {
+        retired.Frames.clear();
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, retired.Swapchain, _device->GetAllocationCallbacks());
+    }
+    _retiredGenerations.clear();
     if (_swapchain != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, _swapchain, _device->GetAllocationCallbacks());
         _swapchain = VK_NULL_HANDLE;
     }
+    _retirement->Clear();
+    _generation = 0;
+    _requiresRecreate = true;
+}
+
+void SwapChainVulkan::DestroyImpl() noexcept {
+    this->DrainAndClear();
     _surface.reset();
 }
 
 SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
-    if (_swapchain == VK_NULL_HANDLE) {
+    this->CollectRetired();
+    if (_terminalResult != VK_SUCCESS) {
+        result.Status = SwapChainStatus::Error;
+        result.NativeStatusCode = _terminalResult;
+        return result;
+    }
+    if (_swapchain == VK_NULL_HANDLE || _requiresRecreate) {
         result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = VK_ERROR_OUT_OF_DATE_KHR;
         return result;
@@ -4348,6 +4346,13 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
     }
 
     auto waitToDraw = waitToDrawOpt.Release();
+    auto acquireFenceOpt = this->AcquireFenceFromPool();
+    if (!acquireFenceOpt.HasValue()) {
+        this->RecycleSyncObject(std::move(waitToDraw));
+        result.Status = SwapChainStatus::Error;
+        return result;
+    }
+    auto acquireFence = acquireFenceOpt.Release();
 
     uint64_t nanoTimeout;
     if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
@@ -4363,13 +4368,13 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         _swapchain,
         nanoTimeout,
         waitToDraw->_semaphore->_semaphore,
-        VK_NULL_HANDLE,
+        acquireFence->_fence,
         &imageIndex);
     if (vr == VK_SUCCESS || vr == VK_SUBOPTIMAL_KHR) {
         Frame& imageFrame = _frames[imageIndex];
-        if (imageFrame.acquireSyncObject != nullptr) {
-            this->RecycleSyncObject(std::move(imageFrame.acquireSyncObject));
-        }
+        _retirement->Acquire(_generation);
+        _pendingAcquires.push_back({_generation, std::move(acquireFence), std::move(imageFrame.acquireSyncObject), imageFrame.successfulPresent});
+        imageFrame.successfulPresent = false;
         imageFrame.acquireSyncObject = std::move(waitToDraw);
         _outstandingAcquire.imageIndex = imageIndex;
         _outstandingAcquire.waitToDraw = imageFrame.acquireSyncObject.get();
@@ -4387,21 +4392,22 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
         result.Frame = std::move(frame);
         return result;
     }
+    // Failed acquisitions did not submit a signal operation.
+    _recycledAcquireFences.push_back(std::move(acquireFence));
+    this->RecycleSyncObject(std::move(waitToDraw));
     if (vr == VK_TIMEOUT || vr == VK_NOT_READY) {
-        this->RecycleSyncObject(std::move(waitToDraw));
         result.Status = SwapChainStatus::RetryLater;
         result.NativeStatusCode = vr;
         return result;
     }
+    this->RecordFailure(vr);
     if (vr == VK_ERROR_OUT_OF_DATE_KHR) {
-        this->RecycleSyncObject(std::move(waitToDraw));
         result.Status = SwapChainStatus::RequireRecreate;
         result.NativeStatusCode = vr;
         RADRAY_WARN_LOG("vkAcquireNextImageKHR failed: {}", vr);
         return result;
     }
 
-    this->RecycleSyncObject(std::move(waitToDraw));
     result.NativeStatusCode = vr;
     result.Status = SwapChainStatus::Error;
     RADRAY_ERR_LOG("vkAcquireNextImageKHR failed: {}", vr);
@@ -4410,6 +4416,7 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
 
 SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     SwapChainPresentResult result{};
+    this->CollectRetired();
 
     auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent));
     const VkSemaphore waitSem = readyToPresentSync->_semaphore->_semaphore;
@@ -4423,7 +4430,15 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &_outstandingAcquire.imageIndex;
     presentInfo.pResults = nullptr;
-    auto presentResult = _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo);
+    const auto presentResult = _terminalResult == VK_SUCCESS
+                                   ? _device->_ftb.vkQueuePresentKHR(_queue->_queue, &presentInfo)
+                                   : _terminalResult;
+    _frames[_outstandingAcquire.imageIndex].successfulPresent = presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR;
+    // OOM does not enqueue the wait. Other non-device-lost failures may have done so.
+    if (presentResult != VK_ERROR_OUT_OF_HOST_MEMORY && presentResult != VK_ERROR_OUT_OF_DEVICE_MEMORY && presentResult != VK_ERROR_DEVICE_LOST) {
+        _retirement->QueuePresent(_generation);
+    }
+    this->RecordFailure(presentResult);
     _outstandingAcquire.Reset();
     InvalidateFrame(frame);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
@@ -4436,6 +4451,7 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
         result.Status = SwapChainStatus::Success;
     }
     result.NativeStatusCode = presentResult;
+    this->CollectRetired();
     return result;
 }
 
@@ -4446,38 +4462,56 @@ SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame fram
 }
 
 bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
+    this->CollectRetired();
+    if (!_surface || _terminalResult != VK_SUCCESS) return false;
     SwapChainDescriptor desc = this->GetDesc();
     desc.BackBufferCount = _backBufferCount;
     desc.Width = width;
     desc.Height = height;
     desc.Format = format;
     desc.PresentMode = presentMode;
+    _width = width;
+    _height = height;
+    _reqFormat = format;
+    _mode = presentMode;
 
     VkExtent2D swapchainSize{};
     VkFormat rawFormat = VK_FORMAT_UNDEFINED;
     VkSwapchainKHR oldSwapchain = _swapchain;
-    VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat);
+    VkResult createResult;
+    VkImageUsageFlags imageUsage{};
+    VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat, imageUsage, createResult);
+    if (newSwapchain == VK_NULL_HANDLE && createResult == VK_NOT_READY) {
+        _requiresRecreate = true;
+        return false;
+    }
     // Passing oldSwapchain retires it even when native creation fails.
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        _retirement->Retire(_generation);
+        _retiredGenerations.push_back({_generation, oldSwapchain, std::move(_frames)});
+    }
     _frames.clear();
     _swapchain = newSwapchain;
-    if (oldSwapchain != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroySwapchainKHR(_device->_device, oldSwapchain, _device->GetAllocationCallbacks());
-    }
+    _generation = 0;
     if (newSwapchain == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed during swapchain recreate");
+        this->RecordFailure(createResult);
+        this->DrainAndClear();
         return false;
     }
 
-    if (!_RefreshSwapChainImages(this, swapchainSize, rawFormat, desc.Format)) {
-        _swapchain = VK_NULL_HANDLE;
-        _device->_ftb.vkDestroySwapchainKHR(_device->_device, newSwapchain, _device->GetAllocationCallbacks());
+    if (!_RefreshSwapChainImages(this, swapchainSize, rawFormat, desc.Format, imageUsage)) {
+        this->DrainAndClear();
         return false;
     }
 
+    _generation = _retirement->BeginGeneration();
+    _requiresRecreate = false;
     _width = desc.Width;
     _height = desc.Height;
     _reqFormat = desc.Format;
     _mode = desc.PresentMode;
+    this->CollectRetired();
     return true;
 }
 
@@ -4772,53 +4806,33 @@ void ImageViewVulkan::DestroyImpl() noexcept {
 
 // == PipelineLayout / Pipeline / ShaderModule / Sampler ==
 
-PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept
-    : _device(device) {}
-
-PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
-    DestroyImpl();
+BindingGroupLayoutVulkan::~BindingGroupLayoutVulkan() noexcept { Destroy(); }
+bool BindingGroupLayoutVulkan::IsValid() const noexcept { return _layout != VK_NULL_HANDLE; }
+void BindingGroupLayoutVulkan::Destroy() noexcept {
+    if (_layout != VK_NULL_HANDLE) _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+    _layout = VK_NULL_HANDLE;
+    _bindings.clear();
+    _entries.clear();
+    _dynamicOrder.clear();
+    _poolSizes.clear();
+    _device = nullptr;
 }
-
-VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept {
-    return _nativeLayout->Layout;
-}
-
-std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> PipelineLayoutVulkan::GetSetLayouts() const noexcept {
-    return _nativeLayout->SetLayouts;
-}
-
-bool PipelineLayoutVulkan::IsValid() const noexcept {
-    return _device != nullptr && _nativeLayout.HasValue();
-}
-
-void PipelineLayoutVulkan::Destroy() noexcept {
-    DestroyImpl();
-}
-
-void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
-    _device->SetObjectName(name, GetNative());
-}
-
-BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noexcept {
-    const auto binding = std::find_if(
-        _bindingNames.begin(),
-        _bindingNames.end(),
-        [&](const BackendBindingName& value) noexcept { return value.Name == name; });
-    if (binding == _bindingNames.end()) {
-        return {};
-    }
-    return BindingHandleAccess::Make(
-        static_cast<uint32_t>(std::distance(_bindingNames.begin(), binding)),
-        reinterpret_cast<uintptr_t>(this));
-}
-
+void BindingGroupLayoutVulkan::SetDebugName(std::string_view name) noexcept { _device->SetObjectName(name, _layout); }
+BindingGroupLayoutDescriptor BindingGroupLayoutVulkan::GetDesc() const noexcept { return {_bindings}; }
+PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept : _device(device) {}
+PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept { DestroyImpl(); }
+VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept { return _layout; }
+bool PipelineLayoutVulkan::IsValid() const noexcept { return _layout != VK_NULL_HANDLE; }
+void PipelineLayoutVulkan::Destroy() noexcept { DestroyImpl(); }
+void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept { _device->SetObjectName(name, _layout); }
+PipelineLayoutDescriptor PipelineLayoutVulkan::GetDesc() const noexcept { return {_groups, _pushes}; }
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
-    _nativeLayout.Reset();
-    _parameterSetLayouts.clear();
-    _dynamicEntryOrder.clear();
-    _bindingNames.clear();
-    _pushConstantRange.reset();
-    _pushConstantLocation.reset();
+    if (_layout != VK_NULL_HANDLE) _device->_ftb.vkDestroyPipelineLayout(_device->_device, _layout, _device->GetAllocationCallbacks());
+    if (_emptySetLayout != VK_NULL_HANDLE) _device->_ftb.vkDestroyDescriptorSetLayout(_device->_device, _emptySetLayout, _device->GetAllocationCallbacks());
+    _layout = VK_NULL_HANDLE;
+    _emptySetLayout = VK_NULL_HANDLE;
+    _groups.clear();
+    _pushes.clear();
     _device = nullptr;
 }
 

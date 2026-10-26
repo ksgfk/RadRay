@@ -41,7 +41,6 @@ std::optional<Win32Event> Win32Event::Create() noexcept {
     return std::make_optional(std::move(result));
 }
 
-
 std::string_view GetErrorName(HRESULT hr) noexcept {
     switch (hr) {
         case D3D12_ERROR_ADAPTER_NOT_FOUND: return "D3D12_ERROR_ADAPTER_NOT_FOUND";
@@ -490,14 +489,8 @@ D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
 }
 
 std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
-    if (v == ColorWrites{}) return static_cast<D3D12_COLOR_WRITE_ENABLE>(0);
-    if (v == ColorWrite::Red) return D3D12_COLOR_WRITE_ENABLE_RED;
-    if (v == ColorWrite::Green) return D3D12_COLOR_WRITE_ENABLE_GREEN;
-    if (v == ColorWrite::Blue) return D3D12_COLOR_WRITE_ENABLE_BLUE;
-    if (v == ColorWrite::Alpha) return D3D12_COLOR_WRITE_ENABLE_ALPHA;
-    if (v == ColorWrite::Color) return static_cast<D3D12_COLOR_WRITE_ENABLE>(D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE);
-    if (v == ColorWrite::All) return D3D12_COLOR_WRITE_ENABLE_ALL;
-    return std::nullopt;
+    if (v.value() & ~uint32_t(ColorWrite::All)) return std::nullopt;
+    return static_cast<D3D12_COLOR_WRITE_ENABLE>(v.value());
 }
 
 D3D12_COMPARISON_FUNC MapType(CompareFunction v) noexcept {
@@ -591,10 +584,35 @@ D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::ResolveSource)) {
         result |= D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
     }
-    if (v.HasFlag(TextureState::ResolveDestination)) {
+    if (v.HasFlag(TextureState::ResolveDestination) || v.HasFlag(TextureState::AttachmentResolveDestination)) {
         result |= D3D12_RESOURCE_STATE_RESOLVE_DEST;
     }
     return result;
+}
+
+D3D12_RESOURCE_STATES ResolveShaderResourceStatesD3D12(D3D12_RESOURCE_STATES states, ShaderStages stages, D3D12_COMMAND_LIST_TYPE type) noexcept {
+    constexpr auto shader = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (!(states & shader)) return states;
+    auto selected = D3D12_RESOURCE_STATE_COMMON;
+    if (stages) {
+        if (stages.HasFlag(ShaderStage::Pixel)) selected |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        if (stages & (ShaderStage::Vertex | ShaderStage::Compute)) selected |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    } else {
+        selected = type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE : shader;
+    }
+    return (states & ~shader) | selected;
+}
+
+bool AreResourceStatesSupportedD3D12(D3D12_RESOURCE_STATES states, D3D12_COMMAND_LIST_TYPE type) noexcept {
+    constexpr auto writes = D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    const auto write = states & writes;
+    if (write && (!std::has_single_bit(static_cast<uint32_t>(write)) || states != write)) return false;
+    auto allowed = D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST;
+    if (type != D3D12_COMMAND_LIST_TYPE_COPY)
+        allowed |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+    if (type == D3D12_COMMAND_LIST_TYPE_DIRECT)
+        allowed |= D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_RESOLVE_SOURCE | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    return (states & ~allowed) == 0;
 }
 
 D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE MapType(LoadAction v) noexcept {
@@ -643,6 +661,8 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         case AddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        case AddressMode::ClampToBorder: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+        case AddressMode::MirrorClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE;
     }
     Unreachable();
 }

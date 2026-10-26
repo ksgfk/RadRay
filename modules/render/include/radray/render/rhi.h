@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -43,7 +42,24 @@ enum class ShaderBlobCategory : int32_t {
 enum class AddressMode : int32_t {
     ClampToEdge,
     Repeat,
-    Mirror
+    Mirror,
+    ClampToBorder,
+    MirrorClampToEdge
+};
+
+enum class SamplerBorderColor : uint32_t {
+    FloatTransparentBlack,
+    IntTransparentBlack,
+    FloatOpaqueBlack,
+    IntOpaqueBlack,
+    FloatOpaqueWhite,
+    IntOpaqueWhite
+};
+
+enum class SamplerReductionMode : uint32_t {
+    WeightedAverage,
+    Min,
+    Max
 };
 
 enum class FilterMode : int32_t {
@@ -330,7 +346,18 @@ enum class TextureState : uint32_t {
     DepthWrite = DepthRead << 1,
     UnorderedAccess = DepthWrite << 1,
     ResolveSource = UnorderedAccess << 1,
-    ResolveDestination = ResolveSource << 1
+    ResolveDestination = ResolveSource << 1,
+    DepthReadStencilWrite = ResolveDestination << 1,
+    DepthWriteStencilRead = DepthReadStencilWrite << 1,
+    AttachmentResolveDestination = DepthWriteStencilRead << 1
+};
+
+enum class ResolveMode : uint32_t {
+    None = 0,
+    SampleZero = 1,
+    Average = 2,
+    Min = 4,
+    Max = 8,
 };
 
 enum class TextureViewUsage : uint32_t {
@@ -340,6 +367,8 @@ enum class TextureViewUsage : uint32_t {
     DepthRead,
     DepthWrite,
     UnorderedAccess,
+    DepthReadStencilWrite,
+    DepthWriteStencilRead,
 };
 
 enum class ResourceHint : uint32_t {
@@ -411,17 +440,49 @@ enum class PhysicalDeviceType : int32_t {
     Cpu,
 };
 
+enum class BindingKind : uint32_t {
+    CBuffer,
+    StructuredBuffer,
+    RWStructuredBuffer,
+    RawBuffer,
+    RWRawBuffer,
+    TypedBuffer,
+    RWTypedBuffer,
+    Texture,
+    RWTexture,
+    Sampler
+};
+
+enum class BindingRegisterClass : uint32_t {
+    CBV,
+    SRV,
+    UAV,
+    Sampler
+};
+
+enum class D3D12BufferPlacement : uint32_t {
+    Table = 0,
+    RootDescriptor = 1
+};
+
+enum class VulkanBufferDescriptorPlacement : uint32_t {
+    Regular = 0,
+    Dynamic = 1
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
     CmdQueue = Device << 1,
     CmdBuffer = CmdQueue << 1,
     CmdEncoder = CmdBuffer << 1,
-    GraphicsCmdEncoder = CmdEncoder | (CmdEncoder << 1),
-    ComputeCmdEncoder = CmdEncoder | (CmdEncoder << 2),
-    Fence = CmdEncoder << 3,
+    CmdAllocator = CmdEncoder << 1,
+    GraphicsCmdEncoder = CmdAllocator | (CmdAllocator << 1),
+    ComputeCmdEncoder = CmdAllocator | (CmdAllocator << 2),
+    Fence = CmdAllocator << 3,
     Shader = Fence << 1,
-    PipelineLayout = Shader << 1,
+    BindingGroupLayout = Shader << 1,
+    PipelineLayout = BindingGroupLayout << 1,
     ShaderParameterSet = PipelineLayout << 1,
     PipelineState = ShaderParameterSet << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
@@ -437,8 +498,7 @@ enum class RenderObjectTag : uint32_t {
     RenderPass = QueryPool << 1,
     Framebuffer = RenderPass << 1,
     VkInstance = Framebuffer << 1,
-    DXGIFactory = VkInstance << 1,
-    CmdAllocator = DXGIFactory << 1
+    DXGIFactory = VkInstance << 1
 };
 
 }  // namespace radray::render
@@ -470,6 +530,9 @@ template <>
 struct is_flags<render::TextureState> : public std::true_type {};
 
 template <>
+struct is_flags<render::ResolveMode> : public std::true_type {};
+
+template <>
 struct is_flags<render::TextureAspect> : public std::true_type {};
 template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
@@ -486,6 +549,7 @@ using TextureUses = EnumFlags<render::TextureUse>;
 using SampleCountMask = EnumFlags<render::SampleCount>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
+using ResolveModes = EnumFlags<ResolveMode>;
 using ShaderStages = EnumFlags<ShaderStage>;
 using TextureAspects = EnumFlags<TextureAspect>;
 
@@ -513,6 +577,7 @@ class Texture;
 class TextureView;
 class Shader;
 class PipelineLayout;
+class BindingGroupLayout;
 class ShaderParameterSet;
 class PipelineState;
 class GraphicsPipelineState;
@@ -580,11 +645,26 @@ struct VulkanInstanceDescriptor {
     void* LogUserData{nullptr};
 };
 
+class DXGIDiagnosticContext {
+public:
+    virtual ~DXGIDiagnosticContext() noexcept = default;
+    DXGIDiagnosticContext(const DXGIDiagnosticContext&) = delete;
+    DXGIDiagnosticContext& operator=(const DXGIDiagnosticContext&) = delete;
+
+    static Nullable<shared_ptr<DXGIDiagnosticContext>> Create();
+
+protected:
+    DXGIDiagnosticContext() noexcept = default;
+};
+
 struct DXGIFactoryDescriptor {
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
     RenderLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
+    // Required with the debug layer. All concurrently live debug factories in
+    // the process must share this context, including factories retained by devices.
+    shared_ptr<DXGIDiagnosticContext> DiagnosticContext;
 };
 
 struct VulkanPhysicalDeviceInfo {
@@ -842,6 +922,13 @@ struct RenderPassColorAttachment {
     LoadAction Load{LoadAction::DontCare};
     StoreAction Store{StoreAction::Store};
     ColorClearValue Clear{};
+    Nullable<TextureView*> ResolveTarget{nullptr};
+};
+
+struct DepthStencilResolveDescriptor {
+    TextureView* Target;
+    ResolveMode DepthMode{ResolveMode::None};
+    ResolveMode StencilMode{ResolveMode::None};
 };
 
 struct RenderPassDepthStencilAttachment {
@@ -850,8 +937,8 @@ struct RenderPassDepthStencilAttachment {
     StoreAction DepthStore{StoreAction::Store};
     LoadAction StencilLoad{LoadAction::DontCare};
     StoreAction StencilStore{StoreAction::Store};
-    bool ReadOnly{false};
     DepthStencilClearValue Clear{};
+    std::optional<DepthStencilResolveDescriptor> Resolve{};
 };
 
 /// Views and operations borrowed during BeginRenderPass; their owners survive the command epoch.
@@ -864,7 +951,7 @@ struct RenderPassBeginDescriptor {
     bool AllowUavWrites{false};
 };
 
-/// Single subpass, ordered color mapping, no input/resolve attachments or multiview.
+/// Rasterization attachment compatibility; execution-time resolves are excluded.
 struct AttachmentSignature {
     vector<TextureFormat> Colors;
     std::optional<TextureFormat> DepthStencil;
@@ -911,6 +998,10 @@ struct SamplerDescriptor {
     float LodMax{0.0f};
     std::optional<CompareFunction> Compare{};
     uint32_t AnisotropyClamp{0};
+    float MipLodBias{0};
+    SamplerBorderColor BorderColor{SamplerBorderColor::FloatTransparentBlack};
+    SamplerReductionMode Reduction{SamplerReductionMode::WeightedAverage};
+    bool UnnormalizedCoordinates{false};
 
     friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
     friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
@@ -964,43 +1055,73 @@ struct ShaderTexelBufferBinding {
 
 using ShaderParameterValue = std::variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>;
 
+struct D3D12BindingDescriptor {
+    BindingRegisterClass RegisterType{BindingRegisterClass::CBV};
+    uint32_t Register{0};
+    uint32_t Space{0};
+    D3D12BufferPlacement Placement{D3D12BufferPlacement::Table};
+};
+
+struct VulkanBindingDescriptor {
+    uint32_t Set{0};
+    uint32_t Binding{0};
+    VulkanBufferDescriptorPlacement Placement{VulkanBufferDescriptorPlacement::Regular};
+};
+
+/// Numeric ID is group-local. Only the active backend mapping is consumed.
+struct BindingDescriptor {
+    uint32_t BindingId{0};
+    BindingKind Kind{BindingKind::CBuffer};
+    uint32_t Count{1};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    std::optional<D3D12BindingDescriptor> D3D12{};
+    std::optional<VulkanBindingDescriptor> Vulkan{};
+    std::optional<SamplerDescriptor> ImmutableSampler{};
+};
+
+/// Input spans are borrowed only until creation returns.
+struct BindingGroupLayoutDescriptor {
+    std::span<const BindingDescriptor> Bindings;
+};
+
+/// Layout is borrowed; GroupSlot is independent of the native Vulkan set.
+struct PipelineLayoutGroupDescriptor {
+    uint32_t GroupSlot{0};
+    BindingGroupLayout* Layout{nullptr};
+};
+
+struct PushConstantDescriptor {
+    struct D3D12Location {
+        uint32_t Register{0};
+        uint32_t Space{0};
+    };
+    struct VulkanLocation {
+        uint32_t Offset{0};
+    };
+
+    uint32_t PushId{0};
+    uint32_t Size{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    std::optional<D3D12Location> D3D12;
+    std::optional<VulkanLocation> Vulkan;
+};
+
+struct PipelineLayoutDescriptor {
+    std::span<const PipelineLayoutGroupDescriptor> Groups;
+    std::span<const PushConstantDescriptor> PushConstants;
+};
+
+/// The group owner must outlive its parameter sets and all recorded GPU use.
 struct ShaderParameterSetDescriptor {
-    PipelineLayout* Layout{nullptr};
-    uint32_t GroupIndex{0};
+    BindingGroupLayout* Layout{nullptr};
 };
 
-struct BindingHandleAccess;
-
-// Names one binding record in one pipeline layout's metadata table. The public surface is
-// deliberately only default-invalid, validity and equality: a caller takes a handle from
-// PipelineLayout::FindBinding and hands it back, so nothing outside the backends needs the group,
-// the register number or the register class. The internal token pairs the layout's address with
-// a record index. Handles must be discarded when their layout is destroyed.
-class BindingHandle {
-public:
-    constexpr BindingHandle() noexcept = default;
-
-    constexpr bool IsValid() const noexcept { return _generation != 0; }
-
-    friend bool operator==(const BindingHandle&, const BindingHandle&) noexcept = default;
-
-private:
-    friend struct BindingHandleAccess;
-
-    explicit constexpr BindingHandle(uint32_t recordIndex, uintptr_t generation) noexcept
-        : _generation(generation), _recordIndex(recordIndex) {}
-
-    uintptr_t _generation{0};
-    uint32_t _recordIndex{0};
-};
-
-// The offset applies to the dynamic (Vulkan) or root (D3D12) buffer descriptor the handle names,
-// inside the group being bound. Because the handle names a record rather than a bare register
-// number, two root descriptors in one group can no longer be taken for one another.
+// Group-local IDs; each dynamic binding requires exactly one offset, including zero.
+/// Each dynamic binding is supplied exactly once, including zero offsets.
 struct ShaderParameterDynamicOffset {
-    BindingHandle Binding{};
+    uint32_t BindingId{0};
+    uint32_t ArrayIndex{0};
     uint32_t Offset{0};
-
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
 };
 
@@ -1241,9 +1362,13 @@ struct DeviceLimits {
     uint32_t MaxTextureArrayLayers{0};
     uint64_t MaxBufferSize{0};
     uint64_t MaxUniformBufferRange{0};
+    uint64_t MaxStorageBufferRange{0};
     uint32_t MaxPushConstantBytes{0};
     uint64_t CBufferOffsetAlignment{1};
     uint64_t StorageBufferOffsetAlignment{1};
+    uint64_t TexelBufferOffsetAlignment{1};
+    float MaxSamplerAnisotropy{1};
+    float MinSamplerLodBias{0}, MaxSamplerLodBias{0};
 };
 
 struct DeviceFeatures {
@@ -1251,8 +1376,12 @@ struct DeviceFeatures {
     bool IndirectDraw{false};
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
+    bool IndependentDepthStencilTransitions{false};
     bool UavMemoryBarrier{false};
     ShaderStages UavWriteStages{ShaderStage::UNKNOWN};
+    bool SamplerAnisotropy{false}, SamplerMirrorClampToEdge{false}, SamplerFilterMinmax{false};
+    bool SamplerAnisotropyPointMip{false};
+    bool SamplerUnnormalizedCoordinates{false}, SamplerIntegerBorderColor{false};
 };
 
 struct RenderDeviceCapabilities {
@@ -1271,12 +1400,20 @@ struct TextureSupportQuery {
 };
 
 struct TextureSupport {
-    bool Supported{false};
-    SampleCountMask SampleCounts{};
-    bool LinearFiltering{false};
-    bool Blending{false};
-    uint32_t MaxWidth{0}, MaxHeight{0}, MaxDepth{0}, MaxArrayLayers{0}, MaxMipLevels{0};
     uint64_t MaxResourceSize{0};
+    uint32_t MaxWidth{0}, MaxHeight{0}, MaxDepth{0};
+    uint32_t MaxArrayLayers{0}, MaxMipLevels{0};
+    SampleCountMask SampleCounts{};
+    bool Supported{false};
+    bool LinearFiltering{false};
+    bool MinMaxFiltering{false};
+    bool Blending{false};
+};
+
+struct AttachmentResolveSupport {
+    ResolveModes DepthModes{}, StencilModes{};
+    bool ColorAverage{false};
+    bool IndependentResolve{false}, IndependentResolveNone{false};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -1292,6 +1429,8 @@ public:
     virtual const RenderDeviceCapabilities& GetCapabilities() const noexcept = 0;
 
     virtual TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept = 0;
+
+    virtual AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept = 0;
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
@@ -1312,6 +1451,10 @@ public:
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept = 0;
 
@@ -1431,7 +1574,8 @@ public:
     // The handle already names one push declaration in the bound layout, so there is no group
     // parameter: a D3D12 declaration may fan out to several RootConstants destinations and a Vulkan
     // variant has at most one active push block.
-    virtual bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept = 0;
+    /// Update a 4-byte-aligned subrange of the current pipeline push block.
+    virtual bool SetPushConstants(uint32_t pushId, uint32_t byteOffset, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1518,6 +1662,8 @@ public:
     // Validation failure or an unsupported backend aborts; the frame cannot be retried.
     virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame frame) noexcept = 0;
 
+    /// Caller must finish the acquired frame, complete all GPU uses of old backbuffers,
+    /// and release their views/command references. A backend may invalidate old handles even on failure.
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
@@ -1596,13 +1742,23 @@ public:
     virtual ShaderStages GetStages() const noexcept = 0;
 };
 
+class BindingGroupLayout : public RenderBase, public IDebugName {
+public:
+    virtual ~BindingGroupLayout() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindingGroupLayout; }
+
+    // Returned spans are borrowed until this layout is destroyed.
+    virtual BindingGroupLayoutDescriptor GetDesc() const noexcept = 0;
+};
+
 class PipelineLayout : public RenderBase, public IDebugName {
 public:
     virtual ~PipelineLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
 
-    virtual BindingHandle FindBinding(std::string_view name) const noexcept = 0;
+    virtual PipelineLayoutDescriptor GetDesc() const noexcept = 0;
 };
 
 class ShaderParameterSet : public RenderBase {
@@ -1611,9 +1767,10 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterSet; }
 
-    virtual bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
+    virtual bool Set(uint32_t bindingId, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
 
     virtual bool FlushWrites() noexcept = 0;
+
     /// Caller must have ended every command epoch using this set before reuse.
     virtual void ResetBindingsForReuse() noexcept = 0;
 };
@@ -1692,8 +1849,16 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept;
+bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept;
+bool IsDepthReadOnly(TextureViewUsage usage) noexcept;
+bool IsStencilReadOnly(TextureViewUsage usage) noexcept;
 std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept;
 AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
+
+BindingRegisterClass GetBindingRegisterClass(BindingKind kind) noexcept;
+bool IsWritableBinding(BindingKind kind) noexcept;
+bool CanBeRootDescriptor(BindingKind kind) noexcept;
 
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
@@ -1703,6 +1868,7 @@ std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;
 std::string_view format_as(TextureState v) noexcept;
+std::string_view format_as(ResolveMode v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;

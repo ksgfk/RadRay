@@ -35,6 +35,9 @@ constexpr FixtureDescription kFixtures[] = {
     {"unused_resource"},
     {"shared_cbuffer_type"},
     {"nested_cbuffer_roots"},
+    {"explicit_bindings"},
+    {"explicit_multiple_push"},
+    {"explicit_layered_groups"},
 };
 
 bool ReadFile(const std::filesystem::path& path, vector<byte>& output) {
@@ -70,10 +73,12 @@ bool WriteArtifact(
 
 int main() {
     const std::filesystem::path root{RADRAY_PROJECT_DIR};
-    const std::filesystem::path sourceRoot = root / "modules/render/tests/data/shader_sources";
-    const std::filesystem::path artifactRoot = root / "modules/render/tests/data/shader_artifacts";
+    const std::filesystem::path sourceRoot = root / "modules/shader/tests/data/shader_sources";
+    const std::filesystem::path artifactRoot = root / "modules/shader/tests/data/shader_artifacts";
     const vector<std::filesystem::path> includePaths{root / "shaderlib"};
     std::filesystem::create_directories(artifactRoot);
+    const auto rawRoot = root / "modules/render/tests/data/shader_bytecode";
+    std::filesystem::create_directories(rawRoot);
 
     Client client;
     if (!client.IsAvailable()) {
@@ -83,7 +88,9 @@ int main() {
     for (const FixtureDescription& fixture : kFixtures) {
         vector<byte> source;
         const string fileName = string{fixture.Name} + ".hlsl";
-        if (!ReadFile(sourceRoot / fileName, source)) {
+        const bool explicitFixture = std::string_view{fixture.Name}.starts_with("explicit_");
+        const auto sourcePath = explicitFixture ? root / "modules/shader_compiler/tests/data" / fileName : sourceRoot / fileName;
+        if (!ReadFile(sourcePath, source)) {
             return 3;
         }
 
@@ -124,7 +131,12 @@ int main() {
                 return 6;
             }
             const string suffix = target == ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
-            if (!WriteArtifact(artifactRoot / (string{fixture.Name} + suffix), *lane)) {
+            for (const auto& stage : lane->Stages) {
+                std::ofstream raw(rawRoot / (string{fixture.Name} + "." + stage.EntryPoint + suffix), std::ios::binary | std::ios::trunc);
+                raw.write(reinterpret_cast<const char*>(stage.Bytecode.data()), static_cast<std::streamsize>(stage.Bytecode.size()));
+                if (!raw.good()) return 8;
+            }
+            if (!explicitFixture && !WriteArtifact(artifactRoot / (string{fixture.Name} + suffix), *lane)) {
                 return 7;
             }
         }

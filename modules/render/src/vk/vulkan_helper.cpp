@@ -34,10 +34,263 @@
 
 namespace radray::render::vulkan {
 
+DeviceFeaturesVulkan::DeviceFeaturesVulkan() noexcept {
+    Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+}
+
+FeatureChainVulkan::FeatureChainVulkan(const DeviceFeaturesVulkan& features) noexcept
+    : Vulkan11(features.Vulkan11), Vulkan12(features.Vulkan12) {
+    Core.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    Core.features = features.Core;
+    Core.pNext = &Vulkan11;
+    Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    Vulkan11.pNext = &Vulkan12;
+    Vulkan12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    Vulkan12.pNext = nullptr;
+}
+
+DeviceFeaturesVulkan FeatureChainVulkan::Snapshot() const noexcept {
+    DeviceFeaturesVulkan result;
+    result.Core = Core.features;
+    result.Vulkan11 = Vulkan11;
+    result.Vulkan12 = Vulkan12;
+    result.Vulkan11.pNext = nullptr;
+    result.Vulkan12.pNext = nullptr;
+    return result;
+}
+
+void FeatureChainVulkan::ApplyTo(VkDeviceCreateInfo& createInfo) const noexcept {
+    createInfo.pNext = &Core;
+    createInfo.pEnabledFeatures = nullptr;
+}
+
+FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
+    using Requirement = FeatureRequirementVulkan;
+    return {
+        .FullDrawIndexUint32 = Requirement::Optional,
+        .ImageCubeArray = Requirement::Optional,
+        .DepthClamp = Requirement::Optional,
+        .DepthBiasClamp = Requirement::Optional,
+        .FillModeNonSolid = Requirement::Optional,
+        .IndependentBlend = Requirement::Optional,
+        .DualSrcBlend = Requirement::Optional,
+        .MultiDrawIndirect = Requirement::Optional,
+        .DrawIndirectFirstInstance = Requirement::Optional,
+        .SamplerAnisotropy = Requirement::Optional,
+        .VertexPipelineStoresAndAtomics = Requirement::Optional,
+        .FragmentStoresAndAtomics = Requirement::Optional,
+        .TimelineSemaphore = Requirement::Required,
+        .SamplerMirrorClampToEdge = Requirement::Optional,
+        .SamplerFilterMinmax = Requirement::Optional,
+        .ImagelessFramebuffer = Requirement::Optional,
+        .SeparateDepthStencilLayouts = Requirement::Optional};
+}
+
+FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested) {
+    FeatureSelectionVulkan result;
+    auto select = [&](std::string_view name, FeatureRequirementVulkan requirement, VkBool32 support, VkBool32& enabled) {
+        if (requirement == FeatureRequirementVulkan::Disabled) return;
+        if (support) {
+            enabled = VK_TRUE;
+            result.EnabledNames.emplace_back(name);
+        } else if (requirement == FeatureRequirementVulkan::Required) {
+            result.MissingRequired.emplace_back(name);
+        }
+    };
+    auto& core = result.Enabled.Core;
+    auto& vulkan12 = result.Enabled.Vulkan12;
+    select("fullDrawIndexUint32", requested.FullDrawIndexUint32, supported.Core.fullDrawIndexUint32, core.fullDrawIndexUint32);
+    select("imageCubeArray", requested.ImageCubeArray, supported.Core.imageCubeArray, core.imageCubeArray);
+    select("depthClamp", requested.DepthClamp, supported.Core.depthClamp, core.depthClamp);
+    select("depthBiasClamp", requested.DepthBiasClamp, supported.Core.depthBiasClamp, core.depthBiasClamp);
+    select("fillModeNonSolid", requested.FillModeNonSolid, supported.Core.fillModeNonSolid, core.fillModeNonSolid);
+    select("independentBlend", requested.IndependentBlend, supported.Core.independentBlend, core.independentBlend);
+    select("dualSrcBlend", requested.DualSrcBlend, supported.Core.dualSrcBlend, core.dualSrcBlend);
+    select("multiDrawIndirect", requested.MultiDrawIndirect, supported.Core.multiDrawIndirect, core.multiDrawIndirect);
+    select("drawIndirectFirstInstance", requested.DrawIndirectFirstInstance, supported.Core.drawIndirectFirstInstance, core.drawIndirectFirstInstance);
+    select("samplerAnisotropy", requested.SamplerAnisotropy, supported.Core.samplerAnisotropy, core.samplerAnisotropy);
+    select("vertexPipelineStoresAndAtomics", requested.VertexPipelineStoresAndAtomics, supported.Core.vertexPipelineStoresAndAtomics, core.vertexPipelineStoresAndAtomics);
+    select("fragmentStoresAndAtomics", requested.FragmentStoresAndAtomics, supported.Core.fragmentStoresAndAtomics, core.fragmentStoresAndAtomics);
+    select("timelineSemaphore", requested.TimelineSemaphore, supported.Vulkan12.timelineSemaphore, vulkan12.timelineSemaphore);
+    select("samplerMirrorClampToEdge", requested.SamplerMirrorClampToEdge, supported.Vulkan12.samplerMirrorClampToEdge, vulkan12.samplerMirrorClampToEdge);
+    select("samplerFilterMinmax", requested.SamplerFilterMinmax, supported.Vulkan12.samplerFilterMinmax, vulkan12.samplerFilterMinmax);
+    select("imagelessFramebuffer", requested.ImagelessFramebuffer, supported.Vulkan12.imagelessFramebuffer, vulkan12.imagelessFramebuffer);
+    select("separateDepthStencilLayouts", requested.SeparateDepthStencilLayouts, supported.Vulkan12.separateDepthStencilLayouts, vulkan12.separateDepthStencilLayouts);
+    return result;
+}
+
+std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept {
+    if (!functions.vkWaitSemaphores) return "vkWaitSemaphores";
+    if (!functions.vkGetSemaphoreCounterValue) return "vkGetSemaphoreCounterValue";
+    if (!functions.vkGetDescriptorSetLayoutSupport) return "vkGetDescriptorSetLayoutSupport";
+    if (!functions.vkGetBufferMemoryRequirements2) return "vkGetBufferMemoryRequirements2";
+    if (!functions.vkGetImageMemoryRequirements2) return "vkGetImageMemoryRequirements2";
+    if (!functions.vkBindBufferMemory2) return "vkBindBufferMemory2";
+    if (!functions.vkBindImageMemory2) return "vkBindImageMemory2";
+    if (!functions.vkCreateRenderPass2) return "vkCreateRenderPass2";
+    if (!functions.vkCmdBeginRenderPass2) return "vkCmdBeginRenderPass2";
+    if (!functions.vkCmdEndRenderPass2) return "vkCmdEndRenderPass2";
+    return {};
+}
+
 uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept {
     auto count = std::max(requested, capabilities.minImageCount);
     if (capabilities.maxImageCount != 0) count = std::min(count, capabilities.maxImageCount);
     return count;
+}
+
+std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept {
+    const auto min = capabilities.minImageExtent;
+    const auto max = capabilities.maxImageExtent;
+    if (!max.width || !max.height || min.width > max.width || min.height > max.height) return std::nullopt;
+    const auto extent = capabilities.currentExtent.width == UINT32_MAX
+                            ? VkExtent2D{std::clamp(requested.width, min.width, max.width), std::clamp(requested.height, min.height, max.height)}
+                            : capabilities.currentExtent;
+    if (!extent.width || !extent.height) return std::nullopt;
+    return extent;
+}
+
+std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept {
+    if (desc.Primitive.UnclippedDepth && !features.Core.depthClamp) return "depth clamp is unsupported";
+    if (desc.Primitive.Poly != PolygonMode::Fill && !features.Core.fillModeNonSolid) return "non-solid polygon mode is unsupported";
+    if (desc.Primitive.Conservative && !conservativeRasterization) return "conservative rasterization is unsupported";
+    if (desc.DepthStencil) {
+        const auto& bias = desc.DepthStencil->DepthBias;
+        if ((bias.Constant != 0 || bias.SlopScale != 0) && bias.Clamp != 0 && !features.Core.depthBiasClamp) return "depth bias clamp is unsupported";
+    }
+    const auto dualSource = [](BlendFactor factor) {
+        return factor == BlendFactor::Src1 || factor == BlendFactor::OneMinusSrc1 || factor == BlendFactor::Src1Alpha || factor == BlendFactor::OneMinusSrc1Alpha;
+    };
+    for (const auto& target : desc.ColorTargets) {
+        if (!features.Core.independentBlend) {
+            const auto& first = desc.ColorTargets.front();
+            if (target.Blend != first.Blend || target.WriteMask != first.WriteMask) return "independent blend is unsupported";
+        }
+        if (target.Blend && !features.Core.dualSrcBlend) {
+            const auto& blend = *target.Blend;
+            if (dualSource(blend.Color.Src) || dualSource(blend.Color.Dst) || dualSource(blend.Alpha.Src) || dualSource(blend.Alpha.Dst)) return "dual-source blend is unsupported";
+        }
+    }
+    return std::nullopt;
+}
+
+uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept {
+    const auto available = GetTextureFormatAspects(format);
+    if (!aspects) aspects = available;
+    if (!std::has_single_bit(aspects.value()) || (aspects.value() & ~available.value())) return 0;
+    if (aspects == TextureAspect::Stencil) return 1;
+    if (aspects == TextureAspect::Depth) return format == TextureFormat::D16_UNORM ? 2 : 4;
+    return GetTextureFormatBytesPerPixel(format);
+}
+
+VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept {
+    constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (!(stages & mask)) return stages;
+    VkPipelineStageFlags selected = 0;
+    if (shaders) {
+        if (shaders.HasFlag(ShaderStage::Vertex)) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+        if (shaders.HasFlag(ShaderStage::Pixel)) selected |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (shaders.HasFlag(ShaderStage::Compute)) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    } else {
+        if (queueFlags & VK_QUEUE_GRAPHICS_BIT) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (queueFlags & VK_QUEUE_COMPUTE_BIT) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        selected &= stages;
+    }
+    return selected ? (stages & ~mask) | selected : 0;
+}
+
+bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept {
+    VkPipelineStageFlags allowed = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    if (queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)) allowed |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) allowed |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (queueFlags & VK_QUEUE_COMPUTE_BIT) allowed |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (queueFlags & VK_QUEUE_GRAPHICS_BIT) allowed |= VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    return stages != 0 && (stages & ~allowed) == 0;
+}
+
+VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept {
+    switch (stage) {
+        case QueryPipelineStage::Top: return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        case QueryPipelineStage::Bottom: return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        case QueryPipelineStage::Graphics: return VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+        case QueryPipelineStage::Compute: return VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    Unreachable();
+}
+
+static uint32_t _ImageFormatCompatibilityClass(TextureFormat format) noexcept {
+    switch (format) {
+        case TextureFormat::R8_SINT:
+        case TextureFormat::R8_UINT:
+        case TextureFormat::R8_SNORM:
+        case TextureFormat::R8_UNORM: return 8;
+        case TextureFormat::R16_SINT:
+        case TextureFormat::R16_UINT:
+        case TextureFormat::R16_SNORM:
+        case TextureFormat::R16_UNORM:
+        case TextureFormat::R16_FLOAT:
+        case TextureFormat::RG8_SINT:
+        case TextureFormat::RG8_UINT:
+        case TextureFormat::RG8_SNORM:
+        case TextureFormat::RG8_UNORM: return 16;
+        case TextureFormat::R32_SINT:
+        case TextureFormat::R32_UINT:
+        case TextureFormat::R32_FLOAT:
+        case TextureFormat::RG16_SINT:
+        case TextureFormat::RG16_UINT:
+        case TextureFormat::RG16_SNORM:
+        case TextureFormat::RG16_UNORM:
+        case TextureFormat::RG16_FLOAT:
+        case TextureFormat::RGBA8_SINT:
+        case TextureFormat::RGBA8_UINT:
+        case TextureFormat::RGBA8_SNORM:
+        case TextureFormat::RGBA8_UNORM:
+        case TextureFormat::RGBA8_UNORM_SRGB:
+        case TextureFormat::BGRA8_UNORM:
+        case TextureFormat::BGRA8_UNORM_SRGB:
+        case TextureFormat::RGB10A2_UINT:
+        case TextureFormat::RGB10A2_UNORM:
+        case TextureFormat::RG11B10_FLOAT: return 32;
+        case TextureFormat::RG32_SINT:
+        case TextureFormat::RG32_UINT:
+        case TextureFormat::RG32_FLOAT:
+        case TextureFormat::RGBA16_SINT:
+        case TextureFormat::RGBA16_UINT:
+        case TextureFormat::RGBA16_SNORM:
+        case TextureFormat::RGBA16_UNORM:
+        case TextureFormat::RGBA16_FLOAT: return 64;
+        case TextureFormat::RGBA32_SINT:
+        case TextureFormat::RGBA32_UINT:
+        case TextureFormat::RGBA32_FLOAT: return 128;
+        case TextureFormat::D16_UNORM: return 1001;
+        case TextureFormat::D32_FLOAT: return 1002;
+        case TextureFormat::D24_UNORM_S8_UINT: return 1003;
+        case TextureFormat::D32_FLOAT_S8_UINT: return 1004;
+        case TextureFormat::UNKNOWN: return 0;
+    }
+    return 0;
+}
+
+bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkImageCreateFlags flags) noexcept {
+    const auto imageClass = _ImageFormatCompatibilityClass(image);
+    if (!imageClass) return false;
+    if (!(flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) return image == view;
+    return imageClass == _ImageFormatCompatibilityClass(view);
+}
+
+VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept {
+    switch (usage) {
+        case TextureViewUsage::Resource: return VK_IMAGE_USAGE_SAMPLED_BIT;
+        case TextureViewUsage::UnorderedAccess: return VK_IMAGE_USAGE_STORAGE_BIT;
+        case TextureViewUsage::RenderTarget: return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthReadStencilWrite:
+        case TextureViewUsage::DepthWriteStencilRead:
+        case TextureViewUsage::DepthWrite: return VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        case TextureViewUsage::UNKNOWN: return 0;
+    }
+    return 0;
 }
 
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {
@@ -192,6 +445,8 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept {
 }
 
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
+    if (v.HasFlag(TextureState::DepthReadStencilWrite) || v.HasFlag(TextureState::DepthWriteStencilRead))
+        return TextureStateToAccessFlags(TextureStateForAspect(v, TextureAspect::Depth)) | TextureStateToAccessFlags(TextureStateForAspect(v, TextureAspect::Stencil));
     VkAccessFlags access = 0;
     if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::ResolveSource)) {
         access |= VK_ACCESS_TRANSFER_READ_BIT;
@@ -205,12 +460,14 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::RenderTarget)) {
         access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     }
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::DepthWrite)) access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
     if (v.HasFlag(TextureState::DepthRead)) {
         // Traditional read-only attachments still perform store operations with write access.
         access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::DepthWrite)) {
-        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        access |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::UnorderedAccess)) {
         access |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -219,6 +476,8 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
 }
 
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept {
+    if (v.HasFlag(TextureState::DepthReadStencilWrite) || v.HasFlag(TextureState::DepthWriteStencilRead))
+        return TextureStateToPipelineStageFlags(TextureStateForAspect(v, TextureAspect::Depth), isSrc) | TextureStateToPipelineStageFlags(TextureStateForAspect(v, TextureAspect::Stencil), isSrc);
     VkPipelineStageFlags stage = 0;
     if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::CopyDestination) ||
         v.HasFlag(TextureState::ResolveSource) || v.HasFlag(TextureState::ResolveDestination)) {
@@ -229,11 +488,12 @@ VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSr
                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     if (v.HasFlag(TextureState::RenderTarget)) {
         stage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     }
     if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::DepthWrite)) {
-        stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        stage |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     }
     if (v.HasFlag(TextureState::UnorderedAccess)) {
         stage |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
@@ -255,7 +515,15 @@ VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSr
     return stage;
 }
 
-VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format) noexcept {
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format, TextureAspect aspect, bool separate) noexcept {
+    if (v.HasFlag(TextureState::AttachmentResolveDestination)) v = IsDepthStencilFormat(format) ? TextureStates{TextureState::DepthWrite} : TextureStates{TextureState::RenderTarget};
+    if (separate && (aspect == TextureAspect::Depth || aspect == TextureAspect::Stencil)) {
+        v = TextureStateForAspect(v, aspect);
+        if (v.HasFlag(TextureState::DepthWrite)) return aspect == TextureAspect::Depth ? VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL;
+        if (v.HasFlag(TextureState::DepthRead) || v.HasFlag(TextureState::ShaderRead)) return aspect == TextureAspect::Depth ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL;
+    }
+    if (v.HasFlag(TextureState::DepthReadStencilWrite)) return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+    if (v.HasFlag(TextureState::DepthWriteStencilRead)) return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
     if (v.HasFlag(TextureState::Present)) {
         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
@@ -289,6 +557,8 @@ VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept {
         case TextureViewUsage::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         case TextureViewUsage::DepthRead: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         case TextureViewUsage::DepthWrite: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::DepthReadStencilWrite: return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::DepthWriteStencilRead: return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
         case TextureViewUsage::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
         case TextureViewUsage::UNKNOWN: return VK_IMAGE_LAYOUT_UNDEFINED;
     }
@@ -297,7 +567,7 @@ VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept {
 
 VkQueueFlags MapType(QueueType v) noexcept {
     switch (v) {
-        case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT;
+        case QueueType::Direct: return VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
         case QueueType::Compute: return VK_QUEUE_COMPUTE_BIT;
         case QueueType::Copy: return VK_QUEUE_TRANSFER_BIT;
 
@@ -638,6 +908,8 @@ VkSamplerAddressMode MapType(AddressMode v) noexcept {
         case AddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         case AddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
         case AddressMode::Mirror: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+        case AddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        case AddressMode::MirrorClampToEdge: return VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE;
     }
     Unreachable();
 }
