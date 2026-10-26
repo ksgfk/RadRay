@@ -351,7 +351,7 @@
     "when": "RADRAY_BUILD_TESTS",
     "requires": [],
     "options": {
-      "gtest_force_shared_crt": "ON",
+      "gtest_force_shared_crt": "${RADRAY_SHARED_CRT}",
       "BUILD_GMOCK": "OFF",
       "INSTALL_GTEST": "ON"
     },

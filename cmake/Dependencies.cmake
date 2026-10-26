@@ -1,15 +1,17 @@
 include("${CMAKE_CURRENT_LIST_DIR}/RadRayPackageChecks.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RuntimeLibrary.cmake")
 
 function(radray_configure_dependencies)
     set(VOLK_PULL_IN_VULKAN OFF)
     if (RADRAY_DEPENDENCY_TRIPLET)
-        if (NOT RADRAY_DEPENDENCY_TRIPLET MATCHES "^(windows-x64-(msvc|clangcl)|macos-arm64-appleclang)$")
+        if (NOT RADRAY_DEPENDENCY_TRIPLET MATCHES "^(windows-x64-(msvc|clangcl)(-staticcrt)?|macos-arm64-appleclang)$")
             message(FATAL_ERROR "Unsupported RADRAY_DEPENDENCY_TRIPLET: ${RADRAY_DEPENDENCY_TRIPLET}")
         endif()
         if (NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release)$" OR
             (CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_CONFIGURATION_TYPES STREQUAL CMAKE_BUILD_TYPE))
             message(FATAL_ERROR "Repository dependencies require one Debug or Release configuration per build directory")
         endif()
+        radray_check_repository_crt("${RADRAY_DEPENDENCY_TRIPLET}")
         foreach(name IN LISTS RADRAY_DEPENDENCIES)
             list(APPEND CMAKE_PREFIX_PATH "${RADRAY_SOURCE_ROOT}/SDKs/${name}/${RADRAY_DEPENDENCY_TRIPLET}/${CMAKE_BUILD_TYPE}")
         endforeach()

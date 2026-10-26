@@ -1,6 +1,6 @@
 > - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
 > - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
-> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
+> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/RuntimeLibrary.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`, `modules/core/tests/test_memory_override.cpp`
 
 # 构建与测试
 
@@ -37,10 +37,11 @@ python tools/fetch_third_party.py restore --apply
 自动生成。`--only xxHash` 可限定依赖，`--no-lock` 可跳过 lockfile；默认分支更新支持 detached HEAD，
 并重新读取远端 HEAD，远端切换默认分支后也能跟随。升级固定版本使用 `upgrade --apply`。
 
-六个 configure/build/test preset 使用相同名称；构建目录统一为 `build/<三元组>/<Debug|Release>/`。
+十个 configure/build/test preset 使用相同名称；构建目录统一为 `build/<三元组>/<Debug|Release>/`。
 Windows MSVC 使用 `windows-x64-msvc` 与 Ninja，ClangCL 使用 `windows-x64-clangcl` 与
 Visual Studio 18 2026；macOS 使用 `macos-arm64-appleclang` 与 Ninja。每个目录只对应一种配置，
 ClangCL 预设也将 `CMAKE_CONFIGURATION_TYPES` 限定为 Debug 或 Release。旧构建目录不自动迁移或删除。
+Windows 另外提供四组 `-staticcrt` 预设与两种独立三元组，见下文[静态 CRT 与 mimalloc](#静态-crt-与-mimalloc)。
 
 ```powershell
 python tools/build_third_party.py build --triplet windows-x64-clangcl --config Debug --parallel 8
@@ -79,9 +80,9 @@ python tools/build_third_party.py build --triplet windows-x64-msvc --config Rele
 python tools/build_third_party.py build --triplet windows-x64-msvc --config Debug --clean
 ```
 
-脚本只接受上述三种三元组和 Debug/Release，不读取 preset，不接受工程 `-D` 或任意 toolchain。
+脚本接受上述三种三元组、两个 Windows `-staticcrt` 三元组和 Debug/Release，不读取 preset，不接受工程 `-D` 或任意 toolchain。
 Windows MSVC 需要 x64 开发终端；ClangCL 使用 VS 2026 的 ClangCL toolset；macOS 使用系统
-AppleClang 并指定 arm64。Windows 依赖使用动态 CRT（`/MD`、`/MDd`），C++ 最低要求为 C++20。
+AppleClang 并指定 arm64。原 Windows 三元组使用动态 CRT（`/MD`、`/MDd`）；`-staticcrt` 三元组在两种配置中均使用 `/MT`。C++ 最低要求为 C++20。
 
 默认准备依赖目录表中该平台的全部库，包含 GTest、Benchmark 和 Tracy；macOS 排除两个 DirectX 库。
 工程 tests、profiler、backend 等开关只影响主工程消费，不影响准备列表与路径。manifest 中目前未使用的
@@ -100,7 +101,7 @@ configure/build/install，由 CMake 增量构建；不维护 hash、ready 状态
 旧 hash 目录不自动清理。
 失败即停止，日志保存在对应 build 目录；不向同一包、三元组和模式并发写入。
 
-需要编译的包默认静态，保留 spdlog 外部 fmt 与 Windows 宽字符、GTest 动态 CRT、Tracy on-demand
+需要编译的包默认静态，保留 spdlog 外部 fmt 与 Windows 宽字符、与三元组一致的 GTest CRT、Tracy on-demand
 等必要配置。优先使用上游安装规则；IJG libjpeg 与 stdexec 使用 `cmake/dependencies/` 的离线适配，
 不修改源码、不下载额外工具。libjpeg 适配器保留 `FindJPEG` 识别 Debug 所需的 `d` 后缀，
 其他库不统一追加后缀。DXC 是独立 SDK 包，准备脚本不构建或验证它。
@@ -111,13 +112,72 @@ configure/build/install，由 CMake 增量构建；不维护 hash、ready 状态
 不回退源码构建。准备脚本成功只表示所选包安装完成，依赖集成由主工程构建和功能测试验证。
 
 使用其他包时需自行保证 CRT、架构和编译选项兼容；Windows spdlog 必须以宽字符支持编译。
-`mimalloc-static` 通过 `LINK_LIBRARY:WHOLE_ARCHIVE` 进入最终程序。Windows 动态 CRT 下，上游静态
-mimalloc 不覆盖 CRT `malloc`；whole-archive 只保留链接语义，不等于启用 DLL 重定向。本工程不添加
-mimalloc redirect DLL；需要完整全局覆盖时须另行确定分配器与 CRT 策略。
+
+### 静态 CRT 与 mimalloc
+
+Windows 静态 CRT 路线使用独立的三元组、构建目录和 SDK 前缀，不覆盖既有动态 CRT 包：
+
+| 编译器 | 依赖三元组 | configure/build/test preset |
+|---|---|---|
+| MSVC | `windows-x64-msvc-staticcrt` | `win-x64-debug-staticcrt`、`win-x64-release-staticcrt` |
+| ClangCL | `windows-x64-clangcl-staticcrt` | `win-x64-debug-clangcl-staticcrt`、`win-x64-release-clangcl-staticcrt` |
+
+静态 CRT 路线的 Debug 和 Release 均设置 `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`，即 `/MT`。
+mimalloc 3.5.3 的 Windows 静态覆盖要求使用 Release CRT，不能把 `/MTd` 当作同等支持的覆盖路径。
+Debug 仍按 Debug 配置编译，保留调试信息、低优化、断言和 `RADRAY_IS_DEBUG`；mimalloc 也使用
+Debug 构建的内部检查。该路线不启用 Debug CRT，由 `/MTd` 隐含的 `_DEBUG` 和 STL Debug iterator
+检查也不启用；工程不手动改写 `_ITERATOR_DEBUG_LEVEL`。需要原来的 Debug CRT 行为时使用原动态
+CRT 三元组。[mimalloc 3.5.3 静态覆盖说明](https://github.com/microsoft/mimalloc/blob/v3.5.3/readme.md#static-override)
+
+以下命令由开发者显式执行；首先按前文恢复第三方源码和所需 SDK：
+
+```powershell
+python tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Release --parallel 8
+cmake --preset win-x64-release-staticcrt
+cmake --build --preset win-x64-release-staticcrt --parallel 8
+ctest --preset win-x64-release-staticcrt
+```
+
+调试配置需要单独准备 Debug 包：
+
+```powershell
+python tools/build_third_party.py build --triplet windows-x64-msvc-staticcrt --config Debug --parallel 8
+cmake --preset win-x64-debug-staticcrt
+cmake --build --preset win-x64-debug-staticcrt --parallel 8
+ctest --preset win-x64-debug-staticcrt
+```
+
+ClangCL 使用表中的对应名称。不要把原有 `/MD[d]` 构建目录改成 `/MT` 后继续使用缓存包。
+`cmake/RuntimeLibrary.cmake` 在主工程和依赖准备时检查所选三元组与 CRT 是否一致；不匹配则停止，
+不会自动修改宿主的 CRT。显式包 `_DIR`、`CMAKE_PREFIX_PATH`、已有 imported target 或自备包仍由
+调用方保证 ABI 一致，目录隔离不能校验任意外部二进制的实际编译选项。
+
+`RADRAY_ENABLE_MIMALLOC=ON` 时，core 继续将 `mimalloc-static` 以 `LINK_LIBRARY:WHOLE_ARCHIVE`
+传递到最终 exe/DLL。在 `/MT` 下，上游标准 C 分配函数和 C++ `new/delete` 替换会参与最终链接；
+RadRay 的 `Malloc/Free`、对齐分配及同一映像内静态依赖的标准分配调用通过这些符号进入 mimalloc。
+Windows `/MD[d]` 下上游跳过该替换，单纯链接 mimalloc 并不意味着覆盖 CRT 或 C++ 分配。
+启用的 Vulkan 分配回调直接调用 `mi_*`，不依赖 CRT 符号覆盖。工程不添加 mimalloc redirect DLL。
+
+静态覆盖只针对最终映像内这些标准分配入口；系统/驱动内部、GPU 显存和直接使用系统内存 API 的
+分配不在覆盖范围。对象和内存由分配它的模块配对释放，不跨 DLL 使用另一套 CRT 的 `free/delete`。
+Windows `/MT` 下 mimalloc 默认以 C++ 编译并自带 `new/delete`，宿主不得再包含
+`mimalloc-new-delete.h` 或另定义同名替换。Raynium 采用静态 CRT 三元组时也需移除其手动替换头，
+并与 RadRay 统一 `/MT`；本项目不修改外部宿主配置。
+
+`test_inline_vector` 自己替换 `new/delete` 以计数，只编译容器测试与现有 `logger.cpp`，链接
+fmt、spdlog 和 GTest，不链接 core 的 mimalloc 依赖。其余 core 测试仍链接完整 core；静态 CRT
+且启用 mimalloc 时加入 `MimallocOverride` suite，检查标准 C 分配及 realloc 数据保留、RadRay
+分配、对齐分配、C++ 对象/数组和标准容器的 mimalloc 归属。构建完成后可单独执行：
+
+```powershell
+ctest --preset win-x64-release-staticcrt -R MimallocOverride
+```
+
+这些是已加入的构建和检查入口，尚不表示静态 CRT、最终 DLL 覆盖或运行验证已经通过。
 
 ### 编译契约与优化
 
-Debug 保留工具链的运行时检查，工程不改写 `_ITERATOR_DEBUG_LEVEL`。宿主、RadRay 与其
+Debug 保留工具链的编译检查；CRT 与 STL 调试行为取决于所选路线，工程不改写 `_ITERATOR_DEBUG_LEVEL`。宿主、RadRay 与其
 第三方依赖必须使用兼容的 CRT、STL ABI 和 Eigen 编译配置。
 
 core 公开传递 C++20 最低要求、`RADRAY_PLATFORM_*` 和 `RADRAY_IS_DEBUG`；后者保持

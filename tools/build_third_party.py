@@ -25,20 +25,25 @@ def run(command, cwd, log):
 
 
 def triplets():
-    return ("windows-x64-msvc", "windows-x64-clangcl", "macos-arm64-appleclang")
+    return ("windows-x64-msvc", "windows-x64-clangcl",
+            "windows-x64-msvc-staticcrt", "windows-x64-clangcl-staticcrt",
+            "macos-arm64-appleclang")
 
 
 def toolchain_arguments(triplet):
-    if triplet == "windows-x64-msvc":
+    compiler_triplet = triplet.removesuffix("-staticcrt")
+    if compiler_triplet == "windows-x64-msvc":
         args = ["-G", "Ninja", "-DCMAKE_C_COMPILER=cl", "-DCMAKE_CXX_COMPILER=cl"]
-    elif triplet == "windows-x64-clangcl":
+    elif compiler_triplet == "windows-x64-clangcl":
         args = ["-G", "Visual Studio 18 2026", "-A", "x64", "-T", "ClangCL"]
     elif triplet == "macos-arm64-appleclang":
         return ["-G", "Ninja", "-DCMAKE_C_COMPILER=/usr/bin/clang",
                 "-DCMAKE_CXX_COMPILER=/usr/bin/clang++", "-DCMAKE_OSX_ARCHITECTURES=arm64"]
     else:
         fail(f"unsupported triplet: {triplet}")
-    return [*args, "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"]
+    # mimalloc's Windows static override requires the release CRT, including debug builds.
+    runtime = "MultiThreaded" if triplet.endswith("-staticcrt") else "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+    return [*args, f"-DCMAKE_MSVC_RUNTIME_LIBRARY={runtime}"]
 
 
 def load_catalog(root, triplet):
@@ -101,8 +106,11 @@ def build_packages(root, catalog, selected, triplet, config, parallel, clean):
         print(f"Building {name}: {triplet}/{config}", flush=True)
         prefixes = [install_prefix(root, dependency, triplet, config)
                     for dependency in closure(entry["requires"], catalog)]
-        options = {key: ("ON" if triplet.startswith("windows-") else "OFF")
-                   if value == "${WIN32}" else value for key, value in entry["options"].items()}
+        substitutions = {
+            "${WIN32}": "ON" if triplet.startswith("windows-") else "OFF",
+            "${RADRAY_SHARED_CRT}": "ON" if triplet.startswith("windows-") and not triplet.endswith("-staticcrt") else "OFF",
+        }
+        options = {key: substitutions.get(value, value) for key, value in entry["options"].items()}
         run(["cmake", "-S", str(root / "cmake/dependencies"), "-B", str(build), *common,
              f"-DCMAKE_BUILD_TYPE={config}", f"-DCMAKE_CONFIGURATION_TYPES={config}",
              "-DCMAKE_CXX_STANDARD=20", "-DCMAKE_INSTALL_LIBDIR=lib",
@@ -144,6 +152,8 @@ def main():
     build_packages(root, catalog, selected, args.triplet, args.config, args.parallel, args.clean)
     preset = {"windows-x64-msvc": f"win-x64-{args.config.lower()}",
               "windows-x64-clangcl": f"win-x64-{args.config.lower()}-clangcl",
+              "windows-x64-msvc-staticcrt": f"win-x64-{args.config.lower()}-staticcrt",
+              "windows-x64-clangcl-staticcrt": f"win-x64-{args.config.lower()}-clangcl-staticcrt",
               "macos-arm64-appleclang": f"macos-arm64-{args.config.lower()}"}[args.triplet]
     print(f"Installed {len(selected)} dependencies for {args.triplet}/{args.config}.")
     print(f"Configure RadRay explicitly after preparing all required packages and SDKs: cmake --preset {preset}")

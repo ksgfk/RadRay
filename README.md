@@ -30,6 +30,8 @@ ctest --preset win-x64-debug
 ```
 
 二进制在 `build/windows-x64-msvc/Debug/_build/<Config>/`。
+需要将 RadRay 静态链接进 native DLL 并启用 mimalloc 静态覆盖时，使用独立的
+[`-staticcrt` 构建路线](docs/guide/build-test.md#静态-crt-与-mimalloc)。
 
 ## License
 

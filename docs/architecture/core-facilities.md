@@ -38,9 +38,11 @@ template <class T> using vector = std::vector<T, allocator<T>>;
 `unique_ptr` / `shared_ptr` / `weak_ptr` / `make_unique` / `make_shared` /
 `enable_shared_from_this` 也都被 `using` 拉进 `radray` 命名空间。
 
-**mimalloc 是链接期覆盖，代码里看不见。** `RADRAY_ENABLE_MIMALLOC`（默认 ON）让
-`mimalloc-override` 以 whole-archive 方式链进来，全局替换 `malloc` / `new`。
-所以"用了 radray 别名"和"走 mimalloc"是两件独立的事——别名的价值在于统一，不在于分配器。
+`RADRAY_ENABLE_MIMALLOC`（默认 ON）通过 whole-archive 链接 `mimalloc-static`。
+是否替换标准分配取决于平台和 CRT：Windows 静态 CRT 路线使用 `/MT`，让上游替换参与最终映像
+的链接；原 `/MD[d]` 路线只链接库，不自动覆盖标准分配。具体配置、宿主约束与覆盖检查见
+[静态 CRT 与 mimalloc](../guide/build-test.md#静态-crt-与-mimalloc)。容器别名统一类型入口，
+不自行选择分配器。
 
 `AGENTS.md` 要求 STL 容器一律走这些别名。
 
