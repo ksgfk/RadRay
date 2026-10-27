@@ -69,7 +69,7 @@ data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不�
 ### SparseSet
 
 `sparse_set.h` 的 `SparseSet<T>` 用稀疏槽位、稠密值数组和空闲链管理可复用句柄。
-新槽 Generation 从 0 开始，Index 为 `UINT32_MAX` 表示无效句柄；Destroy 与 Clear 使被删除的
+新槽 Generation 从 0 开始，Index 为 `std::numeric_limits<uint32_t>::max()` 表示无效句柄；Destroy 与 Clear 使被删除的
 存活句柄代次递增。代次不检查溢出，调用方约定同一槽位的代次在程序生命周期内不回绕。
 Get、Destroy 要求句柄存活，前置条件仅使用 Debug assert；可能失效的句柄使用 IsAlive 或 TryGet。
 增删只做必要的局部断言，不运行全表扫描；完整行为一致性校验由 `test_sparse_set.cpp` 的混合操作测试覆盖。

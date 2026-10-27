@@ -71,17 +71,29 @@ bool WriteArtifact(
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "usage: radray_shader_fixture_generator <output-directory>\n";
+        return 1;
+    }
+    const std::filesystem::path outputRoot{argv[1]};
     const std::filesystem::path root{RADRAY_PROJECT_DIR};
     const std::filesystem::path sourceRoot = root / "modules/shader/tests/data/shader_sources";
-    const std::filesystem::path artifactRoot = root / "modules/shader/tests/data/shader_artifacts";
+    const std::filesystem::path artifactRoot = outputRoot / "shader_artifacts";
     const vector<std::filesystem::path> includePaths{root / "shaderlib"};
-    std::filesystem::create_directories(artifactRoot);
-    const auto rawRoot = root / "modules/render/tests/data/shader_bytecode";
-    std::filesystem::create_directories(rawRoot);
+    const auto rawRoot = outputRoot / "shader_bytecode";
+    std::error_code error;
+    for (const auto& directory : {artifactRoot, rawRoot}) {
+        std::filesystem::create_directories(directory, error);
+        if (error) {
+            std::cerr << "cannot create " << directory << ": " << error.message() << '\n';
+            return 1;
+        }
+    }
 
     Client client;
     if (!client.IsAvailable()) {
+        std::cerr << "RadRay DXC fork is unavailable; check the SDK package and DLL search path.\n";
         return 2;
     }
 
@@ -91,6 +103,7 @@ int main() {
         const bool explicitFixture = std::string_view{fixture.Name}.starts_with("explicit_");
         const auto sourcePath = explicitFixture ? root / "modules/shader_compiler/tests/data" / fileName : sourceRoot / fileName;
         if (!ReadFile(sourcePath, source)) {
+            std::cerr << "cannot read " << sourcePath << '\n';
             return 3;
         }
 

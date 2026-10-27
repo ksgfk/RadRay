@@ -1,4 +1,5 @@
 #include "gpu_test_fixture.h"
+#include "known_gpu_issues.h"
 #include <filesystem>
 #include <fstream>
 
@@ -24,7 +25,7 @@ protected:
     unique_ptr<Shader> Stage(std::string_view name, ShaderStage stage) {
         const string entry = stage == ShaderStage::Vertex ? "VSMain" : stage == ShaderStage::Pixel ? "PSMain"
                                                                                                    : "CSMain";
-        const auto path = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode" /
+        const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode" /
                           (string{name} + "." + entry + (Backend() == RenderBackend::Vulkan ? ".spirv.bin" : ".dxil.bin"));
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file || file.tellg() <= 0) return {};
@@ -199,8 +200,18 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         }
     }
     ASSERT_FALSE(modes.empty());
+    test::GpuTestEnvironment environment;
+    ASSERT_TRUE(test::TakeExternal(test::GetGpuTestEnvironment(Context), environment));
+    test::KnownGpuIssueSkips skips;
+    uint32_t executedModes = 0;
+    const TextureDescriptor sourceDescriptor{TextureDimension::Dim2D, 8, 8, 1, 1, 4, format, MemoryType::Device, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource};
+    auto targetDescriptor = sourceDescriptor;
+    targetDescriptor.SampleCount = 1;
+    const Rect resolveArea{2, 2, 4, 4};
     for (const auto& [depthMode, stencilMode] : modes) {
         SCOPED_TRACE(fmt::format("depth={}, stencil={}", depthMode, stencilMode));
+        if (skips.Add(test::FindDepthResolveKnownIssue(environment, sourceDescriptor, targetDescriptor, resolveArea, depthMode, stencilMode), fmt::format("depth={} stencil={}", depthMode, stencilMode))) continue;
+        ++executedModes;
 #if defined(RADRAY_ENABLE_D3D12)
         const bool captureThisMode = pixCapture && depthMode == ResolveMode::Average && stencilMode == ResolveMode::None;
         bool captureStarted = false;
@@ -211,8 +222,8 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
             }
         });
 #endif
-        auto source = Texture2D(format, 4, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource);
-        auto target = Texture2D(format, 1, TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite | TextureUse::Resource);
+        auto source = device.CreateTexture(sourceDescriptor).Unwrap();
+        auto target = device.CreateTexture(targetDescriptor).Unwrap();
         auto sourceView = View(source.get(), TextureViewUsage::DepthWrite);
         auto targetView = View(target.get(), TextureViewUsage::DepthWrite);
         auto sourceDepth = View(source.get(), TextureViewUsage::Resource, TextureAspect::Depth);
@@ -308,7 +319,7 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         Barrier(command.get(), target.get(), TextureState::DepthWrite, TextureState::AttachmentResolveDestination);
         attachment.DepthLoad = attachment.StencilLoad = LoadAction::Load;
         attachment.Resolve = DepthStencilResolveDescriptor{targetView.get(), depthMode, stencilMode};
-        auto encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8, .RenderArea = Rect{2, 2, 4, 4}}).Unwrap();
+        auto encoder = command->BeginRenderPass({.DepthStencil = attachment, .Width = 8, .Height = 8, .RenderArea = resolveArea}).Unwrap();
         encoder->SetViewport({0, 0, 8, 8, 0, 1});
         encoder->SetScissor({2, 2, 4, 4});
         for (uint32_t sample = 0; sample < 4; ++sample) {
@@ -380,6 +391,8 @@ TEST_P(AttachmentOperations, DepthStencilResolveModesPreserveUntouchedAspectAndO
         allocator->Reset();
     }
     EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+    RecordProperty("executed_resolve_modes", executedModes);
+    if (skips.Count() && !HasFailure()) GTEST_SKIP() << skips.Summary();
 }
 
 TEST_P(AttachmentOperations, ResolveValidationRejectsIncompatibleTargetsModesAndOverlaps) {

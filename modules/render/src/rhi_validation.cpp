@@ -1,5 +1,8 @@
 #include "rhi_validation.h"
 
+#include <limits>
+#include <radray/render/external_resource.h>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -863,7 +866,7 @@ public:
     }
     void SetScissor(Rect rect) noexcept override {
         if (!Active("SetScissor")) return;
-        if (rect.X < 0 || rect.Y < 0 || !rect.Width || !rect.Height || uint64_t(rect.X) + rect.Width > INT32_MAX || uint64_t(rect.Y) + rect.Height > INT32_MAX) {
+        if (rect.X < 0 || rect.Y < 0 || !rect.Width || !rect.Height || uint64_t(rect.X) + rect.Width > std::numeric_limits<int32_t>::max() || uint64_t(rect.Y) + rect.Height > std::numeric_limits<int32_t>::max()) {
             Context->Reject("SetScissor", "scissor bounds are invalid");
             return;
         }
@@ -896,13 +899,13 @@ public:
         }
         vector<VertexBufferBinding> nativeBindings;
         unordered_set<uint32_t> seen;
-        uint32_t low = UINT32_MAX, high = 0;
+        uint32_t low = std::numeric_limits<uint32_t>::max(), high = 0;
         const auto maximum = Context->NativeDevice->GetDetail().MaxVertexInputBindings;
         for (const auto& binding : bindings) {
             const auto native = Lookup(*Context, binding.View.Target, "BindVertexBuffers");
             if (!native) return;
             const auto desc = binding.View.Target->GetDesc();
-            if (binding.Binding >= maximum || !seen.insert(binding.Binding).second || !desc.Usage.HasFlag(BufferUse::Vertex) || !RangeFits(desc.Size, binding.View.Offset, binding.View.Size) || binding.View.Size > UINT32_MAX) {
+            if (binding.Binding >= maximum || !seen.insert(binding.Binding).second || !desc.Usage.HasFlag(BufferUse::Vertex) || !RangeFits(desc.Size, binding.View.Offset, binding.View.Size) || binding.View.Size > std::numeric_limits<uint32_t>::max()) {
                 Context->Reject("BindVertexBuffers", "vertex buffer slot, usage, or range is invalid");
                 return;
             }
@@ -1276,7 +1279,7 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
                 uint64_t bytes{};
                 nativeTexture->_device->_device->GetCopyableFootprints(&nativeDesc, D3D12CalcSubresource(mip, layer, plane, t.MipLevels, layers), 1, end, &footprint, nullptr, nullptr, &bytes);
-                if (bytes == UINT64_MAX || !RangeFits(b.Size, footprint.Offset, bytes)) return Context->Reject(operation, "texture-buffer copy exceeds buffer range");
+                if (bytes == std::numeric_limits<uint64_t>::max() || !RangeFits(b.Size, footprint.Offset, bytes)) return Context->Reject(operation, "texture-buffer copy exceeds buffer range");
                 end = footprint.Offset + bytes;
             }
         }
@@ -1500,7 +1503,7 @@ public:
             auto* input = desc.SignalFences[i];
             const auto native = Lookup(*Context, input, "Submit");
             if (!native) return;
-            if (desc.SignalValues[i] == UINT64_MAX || desc.SignalValues[i] <= input->GetLastSignaledValue() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
+            if (desc.SignalValues[i] == std::numeric_limits<uint64_t>::max() || desc.SignalValues[i] <= input->GetLastSignaledValue() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
                 Context->Reject("Submit", "fence signal values must increase and signal each fence once");
                 return;
             }
@@ -1630,6 +1633,58 @@ public:
     }
 };
 
+class ExternalResourceValidation final : public ExternalResourceExtension {
+public:
+    ExternalResourceValidation(shared_ptr<ValidationContext> context, ExternalResourceExtension* native) : Context(std::move(context)), Native(native) {}
+    ExternalResult<ExternalDeviceIdentity> GetDeviceIdentity() const noexcept override { return Native->GetDeviceIdentity(); }
+    ExternalSupport QueryBufferSupport(const BufferDescriptor& d, const ExternalResourceDescriptor& e) const noexcept override { return Native->QueryBufferSupport(d, e); }
+    ExternalSupport QueryTextureSupport(const TextureDescriptor& d, const ExternalTextureDescriptor& e) const noexcept override { return Native->QueryTextureSupport(d, e); }
+    ExternalSupport QueryFenceSupport(ExternalFenceHandleType t) const noexcept override { return Native->QueryFenceSupport(t); }
+    ExternalResult<unique_ptr<Buffer>> CreateExportableBuffer(const BufferDescriptor& d, const ExternalResourceDescriptor& e) noexcept override {
+        auto result = Native->CreateExportableBuffer(d, e);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Buffer>{make_unique<BufferValidation>(Context, std::get<unique_ptr<Buffer>>(std::move(result)))};
+    }
+    ExternalResult<unique_ptr<Buffer>> ImportBuffer(BorrowedExternalHandle h, const ExternalBufferInfo& i) noexcept override {
+        auto result = Native->ImportBuffer(h, i);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Buffer>{make_unique<BufferValidation>(Context, std::get<unique_ptr<Buffer>>(std::move(result)))};
+    }
+    ExternalResult<ExternalBufferExport> ExportBuffer(Buffer* object) noexcept override {
+        return Native->ExportBuffer(static_cast<BufferValidation*>(object)->Real());
+    }
+    ExternalResult<unique_ptr<Texture>> CreateExportableTexture(const TextureDescriptor& d, const ExternalTextureDescriptor& e) noexcept override {
+        auto result = Native->CreateExportableTexture(d, e);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Texture>{make_unique<TextureValidation>(Context, std::get<unique_ptr<Texture>>(std::move(result)))};
+    }
+    ExternalResult<unique_ptr<Texture>> ImportTexture(BorrowedExternalHandle h, const ExternalTextureInfo& i) noexcept override {
+        auto result = Native->ImportTexture(h, i);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Texture>{make_unique<TextureValidation>(Context, std::get<unique_ptr<Texture>>(std::move(result)))};
+    }
+    ExternalResult<ExternalTextureExport> ExportTexture(Texture* object) noexcept override {
+        return Native->ExportTexture(static_cast<TextureValidation*>(object)->Real());
+    }
+    ExternalResult<unique_ptr<Fence>> CreateExportableFence(const ExternalFenceDescriptor& d) noexcept override {
+        auto result = Native->CreateExportableFence(d);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Fence>{make_unique<FenceValidation>(Context, std::get<unique_ptr<Fence>>(std::move(result)))};
+    }
+    ExternalResult<unique_ptr<Fence>> ImportFence(BorrowedExternalHandle h, const ExternalFenceInfo& i) noexcept override {
+        auto result = Native->ImportFence(h, i);
+        if (auto* error = std::get_if<ExternalError>(&result)) return *error;
+        return unique_ptr<Fence>{make_unique<FenceValidation>(Context, std::get<unique_ptr<Fence>>(std::move(result)))};
+    }
+    ExternalResult<ExternalFenceExport> ExportFence(Fence* object) noexcept override {
+        return Native->ExportFence(static_cast<FenceValidation*>(object)->Real());
+    }
+
+private:
+    shared_ptr<ValidationContext> Context;
+    ExternalResourceExtension* Native;
+};
+
 class DeviceValidation final : public Device {
 public:
     explicit DeviceValidation(shared_ptr<ValidationContext> context) : _context(std::move(context)) { _context->Owner = this; }
@@ -1656,6 +1711,15 @@ public:
     RenderBackend GetBackend() noexcept override {
         if (!Ready("GetBackend")) _context->Fatal("GetBackend", "cannot query a destroyed device");
         return _context->NativeDevice->GetBackend();
+    }
+    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override {
+        std::lock_guard lock{_cacheMutex};
+        if (!_externalExtension) {
+            const auto native = _context->NativeDevice->GetExternalResourceExtension();
+            if (!native) return nullptr;
+            _externalExtension = make_unique<ExternalResourceValidation>(_context, native.Get());
+        }
+        return _externalExtension.get();
     }
     DeviceDetail GetDetail() const noexcept override {
         if (!Ready("GetDetail")) _context->Fatal("GetDetail", "cannot query a destroyed device");
@@ -1866,14 +1930,14 @@ public:
             bool dynamic;
             if (dx) {
                 const auto& native = *binding.D3D12;
-                if (!ValidEnum(native.Placement) || native.RegisterType != GetBindingRegisterClass(binding.Kind) || binding.Count - 1 > UINT32_MAX - native.Register) {
+                if (!ValidEnum(native.Placement) || native.RegisterType != GetBindingRegisterClass(binding.Kind) || binding.Count - 1 > std::numeric_limits<uint32_t>::max() - native.Register) {
                     _context->Reject("CreateBindingGroupLayout", "invalid D3D12 register class, placement or range");
                     return nullptr;
                 }
                 dynamic = native.Placement == D3D12BufferPlacement::RootDescriptor;
             } else {
                 const auto& native = *binding.Vulkan;
-                if (!ValidEnum(native.Placement) || native.Set == UINT32_MAX || (vkSet && *vkSet != native.Set)) {
+                if (!ValidEnum(native.Placement) || native.Set == std::numeric_limits<uint32_t>::max() || (vkSet && *vkSet != native.Set)) {
                     _context->Reject("CreateBindingGroupLayout", "group must occupy one Vulkan set with valid placement");
                     return nullptr;
                 }
@@ -2103,6 +2167,7 @@ public:
     }
 
 private:
+    unique_ptr<ExternalResourceExtension> _externalExtension;
     shared_ptr<ValidationContext> _context;
     std::mutex _cacheMutex;
     unordered_map<CommandQueue*, unique_ptr<QueueValidation>> _queues;

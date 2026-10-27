@@ -17,8 +17,8 @@ std::filesystem::path ShaderFixtureRoot() {
 }
 
 std::filesystem::path ShaderArtifactRoot() {
-    return std::filesystem::path{RADRAY_PROJECT_DIR} /
-           "modules/shader/tests/data/shader_artifacts";
+    return std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+           "shader_artifacts";
 }
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {

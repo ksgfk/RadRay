@@ -3,8 +3,5 @@
 
 cmake/MsBuildCompileCommandsJson/* linguist-generated
 
-# Metadata and bytecode golden fixtures are wire bytes, even when a particular sample is printable.
-modules/render/tests/data/shader_artifacts/** -text
-
 # Preserve the archived input draft bytes, including its original CRLF payload.
 docs/history/2026-10-21-runtime-next-loop-draft.md -text whitespace=cr-at-eol

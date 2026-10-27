@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明显式 RHI layout 契约、所有权与两个后端映射。Shader 编写方式见 [authoring 指南](../guide/shader-authoring.md)
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/external_resource.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -201,9 +201,9 @@ Device/Factory 释放、通道关闭和末次 DXGI 读取；停止订阅后统�
 因此必须先等待 GPU 再结算；sleep、连续空队列或 marker 都不能替代等待和生命周期关闭。
 真实 Win10 的计数及自然降级验收见[构建与测试](../guide/build-test.md#d3d12--dxgi-采集验收)。
 
-Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
+Fence 查询把 `std::numeric_limits<uint64_t>::max()` 视为设备移除，禁止上层将其比较为成功完成。
 `Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
-即使 timeoutMs 为 UINT64_MAX，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。
+即使 timeoutMs 为 `std::numeric_limits<uint64_t>::max()`，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。
 D3D12 检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除和较早超时的事件
 注册也能唤醒事件。Vulkan 使用有限 vkWaitSemaphores。兼容 Wait() / Wait(value) 的期限为
 30 秒；超时明确终止，不在 GPU 仍可能使用资源时继续销毁。上层可用 WaitFor/poll 做可取消关闭。
@@ -345,16 +345,18 @@ loader 或物理设备版本不足则初始化失败；设备支持更高版本�
 | 间接绘制 | `multiDrawIndirect`、`drawIndirectFirstInstance` | 可选 |
 | 普通与 immutable sampler | `samplerAnisotropy`、`samplerMirrorClampToEdge`、`samplerFilterMinmax` | 可选 |
 | Vertex / Pixel UAV 写入 | `vertexPipelineStoresAndAtomics`、`fragmentStoresAndAtomics` | 可选 |
+| BGRA8 等无对应 SPIR-V typed format 的 storage image 写入 | `shaderStorageImageWriteWithoutFormat` | 可选 |
 | Framebuffer 跨 view 复用 | `imagelessFramebuffer` | 可选，缺失时使用传统 framebuffer |
 | Depth/stencil 逐 aspect 转换 | `separateDepthStencilLayouts` | 可选，缺失时使用显式组合状态 |
 
 未列出的 feature 均关闭，包括全部 Vulkan 1.1 feature、`shaderOutputLayer`、`multiview`、
 `robustBufferAccess`、`hostQueryReset`、
 `uniformBufferStandardLayout`、扩展 subgroup 类型、BDA、indirect count、descriptor indexing、
-shader 动态资源索引、扩展数值类型和无格式 storage image 读写。
+shader 动态资源索引、扩展数值类型和无格式 storage image 读取。
 Vulkan 的 `IsLayeredRenderingFromVertexShaderSupported` 返回 false；这不改变 D3D12 的能力报告。
 固定 descriptor 数组与参数集动态 offsets 继续支持，它们不隐含开启 shader 动态索引。
 调用方提供的 shader 必须满足此启用集：不使用未开启的 SPIR-V capability，storage image 使用合法显式格式，
+或在 `shaderStorageImageWriteWithoutFormat` 已启用时使用 Unknown 格式写入并满足实际格式的支持要求；
 buffer 布局遵从未开启额外 layout feature 时的规则；render 不反射或改写字节码来补足能力。
 
 sampler 创建、RHI 校验、间接绘制和 UAV stage 报告读取 Enabled，而非硬件 Supported。
@@ -700,6 +702,143 @@ view 维度与层范围也在 RHI 校验层按后端检查：Vulkan 的 1D/2D �
 本路径不接入 `VkImageFormatListCreateInfo`；它可能帮助部分实现优化 mutable image，但不据此宣称已有
 性能问题或保证收益。原生规则见 [Vulkan view usage](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewUsageCreateInfo.html)
 与 [image format list](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_image_format_list.html)。
+
+## Windows 同 GPU 原生资源互操作
+
+公共入口是 `external_resource.h` 的 `Device::GetExternalResourceExtension()`，返回由 device 持有的借用接口。
+该入口为纯虚函数，每个 Device 实现必须显式提供扩展或返回空。
+`D3D12DeviceDescriptor::EnableExternalResource` 与 `VulkanDeviceDescriptor::EnableExternalResource`
+默认 false；需要互操作时，调用方必须在创建设备前显式设为 true。关闭时不构造扩展对象，入口返回空，
+RHI validation 包装也保持为空；查询入口不会延迟启用功能。配置在设备创建后不可更改。
+Windows 后端在开启时提供该扩展，其他平台返回空；扩展存在不代表某个资源/方向可用。
+`GetDeviceIdentity()` 返回 `ExternalResult<ExternalDeviceIdentity>`：成功值仅包含 LUID / NodeMask，
+设备没有有效 LUID 或不符合单 node 限制时返回说明原因的 `ExternalError`，不使用 `Valid` 标记。
+身份查询不记录 error；能力查询传递其失败原因，实际创建或导入仍在自身失败边界记录一次 error。
+`QueryBufferSupport`、`QueryTextureSupport`、`QueryFenceSupport` 统一返回 `ExternalSupport`，
+其中 `CanCreateExportable` / `CanImport` 表示本端能力，调用方按实际 usage 查询。查询不支持是正常结果，不记 error。
+跨端路径判断来源的 `CanCreateExportable` 与接收端的 `CanImport`；接收端 Reason 提示不能导出，不代表不能导入。
+先区分能力否定和查询失败：Vulkan 的 `VK_ERROR_FORMAT_NOT_SUPPORTED` 是明确不支持，其他原生错误保留在 Reason 的 NativeApi/NativeCode；
+D3D12 external 查询保留 format/MSAA `CheckFeatureSupport` 失败的 HRESULT，不能把调用失败解释为设备能力缺失。
+查询本身不记录 error；实际操作在 API 边界记录一次，测试遇到查询错误必须判失败。
+`QueryFenceSupport` 要求显式传入同步句柄类型。纹理查询与创建的第二参数改为 `ExternalTextureDescriptor`，
+包含 HandleType（默认 D3D12Resource）和 AllowFormatReinterpretation（默认 false）；Buffer 继续使用
+`ExternalResourceDescriptor`，不保留旧纹理重载。调用方分别查询两端，查询通过后的实际失败不能改判不支持。
+`CreateExportable*`、`Import*`、`Export*` 返回 `ExternalResult<T>`（成功值或 `ExternalError`）；
+`ExternalError::Message` 是拥有内容的字符串，直接说明失败原因；`NativeApi` / `NativeCode` 保留原生诊断。
+能力查询的 `Reason.Message` 说明不可用原因，两方向均可用时为空。
+失败在 API 边界记录操作、后端、句柄类型、参数、消息和原生错误码。能力缺失不影响普通 RHI 创建。
+扩展只检查运行时能力、实际导入兼容性、分配计算溢出和原生调用结果。
+描述格式、枚举取值、元数据完整性、对象归属/存活、可导出资格与外部 barrier 的范围/状态均由调用方保证，
+后端与 validation 包装均不做这些契约判定；违反前置条件不保证返回 `ExternalError`。
+
+当前范围为 Windows、LUID 相同、单 node（node mask 1）、Device memory、dedicated allocation、整资源交接。
+内存句柄支持 `D3D12Resource` 和 `OpaqueWin32`，Fence 支持 `D3D12Fence` 和 `OpaqueWin32`。
+现有默认值仍是 D3D12 句柄类型；opaque 由调用者显式选择，仅用于 Vulkan→Vulkan。
+D3D12 对 opaque 查询返回不支持，创建或导入在调用原生 API 前明确失败；不自动切换句柄类型。
+纹理传递当前 RHI 已表达的 1D/2D/3D、数组、Cube/CubeArray、完整或部分 mip 链、现有颜色与深度/模板格式、MSAA 和 usage；
+具体组合由后端、所选句柄和驱动决定。MSAA 沿用 2D/2DArray、单 mip、无 UAV 的约束。
+默认 typed；显式开启格式重解释才允许后端支持的兼容 view format，并不保证任意 view format 合法。
+D3D12 深度/模板格式请求 Resource 时必须开启重解释；附件或复制可以保持 typed。
+BC、YUV、多平面视频、稀疏纹理和跨 GPU 共享不在范围内。
+不维护设备白名单，不提供分配桥接、辅助 D3D12 device、复制、后端切换或其他回退。
+
+| 操作 | 所有权与结果 |
+|---|---|
+| CreateExportableBuffer / Texture / Fence | 返回现有 Buffer / Texture / Fence，沿用 view、binding、命令和 Submit |
+| Export | 每次返回一个独立 `OwnedExternalHandle`；移动后原 owner 失效，析构或 Reset 关闭本地 NT handle |
+| Import | 借用 `BorrowedExternalHandle`；成功/失败均不消费调用者句柄，不提交、不等待、不清空内容 |
+| Export 的对象前提 | 必须是本 device 仍存活的 CreateExportable 对象；普通资源和导入对象不允许 Export，不执行资格检查 |
+| 销毁导入对象 | 销毁本地 COM 引用或 VkBuffer/VkImage/VkDeviceMemory；调用方先排空所有 GPU 使用 |
+
+导出描述包含设备身份和资源导入所需的参数；Buffer/Texture 还包含逻辑描述、来源后端、必要原生参数和分配信息。
+`ExternalTextureInfo::AllowFormatReinterpretation` 保存实际创建策略，导入使用同一策略。
+NativeFormat / NativeFlags / NativeUsage / NativeTiling 属于 **SourceBackend 的枚举空间**；同后端保留原生参数，
+跨后端根据逻辑描述及格式策略映射，禁止直接复用另一 API 的枚举数值。
+描述不携带版本字段，跨进程编码和协议版本由上层负责。
+`ExternalDeviceIdentity` 保留 LUID/node 语义。Opaque buffer/texture 必须携带 `VulkanMemory`，
+保存 device UUID、driver UUID 和实际 MemoryTypeIndex；opaque fence 必须携带 `VulkanIdentity`。
+现有 D3D12 句柄类型不携带这些字段。Opaque 导入同时核对 LUID/node 和两个 UUID，buffer/texture 来源必须是 Vulkan。
+Buffer 的逻辑 Size、native Width 和 allocation size 分开保存。D3D12 导入核对
+`OpenSharedHandle` 得到的资源描述与 heap 属性。Vulkan 导入 D3D12Resource 时查询句柄 memoryTypeBits 并与资源 requirements
+求交集；opaque 导入使用描述中的原始分配大小和内存类型索引。传递者须提供与句柄匹配的导出描述；Vulkan 没有跨 API 查询原始 D3D12 资源完整描述的接口。
+slot、generation、当前 owner、内容有效性及 timeline value 不属于资源导出描述，由上层协议传递。
+句柄数值只在所属进程内有效，跨进程必须 `DuplicateHandle` 到目标进程。
+
+D3D12 用 DEFAULT/SHARED 的 CreateCommittedResource，初态 COMMON、UNKNOWN layout、sample quality 0，MSAA 使用对应放置对齐。
+Cube/CubeArray 映射为 2D array；按 usage 设置 RTV/UAV/DS flags。默认 typed，开启重解释时使用 FormatToTypeless，
+没有独立 typeless 表示时保留原生格式。导入核对原生资源描述及 heap；DENY_SHADER_RESOURCE 仅与 sampled 请求冲突。
+Fence 使用 SHARED，通过 CreateSharedHandle 导出、OpenSharedHandle 导入。
+Vulkan 保持 1.2 基线，仅在 `EnableExternalResource` 开启时按驱动提供情况请求
+`VK_KHR_external_memory_win32` / `VK_KHR_external_semaphore_win32`；关闭时均不请求。
+开启后仍只要求当前方向的
+EXPORTABLE 或 IMPORTABLE。Buffer/Image 声明所选的 D3D12_RESOURCE 或 OPAQUE_WIN32，导出使用
+VMA 3.4 dedicated 创建接口和 `VkExportMemoryAllocateInfo`，D3D12Resource 导入沿用 dedicated 创建接口及
+`VkImportMemoryWin32HandleInfoKHR`，offset 固定为 0。
+Opaque 导入先创建相同 native 参数的本地对象并查询 requirements，验证导出 allocation size 足够、
+MemoryTypeIndex 在允许集合中且为 DEVICE_LOCAL；随后用 `vmaAllocateDedicatedMemory` 精确保留导出大小和索引，
+通过 import 与显式 `VkMemoryDedicatedAllocateInfo` 链分配并绑定 offset=0。此路径不调用
+`vkGetMemoryWin32HandlePropertiesKHR`；该函数禁止查询 opaque 句柄，且 opaque 的 allocationSize / memoryTypeIndex
+必须匹配原始分配（[Vulkan 导入约束](https://docs.vulkan.org/spec/latest/chapters/memory.html#VUID-VkMemoryAllocateInfo-allocationSize-01743)）。
+共享 image 使用 OPTIMAL；3D 的 DepthOrArraySize 对应 extent.depth，arrayLayers 为 1，其余维度对应 arrayLayers。
+Cube/CubeArray 设置 CUBE_COMPATIBLE，显式重解释设置 MUTABLE_FORMAT，按请求添加 depth/stencil attachment usage。
+external 查询与创建使用同一 format/type/tiling/usage/flags 和所选 handle type，比较 extent、mips、layers、samples 限制；
+附件用途还比较物理设备的 maxFramebufferWidth / maxFramebufferHeight。
+原生描述转换位于各后端 helper 同名 .h/.cpp，无共享状态；普通纹理路径保持原有行为。
+Vulkan 的 view/shader 可选 feature 仍须在设备创建时请求，共享纹理不隐式启用 feature。
+每个 allocation/type 只调用一次 `vkGetMemoryWin32HandleKHR`，保存原始 NT handle；后续 Export 只复制句柄。
+导入 image 使用正常拥有的 VMA allocation，不能套用 swapchain 的 `ResourceHint::External` 借用语义。
+Fence 使用 timeline semaphore，D3D12_FENCE / OPAQUE_WIN32 均导入为永久 payload，不重置已有值；提交仍使用
+`VkTimelineSemaphoreSubmitInfo`（参见 [Khronos D3D12 fence 提交说明](https://docs.vulkan.org/refpages/latest/refpages/source/VkD3D12FenceSubmitInfoKHR.html)）。
+
+两种 barrier descriptor 的 `ExternalTransfer` 默认 None，不改变既有 barrier。Acquire 必须是 Common→本地状态，
+Release 必须是本地状态→Common；共享 Buffer 使用完整逻辑范围（推荐 `BufferRange::AllRange()`），
+原生外部转移覆盖 native 长度；Texture 覆盖全部 mip、array layer 和格式 aspect；3D 的 array layer 为 1，深度切片属于 mip 内部。
+调用方负责共享资格、完整范围和正确边界状态；保持 coupled depth/stencil 限制，不增加自动状态跟踪。
+Vulkan 分两步录制本地 layout 转换与 `VK_QUEUE_FAMILY_EXTERNAL` ↔ 当前 queue family 的所有权转移，
+顺序为 acquire ownership 后本地转换、先本地转换再 release ownership；外部边界为 GENERAL，ownership scope 为 ALL_COMMANDS。
+即使 GENERAL→GENERAL 也保留 ownership barrier。D3D12 逐 mip/layer/plane 转换到 COMMON，原生状态相同则省略 transition。
+本地允许操作不同子资源。子资源状态不同时，发送方先逐范围转换至 Common，再整资源 Common→Common Release；
+接收方等待 fence、整资源 Common→Common Acquire，再逐范围进入目标状态。
+
+新资源由创建端首次完整初始化，Vulkan 初始本地写入允许从 UNDEFINED 开始。
+导入内容首次访问必须 acquire，不能用 UNDEFINED 丢弃；调用顺序为 `等待 ready → Acquire → 本地工作 → Release → signal released`。
+每条 timeline 只有一个 signal 方，值严格递增；Fence 的创建方可以将 signal 责任交给导入端。
+`GetLastSignaledValue()` 只记录本地提交，初始 payload 和另一端的 signal 不改变它；交接使用消息中的明确 value。
+扩展的 validation 包装只负责资源包装/解包并透传运行时结果，以便复用普通 RHI 接口。
+普通 RHI 的既有校验保持原行为；外部资源专用的 barrier 和 Fence signal 契约检查不再执行。
+跨端 owner、generation、单 signal 方、timeline 值递增和 GPU 完成由调用方管理。
+超时不是完成，不能因此回收或复用在途资源。
+
+D3D12 句柄的四种后端组合与 opaque Vulkan→Vulkan 都有原生代码路径，成功与否由运行时决定。
+能力查询通过后的数据错误必须判失败；定位时仍需逐项排查应用契约、runtime、隐式层和驱动，不能仅凭 validation 无错误归因于驱动。
+测试可在执行已知失败组合前，按已验证的适配器、驱动、方向、句柄和完整描述显式隔离；不改变生产能力报告或执行结果。
+隔离计数与unsupported分别记录，`RADRAY_TEST_RUN_KNOWN_GPU_ISSUES=1`恢复严格复现；查询错误和未匹配组合继续按原规则失败。
+具体参数和部分覆盖约束见[已知 GPU 问题的测试隔离](../guide/build-test.md#已知-gpu-问题的测试隔离)。
+验收方法、实际成功范围和已知内容错误见[构建与测试](../guide/build-test.md#windows-资源互操作验收)。
+
+### 互操作规范边界
+
+下列约束核对 Vulkan 1.2.198 规范与 KHR Win32 external memory/semaphore 扩展；当前 refpage 的 VUID 可能随版本更名，
+不使用仅在 synchronization2、maintenance 或新版扩展启用后成立的规则解释 1.2 路径。
+D3D12 核对 Microsoft Learn 与 DirectX-Specs；其中 Resource Heaps 是整合设计文档，包含历史段落，
+旧 D3D11 资源别名规则不能直接用于 D3D12 shared committed texture。
+版本差异也需单独识别：1.2.198 的 dedicated allocation `image-02964` 要求 size 等于 requirements，当前 refpage 已改为大于等于；
+不能把当前文案冒充该历史版本原文。opaque 的原始 allocationSize / memoryTypeIndex 匹配规则没有因此取消。
+
+| 范围 | 当前契约与官方依据 |
+|---|---|
+| 创建与查询 | Vulkan external 查询必须匹配 image 的 type/format/tiling/usage/flags/handle；不是普通 mutable image 查询。1.2 的 `VkImageCreateInfo` VUID `imageCreateMaxMipLevels-02251`、`mipLevels-00958/02255`、`arrayLayers-02256`、`samples-02257` 分别约束能力结果、mip 链、层数和 MSAA；`usage-00964/00965` 另约束附件宽高。见 [1.2.198 Resource Creation](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.2.198/chapters/resources.txt)。 |
+| 查询失败与能力缺失 | [Vulkan image format query](https://docs.vulkan.org/refpages/latest/refpages/source/vkGetPhysicalDeviceImageFormatProperties2.html) 区分 FORMAT_NOT_SUPPORTED 与 OUT_OF_DEVICE_MEMORY 等错误；失败时不能使用返回结构中的残留字段判断支持。[D3D12 CheckFeatureSupport](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-checkfeaturesupport) 返回失败 HRESULT 不是正常的能力位否定；MSAA 使用成功返回的 [NumQualityLevels](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_multisample_quality_levels) 判断请求采样数是否可用。 |
+| dedicated 与分配 | D3D12_RESOURCE 导入的 allocationSize 被实现忽略，由 OS 提供真实分配大小；不能用两 API 的 requirements.size 不同证明布局不兼容。非 Vulkan 来源的 memoryTypeIndex 必须来自句柄查询（`memoryTypeIndex-00645`）；opaque Vulkan 来源精确保留 size/type（`allocationSize-01743`），dedicated image 保留相同创建参数（`image-01876`），绑定 offset 0。见 [Memory Allocation](https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryAllocateInfo.html) 和 [Dedicated Allocation](https://docs.vulkan.org/refpages/latest/refpages/source/VkMemoryDedicatedAllocateInfo.html)。 |
+| 身份与句柄 | Win32 import 要求同一物理设备（`handle-00659`），不消费 NT handle；导入对象持有 payload 引用，应用在不再需要时 CloseHandle。opaque 还要求兼容 UUID。见 [Win32 Import](https://docs.vulkan.org/refpages/latest/refpages/source/VkImportMemoryWin32HandleInfoKHR.html)。 |
+| 所有权与内容 | 必须 release、由 fence/semaphore 保证完成、再 acquire。新导入 image 的 initialLayout=UNDEFINED 是创建占位符，不能用一次 UNDEFINED 转换丢弃已有内容。外部内存创建链的 handleTypes 非零时按设置 ALIAS_BIT 处理，无须额外补该 flag。见 [External Resource Sharing](https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-external-sharing) 和 [Image Create Flags](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageCreateFlagBits.html)。 |
+| D3D12 提交与别名 | 当前 shared committed 资源在两端使用 COMMON 交接，并分开 ExecuteCommandLists。Resource Heaps 说明两次独立 ExecuteCommandLists 提供等价 aliasing 同步；不能因此要求往 committed resource 指针插入 aliasing barrier。显式 aliasing 的对象规则针对 placed/reserved。见 [Memory Aliasing](https://learn.microsoft.com/en-us/windows/win32/direct3d12/memory-aliasing-and-data-inheritance)、[Resource Heaps](https://microsoft.github.io/DirectX-Specs/d3d/ResourceHeaps.html#placed-resource-memory-aliasing-requirements)、[Aliasing Barrier](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_resource_aliasing_barrier)。 |
+| 深度与模板 | D3D12 R24G8/R32G8X24 格式家族的 depth/stencil 是不同 subresource；staging 分别采用 D24X8/D32 和 S8，实际显存布局不公开。没有据此要求 copy-only 资源增加 ALLOW_DEPTH_STENCIL；添加该 flag 会改变资源约束与可能的布局。见 [Planar Depth Stencil](https://microsoft.github.io/DirectX-Specs/d3d/PlanarDepthStencilDDISpec.html) 与 [Resource Flags](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags)。 |
+
+跨 API 的 DXGI↔VkFormat、usage/flags 和 COMMON↔GENERAL 是本实现使用的对应关系，不能将两个 API 的枚举值或平面物理布局等同。
+Vulkan 的 [External Image Implied Layouts](https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-image-layouts)
+表列出 D3D11 句柄，没有列出 D3D12_RESOURCE；因此该表不足以单独证明所有 D3D12 创建模式的边界布局映射。
+对查询支持却失败的部分 mip 数组和 copy-only DS 组合，仍需厂商的跨 API 对应规则或进一步原生对照，不能以普通 image 的能力替代这项证据。
 
 ## 同步
 

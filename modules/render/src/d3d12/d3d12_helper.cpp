@@ -5,6 +5,23 @@
 
 namespace radray::render::d3d12 {
 
+D3D12_RESOURCE_DESC MakeTextureResourceDesc(const TextureDescriptor& desc, bool allowFormatReinterpretation) noexcept {
+    D3D12_RESOURCE_DESC result{};
+    result.Dimension = MapType(desc.Dim);
+    result.Alignment = desc.SampleCount > 1 ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT : 0;
+    result.Width = desc.Width;
+    result.Height = desc.Height;
+    result.DepthOrArraySize = static_cast<UINT16>(desc.DepthOrArraySize);
+    result.MipLevels = static_cast<UINT16>(desc.MipLevels);
+    result.Format = allowFormatReinterpretation ? FormatToTypeless(MapType(desc.Format)) : MapType(desc.Format);
+    result.SampleDesc = {desc.SampleCount, 0};
+    result.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) result.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) result.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    if (desc.Usage & (TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) result.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    return result;
+}
+
 Win32Event::Win32Event(Win32Event&& other) noexcept
     : _event(other._event) {
     other._event = nullptr;
@@ -29,11 +46,11 @@ void Win32Event::Destroy() noexcept {
     }
 }
 
-std::optional<Win32Event> Win32Event::Create() noexcept {
+std::optional<Win32Event> Win32Event::Create(bool logFailure) noexcept {
     HANDLE event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (event == nullptr) {
         DWORD err = ::GetLastError();
-        RADRAY_ERR_LOG("CreateEvent failed: {}", err);
+        if (logFailure) RADRAY_ERR_LOG("CreateEvent failed: {}", err);
         return std::nullopt;
     }
     Win32Event result{};

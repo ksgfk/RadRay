@@ -24,3 +24,7 @@ artifacts
 .opencode
 /build*/
 __pycache__
+
+# Test shader bytecode and metadata are generated locally, never source assets.
+/modules/render/tests/data/shader_bytecode/
+/modules/shader/tests/data/shader_artifacts/

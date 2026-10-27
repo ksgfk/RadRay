@@ -1,4 +1,6 @@
 #include "gpu_test_fixture.h"
+
+#include <limits>
 #include "rhi_validation.h"
 #include <filesystem>
 #include <radray/file.h>
@@ -12,7 +14,7 @@ TEST(VulkanCommandContracts, SwapchainExtentHonorsSurfaceBoundsAndSuspension) {
     VkSurfaceCapabilitiesKHR caps{};
     caps.minImageExtent = {16, 8};
     caps.maxImageExtent = {4096, 2048};
-    caps.currentExtent = {UINT32_MAX, UINT32_MAX};
+    caps.currentExtent = {std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max()};
     auto extent = ResolveSwapChainExtent({1, 8192}, caps);
     ASSERT_TRUE(extent);
     EXPECT_EQ(extent->width, 16u);
@@ -24,7 +26,7 @@ TEST(VulkanCommandContracts, SwapchainExtentHonorsSurfaceBoundsAndSuspension) {
     EXPECT_EQ(extent->height, 240u);
     caps.currentExtent = {0, 0};
     EXPECT_FALSE(ResolveSwapChainExtent({640, 480}, caps));
-    caps.currentExtent = {UINT32_MAX, UINT32_MAX};
+    caps.currentExtent = {std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max()};
     caps.minImageExtent = caps.maxImageExtent = {0, 0};
     EXPECT_FALSE(ResolveSwapChainExtent({640, 480}, caps));
 }
@@ -119,7 +121,7 @@ TEST_F(VulkanCommandContractsGpu, ConstantBlendDrawUsesZeroConstantsAndRejectsDi
     Context.Device = native;
     Context.Queue = native->GetCommandQueue(QueueType::Direct, 0).Unwrap();
     auto device = Validated();
-    const auto root = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode";
+    const auto root = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode";
     const auto vertexBytes = ReadBinaryFile(root / "no_resource_graphics.VSMain.spirv.bin");
     const auto pixelBytes = ReadBinaryFile(root / "no_resource_graphics.PSMain.spirv.bin");
     ASSERT_TRUE(vertexBytes);

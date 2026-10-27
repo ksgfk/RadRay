@@ -9,6 +9,7 @@
 
 #include <radray/render/backend/d3d12_helper.h>
 #include <radray/render/rhi.h>
+#include <radray/render/external_resource.h>
 #include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
@@ -328,11 +329,14 @@ public:
 
     RenderBackend GetBackend() noexcept override { return RenderBackend::D3D12; }
 
+    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
+
     DeviceDetail GetDetail() const noexcept override;
 
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+    TextureSupport QueryTextureSupportWithNativeStatus(const TextureSupportQuery& query, HRESULT& status) const noexcept;
 
     AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
 
@@ -401,6 +405,7 @@ public:
 
     shared_ptr<detail::DiagnosticSession> _diagnostics;
     shared_ptr<detail::DiagnosticChannel> _diagnosticChannel;
+    unique_ptr<ExternalResourceExtension> _externalExtension;
 };
 
 class CmdQueueD3D12 final : public CommandQueue {
@@ -467,6 +472,8 @@ public:
     ComPtr<ID3D12Fence> _fence;
     uint64_t _fenceValue{0};
     Win32Event _event{};
+    std::optional<ExternalFenceInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class CommandAllocatorD3D12 final : public CommandAllocator {
@@ -706,6 +713,8 @@ public:
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
     void* _mappedData{nullptr};
+    std::optional<ExternalBufferInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class QueryPoolD3D12 final : public QueryPool {
@@ -765,6 +774,8 @@ public:
     MemoryType _memory{MemoryType::Device};
     TextureUses _usage{TextureUse::UNKNOWN};
     ResourceHints _hints{ResourceHint::None};
+    std::optional<ExternalTextureInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class TextureViewD3D12 final : public TextureView {

@@ -1,4 +1,5 @@
 #include <radray/render/backend/d3d12_impl.h>
+#include "external_resource_d3d12.h"
 #include <radray/profiler.h>
 #include "d3d12_diagnostics.h"
 
@@ -778,6 +779,9 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc, factoryImpl->_diagnostics, std::move(diagnosticChannel));
+    if (desc.EnableExternalResource) {
+        result->_externalExtension = make_unique<ExternalResourceD3D12>(result.get());
+    }
     DeviceDetail& detail = result->_capabilities.Detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.BufferCopyOffsetAlignment = 1;
@@ -958,10 +962,17 @@ AttachmentResolveSupport DeviceD3D12::QueryAttachmentResolveSupport(TextureForma
 }
 
 TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
+    HRESULT status = S_OK;
+    return QueryTextureSupportWithNativeStatus(query, status);
+}
+
+TextureSupport DeviceD3D12::QueryTextureSupportWithNativeStatus(const TextureSupportQuery& query, HRESULT& status) const noexcept {
+    status = S_OK;
     if (!IsValidTextureSupportQuery(query)) return {};
     const DXGI_FORMAT format = MapType(query.Format);
     D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format, {}, {}};
-    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))) return {};
+    status = _device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support));
+    if (FAILED(status)) return {};
     D3D12_FORMAT_SUPPORT1 dimension{};
     switch (query.Dimension) {
         case TextureDimension::Dim1D:
@@ -982,7 +993,8 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
          (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) == 0 ||
          (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) == 0)) return {};
     D3D12_FEATURE_DATA_FORMAT_SUPPORT sampledSupport{MapShaderResourceType(query.Format), {}, {}};
-    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &sampledSupport, sizeof(sampledSupport)))) return {};
+    status = _device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &sampledSupport, sizeof(sampledSupport));
+    if (FAILED(status)) return {};
     if (query.Usage.HasFlag(TextureUse::Resource) &&
         (sampledSupport.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)) == 0) return {};
     TextureSupport result{};
@@ -1005,7 +1017,9 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
         if (samples > 1 && query.Usage.HasFlag(TextureUse::Resource) &&
             (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD) == 0) continue;
         D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality{format, samples, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0};
-        if (SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality, sizeof(quality))) && quality.NumQualityLevels > 0) {
+        status = _device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality, sizeof(quality));
+        if (FAILED(status)) return {};
+        if (quality.NumQualityLevels > 0) {
             result.SampleCounts |= static_cast<SampleCount>(samples);
         }
     }
@@ -1041,6 +1055,14 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
         return nullptr;
     }
     return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type);
+}
+
+Nullable<ExternalResourceExtension*> DeviceD3D12::GetExternalResourceExtension() noexcept {
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    return _externalExtension.get();
+#else
+    return nullptr;
+#endif
 }
 
 Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
@@ -1146,7 +1168,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     }
     UINT64 paddedSize;
     _device->GetCopyableFootprints(&resDesc, 0, 1, 0, nullptr, nullptr, nullptr, &paddedSize);
-    if (paddedSize != UINT64_MAX) {
+    if (paddedSize != std::numeric_limits<uint64_t>::max()) {
         allocSize = paddedSize;
         resDesc.Width = paddedSize;
     }
@@ -1729,7 +1751,7 @@ Nullable<unique_ptr<BindingGroupLayout>> DeviceD3D12::CreateBindingGroupLayout(c
             table->HeapType = heap;
             table->Visibility = visibility;
         }
-        if (binding.Count > UINT32_MAX - table->DescriptorCount) return nullptr;
+        if (binding.Count > std::numeric_limits<uint32_t>::max() - table->DescriptorCount) return nullptr;
         entry.TableIndex = static_cast<uint32_t>(table - result->_tables.begin());
         entry.TableOffset = table->DescriptorCount;
         table->Ranges.push_back({MapBindingRange(native.RegisterType), binding.Count, native.Register, native.Space, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, entry.TableOffset});
@@ -2386,6 +2408,8 @@ bool FenceD3D12::IsValid() const noexcept {
 }
 
 void FenceD3D12::Destroy() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     _fence = nullptr;
     _event.Destroy();
 }
@@ -3040,7 +3064,7 @@ void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
 
 void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
     if (bindings.empty()) return;
-    uint32_t lowest = UINT32_MAX, highest = 0;
+    uint32_t lowest = std::numeric_limits<uint32_t>::max(), highest = 0;
     for (const auto& binding : bindings) {
         lowest = std::min(lowest, binding.Binding);
         highest = std::max(highest, binding.Binding);
@@ -3450,6 +3474,8 @@ bool BufferD3D12::IsValid() const noexcept {
 }
 
 void BufferD3D12::Destroy() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     if (_mappedData) {
         Unmap();
     }
@@ -3556,6 +3582,8 @@ bool TextureD3D12::IsValid() const noexcept {
 }
 
 void TextureD3D12::Destroy() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     _tex = nullptr;
     _alloc = nullptr;
 }

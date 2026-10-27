@@ -15,7 +15,7 @@ BindingDescriptor MakeBinding(uint32_t id, BindingKind kind, uint32_t dx, uint32
 }
 
 vector<byte> ReadStage(std::string_view name, RenderBackend backend) {
-    const auto path = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode" /
+    const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode" /
                       (string{name} + (backend == RenderBackend::D3D12 ? ".CSMain.dxil.bin" : ".CSMain.spirv.bin"));
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file || file.tellg() <= 0) return {};

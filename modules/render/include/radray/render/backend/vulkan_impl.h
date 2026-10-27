@@ -10,6 +10,7 @@
 #include <radray/render/backend/vulkan_helper.h>
 #include <radray/render/sampler_cache.h>
 #include <radray/render/rhi.h>
+#include <radray/render/external_resource.h>
 
 namespace radray::render::vulkan {
 
@@ -297,6 +298,8 @@ public:
 
     RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
 
+    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
+
     DeviceDetail GetDetail() const noexcept override;
 
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
@@ -377,6 +380,9 @@ public:
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
     RenderDeviceCapabilities _capabilities;
+    unique_ptr<ExternalResourceExtension> _externalExtension;
+    bool _externalMemoryWin32{false};
+    bool _externalSemaphoreWin32{false};
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -679,6 +685,8 @@ public:
     DeviceVulkan* _device;
     unique_ptr<TimelineSemaphoreVulkan> _fence;
     uint64_t _fenceValue{0};
+    std::optional<ExternalFenceInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class TimelineSemaphoreVulkan final : public RenderBase {
@@ -937,6 +945,8 @@ public:
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
     bool _hostCoherent{false};
+    std::optional<ExternalBufferInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class BufferViewVulkan final : public RenderBase {
@@ -1002,6 +1012,8 @@ public:
     bool _isSwapchainImage{false};
     VkImageCreateFlags _createFlags{0};
     VkImageUsageFlags _nativeUsage{0};
+    std::optional<ExternalTextureInfo> _externalInfo;
+    OwnedExternalHandle _externalHandle;
 };
 
 class ImageViewVulkan final : public TextureView {

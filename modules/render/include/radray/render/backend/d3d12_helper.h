@@ -34,7 +34,7 @@ public:
 
     void Destroy() noexcept;
 
-    static std::optional<Win32Event> Create() noexcept;
+    static std::optional<Win32Event> Create(bool logFailure = true) noexcept;
 
 private:
     HANDLE _event{nullptr};
@@ -49,6 +49,8 @@ bool IsStencilFormatDXGI(DXGI_FORMAT fmt) noexcept;
 DXGI_FORMAT FormatToTypeless(DXGI_FORMAT fmt) noexcept;
 
 DXGI_FORMAT MapShaderResourceType(TextureFormat v) noexcept;
+
+D3D12_RESOURCE_DESC MakeTextureResourceDesc(const TextureDescriptor& desc, bool allowFormatReinterpretation) noexcept;
 
 D3D12_COMMAND_LIST_TYPE MapType(QueueType v) noexcept;
 DXGI_FORMAT MapType(TextureFormat v) noexcept;

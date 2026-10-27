@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include <cstring>
 #include <optional>
 #include <atomic>
@@ -85,7 +87,7 @@ struct DiagnosticProbe final : d3d12::detail::DiagnosticObserver {
         uint32_t Severity{};
         Failure Fault{Failure::None};
         HRESULT Result{S_OK};
-        size_t Begin{}, End{SIZE_MAX}, Count{1};
+        size_t Begin{}, End{std::numeric_limits<size_t>::max()}, Count{1};
     };
 
     DiagnosticProbe(std::atomic<uint32_t>& errors, shared_ptr<DXGIDiagnosticContext> context)
@@ -207,6 +209,7 @@ struct DeviceContext {
     std::atomic<uint32_t> RhiValidationErrors{0};
     bool Finalized{false};
     bool VulkanEnvInitialized{false};
+    Nullable<InstanceVulkan*> VulkanInstance{nullptr};
     Nullable<void (*)() noexcept> ShutdownEnvironment{nullptr};
 #if defined(RADRAY_ENABLE_D3D12)
     shared_ptr<DXGIDiagnosticContext> DiagnosticContext;
@@ -219,12 +222,15 @@ struct DeviceContext {
 #endif
     unique_ptr<DXGIFactory> Factory;
     shared_ptr<Device> Device;
+    Nullable<radray::render::Device*> NativeDevice{nullptr};
     CommandQueue* Queue{nullptr};
     DeviceSetupStatus Status{DeviceSetupStatus::NotAttempted};
     DeviceSetupStage Stage{DeviceSetupStage::Backend};
     string Reason;
     string AdapterName;
+    string DriverVersion;
     bool ValidationEnabled{false}, SynchronizationValidationEnabled{false}, GpuValidationEnabled{false};
+    bool VulkanStorageImageWriteWithoutFormatEnabled{false};
 
     void WaitAllQueues() noexcept {
         if (!Device) return;
@@ -247,6 +253,7 @@ struct DeviceContext {
         if (Diagnostics && DiagnosticSubscription) Diagnostics->Checkpoint();
 #endif
         Queue = nullptr;
+        NativeDevice = nullptr;
         Device.reset();
         Factory.reset();
 #if defined(RADRAY_ENABLE_D3D12)
@@ -278,6 +285,7 @@ struct DeviceContext {
             VulkanEnvInitialized = false;
             ShutdownEnvironment = nullptr;
         }
+        VulkanInstance = nullptr;
         if (ValidationEnabled && !structuredDiagnostics) EXPECT_EQ(ValidationErrors.load(), 0u);
         if (Status == DeviceSetupStatus::Ready) testing::Test::RecordProperty("observed_validation_errors", ValidationErrors.load());
     }
@@ -327,11 +335,15 @@ inline bool TryCreateDevice(
     bool enableRhiValidation = false,
     [[maybe_unused]] array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> queueCounts = {1, 0, 0},
     [[maybe_unused]] shared_ptr<DXGIDiagnosticContext> diagnosticContext = nullptr,
-    [[maybe_unused]] bool separateDepthStencilLayouts = true, [[maybe_unused]] bool imagelessFramebuffer = true) {
+    [[maybe_unused]] bool separateDepthStencilLayouts = true, [[maybe_unused]] bool imagelessFramebuffer = true,
+    [[maybe_unused]] Nullable<InstanceVulkan*> existingInstance = nullptr,
+    [[maybe_unused]] bool enableExternalResource = false) {
     context.Reset();
     context.Finalized = false;
     context.ValidationErrors = 0;
     context.RhiValidationErrors = 0;
+    context.VulkanStorageImageWriteWithoutFormatEnabled = false;
+    context.DriverVersion.clear();
 #if defined(RADRAY_ENABLE_D3D12)
     context.Diagnostics.reset();
     context.DiagnosticMode.clear();
@@ -394,6 +406,7 @@ inline bool TryCreateDevice(
         deviceDesc.Factory = context.Factory.get();
         deviceDesc.AdapterIndex = selected;
         deviceDesc.QueueCounts = queueCounts;
+        deviceDesc.EnableExternalResource = enableExternalResource;
         auto device = Device::Create(DeviceDescriptor{deviceDesc}, {.IsEnabled = false});
         if (!device.HasValue()) {
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "D3D12 device creation failed for an available adapter");
@@ -416,6 +429,13 @@ inline bool TryCreateDevice(
                 !d3d12::detail::IsDiagnosticHealthy(native->_diagnostics))
                 return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Validation, "D3D12/DXGI diagnostic self-test failed");
         }
+        context.NativeDevice = context.Device.get();
+        if (enableExternalResource) {
+            LARGE_INTEGER version{};
+            auto* native = static_cast<d3d12::DeviceD3D12*>(context.NativeDevice.Get());
+            const auto status = native->_dxgiAdapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &version);
+            context.DriverVersion = SUCCEEDED(status) ? fmt::format("DXGI {}.{}.{}.{}", uint16_t(version.QuadPart >> 48), uint16_t(version.QuadPart >> 32), uint16_t(version.QuadPart >> 16), uint16_t(version.QuadPart)) : fmt::format("unavailable ({:#x})", uint32_t(status));
+        }
         if (enableRhiValidation) {
             auto validated = detail::CreateValidationDevice(context.Device, {.IsEnabled = true, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
             if (!validated) return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "RHI validation wrapper creation failed");
@@ -435,12 +455,13 @@ inline bool TryCreateDevice(
         instanceDesc.IsEnableGpuBasedValid = enableGpuValidation;
         instanceDesc.LogCallback = CaptureValidationMessage;
         instanceDesc.LogUserData = &context;
-        auto instance = InstanceVulkan::InitEnv(instanceDesc);
+        auto instance = existingInstance ? existingInstance : InstanceVulkan::InitEnv(instanceDesc);
         if (!instance) {
             return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Instance, "Vulkan instance initialization failed");
         }
         context.ShutdownEnvironment = InstanceVulkan::ShutdownEnv;
-        context.VulkanEnvInitialized = true;
+        context.VulkanEnvInitialized = !existingInstance;
+        context.VulkanInstance = instance;
         const auto* native = static_cast<const vulkan::InstanceVulkanImpl*>(instance.Get());
         if (enableValidation && (std::find(native->_layers.begin(), native->_layers.end(), "VK_LAYER_KHRONOS_validation") == native->_layers.end() ||
                                  native->_debugMessenger == VK_NULL_HANDLE))
@@ -468,6 +489,7 @@ inline bool TryCreateDevice(
         VulkanDeviceDescriptor deviceDesc{};
         deviceDesc.PhysicalDeviceIndex = selected;
         deviceDesc.Queues = queues;
+        deviceDesc.EnableExternalResource = enableExternalResource;
         auto requests = vulkan::GetRhiFeatureRequestsVulkan();
         if (!separateDepthStencilLayouts) requests.SeparateDepthStencilLayouts = vulkan::FeatureRequirementVulkan::Disabled;
         if (!imagelessFramebuffer) requests.ImagelessFramebuffer = vulkan::FeatureRequirementVulkan::Disabled;
@@ -477,7 +499,11 @@ inline bool TryCreateDevice(
         }
         testing::Test::RecordProperty("separate_depth_stencil_layouts", device.Get()->_enabledFeatures.Vulkan12.separateDepthStencilLayouts ? "enabled" : "disabled");
         testing::Test::RecordProperty("imageless_framebuffer", device.Get()->_enabledFeatures.Vulkan12.imagelessFramebuffer ? "enabled" : "disabled");
+        context.VulkanStorageImageWriteWithoutFormatEnabled = device.Get()->_enabledFeatures.Core.shaderStorageImageWriteWithoutFormat != 0;
         context.Device = device.Release();
+        context.NativeDevice = context.Device.get();
+        if (enableExternalResource)
+            context.DriverVersion = fmt::format("Vulkan raw={:#x}", static_cast<vulkan::DeviceVulkan*>(context.NativeDevice.Get())->_properties.driverVersion);
         if (enableRhiValidation) {
             auto validated = radray::render::detail::CreateValidationDevice(context.Device, {.IsEnabled = true, .LogCallback = CaptureRhiValidationMessage, .LogUserData = &context});
             if (!validated) return RejectDeviceSetup(context, backend, DeviceSetupStatus::InitializationFailed, DeviceSetupStage::Device, "Vulkan validation wrapper failed");
@@ -501,6 +527,10 @@ inline bool TryCreateDevice(
     context.SynchronizationValidationEnabled = enableValidation && backend == RenderBackend::Vulkan;
     context.GpuValidationEnabled = enableGpuValidation;
     testing::Test::RecordProperty("adapter", context.AdapterName);
+    if (enableExternalResource) {
+        testing::Test::RecordProperty("driver", context.DriverVersion);
+        RADRAY_INFO_LOG("External test device backend={} adapter='{}' driver='{}'", backend, context.AdapterName, context.DriverVersion);
+    }
     testing::Test::RecordProperty("validation", context.ValidationEnabled ? "enabled" : "disabled");
     testing::Test::RecordProperty("synchronization_validation", context.SynchronizationValidationEnabled ? "enabled" : "disabled");
     testing::Test::RecordProperty("gpu_validation", enableGpuValidation ? "enabled" : "disabled");

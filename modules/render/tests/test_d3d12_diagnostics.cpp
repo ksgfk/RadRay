@@ -824,7 +824,7 @@ TEST(D3D12DiagnosticsGbv, AsyncErrorIsDeliveredBeforeFinalization) {
     test::DeviceContext context;
     ASSERT_TRUE(test::TryCreateDevice(RenderBackend::D3D12, context, true, false));
     RecordProperty("evidence_class", "isolated_expected_error");
-    const auto path = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode/compute.CSMain.dxil.bin";
+    const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode/compute.CSMain.dxil.bin";
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     ASSERT_TRUE(file);
     ASSERT_GT(file.tellg(), 0);

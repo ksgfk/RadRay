@@ -1,4 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
+#include "external_resource_vulkan.h"
 #include <radray/profiler.h>
 
 #if RADRAY_ENABLE_MIMALLOC
@@ -821,7 +822,7 @@ VulkanRenderPassCache::VulkanRenderPassCache(DeviceVulkan* device, FramebufferMo
 VulkanRenderPassCache::~VulkanRenderPassCache() noexcept { Clear(); }
 uint64_t VulkanRenderPassCache::AllocateViewId() {
     std::lock_guard lock{_mutex};
-    if (_nextViewId == UINT64_MAX) RADRAY_ABORT("Vulkan view identity exhausted");
+    if (_nextViewId == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Vulkan view identity exhausted");
     return _nextViewId++;
 }
 void VulkanRenderPassCache::PinViews(std::span<const uint64_t> views) {
@@ -1289,6 +1290,14 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAll
         return nullptr;
     }
     return make_unique<CommandBufferVulkan>(this, cmdPool->_queue, cmdPool.Get(), cmdBuf);
+}
+
+Nullable<ExternalResourceExtension*> DeviceVulkan::GetExternalResourceExtension() noexcept {
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    return _externalExtension.get();
+#else
+    return nullptr;
+#endif
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
@@ -1767,7 +1776,7 @@ Nullable<unique_ptr<BindingGroupLayout>> DeviceVulkan::CreateBindingGroupLayout(
         if (pool == result->_poolSizes.end())
             result->_poolSizes.push_back({*type, binding.Count});
         else {
-            if (binding.Count > UINT32_MAX - pool->descriptorCount) return nullptr;
+            if (binding.Count > std::numeric_limits<uint32_t>::max() - pool->descriptorCount) return nullptr;
             pool->descriptorCount += binding.Count;
         }
     }
@@ -2768,6 +2777,12 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     if (extProperties->conservativeRasterization) extProperties->conservativeRasterization->pNext = nullptr;
 
     vector<const char*> deviceExts{};
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    const bool externalMemoryWin32 = desc.EnableExternalResource && IsValidateExtensions(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, deviceExtsAvailable);
+    const bool externalSemaphoreWin32 = desc.EnableExternalResource && IsValidateExtensions(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, deviceExtsAvailable);
+    if (externalMemoryWin32) needExts.emplace(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    if (externalSemaphoreWin32) needExts.emplace(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+#endif
     deviceExts.reserve(needExts.size());
     for (const auto& ext : needExts) {
         deviceExts.emplace_back(ext.c_str());
@@ -2815,6 +2830,13 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         selectPhyDevice.device,
         device);
     volkLoadDeviceTable(&deviceR->_ftb, deviceR->_device);
+#if defined(RADRAY_PLATFORM_WINDOWS)
+    deviceR->_externalMemoryWin32 = externalMemoryWin32 && deviceR->_ftb.vkGetMemoryWin32HandleKHR && deviceR->_ftb.vkGetMemoryWin32HandlePropertiesKHR;
+    deviceR->_externalSemaphoreWin32 = externalSemaphoreWin32 && deviceR->_ftb.vkGetSemaphoreWin32HandleKHR && deviceR->_ftb.vkImportSemaphoreWin32HandleKHR;
+    if (desc.EnableExternalResource) {
+        deviceR->_externalExtension = make_unique<ExternalResourceVulkan>(deviceR.get());
+    }
+#endif
     if (const auto missing = GetMissingDeviceFunctionVulkan(deviceR->_ftb); !missing.empty()) {
         RADRAY_ERR_LOG("Vulkan required core device entry point is missing: {}", missing);
         return nullptr;
@@ -3259,6 +3281,50 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    const auto externalTransfer = [](const ResourceBarrierDescriptor& b) {
+        return std::visit([](const auto& value) {
+            if constexpr (requires { value.ExternalTransfer; })
+                return value.ExternalTransfer != ExternalOwnershipTransfer::None;
+            else
+                return false;
+        },
+                          b);
+    };
+    if (std::any_of(barriers.begin(), barriers.end(), externalTransfer)) {
+        for (const auto& b : barriers) {
+            if (!externalTransfer(b)) {
+                ResourceBarrier({&b, 1});
+                continue;
+            }
+            std::visit([&](const auto& value) {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (!std::is_same_v<T, BarrierUavDescriptor>) {
+                    const bool acquire = value.ExternalTransfer == ExternalOwnershipTransfer::Acquire;
+                    auto local = value;
+                    local.ExternalTransfer = ExternalOwnershipTransfer::None;
+                    const ResourceBarrierDescriptor localBarrier = local;
+                    const auto transition = [&] { if (local.Before != local.After) ResourceBarrier({&localBarrier, 1}); };
+                    if (!acquire) transition();
+                    const auto source = acquire ? VK_QUEUE_FAMILY_EXTERNAL : _cmdPool->_queue->_family.Family;
+                    const auto destination = acquire ? _cmdPool->_queue->_family.Family : VK_QUEUE_FAMILY_EXTERNAL;
+                    const VkAccessFlags access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                    if constexpr (std::is_same_v<T, BarrierBufferDescriptor>) {
+                        const auto* buffer = CastVkObject(value.Target);
+                        const VkBufferMemoryBarrier native{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr, acquire ? 0u : access, acquire ? access : 0u,
+                                                           source, destination, buffer->_buffer, 0, buffer->_reqSize};
+                        _device->_ftb.vkCmdPipelineBarrier(_cmdBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 1, &native, 0, nullptr);
+                    } else {
+                        const auto* image = CastVkObject(value.Target);
+                        const VkImageMemoryBarrier native{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, acquire ? 0u : access, acquire ? access : 0u, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, source, destination, image->_image, MakeExternalTextureRange(image->GetDesc())};
+                        _device->_ftb.vkCmdPipelineBarrier(_cmdBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &native);
+                    }
+                    if (acquire) transition();
+                }
+            },
+                       b);
+        }
+        return;
+    }
     const auto shaderStages = [this](VkPipelineStageFlags native, ShaderStages stages) {
         return ResolveShaderPipelineStagesVulkan(native, stages, _cmdPool->_queue->_queueFlags);
     };
@@ -3695,7 +3761,7 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
 
 void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
     if (bindings.empty()) return;
-    uint32_t lowest = UINT32_MAX, highest = 0;
+    uint32_t lowest = std::numeric_limits<uint32_t>::max(), highest = 0;
     for (const auto& binding : bindings) {
         lowest = std::min(lowest, binding.Binding);
         highest = std::max(highest, binding.Binding);
@@ -3954,7 +4020,7 @@ void LegacyFenceVulkan::Destroy() noexcept {
 }
 
 void LegacyFenceVulkan::Wait() noexcept {
-    if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, UINT64_MAX);
+    if (auto vr = _device->_ftb.vkWaitForFences(_device->_device, 1, &_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkWaitForFences failed: {}", vr);
     }
@@ -4007,6 +4073,8 @@ FenceVulkan::~FenceVulkan() noexcept {
 }
 
 void FenceVulkan::DestroyImpl() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     _fence.reset();
     _fenceValue = 0;
 }
@@ -4049,7 +4117,7 @@ bool FenceVulkan::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
         waitInfo.semaphoreCount = 1;
         waitInfo.pSemaphores = &waitSemaphore;
         waitInfo.pValues = &value;
-        const uint64_t duration = std::min(timeoutMs, (UINT64_MAX - 1) / 1000000) * 1000000;
+        const uint64_t duration = std::min(timeoutMs, (std::numeric_limits<uint64_t>::max() - 1) / 1000000) * 1000000;
         if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, duration); vr != VK_SUCCESS) {
             if (vr == VK_TIMEOUT) return _fence->GetCompletedValue() >= value;
             RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
@@ -4131,7 +4199,7 @@ void SwapChainSyncObjectVulkan::Destroy() noexcept {
 // == SwapChain 与 QueryPool ==
 
 uint64_t SwapChainRetirementVulkan::BeginGeneration() {
-    RADRAY_ASSERT(_nextGeneration != UINT64_MAX);
+    RADRAY_ASSERT(_nextGeneration != std::numeric_limits<uint64_t>::max());
     const auto id = ++_nextGeneration;
     _generations.push_back({id});
     return id;
@@ -4293,7 +4361,7 @@ void SwapChainVulkan::DrainAndClear() noexcept {
         if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkDeviceWaitIdle failed: {}", idle);
         if (_terminalResult != VK_ERROR_DEVICE_LOST) {
             for (const auto& acquire : _pendingAcquires) {
-                const VkResult wait = _device->_ftb.vkWaitForFences(_device->_device, 1, &acquire.Fence->_fence, VK_TRUE, UINT64_MAX);
+                const VkResult wait = _device->_ftb.vkWaitForFences(_device->_device, 1, &acquire.Fence->_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
                 this->RecordFailure(wait);
                 if (wait == VK_ERROR_DEVICE_LOST) break;
                 if (wait != VK_SUCCESS) RADRAY_ABORT("vkWaitForFences failed: {}", wait);
@@ -4607,6 +4675,8 @@ void BufferVulkan::Destroy() noexcept {
 }
 
 void BufferVulkan::DestroyImpl() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     if (_buffer != VK_NULL_HANDLE) {
         if (_allocation == VK_NULL_HANDLE) {
             _device->_ftb.vkDestroyBuffer(_device->_device, _buffer, _device->GetAllocationCallbacks());
@@ -4755,6 +4825,8 @@ TextureDescriptor ImageVulkan::GetDesc() const noexcept {
 }
 
 void ImageVulkan::DestroyImpl() noexcept {
+    _externalHandle.Reset();
+    _externalInfo.reset();
     if (_image != VK_NULL_HANDLE) {
         if (_hints.HasFlag(ResourceHint::External)) {
             _image = VK_NULL_HANDLE;

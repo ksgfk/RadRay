@@ -24,7 +24,7 @@ protected:
     }
     unique_ptr<Shader> Stage(ShaderStage stage) {
         const auto name = stage == ShaderStage::Vertex ? "command_contracts.VSMain.dxil.bin" : "command_contracts.PSMain.dxil.bin";
-        const auto bytes = ReadBinaryFile(std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode" / name);
+        const auto bytes = ReadBinaryFile(std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode" / name);
         if (!bytes) return {};
         return Device->CreateShader({*bytes, ShaderBlobCategory::DXIL, stage}).Unwrap();
     }
@@ -249,7 +249,7 @@ TEST_F(D3D12CommandContracts, InvalidQueueOperationsAreRejectedBeforeNativeRecor
 }
 
 TEST_F(D3D12CommandContracts, HostVisibleBuffersRespectTheirNativeHeapStates) {
-    const auto bytes = ReadBinaryFile(std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode/compute.CSMain.dxil.bin");
+    const auto bytes = ReadBinaryFile(std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode/compute.CSMain.dxil.bin");
     ASSERT_TRUE(bytes);
     auto shader = Device->CreateShader({*bytes, ShaderBlobCategory::DXIL, ShaderStage::Compute}).Unwrap();
     const BindingDescriptor binding{.BindingId = 0, .Kind = BindingKind::RWStructuredBuffer, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = D3D12BindingDescriptor{BindingRegisterClass::UAV, 2, 0, D3D12BufferPlacement::Table}};

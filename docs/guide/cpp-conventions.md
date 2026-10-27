@@ -54,6 +54,9 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 
 ## 接口风格
 
+整数上下界统一使用 `<limits>` 中的 `std::numeric_limits<T>::min()` / `max()`，使用处直接包含 `<limits>`；
+不使用 `<cstdint>` / `<stdint.h>` 的整数边界宏。
+
 **可空指针用 `Nullable<T>`，可空值用 `std::optional`。** 这条分界在仓库里执行得很干净：
 
 ```cpp

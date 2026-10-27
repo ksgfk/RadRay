@@ -560,6 +560,7 @@ using TextureAspects = EnumFlags<TextureAspect>;
 namespace radray::render {
 
 class Device;
+class ExternalResourceExtension;
 class CommandQueue;
 class CommandBuffer;
 class CommandAllocator;
@@ -697,6 +698,7 @@ struct D3D12DeviceDescriptor {
     DXGIFactory* Factory{nullptr};
     std::optional<uint32_t> AdapterIndex{};
     array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> QueueCounts{1, 0, 0};
+    bool EnableExternalResource{false};
 };
 
 struct VulkanCommandQueueDescriptor {
@@ -708,6 +710,7 @@ class VulkanDeviceDescriptor {
 public:
     std::optional<uint32_t> PhysicalDeviceIndex{};
     std::span<const VulkanCommandQueueDescriptor> Queues{};
+    bool EnableExternalResource{false};
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
@@ -878,6 +881,10 @@ struct BufferRange {
     friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
 };
 
+enum class ExternalOwnershipTransfer : uint32_t { None,
+                                                  Acquire,
+                                                  Release };
+
 struct BarrierBufferDescriptor {
     Buffer* Target{nullptr};
     BufferStates Before{BufferState::UNKNOWN};
@@ -885,6 +892,7 @@ struct BarrierBufferDescriptor {
     // D3D12 legacy barriers widen this range to the whole buffer.
     BufferRange Range{BufferRange::AllRange()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
+    ExternalOwnershipTransfer ExternalTransfer{ExternalOwnershipTransfer::None};
 };
 
 struct SubresourceRange {
@@ -909,6 +917,7 @@ struct BarrierTextureDescriptor {
     TextureStates After{TextureState::UNKNOWN};
     SubresourceRange Range{SubresourceRange::AllSub()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
+    ExternalOwnershipTransfer ExternalTransfer{ExternalOwnershipTransfer::None};
 };
 
 struct BarrierUavDescriptor {
@@ -1424,6 +1433,9 @@ public:
 
     virtual RenderBackend GetBackend() noexcept = 0;
 
+    // Borrowed from this device; null when disabled at creation or unavailable on this platform.
+    virtual Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept = 0;
+
     virtual DeviceDetail GetDetail() const noexcept = 0;
 
     virtual const RenderDeviceCapabilities& GetCapabilities() const noexcept = 0;
@@ -1634,7 +1646,7 @@ public:
     virtual void Wait(uint64_t value) noexcept = 0;
 
     // Finite CPU wait. False means timeout, never GPU completion; 0 only polls.
-    // The caller serializes waits on this fence. Even UINT64_MAX is finite.
+    // The caller serializes waits on this fence. Even the maximum uint64_t timeout is finite.
     virtual bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept = 0;
 };
 

@@ -252,7 +252,10 @@ RadRay 安装包导出 `RadRay::shadercompiler` 与可选 `RadRay::shader_compil
 [安装与包消费](../guide/build-test.md#安装与包消费)。
 
 当前没有正式 shader artifact publisher 或索引；fork SDK autobuild 只发布 compiler package。
-shader 测试读取版本控制的 metadata golden；render 测试只读取独立的 raw stage 字节码。
-`modules/shader_compiler/tests/shader_fixture_generator.cpp` 属于 compiler 侧手动 `EXCLUDE_FROM_ALL` 目标，
-生成器从 shader/compiler 测试 source 更新这些 fixture。普通 render 构建、测试和安装不调用生成器。
-这些 fixture 不代表产品 artifact 发布链。
+shader 测试读取本地生成的 metadata，并保留版本控制中的 golden hash 文本断言；render 测试只读取
+独立的 raw stage 字节码。生成的 `.bin` 不入库，统一由 `tools/compile_test_shaders.py` 显式准备到
+被忽略的 `build/test_shaders/`（测试可用 `RADRAY_TEST_SHADER_DIR` 改写）。脚本组合 compiler 侧
+`EXCLUDE_FROM_ALL` 的 `radray_shader_fixture_generator` 与 raw DXC 配方；普通测试构建只验证
+源指纹和产物，不构建/调用生成器。compiler 关闭的消费者需预先准备夹具，但仍不查找或加载 DXC。
+生成依赖、增量校验与干净检出步骤见[本地测试 shader](../guide/build-test.md#本地测试-shader)。
+这些 fixture 不代表产品 artifact 发布链，也不参与产品安装。

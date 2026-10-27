@@ -51,6 +51,7 @@ DeviceFeaturesVulkan ExpectedRhiFeatures() {
     result.Core.samplerAnisotropy = VK_TRUE;
     result.Core.vertexPipelineStoresAndAtomics = VK_TRUE;
     result.Core.fragmentStoresAndAtomics = VK_TRUE;
+    result.Core.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     result.Vulkan12.timelineSemaphore = VK_TRUE;
     result.Vulkan12.samplerMirrorClampToEdge = VK_TRUE;
     result.Vulkan12.samplerFilterMinmax = VK_TRUE;
@@ -61,7 +62,7 @@ DeviceFeaturesVulkan ExpectedRhiFeatures() {
 
 TEST(VulkanInitialization, AllocatesMultipleQueuesAndSharesFamilyCapacity) {
     const VkQueueFamilyProperties families[]{
-        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, .queueCount = 4, .timestampValidBits = 0, .minImageTransferGranularity = {}},
+        {.queueFlags = VkQueueFlags(VK_QUEUE_GRAPHICS_BIT) | VkQueueFlags(VK_QUEUE_COMPUTE_BIT), .queueCount = 4, .timestampValidBits = 0, .minImageTransferGranularity = {}},
         {.queueFlags = VK_QUEUE_COMPUTE_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}}};
     std::array<uint32_t, 2> used{};
     const auto direct = AllocateQueueIndicesVulkan(QueueType::Direct, 2, families, used);
@@ -89,7 +90,7 @@ TEST(VulkanInitialization, DirectRequiresBothGraphicsAndCompute) {
     const VkQueueFamilyProperties families[]{
         {.queueFlags = VK_QUEUE_GRAPHICS_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}},
         {.queueFlags = VK_QUEUE_COMPUTE_BIT, .queueCount = 2, .timestampValidBits = 0, .minImageTransferGranularity = {}},
-        {.queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}}};
+        {.queueFlags = VkQueueFlags(VK_QUEUE_GRAPHICS_BIT) | VkQueueFlags(VK_QUEUE_COMPUTE_BIT), .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}}};
     std::array<uint32_t, 3> used{};
     const auto queues = AllocateQueueIndicesVulkan(QueueType::Direct, 2, families, used);
     ASSERT_EQ(queues.size(), 1u);
@@ -98,7 +99,7 @@ TEST(VulkanInitialization, DirectRequiresBothGraphicsAndCompute) {
 }
 
 TEST(VulkanInitialization, CopyAcceptsImplicitAndExplicitTransferSupport) {
-    const VkQueueFlags flags[]{VK_QUEUE_GRAPHICS_BIT, VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, VK_QUEUE_TRANSFER_BIT};
+    const VkQueueFlags flags[]{VK_QUEUE_GRAPHICS_BIT, VK_QUEUE_COMPUTE_BIT, VkQueueFlags(VK_QUEUE_GRAPHICS_BIT) | VkQueueFlags(VK_QUEUE_COMPUTE_BIT), VK_QUEUE_TRANSFER_BIT};
     for (const auto flag : flags) {
         SCOPED_TRACE(flag);
         const VkQueueFamilyProperties family{.queueFlags = flag, .queueCount = 1, .timestampValidBits = 0, .minImageTransferGranularity = {}};
@@ -174,7 +175,7 @@ TEST(VulkanInitialization, UnsupportedTimestampsAndCopyQueuesDoNotInitializeProf
         ADD_FAILURE() << "Unsupported queue must not create profiler command resources";
         return VK_ERROR_INITIALIZATION_FAILED;
     };
-    const VkQueueFlags flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    const VkQueueFlags flags = VkQueueFlags(VK_QUEUE_GRAPHICS_BIT) | VkQueueFlags(VK_QUEUE_COMPUTE_BIT);
     QueueVulkan direct{&device, VK_NULL_HANDLE, {}, QueueType::Direct, flags, 0};
     QueueVulkan compute{&device, VK_NULL_HANDLE, {}, QueueType::Compute, flags, 0};
     QueueVulkan copy{&device, VK_NULL_HANDLE, {}, QueueType::Copy, flags, 64};
@@ -201,7 +202,7 @@ TEST(VulkanDeviceFeaturePolicy, AllSupportedEnablesExactlyRhiRequests) {
     const auto selection = SelectDeviceFeaturesVulkan(supported, GetRhiFeatureRequestsVulkan());
     EXPECT_TRUE(selection.MissingRequired.empty());
     EXPECT_EQ(FeatureBits(selection.Enabled), FeatureBits(ExpectedRhiFeatures()));
-    EXPECT_EQ(selection.EnabledNames.size(), 17u);
+    EXPECT_EQ(selection.EnabledNames.size(), 18u);
     EXPECT_EQ(FeatureBits(supported), before);
     EXPECT_EQ(selection.Enabled.Vulkan11.pNext, nullptr);
     EXPECT_EQ(selection.Enabled.Vulkan12.pNext, nullptr);
@@ -370,7 +371,7 @@ struct FeatureConsumerProbe {
 
 TEST(VulkanShaderBytecode, FixturesNeedNoGoogleReflectionAndReachDriverUnmodified) {
     FeatureConsumerProbe probe;
-    const auto root = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode";
+    const auto root = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode";
     std::error_code error;
     std::filesystem::directory_iterator files{root, error};
     ASSERT_FALSE(error) << error.message();
@@ -548,7 +549,7 @@ TEST_P(VulkanFramebufferGraphicsGpu, GoogleFreeGraphicsDrawsThroughFramebuffer) 
     if (GetParam() == FramebufferModeVulkan::Imageless && !native._enabledFeatures.Vulkan12.imagelessFramebuffer)
         GTEST_SKIP() << "imagelessFramebuffer is unavailable";
     native._renderPassCache = make_unique<VulkanRenderPassCache>(&native, GetParam());
-    const auto root = std::filesystem::path{RADRAY_PROJECT_DIR} / "modules/render/tests/data/shader_bytecode";
+    const auto root = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode";
     const auto vertexBytes = ReadBinaryFile(root / "no_resource_graphics.VSMain.spirv.bin");
     const auto pixelBytes = ReadBinaryFile(root / "no_resource_graphics.PSMain.spirv.bin");
     ASSERT_TRUE(vertexBytes);

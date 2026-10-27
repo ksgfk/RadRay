@@ -66,8 +66,8 @@ vector<byte> ReadFixtureArtifact(std::string_view name, shader::ShaderTarget tar
     }
     const string suffix = target == shader::ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
     return ReadBinary(
-        std::filesystem::path{RADRAY_PROJECT_DIR} /
-        "modules/shader/tests/data/shader_artifacts" /
+        std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+        "shader_artifacts" /
         (string{name} + suffix));
 }
 
@@ -240,8 +240,8 @@ TEST(RadRayShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
     // Driven off the fixture table so the golden hash indices cannot drift from it.
     const std::span<const test::ShaderContractFixture> fixtures =
         test::GetShaderContractFixtures();
-    const std::filesystem::path root = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts";
+    const std::filesystem::path root = std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+                                       "shader_artifacts";
     for (uint8_t index = 0; index < fixtures.size(); ++index) {
         const std::string_view fixtureName = fixtures[index].Name;
         for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
@@ -586,8 +586,8 @@ TEST(RadRayShaderArtifact, NestedTypeTreeLayoutFactsRemainTargetStable) {
 }
 
 TEST(RadRayShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentity) {
-    const std::filesystem::path path = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts/nested_types.dxil.bin";
+    const std::filesystem::path path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+                                       "shader_artifacts/nested_types.dxil.bin";
     const vector<byte> original = ReadBinary(path);
     ASSERT_FALSE(original.empty());
     const std::optional<size_t> fixtureIndex = FindFixtureIndex("nested_types");
@@ -633,8 +633,8 @@ TEST(RadRayShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentity) {
 }
 
 TEST(RadRayShaderArtifact, FailsClosedForIdentityAndWireCorruption) {
-    const std::filesystem::path path = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts/no_resource_graphics.dxil.bin";
+    const std::filesystem::path path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+                                       "shader_artifacts/no_resource_graphics.dxil.bin";
     const shader::ShaderTarget target = shader::ShaderTarget::DXIL;
     const shader::GpuArtifactHash expected = test::ExpectedGpuArtifact(0, target);
     const vector<byte> original = ReadBinary(path);
@@ -808,8 +808,8 @@ TEST(RadRayShaderArtifact, RejectsDuplicateAndMalformedRecords) {
     expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.ParentIndex = 0; });
 
     const vector<byte> nested = ReadBinary(
-        std::filesystem::path{RADRAY_PROJECT_DIR} /
-        "modules/shader/tests/data/shader_artifacts/nested_types.dxil.bin");
+        std::filesystem::path{RADRAY_TEST_SHADER_DIR} /
+        "shader_artifacts/nested_types.dxil.bin");
     ASSERT_FALSE(nested.empty());
     const std::optional<size_t> nestedFixtureIndex = FindFixtureIndex("nested_types");
     ASSERT_TRUE(nestedFixtureIndex.has_value());
