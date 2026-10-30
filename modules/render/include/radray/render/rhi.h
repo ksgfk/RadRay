@@ -1383,6 +1383,7 @@ struct DeviceLimits {
 struct DeviceFeatures {
     bool TimestampQueries{false};
     bool IndirectDraw{false};
+    bool IndirectFirstInstance{false}; // Nonzero firstInstance is enabled for indirect draws.
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
     bool IndependentDepthStencilTransitions{false};

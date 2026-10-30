@@ -645,6 +645,10 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 `DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
 `DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
 
+`Features.IndirectFirstInstance` 表示间接绘制中非零 `firstInstance` 的实际启用能力。
+D3D12 返回 true；Vulkan 读取创建设备时启用的 `drawIndirectFirstInstance`，不使用物理设备支持值代替。
+该字段与 `IndirectDraw` 分开报告，调用方需要同时满足二者才生成非零起始实例的间接参数。
+
 buffer offset limits 公开 constant、storage 与 texel buffer 对齐：D3D12 分别报告 256、4 与 1
 （typed view 仍需按格式元素对齐），Vulkan 分别来自 `minUniformBufferOffsetAlignment`、
 `minStorageBufferOffsetAlignment` 与 `minTexelBufferOffsetAlignment`，typed buffer 不套用 storage 对齐。

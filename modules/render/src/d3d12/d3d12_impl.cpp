@@ -882,6 +882,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     caps.Features = {
         .TimestampQueries = true,
         .IndirectDraw = true,
+        .IndirectFirstInstance = true,
         .IndirectDispatch = true,
         .SubresourceBarriers = true,
         .IndependentDepthStencilTransitions = true,

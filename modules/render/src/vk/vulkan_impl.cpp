@@ -2907,6 +2907,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         caps.Features = {
             .TimestampQueries = false,
             .IndirectDraw = true,
+            .IndirectFirstInstance = deviceR->_enabledFeatures.Core.drawIndirectFirstInstance == VK_TRUE,
             .IndirectDispatch = true,
             .SubresourceBarriers = true,
             .IndependentDepthStencilTransitions = deviceR->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0,
