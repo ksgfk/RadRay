@@ -580,6 +580,8 @@ public:
 
     void SetScissor(Rect rect) noexcept override;
 
+    void SetStencilReference(uint8_t reference) noexcept override;
+
     void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept override;
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;

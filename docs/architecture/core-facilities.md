@@ -16,7 +16,7 @@
 | `logger.h` | 日志宏、`RADRAY_ABORT`、`RADRAY_ASSERT` |
 | `nullable.h` | `Nullable<T>` |
 | `enum_flags.h` | `EnumFlags<T>` + `magic_enum` 的唯一出口 |
-| `basic_math.h` | Eigen 封装 + 视图/投影辅助；48 B 列主序 `AffineTransform` 传输表示 |
+| `basic_math.h` | Eigen 封装 + 视图/投影辅助；48 B `AffineTransform` 和 24 B 三维 `Aabb` |
 | `hash.h` | `HashCode` 增量哈希、`StringHash`、`PodHasher` |
 | `coroutine.h` | `task`、`TaskScope`、`ManualCoroutineScheduler` |
 | `utility.h` | `StaticCastUniquePtr`、`Unreachable`、`RADRAY_UNUSED` |
@@ -278,6 +278,25 @@ template <> struct JsonDeserializer<T> {
 
 `AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；
 它与 `Eigen::Matrix4f` 相互转换并保留 shear/负缩放，计算和缓存仍使用 `Matrix4f`。
+
+`Aabb` 是三维 float 轴对齐包围盒，使用两个 `array<float, 3>` 成员 `Min` / `Max`，共 24 B。
+构造函数接收最小、最大端点，方法的向量参数和返回值使用 `Eigen::Vector3f`。
+默认构造为空盒，适合从顶点逐步累积，不会额外包含原点。端点非有限或任一轴 `Min > Max` 均视为空盒；
+点、线和面的退化包围盒仍有效。端点成员公开，修改后沿用同一规则。
+
+| 操作 | 契约 |
+|---|---|
+| `IsEmpty` | 检查上述空盒条件 |
+| `GetCenter` / `GetSize` / `GetExtent` | 中心、全尺寸、半尺寸；空盒返回零向量 |
+| `Expand(point)` / `Expand(bounds)` | 原地扩大到包含输入；空盒采用首个有效输入，忽略非有限点和空盒 |
+| `Contains(point)` / `Contains(bounds)` | 包含边界；空盒不包含任何对象，也不被判为包含于其他盒 |
+| `Intersects` / `Intersection` | 边界接触算相交；求交返回独立 AABB，不相交时返回空盒 |
+| `Transform(AffineTransform)` | 返回变换后重新包围的 AABB，支持旋转、负/非均匀/零缩放和 shear；空盒仍为空盒 |
+
+`Transform` 的输入必须是有限仿射变换，不接收透视投影。中心和半尺寸避免中间加减溢出，
+其他算术结果仍受 float 范围和精度限制。AABB 不带坐标空间标记，调用方负责区分本地与世界空间。
+CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，覆盖空盒、退化边界、
+非有限输入、累积合并，以及与八角点参考计算对比的仿射变换。
 
 ## 其他
 

@@ -18,6 +18,7 @@ struct RenderObjectProbe {
     vector<FramebufferAttachmentVulkan> Constraints;
     vector<VkFormat> Formats;
     vector<VkImageView> BeginViews;
+    vector<uint32_t> StencilReferences;
     VkFramebuffer LastFramebuffer{VK_NULL_HANDLE};
     VkRect2D LastArea{};
     InstanceVulkanImpl Instance{VK_NULL_HANDLE, std::nullopt, {}, {}};
@@ -111,6 +112,12 @@ struct RenderObjectProbe {
         };
         Device._ftb.vkCmdEndRenderPass2 = [](VkCommandBuffer, const VkSubpassEndInfo* end) {
             EXPECT_EQ(end->sType, VK_STRUCTURE_TYPE_SUBPASS_END_INFO);
+        };
+        Device._ftb.vkCmdSetStencilReference = [](VkCommandBuffer command, VkStencilFaceFlags faces, uint32_t reference) {
+            auto& p = *reinterpret_cast<RenderObjectProbe*>(command);
+            EXPECT_GT(p.Begins, 0u);
+            EXPECT_EQ(faces, VK_STENCIL_FACE_FRONT_AND_BACK);
+            p.StencilReferences.push_back(reference);
         };
         Command.Begin();
     }
@@ -369,6 +376,9 @@ TEST(VulkanRenderObjects, RenderPass2PreservesAttachmentOperationsAndLayouts) {
                                               .Height = 8,
                                               .RenderArea = Rect{2, 3, 4, 5}})
                        .Unwrap();
+    EXPECT_EQ(p.StencilReferences, (vector<uint32_t>{0}));
+    encoder->SetStencilReference(255);
+    EXPECT_EQ(p.StencilReferences, (vector<uint32_t>{0, 255}));
     p.Command.EndRenderPass(std::move(encoder));
     ASSERT_EQ(p.PassAttachments.size(), 3u);
     for (const auto& attachment : p.PassAttachments) {

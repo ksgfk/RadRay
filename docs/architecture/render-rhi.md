@@ -85,6 +85,18 @@ Vulkan 的 `TimestampQueries` 表示至少一个已创建 queue family 支持 ti
 校验层按 command buffer 实际 family 检查 `timestampValidBits` 和 timestamp stage。
 `ResetQueryPool` / `ResolveQueryData` 要求 graphics 或 compute family，专用 transfer family 被拒绝。
 
+## 模板参考值
+
+`GraphicsCommandEncoder::SetStencilReference(uint8_t)` 设置正反面共用的模板参考值。
+每次成功 BeginRenderPass 将其初始化为 0；切换 PSO 不重置，后续 Draw 使用最近设置的值。
+可以在绑定 PSO 前设置；未启用模板测试时不影响绘制。参考值不属于 PSO 描述符。
+调用者应将每条绘制实际需要的值显式录制，避免依赖上一条绘制。
+
+D3D12 映射为 `OMSetStencilRef`；Vulkan 的图形 PSO 声明 `VK_DYNAMIC_STATE_STENCIL_REFERENCE`，
+通过 `vkCmdSetStencilReference(..., VK_STENCIL_FACE_FRONT_AND_BACK, ...)` 设置。
+RHI 校验层检查有效的 graphics encoder 录制状态再转发，不要求已绑定 PSO 或模板附件。
+比较函数、操作及掩码仍由 `StencilState` 提供，模板附件及 load/store 由 Render Pass 提供。
+
 ## Timestamp 时钟关联
 
 `QueryPool::GetTimestampCalibration` 只提供查询 tick 的频率/周期，不能关联 CPU 与 GPU 时钟。
@@ -644,6 +656,10 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 `Device::GetCapabilities()` 返回创建后不可变的 `RenderDeviceCapabilities`，包括原
 `DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
 `DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
+
+`Features.IndirectFirstInstance` 表示间接绘制中非零 `firstInstance` 的实际启用能力。
+D3D12 返回 true；Vulkan 读取创建设备时启用的 `drawIndirectFirstInstance`，不使用物理设备支持值代替。
+该字段与 `IndirectDraw` 分开报告，调用方需要同时满足二者才生成非零起始实例的间接参数。
 
 buffer offset limits 公开 constant、storage 与 texel buffer 对齐：D3D12 分别报告 256、4 与 1
 （typed view 仍需按格式元素对齐），Vulkan 分别来自 `minUniformBufferOffsetAlignment`、

@@ -1,0 +1,6 @@
+add_executable(test_radray_runtime test_mesh_drawing_pipeline.cpp test_material.cpp)
+target_link_libraries(test_radray_runtime PRIVATE RadRay::runtime GTest::gtest_main)
+radray_default_compile_flags(test_radray_runtime)
+radray_optimize_flags_binary(test_radray_runtime)
+radray_set_build_path(test_radray_runtime)
+gtest_discover_tests(test_radray_runtime)

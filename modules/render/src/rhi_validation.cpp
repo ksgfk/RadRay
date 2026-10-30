@@ -891,6 +891,10 @@ public:
         Pipeline = pipeline;
         Layout = pipeline.Get()->Layout;
     }
+    void SetStencilReference(uint8_t reference) noexcept override {
+        if (!Active("SetStencilReference")) return;
+        Real()->SetStencilReference(reference);
+    }
     void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept override {
         if (!Active("BindVertexBuffers")) return;
         if (!Pipeline) {

@@ -2167,6 +2167,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vector<VkDynamicState> dynStates;
     dynStates.emplace_back(VK_DYNAMIC_STATE_VIEWPORT);
     dynStates.emplace_back(VK_DYNAMIC_STATE_SCISSOR);
+    dynStates.emplace_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
     VkPipelineDynamicStateCreateInfo dynStateInfo{};
     dynStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dynStateInfo.pNext = nullptr;
@@ -2907,6 +2908,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         caps.Features = {
             .TimestampQueries = false,
             .IndirectDraw = true,
+            .IndirectFirstInstance = deviceR->_enabledFeatures.Core.drawIndirectFirstInstance == VK_TRUE,
             .IndirectDispatch = true,
             .SubresourceBarriers = true,
             .IndependentDepthStencilTransitions = deviceR->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0,
@@ -3508,6 +3510,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     info.pClearValues = clears.data();
     const VkSubpassBeginInfo begin{VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO, nullptr, VK_SUBPASS_CONTENTS_INLINE};
     _device->_ftb.vkCmdBeginRenderPass2(_cmdBuffer, &info, &begin);
+    encoder->SetStencilReference(0);
     return encoder;
 }
 
@@ -3757,6 +3760,10 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
         {rect.Width,
          rect.Height}};
     _device->_ftb.vkCmdSetScissor(_cmdBuffer->_cmdBuffer, 0, 1, &s);
+}
+
+void SimulateCommandEncoderVulkan::SetStencilReference(uint8_t reference) noexcept {
+    _device->_ftb.vkCmdSetStencilReference(_cmdBuffer->_cmdBuffer, VK_STENCIL_FACE_FRONT_AND_BACK, reference);
 }
 
 void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {

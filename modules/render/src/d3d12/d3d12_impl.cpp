@@ -882,6 +882,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     caps.Features = {
         .TimestampQueries = true,
         .IndirectDraw = true,
+        .IndirectFirstInstance = true,
         .IndirectDispatch = true,
         .SubresourceBarriers = true,
         .IndependentDepthStencilTransitions = true,
@@ -2805,6 +2806,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
                                                              depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
     }
     _renderPassList->BeginRenderPass(static_cast<UINT>(colors.size()), colors.data(), depth ? &*depth : nullptr, flags);
+    encoder->SetStencilReference(0);
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = true;
 #endif
@@ -3060,6 +3062,10 @@ void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
     rect.right = scissor.X + scissor.Width;
     rect.bottom = scissor.Y + scissor.Height;
     _cmdList->_cmdList->RSSetScissorRects(1, &rect);
+}
+
+void CmdRenderPassD3D12::SetStencilReference(uint8_t reference) noexcept {
+    _cmdList->_cmdList->OMSetStencilRef(reference);
 }
 
 void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {

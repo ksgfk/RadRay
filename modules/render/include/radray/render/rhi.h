@@ -1383,6 +1383,7 @@ struct DeviceLimits {
 struct DeviceFeatures {
     bool TimestampQueries{false};
     bool IndirectDraw{false};
+    bool IndirectFirstInstance{false}; // Nonzero firstInstance is enabled for indirect draws.
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
     bool IndependentDepthStencilTransitions{false};
@@ -1599,6 +1600,10 @@ public:
     virtual void SetViewport(Viewport vp) noexcept = 0;
 
     virtual void SetScissor(Rect rect) noexcept = 0;
+
+    // Both faces share the reference. BeginRenderPass resets it to zero; PSO changes preserve it.
+    // May be set before binding a PSO. The value is used only when stencil testing is enabled.
+    virtual void SetStencilReference(uint8_t reference) noexcept = 0;
 
     // 先绑定 VB、后绑定 PSO，以及切换 PSO 时由后端自动重新绑定 VB，均依赖 RHI 后端行为，不保证正确性。
     // 可移植的调用顺序是先绑定 PSO，再绑定其使用的 VB；切换 PSO 后应显式重新绑定 VB。

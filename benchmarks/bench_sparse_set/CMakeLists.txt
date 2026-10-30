@@ -1,0 +1,5 @@
+add_executable(bench_sparse_set bench_sparse_set.cpp)
+target_link_libraries(bench_sparse_set PRIVATE radraycore benchmark::benchmark)
+radray_default_compile_flags(bench_sparse_set)
+radray_optimize_flags_binary(bench_sparse_set)
+radray_set_build_path(bench_sparse_set)

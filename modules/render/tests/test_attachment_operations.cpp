@@ -563,6 +563,121 @@ TEST_P(AttachmentOperations, MixedAttachmentsSampleTheReadOnlyAspectAtTheCurrent
     }
 }
 
+TEST_P(AttachmentOperations, StencilReferenceIsDynamicMaskedAndResetPerPass) {
+    auto& device = *Context.Device;
+    auto stencil = Texture2D(TextureFormat::D32_FLOAT_S8_UINT, 1, TextureUse::DepthStencilWrite);
+    auto stencilView = View(stencil.get(), TextureViewUsage::DepthWrite);
+    auto color = Texture2D(TextureFormat::RGBA8_UNORM, 1, TextureUse::RenderTarget | TextureUse::CopySource);
+    auto colorView = View(color.get(), TextureViewUsage::RenderTarget);
+    auto vs = Stage("attachment_color", ShaderStage::Vertex);
+    auto ps = Stage("attachment_color", ShaderStage::Pixel);
+    ASSERT_TRUE(vs && ps);
+    const PushConstantDescriptor push{0, 16, ShaderStage::Pixel, PushConstantDescriptor::D3D12Location{0, 0}, PushConstantDescriptor::VulkanLocation{0}};
+    auto layout = device.CreatePipelineLayout({{}, std::span{&push, 1}}).Unwrap();
+    auto primitive = PrimitiveState::Default();
+    primitive.Cull = CullMode::None;
+    auto depth = DepthStencilState::Default();
+    depth.Format = TextureFormat::D32_FLOAT_S8_UINT;
+    depth.DepthTestEnable = depth.DepthWriteEnable = false;
+    depth.Stencil = StencilState::Default();
+    depth.Stencil->WriteMask = 0x0F;
+    depth.Stencil->Front.PassOp = depth.Stencil->Back.PassOp = StencilOperation::Replace;
+    auto target = ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
+    target.WriteMask = {};
+    GraphicsPipelineStateDescriptor descriptor{
+        .PipelineLayout = layout.get(), .VS = ShaderEntry{vs.get(), "VSMain"}, .PS = ShaderEntry{ps.get(), "PSMain"}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = MultiSampleState::Default(), .ColorTargets = std::span{&target, 1}};
+    auto writer = device.CreateGraphicsPipelineState(descriptor).Unwrap();
+    target.WriteMask = ColorWrite::All;
+    descriptor.DepthStencil->Stencil->ReadMask = 0x0F;
+    descriptor.DepthStencil->Stencil->WriteMask = 0;
+    descriptor.DepthStencil->Stencil->Front.Compare = descriptor.DepthStencil->Stencil->Back.Compare = CompareFunction::Equal;
+    descriptor.DepthStencil->Stencil->Front.PassOp = descriptor.DepthStencil->Stencil->Back.PassOp = StencilOperation::Keep;
+    auto maskedReader = device.CreateGraphicsPipelineState(descriptor).Unwrap();
+    descriptor.DepthStencil->Stencil->ReadMask = 0xFF;
+    auto fullReader = device.CreateGraphicsPipelineState(descriptor).Unwrap();
+    descriptor.DepthStencil->Stencil.reset();
+    auto noStencil = device.CreateGraphicsPipelineState(descriptor).Unwrap();
+
+    const auto alignment = device.GetCapabilities().Detail.TextureDataPitchAlignment;
+    const auto pitch = (32 + alignment - 1) / alignment * alignment;
+    auto readback = device.CreateBuffer({.Size = pitch * 8, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
+    auto allocator = device.CreateCommandAllocator(Context.Queue).Unwrap();
+    auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+    command->Begin();
+    Barrier(command.get(), stencil.get(), TextureState::Undefined, TextureState::DepthWrite);
+    Barrier(command.get(), color.get(), TextureState::Undefined, TextureState::RenderTarget);
+    RenderPassColorAttachment attachment{colorView.get(), LoadAction::Clear, StoreAction::Store, {{0, 0, 0, 1}}};
+    RenderPassDepthStencilAttachment ds{stencilView.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, {1, 0xA0}};
+    auto encoder = command->BeginRenderPass({.Colors = std::span{&attachment, 1}, .DepthStencil = ds, .Width = 8, .Height = 8}).Unwrap();
+    encoder->SetViewport({0, 0, 8, 8, 0, 1});
+    const auto draw = [&](Rect scissor, array<float, 4> value) {
+        encoder->SetScissor(scissor);
+        ASSERT_TRUE(encoder->SetPushConstants(0, 0, std::as_bytes(std::span{&value, 1})));
+        encoder->Draw(3, 1, 0, 0);
+    };
+
+    // Two draws share the same PSO; only the reference changes. Preserve the high stencil bits.
+    encoder->SetStencilReference(3);  // Also legal before any PSO is bound.
+    encoder->BindGraphicsPipelineState(writer.get());
+    draw({0, 0, 4, 8}, {1, 1, 1, 1});
+    encoder->SetStencilReference(7);
+    draw({4, 0, 4, 8}, {1, 1, 1, 1});
+
+    // Low-bit comparisons ignore the reference's high bits; PSO changes preserve the reference.
+    encoder->SetStencilReference(0xF3);
+    encoder->BindGraphicsPipelineState(noStencil.get());
+    encoder->BindGraphicsPipelineState(maskedReader.get());
+    draw({0, 0, 8, 4}, {1, 0, 0, 1});
+    encoder->SetStencilReference(0xF7);
+    draw({0, 0, 8, 4}, {0, 1, 0, 1});
+    encoder->SetStencilReference(0xFC);
+    draw({0, 0, 8, 4}, {1, 1, 1, 1});  // Must match neither half.
+
+    // Full-byte comparisons verify that the writer's mask retained the original 0xA0 bits.
+    encoder->BindGraphicsPipelineState(fullReader.get());
+    encoder->SetStencilReference(0xA3);
+    draw({0, 4, 8, 4}, {0, 0, 1, 1});
+    encoder->SetStencilReference(0xA7);
+    draw({0, 4, 8, 4}, {1, 1, 0, 1});
+    encoder->SetStencilReference(0xB3);
+    draw({0, 4, 8, 4}, {1, 1, 1, 1});  // Different high bits must fail.
+    command->EndRenderPass(std::move(encoder));
+
+    Barrier(command.get(), stencil.get(), TextureState::DepthWrite, TextureState::DepthWrite);
+    Barrier(command.get(), color.get(), TextureState::RenderTarget, TextureState::RenderTarget);
+    attachment.Load = LoadAction::Load;
+    ds.DepthLoad = LoadAction::Load;
+    ds.Clear.Stencil = 0;
+    encoder = command->BeginRenderPass({.Colors = std::span{&attachment, 1}, .DepthStencil = ds, .Width = 8, .Height = 8}).Unwrap();
+    encoder->SetViewport({0, 0, 8, 8, 0, 1});
+    encoder->BindGraphicsPipelineState(fullReader.get());
+    // No SetStencilReference here: the new Pass must use zero rather than the previous 0xB3.
+    draw({0, 0, 1, 1}, {0, 1, 1, 1});
+    command->EndRenderPass(std::move(encoder));
+    Barrier(command.get(), color.get(), TextureState::RenderTarget, TextureState::CopySource);
+    command->CopyTextureToBuffer(readback.get(), 0, color.get(), {0, 1, 0, 1});
+    test::GpuWorkGuard gpuWork{Context};
+    Submit(command.get());
+    const auto* pixels = static_cast<const uint8_t*>(readback->Map(0, pitch * 8));
+    ASSERT_NE(pixels, nullptr);
+    readback->InvalidateMappedRange({0, pitch * 8});
+    for (uint32_t y = 0; y < 8; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            const array<uint8_t, 4> expected = x == 0 && y == 0 ? array<uint8_t, 4>{0, 255, 255, 255}
+                                               : y < 4 && x < 4 ? array<uint8_t, 4>{255, 0, 0, 255}
+                                               : y < 4          ? array<uint8_t, 4>{0, 255, 0, 255}
+                                               : x < 4          ? array<uint8_t, 4>{0, 0, 255, 255}
+                                                                : array<uint8_t, 4>{255, 255, 0, 255};
+            for (uint32_t channel = 0; channel < 4; ++channel) {
+                EXPECT_EQ(pixels[y * pitch + x * 4 + channel], expected[channel]) << "x=" << x << " y=" << y << " channel=" << channel;
+            }
+        }
+    }
+    readback->Unmap();
+    allocator->Reset();
+    EXPECT_EQ(Context.RhiValidationErrors.load(), 0u);
+}
+
 TEST_P(AttachmentOperations, OrdinaryCachedAndImmutableSamplersUseTheSameValidation) {
     auto& device = *Context.Device;
     const auto& caps = device.GetCapabilities();

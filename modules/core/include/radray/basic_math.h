@@ -52,6 +52,33 @@ struct AffineTransform {
 
 static_assert(sizeof(AffineTransform) == 48);
 
+// Closed 3D bounds. Nonfinite or unordered endpoints represent an empty box; zero-size boxes are valid.
+struct Aabb {
+    array<float, 3> Min;
+    array<float, 3> Max;
+
+    // Defaults to empty, so accumulating points does not implicitly include the origin.
+    Aabb() noexcept;
+    Aabb(const Eigen::Vector3f& min, const Eigen::Vector3f& max) noexcept;
+    bool IsEmpty() const noexcept;
+    // Empty boxes return zero for these measurements. Extent is half the size.
+    Eigen::Vector3f GetCenter() const noexcept;
+    Eigen::Vector3f GetSize() const noexcept;
+    Eigen::Vector3f GetExtent() const noexcept;
+    // Nonfinite points and empty boxes are ignored; expanding an empty box adopts the input.
+    void Expand(const Eigen::Vector3f& point) noexcept;
+    void Expand(const Aabb& bounds) noexcept;
+    // Boundary contact is included. Empty boxes contain/intersect nothing, including another empty box.
+    bool Contains(const Eigen::Vector3f& point) const noexcept;
+    bool Contains(const Aabb& bounds) const noexcept;
+    bool Intersects(const Aabb& bounds) const noexcept;
+    Aabb Intersection(const Aabb& bounds) const noexcept;
+    // Returns enclosing axis-aligned bounds after a finite affine transform, including shear and negative scale.
+    Aabb Transform(const AffineTransform& transform) const noexcept;
+};
+
+static_assert(sizeof(Aabb) == 24);
+
 constexpr uint64_t Align(uint64_t value, uint64_t align) noexcept {
     return (value + (align - 1)) & ~(align - 1);
 }
