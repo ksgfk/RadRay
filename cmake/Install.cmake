@@ -9,7 +9,7 @@ foreach(directory CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_BI
     endif()
 endforeach()
 set(RADRAY_AVAILABLE_COMPONENTS "")
-foreach(component core shader window render shadercompiler)
+foreach(component core shader window render runtime shadercompiler)
     if (TARGET radray${component})
         list(APPEND RADRAY_AVAILABLE_COMPONENTS ${component})
     endif()

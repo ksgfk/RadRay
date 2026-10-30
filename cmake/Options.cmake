@@ -10,6 +10,7 @@ cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_E
 option(RADRAY_ENABLE_LIBJPEG "Enable IJG libjpeg support" ON)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
+cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay rendering runtime" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADRAY_BUILD_RENDER AND WIN32" OFF)
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
 option(RADRAY_BUILD_SHADER "Build the RadRay shader contract and decoder" ON)

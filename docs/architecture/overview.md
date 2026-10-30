@@ -11,10 +11,10 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 
 | 目录 | 内容 |
 |---|---|
-| `modules/` | core、shader、window、render，以及可选 shader compiler client |
+| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
 | `shaderlib/` | HLSL 数学、BSDF、光照共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 raw shader compile CLI |
-| `benchmarks/` | OBJ 解析性能测量 |
+| `benchmarks/` | OBJ 解析与 SparseSet 压力基准 |
 | `cmake/` | 功能与依赖清单、包发现、独立依赖适配、安装导出与构建辅助 |
 | `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |
 | `docs/guide/` | 使用、开发、验证和文档维护方法 |
@@ -34,6 +34,7 @@ shader         → core
 window         → core
 shadercompiler → shader, core                 可选
 render         → core
+runtime        → render, core
 ```
 
 `radrayshader` 提供 shader wire contract 与 artifact decoder，不依赖 DXC 或 render。
@@ -54,6 +55,7 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | HLSL 共享库导航 | [Shaderlib](shaderlib.md) |
 | Source contract、wire、target layout 与 compiler 发布边界 | [Shader pipeline](shader-pipeline.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
+| 场景、Mesh Drawing Pipeline、可编程管线、RDG 与帧资源 | [Rendering runtime](runtime.md) |
 
 ## 历史资料
 
@@ -90,6 +92,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 关注点 | 文件 |
 |---|---|
+| Runtime 与帧驱动 | `modules/runtime/include/radray/runtime/renderer.h` |
 | GPU 设备与 RHI | `modules/render/src/rhi.cpp` |
 | Shader artifact 解码 | `modules/shader/include/radray/shader/shader_artifact.h` |
 | Compiler client | `modules/shader_compiler/include/radray/shader_compiler/client.h` |

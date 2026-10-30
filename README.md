@@ -16,7 +16,7 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 [AGENTS.md](AGENTS.md) 也是长期文档，记录仓库级约束与阅读入口。
 长期知识集中在它与 `docs/architecture/`、`docs/guide/`，历史版本由 Git 保存。
 
-当前主线提供 core、window、RHI 双后端、shader contract 与可选 compiler client。
+当前主线提供 core、window、RHI 双后端、[可编程 rendering runtime](docs/architecture/runtime.md)、shader contract 与可选 compiler client。
 
 ## 快速开始
 
@@ -24,6 +24,7 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 python tools/fetch_third_party.py restore
 python tools/fetch_sdks.py restore
 python tools/build_third_party.py build --triplet windows-x64-msvc --config Debug --parallel 8
+python tools/compile_runtime_test_shaders.py
 cmake --preset win-x64-debug
 cmake --build --preset win-x64-debug --parallel 24
 ctest --preset win-x64-debug

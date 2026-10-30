@@ -210,6 +210,7 @@ cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
 | `RADRAY_BUILD_BENCHMARKS` | 独立构建 ON（所有配置）；子工程 OFF |
 | `RADRAY_BUILD_COMPILE_COMMANDS` | 独立构建 ON；子工程 OFF；仅 Ninja/Makefile 提供辅助目标 |
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
+| `RADRAY_BUILD_RUNTIME` | ON；要求 render |
 | `RADRAY_ENABLE_D3D12` | Windows 且 render 开启时默认 ON |
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
 | `RADRAY_BUILD_SHADER` | ON；独立 shader contract/decoder |
@@ -297,10 +298,11 @@ target_link_libraries(my_app PRIVATE RadRay::render)
 ```
 
 公开 targets 为 `RadRay::core`、`RadRay::shader`、`RadRay::window`、`RadRay::render`、
-`RadRay::shadercompiler`，以及 CLI 的 `RadRay::shader_compile`。源码构建提供相同别名，
-旧的实际 target 名称保留。组件为 `core`、`shader`、`window`、`render`、`shadercompiler`、
+`RadRay::runtime`、`RadRay::shadercompiler`，以及 CLI 的 `RadRay::shader_compile`。源码构建提供相同别名，
+旧的实际 target 名称保留。组件为 `core`、`shader`、`window`、`render`、`runtime`、`shadercompiler`、
 `tools`；模块依赖自动加载，不指定组件时加载全部已安装组件。`RadRay_AVAILABLE_COMPONENTS`
 按实际生成 target 列出安装能力。render 组件只加载 core 和启用后端的外部包，无需 shader 或 DXC。
+runtime 组件传递加载 render/core；公共类型直接位于 `radray`，头文件位于 `<radray/runtime/...>`。
 支持重复/追加组件及标准 `OPTIONAL_COMPONENTS`；必需但未安装的组件失败。
 只请求 core 不查找图形或 DXC 包；静态库 PRIVATE 链接依赖仍通过 `find_dependency` 发现。
 
@@ -328,6 +330,7 @@ POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启
 
 | 目标 | suite 示例 |
 |---|---|
+| `test_radray_runtime` | `RuntimeScene`、`RuntimeGraph`、`RuntimeGpu` |
 | `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler` |
 | `test_radray_render` | `ExplicitBindingLayoutTest`、`ExplicitLayoutOwnershipD3D12`、`ExplicitLayoutOwnershipVulkan`、`DescriptorDirtyRangesD3D12Test` |
 | `test_radray_render`（D3D12 诊断） | `D3D12DiagnosticsTest`、`D3D12DiagnosticsSmoke` |
@@ -946,3 +949,31 @@ python tools/win_gen_compile_commands.py --build-dir build/windows-x64-clangcl/D
 该脚本默认输出 `.vscode/compile_commands.json`。
 IDE 设置见 [开发环境](dev-env.md)。
 文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。
+
+## Runtime 测试
+
+runtime 测试直接链接 `RadRay::runtime`，不依赖应用 bridge。fixture 在构建前显式离线生成：
+
+```powershell
+python tools/compile_runtime_test_shaders.py
+python tools/compile_runtime_test_shaders.py --check
+cmake --build --preset win-x64-debug --target test_radray_runtime --parallel 8
+$env:RADRAY_TEST_REQUIRED_BACKENDS = "d3d12,vulkan"
+ctest --preset win-x64-debug -R 'Runtime(Scene|Graph|Gpu)' --output-on-failure
+```
+
+脚本使用本地 DXC，可通过 `--dxc` 指定编译器；输出默认为 `build/runtime-test-shaders/`。
+`--output-dir` 与 CMake `RADRAY_RUNTIME_TEST_SHADER_DIR` 可统一改写位置。CMake 只运行 `--check`，不下载或编译 shader。
+检查包含生成脚本、HLSL 和 core shaderlib 的内容指纹及 DXIL/SPIR-V 哈希，修改输入后须重新生成。
+Release 使用对应 preset；构建和测试顺序执行。
+
+场景测试覆盖缓存失效、严格合批与失败事务；CPU RDG 测试覆盖依赖、剔除、初始化、句柄和 attachment 校验。
+GPU 测试覆盖双后端的 raster→采样、copy→compute→compute→copy 读回、连续 UAV 访问、PSO key、资源池、extraction、
+失败不提交与可替换管线。启用驱动验证并将错误日志作为失败，不把 native 初始化失败视为跳过。
+
+2026-10-30 在 Windows x64、MSVC 19.51、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0 验证迁入的 runtime：
+standalone 动态 CRT 的 Debug/Release 各 16 项通过，`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，没有跳过。
+同一源码在 Raynium 的 `/MT` Debug/Release 消费中各通过 57 个 native/GPU 回归；没有进行 GUI 或游戏交互验证。
+另以 Release `/MT`、仅 core/render/runtime 的安装配置生成公共头与静态库，外部项目通过
+`find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 链接 `RadRay::runtime`，运行图编译与计划检查成功。
+这些检查不覆盖本机以外的 GPU/驱动或其他平台。

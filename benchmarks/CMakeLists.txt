@@ -1,1 +1,2 @@
 add_subdirectory(bench_read_obj)
+add_subdirectory(bench_sparse_set)
