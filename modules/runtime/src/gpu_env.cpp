@@ -1,4 +1,4 @@
-#include <radray/runtime/environment.h>
+#include <radray/runtime/gpu_env.h>
 
 #include <radray/logger.h>
 #include <radray/scope_guard.h>

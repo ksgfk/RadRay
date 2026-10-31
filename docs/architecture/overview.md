@@ -15,6 +15,7 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 | `shaderlib/` | HLSL 数学、BSDF、光照共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 raw shader compile CLI |
 | `benchmarks/` | OBJ 解析与 SparseSet 压力基准 |
+| `examples/` | 独立教学程序；[Mesh Drawing Pipeline 样例](../guide/build-test.md#mesh-drawing-pipeline-教学样例) 展示 Scene 输入到离屏 GPU 绘制与 PNG 读回 |
 | `cmake/` | 功能与依赖清单、包发现、独立依赖适配、安装导出与构建辅助 |
 | `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |
 | `docs/guide/` | 使用、开发、验证和文档维护方法 |
@@ -55,7 +56,7 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | HLSL 共享库导航 | [Shaderlib](shaderlib.md) |
 | Source contract、wire、target layout 与 compiler 发布边界 | [Shader pipeline](shader-pipeline.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
-| 场景、Mesh Drawing Pipeline、可编程管线、RDG 与帧资源 | [Rendering runtime](runtime.md) |
+| Runtime 环境、设备、Scene 输入、网格命令数据与处理接口 | [Rendering runtime](runtime.md) |
 
 ## 历史资料
 
@@ -66,6 +67,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 保留价值与当前归属 |
 |---|---|
+| [Runtime 精简前设计归档](../history/2026-10-31-runtime-design-archive.md) | `07d41dc` 的对象关系、场景/绘制/RDG 分层、所有权、帧提交和旧测试入口；重设计以保留的环境与设备为起点 |
 | [显式 RHI 绑定布局转向与实施计划](../history/2026-10-22-explicit-rhi-binding-layout-rationale.md) | shader artifact 布局权威转向调用方定义的原因、实施前所有权快照、当时的接口与验收要求；当前直接所有权和取消缓存决定见 RHI 文档 |
 | [Runtime 完整归档](../history/2026-10-21-runtime-archive.md) | 源码恢复、设计与操作快照、草案附件及归档时验证入口 |
 | [Runtime 重写原因](../history/2026-10-21-runtime-rewrite-rationale.md) | 补丁叠加的基础问题、用户决策、源码核查与下一版方向 |
@@ -92,7 +94,13 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 关注点 | 文件 |
 |---|---|
-| Runtime 与帧驱动 | `modules/runtime/include/radray/runtime/renderer.h` |
+| Runtime 后端环境 | `modules/runtime/include/radray/runtime/gpu_env.h` |
+| Runtime 设备与队列 | `modules/runtime/include/radray/runtime/gpu_device.h` |
+| Runtime 场景存储 | `modules/runtime/include/radray/runtime/scene.h` |
+| Runtime 绘制命令数据 | `modules/runtime/include/radray/runtime/mesh_draw_command.h` |
+| Runtime Pass Processor 接口 | `modules/runtime/include/radray/runtime/mesh_pass_processor.h` |
+| Runtime 命令输出 Context | `modules/runtime/include/radray/runtime/mesh_pass_draw_list_context.h` |
+| Mesh Drawing Pipeline 教学主流程 | `examples/mesh_drawing_pipeline/sample.cpp` |
 | GPU 设备与 RHI | `modules/render/src/rhi.cpp` |
 | Shader artifact 解码 | `modules/shader/include/radray/shader/shader_artifact.h` |
 | Compiler client | `modules/shader_compiler/include/radray/shader_compiler/client.h` |

@@ -330,7 +330,6 @@ POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启
 
 | 目标 | suite 示例 |
 |---|---|
-| `test_radray_runtime` | `RuntimeScene`、`RuntimeGraph`、`RuntimeGpu` |
 | `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler` |
 | `test_radray_render` | `ExplicitBindingLayoutTest`、`ExplicitLayoutOwnershipD3D12`、`ExplicitLayoutOwnershipVulkan`、`DescriptorDirtyRangesD3D12Test` |
 | `test_radray_render`（D3D12 诊断） | `D3D12DiagnosticsTest`、`D3D12DiagnosticsSmoke` |
@@ -950,30 +949,150 @@ python tools/win_gen_compile_commands.py --build-dir build/windows-x64-clangcl/D
 IDE 设置见 [开发环境](dev-env.md)。
 文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。
 
-## Runtime 测试
+## Runtime 构建
 
-runtime 测试直接链接 `RadRay::runtime`，不依赖应用 bridge。fixture 在构建前显式离线生成：
+`RADRAY_BUILD_RUNTIME=ON` 要求 render 开启，提供 `RadRay::runtime` / `radrayruntime`。
+当前模块包含 Environment、DeviceContext、Scene 绘制输入和 Mesh Drawing Pipeline 基础接口，公共入口为
+`<radray/runtime/gpu_env.h>`、`<radray/runtime/gpu_device.h>` 和 `<radray/runtime/scene.h>`。
+Scene 头包含 primitive、mesh、material，以及 MeshBatchElement、VertexInput 的类型，
+资源分段描述单独包含 `<radray/runtime/mesh_section.h>`。绘制入口为
+`<radray/runtime/mesh_pass_processor.h>`、`<radray/runtime/mesh_pass_draw_list_context.h>` 与
+`<radray/runtime/mesh_draw_command.h>`。
+
+在已按前文准备依赖和工具链的环境中构建：
 
 ```powershell
-python tools/compile_runtime_test_shaders.py
-python tools/compile_runtime_test_shaders.py --check
-cmake --build --preset win-x64-debug --target test_radray_runtime --parallel 8
-$env:RADRAY_TEST_REQUIRED_BACKENDS = "d3d12,vulkan"
-ctest --preset win-x64-debug -R 'Runtime(Scene|Graph|Gpu)' --output-on-failure
+cmake --preset win-x64-debug -DRADRAY_BUILD_RUNTIME=ON
+cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 ```
 
-脚本使用本地 DXC，可通过 `--dxc` 指定编译器；输出默认为 `build/runtime-test-shaders/`。
-`--output-dir` 与 CMake `RADRAY_RUNTIME_TEST_SHADER_DIR` 可统一改写位置。CMake 只运行 `--check`，不下载或编译 shader。
-检查包含生成脚本、HLSL 和 core shaderlib 的内容指纹及 DXIL/SPIR-V 哈希，修改输入后须重新生成。
-Release 使用对应 preset；构建和测试顺序执行。
+安装消费继续使用 `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 和 `RadRay::runtime`，
+传递加载 render/core，不要求 shader 或 DXC。`RADRAY_BUILD_TESTS=ON` 时提供
+`test_radray_runtime`，使用 CPU 替身验证输出 Context 的命令复制与 Finalize 契约，不要求 GPU 或预编译 shader：
 
-场景测试覆盖缓存失效、严格合批与失败事务；CPU RDG 测试覆盖依赖、剔除、初始化、句柄和 attachment 校验。
-GPU 测试覆盖双后端的 raster→采样、copy→compute→compute→copy 读回、连续 UAV 访问、PSO key、资源池、extraction、
-失败不提交与可替换管线。启用驱动验证并将错误日志作为失败，不把 native 初始化失败视为跳过。
+```powershell
+cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
+ctest --preset win-x64-debug-clangcl -R '^MeshDrawingPipeline\.' --output-on-failure
+```
 
-2026-10-30 在 Windows x64、MSVC 19.51、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0 验证迁入的 runtime：
-standalone 动态 CRT 的 Debug/Release 各 16 项通过，`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，没有跳过。
-同一源码在 Raynium 的 `/MT` Debug/Release 消费中各通过 57 个 native/GPU 回归；没有进行 GUI 或游戏交互验证。
-另以 Release `/MT`、仅 core/render/runtime 的安装配置生成公共头与静态库，外部项目通过
-`find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 链接 `RadRay::runtime`，运行图编译与计划检查成功。
-这些检查不覆盖本机以外的 GPU/驱动或其他平台。
+Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
+后端回归入口见[测试](#测试)，模块接口见 [Rendering runtime](../architecture/runtime.md)。
+旧场景、绘制和 RDG 的测试命令及既有验证声明保存在[设计归档](../history/2026-10-31-runtime-design-archive.md)，
+只适用于该归档基线。
+
+## Mesh Drawing Pipeline 教学样例
+
+`examples/mesh_drawing_pipeline/` 是独立可执行程序，复用 runtime 的 Environment、DeviceContext 和
+Scene 输入数据、命令数据与 Processor/Context 接口。Depth/Color Processor、相机与材质颜色、PSO/资源准备和
+Pass 调度、候选 Primitive/Batch 遍历、输入检查及 Element 命令构建属于样例；
+基类 Processor、输出 Context 接口及其动态列表、MeshDrawCommand 位于 runtime。
+runtime 不提供命令校验或录制接口，样例自行检查几何资源并使用 RHI 录制带参数的绘制。
+它离屏绘制一帧，四个 Primitive
+共享顶点/索引缓冲，各含两个 Section 对应的 Batch，每个 Batch 含一个 Element。
+两个 Pass 都收到相同的八个候选 Batch，各自的 Processor 根据样例 `BatchPassPolicy` 筛选：
+
+| 对象 | Section 规则 | Depth Draw 数 | Color Draw 数 | 图片中的表现 |
+|---|---|---:|---:|---|
+| A：正常物体 | 两个 Section 都为 `DepthAndColor` | 2 | 2 | 左侧暖色方块、蓝色顶面 |
+| B：深度遮挡体 | 两个 Section 都为 `DepthOnly` | 2 | 0 | 自身不上色，在 A 前方遮出一块背景色缺口 |
+| C：只参加颜色 | 两个 Section 都为 `ColorOnly` | 0 | 2 | 中间绿色方块、浅绿色顶面；跳过预深度仍能正常绘制 |
+| D：Section 规则不同 | 侧面 `DepthAndColor`，顶面 `ColorOnly` | 1 | 2 | 右侧紫色方块、粉色顶面；同一 Primitive 的 Batch 参与不同 Pass |
+
+Depth 接受五条、跳过三条；Color 接受六条、跳过两条，总计 **十一条单实例 Draw**。
+左侧缺口是 B 的深度挡住 A、而 B 不写颜色的结果，不是透明材质或 shader discard。
+配置表在 `sample.cpp` 的 `cubes` 中，索引 0 为侧面和底面 Section，索引 1 为顶面 Section。
+可直接调整 `SectionPasses`，观察 Processor 的接受/跳过日志及图片变化。
+
+建议按下面顺序阅读，每个主要步骤都有中文「当前操作、为什么、UE5 对照、本例简化」注释：
+
+| 文件 | 阅读重点 |
+|---|---|
+| [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 从 `RunSample` 顺序阅读步骤 1～8：准备场景、遍历 Primitive/Batch 并调用 Processor、两个 Pass、提交等待与读回 |
+| [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | 两个派生 Processor 筛选，样例 helper 检查输入并展开 Element；Context 准备常量和教学日志，样例自行录制 |
+| [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口，持有输出 Context 引用，AddMeshBatch 返回 void |
+| [mesh_pass_draw_list_context.h](../../modules/runtime/include/radray/runtime/mesh_pass_draw_list_context.h) / [mesh_pass_draw_list_context.cpp](../../modules/runtime/src/mesh_pass_draw_list_context.cpp) | AddCommand 分配输出命令，FinalizeCommand 填写 Element 绘制范围；提供本次输出列表，无缓存 |
+| [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 通用命令仅保存 PSO、几何绑定与绘制范围 |
+| [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GPU 对象的持有与销毁、固定 PSO/布局、shader 加载、上传和按行跨度读回 |
+| [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | 两个 Pass 共用 VS 计算位置，固定 80 字节变换/颜色常量，PS 输出纯色 |
+
+源码对照基线为本地 `F:/cpp/UnrealEngine` 的 UE **5.8.4**（`Engine/Build/Build.version`），
+注释中的 UE 路径相对其 `Engine/Source/Runtime/`。对应关系用于解释传统 Mesh Drawing Pipeline 的职责：
+本例直接组装 Batch、假定全部候选可见、每次重新生成命令；省略 UE 的代理同步、剔除、LOD、静态命令缓存、
+排序、实例化、完整材质和 RDG。Color Pass 只是纯色上色，不等价于 UE 完整 Base Pass。
+材质句柄仅在样例中映射颜色，不扩展 runtime 的 `MaterialRenderProxy`。
+`BatchPassPolicy` 也仅属于样例，通过 Batch 句柄关联记录。其筛选职责对照 UE 的
+`FMeshBatch::bUseForDepthPass` / `bUseForMaterial`：`FDepthPassMeshProcessor::AddMeshBatch` 和
+`FBasePassMeshProcessor::AddMeshBatch` 分别读取这些标志；UE 还判断材质、遮挡体和其他条件。
+候选收集不按 Pass 预先分组，Processor 内的条件才决定是否生成命令。
+样例主流程为两个 Pass 分别创建输出 Context 和 Processor，再调用 `sample.cpp` 内私有的 `BuildMeshDrawCommandList`。
+该样例函数遍历 Primitive 和 Batch、检查 Scene 句柄，每个 Batch 调用一次返回 void 的 `AddMeshBatch`；
+runtime 不提供场景遍历入口。
+Processor 接受 Batch 并选定 PSO 后，调用 `pipeline.cpp` 内私有的 `BuildMeshDrawCommands`，
+在其中检查顶点布局与流、遍历 Element 并逐条构建命令。调用顺序对照 UE 的
+`AddMeshBatch → BuildMeshDrawCommands`，但本例的构建 helper 完全属于样例，runtime 不提供对应方法。
+本例展开全部非空 Element，暂不实现 UE 的 `BatchElementMask`。
+每个 Element 通过输出 Context 的 `AddCommand → FinalizeCommand` 完成，Element 索引和 Batch 上下文
+直接传给 Finalize，不经过返回值收集。样例的 `SampleDrawListContext` 保存 `PreparedDraw`，
+在 Finalize 中准备参数并打印接受日志。Depth 使用白色参数，Color 从材质颜色表读取。
+`RecordDrawCommands` 在样例内直接按 PSO → VB/IB → push constants → DrawIndexed 录制；
+参数不进入 runtime 的数据结构或构建入参。
+筛选跳过时 Processor 直接返回；空 Batch 或全部零索引 Element 也不生成命令。
+样例遍历负责检查无效句柄，样例构建 helper 检查顶点布局和流；错误均记录并跳过相关项，
+保留已有输出，样例继续处理后续 Batch。
+样例 Context 的颜色映射缺失会设置自身错误标志，主流程据此放弃渲染；runtime 不定义统一状态返回。
+样例在录制前检查 PSO/Buffer 有效性、缓冲 usage、绑定及索引范围，失败时放弃录制和提交。
+
+### 准备 shader 与构建
+
+在已准备好 Debug/Release 依赖包的环境中执行。`RADRAY_BUILD_EXAMPLES` 默认 **OFF**；开启时必须
+同时开启 `RADRAY_BUILD_RUNTIME`、`RADRAY_BUILD_RENDER` 和 `RADRAY_ENABLE_LIBPNG`（后者依赖 zlib）。
+双后端需要 `RADRAY_ENABLE_D3D12=ON`、`RADRAY_ENABLE_VULKAN=ON`，Windows 默认均开启。
+样例只链接 `RadRay::runtime` 及其传递依赖，不需要运行时 shader compiler。
+
+先显式预编译 shader，再构建样例：
+
+```powershell
+python -X utf8 examples/mesh_drawing_pipeline/compile_shaders.py
+cmake --preset win-x64-debug-clangcl -DRADRAY_BUILD_EXAMPLES=ON
+cmake --build --preset win-x64-debug-clangcl --target radray_mesh_drawing_sample --parallel 8
+cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_EXAMPLES=ON
+cmake --build --preset win-x64-release-clangcl --target radray_mesh_drawing_sample --parallel 8
+```
+
+[预编译脚本](../../examples/mesh_drawing_pipeline/compile_shaders.py) 默认使用
+`SDKs/radray_dxc/extracted/bin/dxc.exe`，可用 `--dxc` 指定本地编译器，`--output-dir` 指定输出目录。
+生成 `cube.VSMain.dxil.bin`、`cube.PSMain.dxil.bin` 和对应的两个 `.spirv.bin`，默认位于
+`build/mesh_drawing_pipeline/shaders/`。DXIL 使用 SM 6.0；SPIR-V 使用 Vulkan 1.2 target 与 DX 布局。
+HLSL 修改后须手动重新执行脚本。脚本、构建和运行均不下载依赖，CMake 不自动编译 shader。
+
+### 运行与核对
+
+```powershell
+./build/windows-x64-clangcl/Debug/_build/Debug/radray_mesh_drawing_sample.exe --backend d3d12 --output build/mesh_drawing_pipeline/d3d12-debug.png
+./build/windows-x64-clangcl/Debug/_build/Debug/radray_mesh_drawing_sample.exe --backend vulkan --output build/mesh_drawing_pipeline/vulkan-debug.png
+./build/windows-x64-clangcl/Release/_build/Release/radray_mesh_drawing_sample.exe --backend d3d12 --output build/mesh_drawing_pipeline/d3d12-release.png
+./build/windows-x64-clangcl/Release/_build/Release/radray_mesh_drawing_sample.exe --backend vulkan --output build/mesh_drawing_pipeline/vulkan-release.png
+```
+
+参数为 `--backend d3d12|vulkan`、`--shader-dir <目录>`、`--output <文件>`，`--help` 显示用法。
+Windows 默认 D3D12，其他平台默认 Vulkan；未指定目录时从编译时仓库根的
+`build/mesh_drawing_pipeline/shaders/` 读取 shader，图片写到该仓库根的
+`build/mesh_drawing_pipeline/<backend>.png`。显式传入的相对路径以运行时工作目录为准。
+所有默认产物都在 Git 忽略的 `build/` 内；样例不进入安装导出。
+
+每次运行请求开启后端验证（Vulkan 同时请求同步验证），实际启用情况和诊断见后端启动日志。
+日志应打印四个 Primitive、八个 Batch，以及各 Pass 的 `对象 / Primitive / Batch / Element → Draw`
+对应关系；Draw 编号为当前 Pass 输出列表中的序号。跳过日志按 Batch 输出一次，
+不分配 Draw 编号，并打印原因。最后出现
+`Depth=5，Color=6，总计 11 条单实例 Draw` 和 PNG 路径。
+Depth Pass 清深度并写入，Color Pass `Load` 同一深度，以 `LessEqual` 测试并写深度。
+这样既能复用预深度，也能接纳 `ColorOnly` 对象并处理其自身和相互遮挡；如果仍使用 `Equal`，
+没有预深度的表面会消失。两个 Pass 之间保留显式 `DepthWrite → DepthWrite` barrier，
+Vulkan 用它同步前一次写入和后一次读写。录制顺序为 PSO → 顶点/索引缓冲 → 常量 → DrawIndexed。
+检查 800×600 图片中三个有颜色的物体、左侧背景色缺口，以及各物体的 Section 颜色。
+读回逐行去除 padding，日志打印实际 GPU row pitch；Vulkan 使用负 viewport 高度统一输出方向。
+
+指定后端失败时直接报错，不切换后端。退出码 `2` 表示参数或输出目录错误，`3` 表示 GPU/资源/shader
+准备失败，`4` 表示样例输出 Context 准备参数失败，`5` 表示录制失败，`6` 表示图片读回/写入失败。可将 `--shader-dir`
+设为不存在的目录检查缺失 shader 提示，将 `--output` 指向已有目录检查路径错误；不会生成伪造图片。
+程序在 GPU 完成后才读取和释放资源，失败路径也会结束必要的录制并按依赖顺序清理 GPU 对象。

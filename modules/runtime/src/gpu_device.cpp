@@ -1,7 +1,7 @@
-#include <radray/runtime/device.h>
+#include <radray/runtime/gpu_device.h>
 
 #include <radray/logger.h>
-#include <radray/runtime/environment.h>
+#include <radray/runtime/gpu_env.h>
 
 namespace radray {
 
