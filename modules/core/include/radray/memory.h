@@ -4,6 +4,8 @@
 
 namespace radray {
 
+// Pair allocations with the corresponding RadRay free function. The selected
+// allocator may differ from the caller's CRT even within the same executable.
 [[nodiscard]] void* Malloc(size_t size) noexcept;
 
 void Free(void* ptr) noexcept;

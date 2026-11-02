@@ -510,6 +510,11 @@ Vulkan 的 VB 绑定同样不保存去重缓存，每次合法调用都直接下
 
 ### 描述符分配
 
+D3D12 后端在 `d3d12_impl.cpp` 内为设备的 `D3D12MA::Allocator` 和每个
+`D3D12MA::VirtualBlock` 提供 `ALLOCATION_CALLBACKS`，CPU 元数据通过
+RadRay `AlignedAlloc/AlignedFree` 配对分配与释放。启用 mimalloc 时直接进入
+mimalloc，不依赖 CRT 全局分配覆盖；GPU 显存仍由 D3D12 管理。
+
 D3D12 分两套：`CpuDescriptorAllocator` 是分页堆，每页用 `D3D12MA::VirtualBlock` 做子分配；
 `GpuDescriptorAllocator` 是单个 shader-visible 堆 + `FirstFitAllocator`。Device 持 4 个 CPU
 分配器（CBV_SRV_UAV / RTV / DSV / Sampler）和 2 个 GPU 堆（resource 65536、sampler 2048）。

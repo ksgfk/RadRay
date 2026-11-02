@@ -9,6 +9,7 @@
 #include <dxgidebug.h>
 
 #include <radray/basic_math.h>
+#include <radray/memory.h>
 #include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
 #ifdef RADRAY_ENABLE_PROFILER
@@ -36,6 +37,22 @@
 //   == 各对象类实现 ==
 
 namespace radray::render::d3d12 {
+
+namespace {
+
+void* AllocateMemory(size_t size, size_t alignment, void*) noexcept {
+    return AlignedAlloc(alignment, size);
+}
+
+void FreeMemory(void* ptr, void*) noexcept {
+    AlignedFree(ptr);
+}
+
+D3D12MA::ALLOCATION_CALLBACKS MakeAllocationCallbacks() noexcept {
+    return {AllocateMemory, FreeMemory, nullptr};
+}
+
+}  // namespace
 
 static void _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
     if (SUCCEEDED(hr)) return;
@@ -415,6 +432,8 @@ std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Alloca
     D3D12MA::VIRTUAL_BLOCK_DESC blockDesc{};
     blockDesc.Size = static_cast<UINT64>(pageCapacity);
     blockDesc.Flags = D3D12MA::VIRTUAL_BLOCK_FLAG_NONE;
+    const auto allocationCallbacks = MakeAllocationCallbacks();
+    blockDesc.pAllocationCallbacks = &allocationCallbacks;
     ComPtr<D3D12MA::VirtualBlock> block;
     if (FAILED(D3D12MA::CreateVirtualBlock(&blockDesc, block.GetAddressOf()))) {
         return std::nullopt;
@@ -768,6 +787,8 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     ComPtr<D3D12MA::Allocator> alloc;
     {
         D3D12MA::ALLOCATOR_DESC allocDesc{};
+        const auto allocationCallbacks = MakeAllocationCallbacks();
+        allocDesc.pAllocationCallbacks = &allocationCallbacks;
         allocDesc.Flags = D3D12MA::ALLOCATOR_FLAG_NONE;
         allocDesc.pDevice = device.Get();
         allocDesc.pAdapter = adapter.Get();

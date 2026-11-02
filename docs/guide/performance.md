@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`
 
 # 性能测量
 
@@ -13,6 +13,40 @@
 |---|---|
 | `bench_read_obj` | 内存 OBJ 文本解析，不含磁盘 IO |
 | `bench_sparse_set` | SparseSet 的扩容、访问、删除、复用与历史高水位压力；无需外部资产 |
+| `bench_object_arena` | 对象批量构造/回收、存储复用及 STL vector 扩容；无需外部资产 |
+
+## Object arena
+
+`bench_object_arena` 使用 Google Benchmark，通过 main 显式注册用例，没有全局 fixture 或分配钩子。
+契约见 [Core / ObjectArena](../architecture/core-facilities.md#objectarena-与-arenaallocator)。每批为 256 或
+4096 个对象，Trivial 与 Nontrivial 在本机 64 位构建中均为 64 B；后者析构更新测试侧计数，验证恰好析构一次。
+
+| Family | 计时边界 |
+|---|---|
+| `ObjectArena/Cold` | 构造全部对象并 Release；下一批重新申请存储 |
+| `ObjectArena/Reuse` | 预热后构造全部对象并 Reset，复用保留的普通块和析构表 |
+| `ObjectArena/Reset` | 构造置于计时外，仅测 Reset 与一次计数校验 |
+| `ObjectArena/Heap` | 逐对象 new/delete；保存待销毁指针的表在计时前预分配，表写入包含在计时中 |
+| `ObjectArena/Vector` | 分别使用 arena allocator 和默认 allocator；比较自动扩容与提前 reserve，包含容器销毁和 arena Reset |
+
+为使复用用例覆盖完整工作集，基准显式使用 64 KiB 普通块、8 MiB 保留预算；这不同于生产默认的
+256 KiB 预算。`Time` 为整批墙钟时间，`items_per_second` 按对象/元素数归一化；`retained_bytes`
+在循环结束后读取，表示 arena 动态存储，不是进程 working set。Heap 用例不报告系统分配器保留量。
+不得把纯 Reset 与整批构造/销毁的时间直接比较。峰值后的预算收敛由正确性测试覆盖。
+
+```powershell
+cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
+cmake --build --preset win-x64-release-clangcl --target test_radray_core bench_object_arena --parallel 8
+ctest --preset win-x64-release-clangcl -R '^(ObjectArenaTest|ArenaAllocatorTest)\.' --output-on-failure --timeout 30
+$bench = './build/windows-x64-clangcl/Release/_build/Release/bench_object_arena.exe'
+& $bench --benchmark_min_time=1x
+& $bench '--benchmark_filter=ObjectArena/(Cold|Reuse|Heap|Vector)' --benchmark_min_time=0.1s --benchmark_repetitions=5 --benchmark_out=build/object-arena.json --benchmark_out_format=json
+& $bench '--benchmark_filter=ObjectArena/Reset/' --benchmark_min_time=1000x --benchmark_repetitions=5 --benchmark_out=build/object-arena-reset.json --benchmark_out_format=json
+```
+
+先运行全矩阵单轮验证，再进行重复采样；错误用例使用 SkipWithError 并使进程返回非零。
+Reset 用例在计时外构造对象，使用固定迭代数限制总运行时间；分析短时回收结果时同时检查重复采样的波动。
+原始结果留在 build/，不自动写入开发历史。
 
 ## 比较与证据口径
 

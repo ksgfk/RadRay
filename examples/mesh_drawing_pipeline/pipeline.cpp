@@ -1,91 +1,25 @@
 #include "pipeline.h"
 
 #include <algorithm>
-#include <cstring>
+#include <limits>
 
 #include <radray/logger.h>
 
 namespace radray::examples::mesh_drawing {
 namespace {
 
-bool ValidateInput(const VertexInput& input) {
-    vector<render::VertexAttribute> attributes;
-    for (const auto& attribute : input.Attributes) {
-        attributes.push_back({attribute.BufferBinding, attribute.Offset, attribute.Semantic,
-                              attribute.SemanticIndex, attribute.Format, attribute.Location});
-    }
-    if (!render::ValidateVertexInputState({input.Layouts, attributes}) || input.Streams.size() != input.Layouts.size()) return false;
-    for (const auto& layout : input.Layouts) {
-        const auto stream = std::find_if(input.Streams.begin(), input.Streams.end(), [&](const VertexInputStream& value) {
-            return value.Binding == layout.Binding;
-        });
-        if (stream == input.Streams.end() || stream->Size < layout.ArrayStride) return false;
-    }
+bool ExtractMaterialColor(const Scene& scene, SparseSetHandle materialHandle,
+                          MaterialParameterIndices parameters, MaterialConstants& outConstants) {
+    if (!scene.Materials.IsAlive(materialHandle)) return false;
+    const auto& proxy = scene.Materials.Get(materialHandle);
+    const auto baseValue = proxy.GetParameter(parameters.BaseColor);
+    const auto brightnessValue = proxy.GetParameter(parameters.Brightness);
+    const Nullable<const array<float, 4>*> baseColor = baseValue ? std::get_if<array<float, 4>>(baseValue.Get()) : nullptr;
+    const Nullable<const float*> brightness = brightnessValue ? std::get_if<float>(brightnessValue.Get()) : nullptr;
+    if (!baseColor || !brightness) return false;
+    outConstants.Color = *baseColor;
+    for (size_t index = 0; index < 3; ++index) outConstants.Color[index] *= *brightness;
     return true;
-}
-
-void BuildMeshDrawCommands(const MeshBatchContext& context, render::GraphicsPipelineState& pipeline,
-                           SampleDrawListContext& output, std::string_view passName, uint8_t stencilReference) {
-    // 步骤 5c：样例检查几何输入，准备共享 PSO/顶点绑定，再逐个展开非空 Element。
-    // 为什么：具体命令如何构建由样例组织；runtime 的 Processor 只保留调用接口和输出 Context。
-    // UE5 对照：Renderer/Public/MeshPassProcessor.inl 的 FMeshPassProcessor::BuildMeshDrawCommands。
-    // 本例简化：构建 helper 留在样例，不作为 runtime API；仅支持直接索引单实例，不处理 shader bindings。
-    const auto& batch = context.Batch;
-    if (std::none_of(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0; })) {
-        return;
-    }
-    if (!batch.VertexInput || !ValidateInput(*batch.VertexInput)) {
-        RADRAY_ERR_LOG("Mesh pass {}: batch {} has invalid vertex input layout or streams", passName, context.BatchHandle);
-        output.HasErrors = true;
-        return;
-    }
-    MeshDrawCommand initializer;
-    initializer.Pipeline = &pipeline;
-    for (const auto& stream : batch.VertexInput->Streams) {
-        initializer.VertexBuffers.push_back({stream.Binding, {stream.Buffer.Get(), stream.Offset, stream.Size}});
-    }
-    for (size_t elementIndex = 0; elementIndex < batch.Elements.size(); ++elementIndex) {
-        if (batch.Elements[elementIndex].IndexCount == 0) continue;
-        auto& command = output.AddCommand(initializer);
-        output.FinalizeCommand(context, elementIndex, command);
-        output.Pass.Commands.back().StencilReference = stencilReference;
-    }
-}
-
-bool ValidateGeometry(const MeshDrawCommand& command) noexcept {
-    const auto& indices = command.IndexBuffer;
-    if (!command.Pipeline || !command.Pipeline->IsValid() || !indices.Target || !indices.Target->IsValid() || command.IndexCount == 0 ||
-        (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
-    const auto indexDesc = indices.Target->GetDesc();
-    const uint64_t indexEnd = uint64_t{indices.Offset} +
-                              (uint64_t{command.FirstIndex} + command.IndexCount) * indices.Stride;
-    if (!indexDesc.Usage.HasFlag(render::BufferUse::Index) || indexEnd > indexDesc.Size) return false;
-    for (size_t i = 0; i < command.VertexBuffers.size(); ++i) {
-        const auto& binding = command.VertexBuffers[i];
-        const auto& view = binding.View;
-        if (!view.Target || !view.Target->IsValid() || view.Size == 0) return false;
-        const auto desc = view.Target->GetDesc();
-        if (!desc.Usage.HasFlag(render::BufferUse::Vertex) || view.Offset > desc.Size || view.Size > desc.Size - view.Offset) return false;
-        for (size_t j = 0; j < i; ++j) {
-            if (command.VertexBuffers[j].Binding == binding.Binding) return false;
-        }
-    }
-    return true;
-}
-
-DrawConstants MakeConstants(const Eigen::Matrix4f& viewProjection,
-                            const PrimitiveSceneInfo& primitive, const array<float, 4>& color, float localScale) {
-    // 步骤 6：样例为接受的绘制保存 MVP 和颜色，放入样例自己的 PreparedDraw。
-    // 为什么：LocalToClip、Color 及 push constant 传递方式只属于 cube.hlsl 的参数约定。
-    // UE5 对照：Renderer/Public/MeshPassProcessor.inl 准备共享 bindings，再展开 Element 构建 FMeshDrawCommand。
-    // 本例简化：一个 80 字节 push block；runtime 的命令数据不持有或绑定 shader 参数。
-    DrawConstants constants;
-    Eigen::Matrix4f expansion = Eigen::Matrix4f::Identity();
-    expansion(0, 0) = expansion(1, 1) = expansion(2, 2) = localScale;
-    const Eigen::Matrix4f localToClip = viewProjection * primitive.LocalToWorld.ToMatrix() * expansion;
-    std::memcpy(constants.LocalToClip.data(), localToClip.data(), sizeof(constants.LocalToClip));
-    constants.Color = color;
-    return constants;
 }
 
 Nullable<const BatchPassPolicy*> FindPolicy(std::span<const BatchPassPolicy> policies, SparseSetHandle handle) {
@@ -99,16 +33,16 @@ void LogSkipped(std::string_view passName, const MeshBatchContext& context, cons
 }
 
 bool AcceptsMaterial(const Scene& scene, const MeshBatchContext& context, const BatchPassPolicy& policy,
-                     MaterialTagFilter filter, std::string_view passName, SampleDrawListContext& output) {
+                     MaterialTagFilter filter, std::string_view passName, bool& hasErrors) {
     if (!scene.Materials.IsAlive(context.Batch.Material)) {
         RADRAY_ERR_LOG("材质句柄失效：{}", context.Batch.Material);
-        output.HasErrors = true;
+        hasErrors = true;
         return false;
     }
     const auto resource = scene.Materials.Get(context.Batch.Material).GetResource();
     if (!resource) {
         RADRAY_ERR_LOG("材质尚未同步到 Proxy");
-        output.HasErrors = true;
+        hasErrors = true;
         return false;
     }
     const auto& tags = resource->Properties.Tags;
@@ -118,7 +52,7 @@ bool AcceptsMaterial(const Scene& scene, const MeshBatchContext& context, const 
     }
     if (tags.GetTable().Get() != filter.Table) {
         RADRAY_ERR_LOG("材质与 Processor 必须使用同一张标签表");
-        output.HasErrors = true;
+        hasErrors = true;
         return false;
     }
     if (!tags.Matches(filter.Required.Key, filter.Required.Value)) {
@@ -144,63 +78,9 @@ Nullable<const MaterialPipelines*> FindMaterialPipelines(
 
 }  // namespace
 
-SampleDrawListContext::SampleDrawListContext(const PassContext& pass, std::string_view passName,
-                                             const Scene& scene, MaterialParameterIndices parameters, std::span<const BatchPassPolicy> policies,
-                                             float localScale, std::optional<array<float, 4>> colorOverride)
-    : Pass{pass.ViewportRect, pass.Scissor, {}}, _viewProjection(pass.ViewProjection),
-      _passName(passName), _policies(policies), _scene(&scene), _parameters(parameters),
-      _localScale(localScale), _colorOverride(colorOverride) {}
-
-MeshDrawCommand& SampleDrawListContext::AddCommand(const MeshDrawCommand& initializer) {
-    Pass.Commands.push_back({initializer, {}});
-    return Pass.Commands.back().Command;
-}
-
-void SampleDrawListContext::FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) {
-    // 步骤 6：Context 完成 Element 绘制范围，并将样例参数附到自己的 PreparedDraw。
-    // 为什么：AddMeshBatch 返回 void，输出由 Context 持有；runtime 无需知道颜色、MVP 或教学日志。
-    // UE5 对照：Renderer/Public/MeshPassProcessor.h 的 FMeshPassDrawListContext::AddCommand / FinalizeCommand。
-    // 本例简化：立即完成刚追加的命令，不保存命令指针；只有本次输出，没有静态缓存或状态桶。
-    MeshPassDrawListContext::FinalizeCommand(context, elementIndex, command);
-    const auto policy = FindPolicy(_policies, context.BatchHandle);
-    if (!policy) {
-        RADRAY_ERR_LOG("Batch 没有样例 Pass 配置");
-        HasErrors = true;
-        return;
-    }
-    // 步骤 M5：从 Proxy 快照读取材质参数，再适配成本例 shader 的 80 字节参数块。
-    // 为什么：Material 声明参数含义，样例负责其 GPU 布局；runtime MeshDrawCommand 不持有 push constant。
-    // UE5 对照：Renderer/Private/ShaderBaseClasses.cpp 的 FMaterialShader::GetShaderBindings 绑定材质 uniform buffer。
-    // 本例简化：CPU 读取两个类型明确的值；不实现 UE 的 uniform expression 求值、GPU 缓冲缓存或线程同步。
-    if (!_scene->Materials.IsAlive(context.Batch.Material)) {
-        RADRAY_ERR_LOG("材质句柄失效");
-        HasErrors = true;
-        return;
-    }
-    const auto& proxy = _scene->Materials.Get(context.Batch.Material);
-    const auto baseValue = proxy.GetParameter(_parameters.BaseColor);
-    const auto brightnessValue = proxy.GetParameter(_parameters.Brightness);
-    const Nullable<const array<float, 4>*> baseColor = baseValue ? std::get_if<array<float, 4>>(baseValue.Get()) : nullptr;
-    const Nullable<const float*> brightness = brightnessValue ? std::get_if<float>(brightnessValue.Get()) : nullptr;
-    if (!baseColor || !brightness || !proxy.GetResource()) {
-        RADRAY_ERR_LOG("材质参数不符合本例 BaseColor(float4) / Brightness(float) 契约");
-        HasErrors = true;
-        return;
-    }
-    auto color = *baseColor;
-    for (size_t index = 0; index < 3; ++index) color[index] *= *brightness;
-    // Outline 的固定颜色与局部放大倍率由 Pass 覆盖；不改变原 Primitive 或 MaterialInstance。
-    if (_colorOverride) color = *_colorOverride;
-    Pass.Commands.back().Constants = MakeConstants(_viewProjection, context.Primitive, color, _localScale);
-    RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} Element={} → Draw={}，索引范围=[{}, {})，Material={} Cull={}",
-                    _passName, policy->ObjectName, context.PrimitiveHandle, context.BatchHandle, elementIndex,
-                    Pass.Commands.size() - 1, command.FirstIndex, uint64_t{command.FirstIndex} + command.IndexCount,
-                    context.Batch.Material, static_cast<int32_t>(proxy.GetResource()->Properties.RenderState.Cull));
-}
-
-DepthPassProcessor::DepthPassProcessor(SampleDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
+DepthPassProcessor::DepthPassProcessor(MeshPassDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
                                        std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter) noexcept
-    : MeshPassProcessor(drawListContext), _output(&drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter) {}
+    : MeshPassProcessor(drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter) {}
 
 void DepthPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     // 步骤 5a：Depth Processor 排除 ColorOnly，再检查材质 Surface=Opaque，接受的 Batch 才展开 Element。
@@ -210,25 +90,25 @@ void DepthPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     const auto policy = FindPolicy(_policies, context.BatchHandle);
     if (!policy) {
         RADRAY_ERR_LOG("Batch 没有样例 Pass 配置");
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
     if (policy->Participation == PassParticipation::ColorOnly) {
         LogSkipped("Depth", context, *policy, "ColorOnly：不参加 Depth Pass");
         return;
     }
-    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Depth", *_output)) return;
+    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Depth", HasErrors)) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
     if (!pipelines || !pipelines->Depth) {
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
-    BuildMeshDrawCommands(context, *pipelines->Depth, *_output, "Depth", 0);
+    if (!BuildMeshDrawCommands(context, {.Pipeline = pipelines->Depth.Get(), .AllowDeferredInstanceStream = true})) HasErrors = true;
 }
 
-ColorPassProcessor::ColorPassProcessor(SampleDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
-                                       std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter) noexcept
-    : MeshPassProcessor(drawListContext), _output(&drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter) {}
+ColorPassProcessor::ColorPassProcessor(MeshPassDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
+                                       std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter, MaterialParameterIndices parameters) noexcept
+    : MeshPassProcessor(drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter), _parameters(parameters) {}
 
 void ColorPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     // 步骤 5b：Color Processor 排除 DepthOnly，再检查材质标签，并将模板参考值复制到本次输出。
@@ -238,25 +118,34 @@ void ColorPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     const auto policy = FindPolicy(_policies, context.BatchHandle);
     if (!policy) {
         RADRAY_ERR_LOG("Batch 没有样例 Pass 配置");
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
     if (policy->Participation == PassParticipation::DepthOnly) {
         LogSkipped("Color", context, *policy, "DepthOnly：仅作深度遮挡，不参加 Color Pass");
         return;
     }
-    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Color", *_output)) return;
+    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Color", HasErrors)) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
     if (!pipelines || !pipelines->Color) {
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
-    BuildMeshDrawCommands(context, *pipelines->Color, *_output, "Color", pipelines->Resource->Properties.RenderState.StencilReference);
+    MaterialConstants constants;
+    if (!ExtractMaterialColor(*_scene, context.Batch.Material, _parameters, constants)) {
+        RADRAY_ERR_LOG("Color Pass 的材质参数缺失或类型不匹配");
+        HasErrors = true;
+        return;
+    }
+    if (!BuildMeshDrawCommands(context, {.Pipeline = pipelines->Color.Get(),
+                                         .StencilReference = pipelines->Resource->Properties.RenderState.StencilReference,
+                                         .PushConstants = MeshPushConstantBinding{0, 0, std::as_bytes(std::span{&constants, 1})},
+                                         .AllowDeferredInstanceStream = true})) HasErrors = true;
 }
 
-OutlinePassProcessor::OutlinePassProcessor(SampleDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
+OutlinePassProcessor::OutlinePassProcessor(MeshPassDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
                                            std::span<const BatchPassPolicy> policies, MaterialTagFilter opaqueFilter, MaterialTagFilter outlineFilter) noexcept
-    : MeshPassProcessor(drawListContext), _output(&drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies),
+    : MeshPassProcessor(drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies),
       _opaqueFilter(opaqueFilter), _outlineFilter(outlineFilter) {}
 
 void OutlinePassProcessor::AddMeshBatch(const MeshBatchContext& context) {
@@ -267,26 +156,30 @@ void OutlinePassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     const auto policy = FindPolicy(_policies, context.BatchHandle);
     if (!policy) {
         RADRAY_ERR_LOG("Batch 没有样例 Pass 配置");
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
     if (policy->Participation == PassParticipation::DepthOnly) {
         LogSkipped("Outline", context, *policy, "DepthOnly：不参加颜色绘制，也不描边");
         return;
     }
-    if (!AcceptsMaterial(*_scene, context, *policy, _opaqueFilter, "Outline", *_output) ||
-        !AcceptsMaterial(*_scene, context, *policy, _outlineFilter, "Outline", *_output)) return;
+    if (!AcceptsMaterial(*_scene, context, *policy, _opaqueFilter, "Outline", HasErrors) ||
+        !AcceptsMaterial(*_scene, context, *policy, _outlineFilter, "Outline", HasErrors)) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
     if (!pipelines || !pipelines->Outline) {
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
-    BuildMeshDrawCommands(context, *pipelines->Outline, *_output, "Outline", pipelines->Resource->Properties.RenderState.StencilReference);
+    const MaterialConstants gold{{1.0f, 0.72f, 0.08f, 1.0f}};
+    if (!BuildMeshDrawCommands(context, {.Pipeline = pipelines->Outline.Get(),
+                                         .StencilReference = pipelines->Resource->Properties.RenderState.StencilReference,
+                                         .PushConstants = MeshPushConstantBinding{0, 0, std::as_bytes(std::span{&gold, 1})},
+                                         .AllowDeferredInstanceStream = true})) HasErrors = true;
 }
 
-TransparentPassProcessor::TransparentPassProcessor(SampleDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
-                                                   std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter) noexcept
-    : MeshPassProcessor(drawListContext), _output(&drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter) {}
+TransparentPassProcessor::TransparentPassProcessor(MeshPassDrawListContext& drawListContext, const Scene& scene, std::span<const MaterialPipelines> pipelines,
+                                                   std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter, MaterialParameterIndices parameters) noexcept
+    : MeshPassProcessor(drawListContext), _scene(&scene), _pipelines(pipelines), _policies(policies), _materialFilter(materialFilter), _parameters(parameters) {}
 
 void TransparentPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     // 步骤 5e：颜色参与规则满足后，只接受 Surface=Transparent；不透明材质在这里被拒绝。
@@ -297,48 +190,236 @@ void TransparentPassProcessor::AddMeshBatch(const MeshBatchContext& context) {
     const auto policy = FindPolicy(_policies, context.BatchHandle);
     if (!policy) {
         RADRAY_ERR_LOG("Batch 没有样例 Pass 配置");
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
     if (policy->Participation == PassParticipation::DepthOnly) {
         LogSkipped("Transparent", context, *policy, "DepthOnly：不参加透明颜色绘制");
         return;
     }
-    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Transparent", *_output)) return;
+    if (!AcceptsMaterial(*_scene, context, *policy, _materialFilter, "Transparent", HasErrors)) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
     if (!pipelines || !pipelines->Color) {
-        _output->HasErrors = true;
+        HasErrors = true;
         return;
     }
-    BuildMeshDrawCommands(context, *pipelines->Color, *_output, "Transparent", pipelines->Resource->Properties.RenderState.StencilReference);
+    MaterialConstants constants;
+    if (!ExtractMaterialColor(*_scene, context.Batch.Material, _parameters, constants)) {
+        RADRAY_ERR_LOG("Transparent Pass 的材质参数缺失或类型不匹配");
+        HasErrors = true;
+        return;
+    }
+    if (!BuildMeshDrawCommands(context, {.Pipeline = pipelines->Color.Get(),
+                                         .StencilReference = pipelines->Resource->Properties.RenderState.StencilReference,
+                                         .PushConstants = MeshPushConstantBinding{0, 0, std::as_bytes(std::span{&constants, 1})},
+                                         .AllowDeferredInstanceStream = true})) HasErrors = true;
 }
 
-bool RecordDrawCommands(render::GraphicsCommandEncoder& encoder, const PreparedPass& pass) {
-    // 步骤 7：样例按 PSO → VB/IB → 模板参考值 → 常量 → DrawIndexed 顺序录制。
-    // 为什么：校验与 RHI 录制由样例负责；这里读取 PreparedDraw，不再读取 Scene。
-    // UE5 对照：Renderer/Private/MeshPassProcessor.cpp 的 SubmitMeshDrawCommands / FMeshDrawCommand::SubmitDraw。
-    // 本例简化：此处直接用 RHI 绑定固定 80 字节参数；runtime 提供命令数据、Processor 与输出 Context 接口。
-    for (const auto& draw : pass.Commands) {
-        if (!ValidateGeometry(draw.Command)) {
-            RADRAY_ERR_LOG("样例的几何绘制命令无效");
-            return false;
+bool PreparePassDrawCommands(MeshPassId passId, const Scene& scene,
+                             std::span<const SparseSetHandle> primitives, std::span<const BatchPassPolicy> policies,
+                             MeshPassFrameDrawList& output) {
+    output.Clear();
+    const array<std::string_view, 4> passNames{"Depth", "Color", "Outline", "Transparent"};
+    if (passId.Value >= passNames.size() || primitives.size() > std::numeric_limits<uint32_t>::max()) return false;
+    for (size_t primitiveIndex = 0; primitiveIndex < primitives.size(); ++primitiveIndex) {
+        const auto primitiveHandle = primitives[primitiveIndex];
+        if (!scene.Primitives.IsAlive(primitiveHandle)) return false;
+        const auto& primitive = scene.Primitives.Get(primitiveHandle);
+        for (const auto batchHandle : primitive.Meshes) {
+            if (!scene.Meshes.IsAlive(batchHandle)) return false;
+            const auto& batch = scene.Meshes.Get(batchHandle);
+            if (std::none_of(batch.CachedCommands.begin(), batch.CachedCommands.end(), [&](const CachedMeshDrawCommandInfo& info) { return info.Pass == passId; })) continue;
+            const VisibleMeshBatch visible{
+                .Batch = batchHandle,
+                .FirstInstanceOverride = static_cast<uint32_t>(primitiveIndex)};
+            const auto firstCommand = output.VisibleCommands.size();
+            if (!scene.GatherVisibleMeshDrawCommands(passId, std::span{&visible, 1}, output.VisibleCommands)) return false;
+            const auto policy = FindPolicy(policies, batchHandle);
+            if (!policy) return false;
+            size_t drawIndex = firstCommand;
+            for (const auto& info : batch.CachedCommands) {
+                if (info.Pass != passId) continue;
+                RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} Element={} → Draw={}，CommandHandle={}",
+                                passNames[passId.Value], policy->ObjectName, primitiveHandle, batchHandle, info.ElementIndex, drawIndex++, info.CommandHandle);
+            }
         }
     }
-    encoder.SetViewport(pass.ViewportRect);
-    encoder.SetScissor(pass.Scissor);
-    for (const auto& draw : pass.Commands) {
-        const auto& command = draw.Command;
-        encoder.BindGraphicsPipelineState(command.Pipeline.Get());
-        encoder.BindVertexBuffers(command.VertexBuffers);
-        encoder.BindIndexBuffer(command.IndexBuffer);
-        encoder.SetStencilReference(draw.StencilReference);
-        if (!encoder.SetPushConstants(0, 0, std::as_bytes(std::span{&draw.Constants, 1}))) {
-            RADRAY_ERR_LOG("样例参数绑定失败，放弃提交当前 CommandBuffer");
-            return false;
-        }
-        encoder.DrawIndexed(command.IndexCount, 1, command.FirstIndex, command.VertexOffset, 0);
+    output.SortVisibleCommands();
+    return true;
+}
+
+MeshDrawingFramePipeline::MeshDrawingFramePipeline(GpuResources& gpu, const Scene& scene, const PassContext& view,
+                                                   std::span<const SparseSetHandle> candidates, std::span<const BatchPassPolicy> policies,
+                                                   MaterialParameterIndices parameters) noexcept
+    : _gpu(gpu), _scene(scene), _view(view), _candidates(candidates), _policies(policies),
+      _depthProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.OpaqueTag, "材质缺少或不匹配 Surface=Opaque"}),
+      _colorProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.OpaqueTag, "材质缺少或不匹配 Surface=Opaque"}, parameters),
+      _outlineProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.OpaqueTag, "材质缺少或不匹配 Surface=Opaque"},
+                        {&gpu.MaterialTags, gpu.OutlineTag, "材质缺少或不匹配 Outline=Enabled"}),
+      _transparentProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.TransparentTag, "材质缺少或不匹配 Surface=Transparent"}, parameters),
+      _passes{{{{0}, &_depthProcessor}, {{1}, &_colorProcessor}, {{2}, &_outlineProcessor}, {{3}, &_transparentProcessor}}} {}
+
+bool MeshDrawingFramePipeline::Initialize(uint32_t slotCount) {
+    if (slotCount == 0 || !_frames.empty() || _candidates.empty() || _candidates.size() > std::numeric_limits<uint32_t>::max()) return false;
+    for (uint32_t index = 0; index < slotCount; ++index) {
+        auto frame = make_unique<GpuFrameResources>();
+        if (!frame->Initialize(_gpu, static_cast<uint32_t>(_candidates.size()))) return false;
+        _frames.push_back(std::move(frame));
     }
     return true;
+}
+
+std::span<const MeshPassRegistration> MeshDrawingFramePipeline::GetMeshPassRegistrations() noexcept { return _passes; }
+
+bool MeshDrawingFramePipeline::HasErrors() const noexcept {
+    return _depthProcessor.HasErrors || _colorProcessor.HasErrors || _outlineProcessor.HasErrors || _transparentProcessor.HasErrors;
+}
+
+void MeshDrawingFramePipeline::Extract(const Scene& source, FrameSlot& slot) noexcept {
+    if (&source != &_scene || slot.GetScene().Get() != &source) RADRAY_ABORT("MeshDrawingFramePipeline: unexpected source scene");
+    if (slot.GetIndex() >= _frames.size()) RADRAY_ABORT("MeshDrawingFramePipeline: slot index exceeds frame resources");
+    if (HasErrors() || source.HasDirtyBatches()) RADRAY_ABORT("MeshDrawingFramePipeline: mesh command synchronization failed");
+    auto& resources = *_frames[slot.GetIndex()];
+    vector<Eigen::Matrix4f> matrices;
+    matrices.reserve(_candidates.size());
+    for (const auto handle : _candidates) {
+        if (!source.Primitives.IsAlive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
+        matrices.push_back(source.Primitives.Get(handle).LocalToWorld.ToMatrix());
+    }
+    if (!resources.UploadSceneParameters(_view.ViewProjection, matrices)) RADRAY_ABORT("MeshDrawingFramePipeline: cannot upload scene parameters");
+    for (uint32_t pass = 0; pass < _passes.size(); ++pass) {
+        if (!PreparePassDrawCommands({pass}, source, _candidates, _policies, slot.GetPassDrawList({pass}))) RADRAY_ABORT("MeshDrawingFramePipeline: cannot prepare pass {}", pass);
+    }
+    const auto depth = slot.GetPassDrawList({0}).VisibleCommands.size();
+    const auto color = slot.GetPassDrawList({1}).VisibleCommands.size();
+    const auto outline = slot.GetPassDrawList({2}).VisibleCommands.size();
+    const auto transparent = slot.GetPassDrawList({3}).VisibleCommands.size();
+    RADRAY_INFO_LOG("步骤 6：Frame={} Slot={}，Depth={}，Color={}，Outline={}，Transparent={}，总计 {} 条单实例 Draw",
+                    slot.GetFrameId(), slot.GetIndex(), depth, color, outline, transparent, depth + color + outline + transparent);
+}
+
+bool MeshDrawingFramePipeline::RecordPass(render::GraphicsCommandEncoder& encoder, FrameSlot& slot,
+                                          MeshPassId passId, const GpuFrameResources& resources) {
+    const auto source = slot.GetScene();
+    if (!source) return false;
+    encoder.SetViewport(_view.ViewportRect);
+    encoder.SetScissor(_view.Scissor);
+    const MeshShaderParameterBinding passBinding{0, resources.PassParameterSets[passId == MeshPassId{2} ? 1 : 0].Get(), {}};
+    const MeshPassSubmitArgs submitArgs{
+        .ParameterSets = std::span{&passBinding, 1},
+        .InstanceStream = render::VertexBufferBinding{1, {resources.InstanceBuffer.Get(), 0, resources.InstanceBuffer->GetDesc().Size}}};
+    return slot.GetPassDrawList(passId).Submit(encoder, source->GetCachedDrawList(passId), submitArgs);
+}
+
+void MeshDrawingFramePipeline::Record(FrameSlot& slot) noexcept {
+    if (!slot.GetScene() || slot.GetIndex() >= _frames.size()) RADRAY_ABORT("MeshDrawingFramePipeline: invalid recording slot");
+    auto& resources = *_frames[slot.GetIndex()];
+    if (resources.CompletionValue >= std::numeric_limits<uint64_t>::max() - 1) RADRAY_ABORT("MeshDrawingFramePipeline: fence values exhausted");
+    auto acquired = slot.AcquireCommandBuffer();
+    if (!acquired) RADRAY_ABORT("MeshDrawingFramePipeline: cannot acquire command buffer");
+    auto& command = *acquired;
+    command.Begin();
+    if (!_geometrySubmitted) {
+        const render::ResourceBarrierDescriptor geometry[]{
+            render::BarrierBufferDescriptor{_gpu.VertexBuffer.Get(), render::BufferState::HostWrite, render::BufferState::Vertex},
+            render::BarrierBufferDescriptor{_gpu.IndexBuffer.Get(), render::BufferState::HostWrite, render::BufferState::Index}};
+        command.ResourceBarrier(geometry);
+    }
+    const render::ResourceBarrierDescriptor initialBuffers[]{
+        render::BarrierBufferDescriptor{resources.InstanceBuffer.Get(), render::BufferState::HostWrite, render::BufferState::Vertex},
+        render::BarrierBufferDescriptor{resources.PassBuffers[0].Get(), render::BufferState::HostWrite, render::BufferState::CBuffer},
+        render::BarrierBufferDescriptor{resources.PassBuffers[1].Get(), render::BufferState::HostWrite, render::BufferState::CBuffer},
+        render::BarrierBufferDescriptor{resources.Readback.Get(), resources.CompletionValue == 0 ? render::BufferState::Undefined : render::BufferState::HostRead, render::BufferState::CopyDestination}};
+    command.ResourceBarrier(initialBuffers);
+    TransitionTexture(command, *resources.DepthTexture, resources.CompletionValue == 0 ? render::TextureState::Undefined : render::TextureState::DepthWrite, render::TextureState::DepthWrite);
+    RADRAY_INFO_LOG("步骤 7：录制 Depth Pass，清除并写入深度");
+    auto depthEncoder = command.BeginRenderPass({.DepthStencil = render::RenderPassDepthStencilAttachment{
+                                                     .View = resources.DepthWriteView.Get(), .DepthLoad = render::LoadAction::Clear, .DepthStore = render::StoreAction::Store, .StencilLoad = render::LoadAction::Clear, .StencilStore = render::StoreAction::Store, .Clear = {1, 0}},
+                                                 .Width = resources.Width,
+                                                 .Height = resources.Height,
+                                                 .Name = "Tutorial Depth"});
+    if (!depthEncoder) RADRAY_ABORT("MeshDrawingFramePipeline: cannot begin depth pass");
+    const bool depthRecorded = RecordPass(*depthEncoder, slot, {0}, resources);
+    command.EndRenderPass(depthEncoder.Release());
+    if (!depthRecorded) RADRAY_ABORT("MeshDrawingFramePipeline: cannot record depth pass");
+
+    TransitionTexture(command, *resources.DepthTexture, render::TextureState::DepthWrite, render::TextureState::DepthWrite);
+    TransitionTexture(command, *resources.ColorTexture, resources.CompletionValue == 0 ? render::TextureState::Undefined : render::TextureState::CopySource, render::TextureState::RenderTarget);
+    RADRAY_INFO_LOG("步骤 7：录制 Color Pass，Load 同一深度，LessEqual 测试并补写深度");
+    const render::RenderPassColorAttachment colorAttachment{
+        resources.ColorView.Get(), render::LoadAction::Clear, render::StoreAction::Store, {{0.035f, 0.055f, 0.085f, 1}}};
+    auto colorEncoder = command.BeginRenderPass({.Colors = std::span{&colorAttachment, 1},
+                                                 .DepthStencil = render::RenderPassDepthStencilAttachment{
+                                                     .View = resources.DepthWriteView.Get(), .DepthLoad = render::LoadAction::Load, .DepthStore = render::StoreAction::Store, .StencilLoad = render::LoadAction::Load, .StencilStore = render::StoreAction::Store},
+                                                 .Width = resources.Width,
+                                                 .Height = resources.Height,
+                                                 .Name = "Tutorial Color"});
+    if (!colorEncoder) RADRAY_ABORT("MeshDrawingFramePipeline: cannot begin color pass");
+    const bool colorRecorded = RecordPass(*colorEncoder, slot, {1}, resources);
+    command.EndRenderPass(colorEncoder.Release());
+    if (!colorRecorded) RADRAY_ABORT("MeshDrawingFramePipeline: cannot record color pass");
+
+    TransitionTexture(command, *resources.DepthTexture, render::TextureState::DepthWrite, render::TextureState::DepthWrite);
+    TransitionTexture(command, *resources.ColorTexture, render::TextureState::RenderTarget, render::TextureState::RenderTarget);
+    const render::RenderPassColorAttachment loadedColor{
+        resources.ColorView.Get(), render::LoadAction::Load, render::StoreAction::Store, {}};
+    RADRAY_INFO_LOG("步骤 7a：Outline Pass，Load 模板；NotEqual 7、禁止模板/深度写入，金色外壳放大 1.12 倍");
+    auto outlineEncoder = command.BeginRenderPass({.Colors = std::span{&loadedColor, 1},
+                                                   .DepthStencil = render::RenderPassDepthStencilAttachment{
+                                                       .View = resources.DepthWriteView.Get(), .DepthLoad = render::LoadAction::Load, .DepthStore = render::StoreAction::Store, .StencilLoad = render::LoadAction::Load, .StencilStore = render::StoreAction::Store},
+                                                   .Width = resources.Width,
+                                                   .Height = resources.Height,
+                                                   .Name = "Tutorial Outline"});
+    if (!outlineEncoder) RADRAY_ABORT("MeshDrawingFramePipeline: cannot begin outline pass");
+    const bool outlineRecorded = RecordPass(*outlineEncoder, slot, {2}, resources);
+    command.EndRenderPass(outlineEncoder.Release());
+    if (!outlineRecorded) RADRAY_ABORT("MeshDrawingFramePipeline: cannot record outline pass");
+
+    TransitionTexture(command, *resources.DepthTexture, render::TextureState::DepthWrite, render::TextureState::DepthWrite);
+    TransitionTexture(command, *resources.ColorTexture, render::TextureState::RenderTarget, render::TextureState::RenderTarget);
+    RADRAY_INFO_LOG("步骤 7b：Transparent Pass，Load 颜色并进行 alpha 混合；LessEqual 测试，不写深度");
+    auto transparentEncoder = command.BeginRenderPass({.Colors = std::span{&loadedColor, 1},
+                                                       .DepthStencil = render::RenderPassDepthStencilAttachment{
+                                                           .View = resources.DepthWriteView.Get(), .DepthLoad = render::LoadAction::Load, .DepthStore = render::StoreAction::Store, .StencilLoad = render::LoadAction::Load, .StencilStore = render::StoreAction::Store},
+                                                       .Width = resources.Width,
+                                                       .Height = resources.Height,
+                                                       .Name = "Tutorial Transparent"});
+    if (!transparentEncoder) RADRAY_ABORT("MeshDrawingFramePipeline: cannot begin transparent pass");
+    const bool transparentRecorded = RecordPass(*transparentEncoder, slot, {3}, resources);
+    command.EndRenderPass(transparentEncoder.Release());
+    if (!transparentRecorded) RADRAY_ABORT("MeshDrawingFramePipeline: cannot record transparent pass");
+
+    TransitionTexture(command, *resources.ColorTexture, render::TextureState::RenderTarget, render::TextureState::CopySource);
+    command.CopyTextureToBuffer(resources.Readback.Get(), 0, resources.ColorTexture.Get(), {0, 1, 0, 1});
+    const render::ResourceBarrierDescriptor toHost = render::BarrierBufferDescriptor{
+        resources.Readback.Get(), render::BufferState::CopyDestination, render::BufferState::HostRead};
+    command.ResourceBarrier(std::span{&toHost, 1});
+    const render::ResourceBarrierDescriptor toUpload[]{
+        render::BarrierBufferDescriptor{resources.InstanceBuffer.Get(), render::BufferState::Vertex, render::BufferState::HostWrite},
+        render::BarrierBufferDescriptor{resources.PassBuffers[0].Get(), render::BufferState::CBuffer, render::BufferState::HostWrite},
+        render::BarrierBufferDescriptor{resources.PassBuffers[1].Get(), render::BufferState::CBuffer, render::BufferState::HostWrite}};
+    command.ResourceBarrier(toUpload);
+    command.End();
+    array submitted{&command};
+    array fences{resources.CompletionFence.Get()};
+    array values{resources.CompletionValue + 1};
+    slot.GetQueue().Submit({.CmdBuffers = submitted, .SignalFences = fences, .SignalValues = values});
+    resources.CompletionValue = values[0];
+    _geometrySubmitted = true;
+    RADRAY_INFO_LOG("步骤 8：提交 Frame={} Slot={} Fence={}，复用该槽时才等待", slot.GetFrameId(), slot.GetIndex(), resources.CompletionValue);
+}
+
+void MeshDrawingFramePipeline::Wait(FrameSlot& slot) noexcept {
+    auto& resources = *_frames[slot.GetIndex()];
+    resources.CompletionFence->Wait(resources.CompletionValue);
+    RADRAY_INFO_LOG("等待完成：Frame={} Slot={} Fence={}", slot.GetFrameId(), slot.GetIndex(), resources.CompletionValue);
+}
+
+bool MeshDrawingFramePipeline::SaveImage(uint32_t slotIndex, const std::filesystem::path& output) const {
+    if (slotIndex >= _frames.size()) return false;
+    const auto& resources = *_frames[slotIndex];
+    if (resources.CompletionValue == 0 || resources.CompletionFence->GetCompletedValue() < resources.CompletionValue) return false;
+    return resources.SaveImage(output);
 }
 
 }  // namespace radray::examples::mesh_drawing

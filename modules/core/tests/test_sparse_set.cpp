@@ -94,6 +94,23 @@ TEST(SparseSetTest, IterateDense) {
     EXPECT_EQ(values[1], 5);
 }
 
+TEST(SparseSetTest, DenseIndexResolvesHandlesAfterMovesAndReuse) {
+    SparseSet<int> set;
+    const auto first = set.Emplace(1);
+    const auto second = set.Emplace(2);
+    const auto third = set.Emplace(3);
+    set.Destroy(first);
+    EXPECT_EQ(set.GetHandleAt(0), third);
+    EXPECT_EQ(set.GetHandleAt(1), second);
+    const auto reused = set.Emplace(4);
+    EXPECT_EQ(set.GetHandleAt(2), reused);
+    EXPECT_NE(reused.Generation, first.Generation);
+    const auto& view = set;
+    for (uint32_t index = 0; index < view.Count(); ++index) {
+        EXPECT_EQ(&view.Get(view.GetHandleAt(index)), &view.Values()[index]);
+    }
+}
+
 TEST(SparseSetTest, ClearInvalidatesAllHandles) {
     SparseSet<int> set;
     const SparseSetHandle handleA = set.Emplace(7);

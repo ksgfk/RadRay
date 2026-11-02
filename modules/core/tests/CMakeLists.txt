@@ -7,6 +7,8 @@ set(radray_core_test_sources
     test_str_convert.cpp
     test_nullable.cpp
     test_intrusive_ptr.cpp
+    test_memory.cpp
+    test_object_arena.cpp
     test_enum_flags.cpp
     test_sparse_set.cpp
     test_manual_coroutine_scheduler.cpp

@@ -1,5 +1,35 @@
 include_guard(GLOBAL)
 
+function(radray_get_mimalloc_linkage targets libraries)
+    set(required_targets mimalloc-static)
+    set(link_libraries "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
+    if (WIN32)
+        if (DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+            set(runtime "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+        else()
+            set(runtime "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+        endif()
+        if (runtime STREQUAL "")
+            message(FATAL_ERROR
+                "Windows mimalloc linkage cannot be selected from an empty CMAKE_MSVC_RUNTIME_LIBRARY; choose an explicit CRT value")
+        endif()
+        if (runtime MATCHES "DLL$")
+            set(required_targets mimalloc)
+        elseif(runtime STREQUAL "MultiThreaded" OR runtime STREQUAL "MultiThreadedDebug" OR
+               runtime STREQUAL "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+            set(required_targets mimalloc-static)
+        else()
+            set(required_targets mimalloc mimalloc-static)
+        endif()
+        set(shared "$<OR:$<STREQUAL:$<GENEX_EVAL:${runtime}>,MultiThreadedDLL>,$<STREQUAL:$<GENEX_EVAL:${runtime}>,MultiThreadedDebugDLL>>")
+        set(link_libraries
+            "$<${shared}:mimalloc>"
+            "$<$<NOT:${shared}>:$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>>")
+    endif()
+    set(${targets} "${required_targets}" PARENT_SCOPE)
+    set(${libraries} "${link_libraries}" PARENT_SCOPE)
+endfunction()
+
 # Repository triplets describe both the compiler and the CRT ABI of prepared packages.
 function(radray_check_repository_crt triplet)
     if (NOT triplet MATCHES "^windows-")

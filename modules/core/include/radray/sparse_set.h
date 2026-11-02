@@ -147,6 +147,13 @@ public:
         return std::span<const T>{_denseValues.data(), _denseValues.size()};
     }
 
+    // Resolves a current Values() index to a stable handle. Dense indices change on removal.
+    SparseSetHandle GetHandleAt(uint32_t denseIndex) const noexcept {
+        RADRAY_ASSERT(denseIndex < _sparseIndices.size());
+        const auto sparseIndex = _sparseIndices[denseIndex];
+        return {sparseIndex, _sparse[sparseIndex].Generation};
+    }
+
     uint32_t Count() const noexcept {
         RADRAY_ASSERT(_denseValues.size() <= InvalidIndex);
         return static_cast<uint32_t>(_denseValues.size());

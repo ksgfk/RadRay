@@ -12,6 +12,7 @@ set(radray_render_test_sources
     test_vulkan_device_features.cpp
     test_vulkan_command_contracts.cpp
     test_d3d12_command_contracts.cpp
+    test_d3d12_memory.cpp
     test_swapchain_retirement_vulkan.cpp
     test_swapchain_wsi_vulkan.cpp
     test_explicit_binding_layout.cpp

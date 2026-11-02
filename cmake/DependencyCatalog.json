@@ -169,11 +169,12 @@
     "requires": [],
     "options": {
       "MI_BUILD_OBJECT": "OFF",
-      "MI_BUILD_SHARED": "OFF",
+      "MI_BUILD_SHARED": "${RADRAY_SHARED_CRT}",
       "MI_BUILD_STATIC": "ON",
       "MI_BUILD_TESTS": "OFF",
       "MI_XMALLOC": "ON",
       "MI_OVERRIDE": "ON",
+      "MI_WIN_REDIRECT": "${RADRAY_SHARED_CRT}",
       "MI_OPT_ARCH": "OFF",
       "MI_INSTALL_TOPLEVEL": "ON"
     },

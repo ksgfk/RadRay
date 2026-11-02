@@ -9,8 +9,6 @@
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 
-#include "pipeline.h"
-
 namespace radray::examples::mesh_drawing {
 namespace {
 
@@ -40,7 +38,7 @@ Nullable<unique_ptr<render::Buffer>> UploadBuffer(
     if (!buffer) return nullptr;
     Nullable<void*> mapped = buffer->Map(0, bytes.size());
     if (!mapped) {
-        RADRAY_ERR_LOG("无法映射几何上传缓冲");
+        RADRAY_ERR_LOG("无法映射上传缓冲");
         return nullptr;
     }
     std::memcpy(mapped.Get(), bytes.data(), bytes.size());
@@ -50,15 +48,6 @@ Nullable<unique_ptr<render::Buffer>> UploadBuffer(
 }
 
 }  // namespace
-
-GpuResources::~GpuResources() noexcept {
-    // 为什么：GPU 完成后还要结束 allocator epoch，才能释放本次录制引用的 PSO、附件和缓冲。
-    // 在成功与失败路径统一执行；主流程保证已开启的 encoder 和 command 在返回前成对结束。
-    if (Device) {
-        Device->GetQueue().Wait();
-        if (Allocator) Allocator->Reset();
-    }
-}
 
 bool GpuResources::Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
     RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证，读取预编译 shader", backend);
@@ -83,10 +72,20 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     // 为什么：多个实例可共享同一组程序；shader 可用性与具体 Pass 的参与规则是两件事。
     // UE5 对照：Engine/Public/MaterialShared.h 的 FMaterial / FMaterialResource / FMaterialShaderMap。
     // 本例简化：具名程序与 Surface/Outline 标签由应用准备；标签不触发编译，也不是 UE 的固定材质枚举。
+    const render::BindingDescriptor passBinding{
+        .BindingId = 0,
+        .Kind = render::BindingKind::CBuffer,
+        .Count = 1,
+        .Stages = render::ShaderStage::Vertex,
+        .D3D12 = render::D3D12BindingDescriptor{render::BindingRegisterClass::CBV, 0, 0, render::D3D12BufferPlacement::Table},
+        .Vulkan = render::VulkanBindingDescriptor{0, 0, render::VulkanBufferDescriptorPlacement::Regular}};
+    PassGroupLayout = device.CreateBindingGroupLayout({std::span{&passBinding, 1}});
+    if (!PassGroupLayout) return false;
+    const render::PipelineLayoutGroupDescriptor passGroup{.GroupSlot = 0, .Layout = PassGroupLayout.Get()};
     const render::PushConstantDescriptor push{
-        0, sizeof(DrawConstants), render::ShaderStage::Vertex | render::ShaderStage::Pixel,
-        render::PushConstantDescriptor::D3D12Location{0, 0}, render::PushConstantDescriptor::VulkanLocation{0}};
-    Layout = device.CreatePipelineLayout({{}, std::span{&push, 1}});
+        0, sizeof(MaterialConstants), render::ShaderStage::Pixel,
+        render::PushConstantDescriptor::D3D12Location{1, 0}, render::PushConstantDescriptor::VulkanLocation{0}};
+    Layout = device.CreatePipelineLayout({std::span{&passGroup, 1}, std::span{&push, 1}});
     if (!Layout) return false;
     OpaqueResource.Programs = {
         {"Depth", Layout.Get(), VertexShader.Get(), "VSMain", nullptr, ""},
@@ -118,20 +117,7 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
         {render::BlendFactor::One, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add}};
     RADRAY_INFO_LOG("材质标签登记：Surface=Opaque / Transparent，Outline=Enabled；描边物体写模板 7，透明材质启用 alpha 混合并关闭深度写入");
 
-    ColorTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource});
-    DepthTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::D32_FLOAT_S8_UINT, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::DepthStencilWrite});
-    if (!ColorTexture || !DepthTexture) return false;
-    ColorView = device.CreateTextureView({ColorTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
-    DepthWriteView = device.CreateTextureView({DepthTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::D32_FLOAT_S8_UINT, {0, 1, 0, 1}, render::TextureViewUsage::DepthWrite});
-    if (!ColorView || !DepthWriteView) return false;
-
-    RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
-    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
-    if (!Readback) return false;
-    Allocator = device.CreateCommandAllocator(&Device->GetQueue());
-    if (!Allocator) return false;
-    Command = device.CreateCommandBuffer(Allocator.Get());
-    return Command.HasValue();
+    return true;
 }
 
 bool GpuResources::UploadGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices) {
@@ -142,6 +128,66 @@ bool GpuResources::UploadGeometry(std::span<const byte> vertices, std::span<cons
     VertexBuffer = UploadBuffer(Device->GetDevice(), vertices, render::BufferUse::Vertex);
     IndexBuffer = UploadBuffer(Device->GetDevice(), std::as_bytes(indices), render::BufferUse::Index);
     return VertexBuffer && IndexBuffer;
+}
+
+bool GpuFrameResources::Initialize(const GpuResources& shared, uint32_t instanceCount) {
+    if (instanceCount == 0) return false;
+    Width = shared.Width;
+    Height = shared.Height;
+    auto& device = shared.Device->GetDevice();
+    ColorTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource});
+    DepthTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::D32_FLOAT_S8_UINT, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::DepthStencilWrite});
+    if (!ColorTexture || !DepthTexture) return false;
+    ColorView = device.CreateTextureView({ColorTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
+    DepthWriteView = device.CreateTextureView({DepthTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::D32_FLOAT_S8_UINT, {0, 1, 0, 1}, render::TextureViewUsage::DepthWrite});
+    if (!ColorView || !DepthWriteView) return false;
+
+    RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
+    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
+    if (!Readback) return false;
+    InstanceBuffer = device.CreateBuffer({.Size = uint64_t{instanceCount} * sizeof(InstanceData),
+                                          .Memory = render::MemoryType::Upload,
+                                          .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite});
+    if (!InstanceBuffer) return false;
+    const uint64_t alignment = std::max<uint64_t>(1, std::max<uint64_t>(device.GetDetail().CBufferAlignment, device.GetCapabilities().Limits.CBufferOffsetAlignment));
+    const uint64_t cbufferSize = Align(uint64_t{sizeof(PassConstants)}, alignment);
+    for (size_t index = 0; index < PassBuffers.size(); ++index) {
+        PassBuffers[index] = device.CreateBuffer({.Size = cbufferSize, .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CBuffer | render::BufferUse::MapWrite});
+        if (!PassBuffers[index]) return false;
+        PassParameterSets[index] = device.CreateShaderParameterSet({shared.PassGroupLayout.Get()});
+        if (!PassParameterSets[index] ||
+            !PassParameterSets[index]->Set(0, 0, render::ShaderBufferBinding{PassBuffers[index].Get(), {0, cbufferSize}, 0}) ||
+            !PassParameterSets[index]->FlushWrites()) return false;
+    }
+    CompletionFence = device.CreateFence();
+    return CompletionFence.HasValue();
+}
+
+bool GpuFrameResources::UploadSceneParameters(const Eigen::Matrix4f& viewProjection, std::span<const Eigen::Matrix4f> localToWorlds) {
+    if (localToWorlds.empty() || localToWorlds.size() != InstanceBuffer->GetDesc().Size / sizeof(InstanceData)) return false;
+    const uint64_t instanceSize = InstanceBuffer->GetDesc().Size;
+    Nullable<void*> mapped = InstanceBuffer->Map(0, instanceSize);
+    if (!mapped) return false;
+    auto* instanceBytes = static_cast<byte*>(mapped.Get());
+    for (size_t index = 0; index < localToWorlds.size(); ++index) {
+        std::memcpy(instanceBytes + index * sizeof(InstanceData), localToWorlds[index].data(), sizeof(InstanceData));
+    }
+    InstanceBuffer->FlushMappedRange({0, instanceSize});
+    InstanceBuffer->Unmap();
+    const array scales{1.0f, 1.12f};
+    for (size_t index = 0; index < scales.size(); ++index) {
+        PassConstants constants;
+        std::memcpy(constants.ViewProjection.data(), viewProjection.data(), sizeof(constants.ViewProjection));
+        constants.LocalScale = scales[index];
+        const uint64_t cbufferSize = PassBuffers[index]->GetDesc().Size;
+        Nullable<void*> passMapped = PassBuffers[index]->Map(0, cbufferSize);
+        if (!passMapped) return false;
+        std::memset(passMapped.Get(), 0, static_cast<size_t>(cbufferSize));
+        std::memcpy(passMapped.Get(), &constants, sizeof(constants));
+        PassBuffers[index]->FlushMappedRange({0, cbufferSize});
+        PassBuffers[index]->Unmap();
+    }
+    return true;
 }
 
 bool GpuResources::CreatePipelines(const VertexInput& input, const MaterialResource& resource) {
@@ -177,7 +223,7 @@ bool GpuResources::CreatePipelines(const VertexInput& input, const MaterialResou
     primitive.Cull = state.Cull;
     primitive.UnclippedDepth = false;
     auto depth = render::DepthStencilState::Default();  // Depth Pass：Less、测试/写入开启、模板关闭。
-    depth.Format = DepthTexture->GetDesc().Format;
+    depth.Format = render::TextureFormat::D32_FLOAT_S8_UINT;
     depth.DepthBias = state.DepthBias;
     render::GraphicsPipelineStateDescriptor descriptor{
         .PipelineLayout = depthProgram.Layout.Get(), .VS = render::ShaderEntry{depthProgram.VertexShader.Get(), depthProgram.VertexEntry}, .VertexInput = {input.Layouts, attributes}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = render::MultiSampleState::Default()};
@@ -243,11 +289,7 @@ bool PrepareOutputDirectory(const std::filesystem::path& output) {
     return true;
 }
 
-bool GpuResources::SaveImage(const std::filesystem::path& output) const {
-    // 步骤 8（读回部分）：从 GPU copy 的行跨度中提取紧密 RGBA8 像素，再写 PNG。
-    // 为什么：Readback 每行可能含 padding；直接把整块内存当图片会造成错行。
-    // UE5 对照：这一段属于离屏结果验证，位于 Mesh Drawing Pipeline 之后，不对应 FMeshDrawCommand。
-    // 本例简化：主流程已经 Queue.Wait，只读回一张 800×600 图片，不实现异步读回队列。
+bool GpuFrameResources::SaveImage(const std::filesystem::path& output) const {
     Nullable<void*> mapped = Readback->Map(0, RowPitch * Height);
     if (!mapped) {
         RADRAY_ERR_LOG("无法映射图片读回缓冲");

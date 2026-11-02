@@ -52,7 +52,7 @@ git ls-tree -r --name-only 07d41dcf80d63316a512be848eeae9781dddb1e6 -- modules/r
 并通过它依赖 core。公共头使用 `<radray/runtime/...>`，类型位于 `namespace radray`；RHI 类型位于
 `radray::render`。模块不依赖 shader compiler、DXC SDK、应用 bridge 或应用顶点语义。
 
-基线文档记录该分层来自 Raynium 中参考 UE 5.8.4 的最小框架，并非完整 UE Renderer 的移植：
+基线文档记录该分层来自参考 UE 5.8.4 的最小框架，并非完整 UE Renderer 的移植：
 
 ```text
 应用：SceneUpdate + ViewSubmission + 自定义 Pipeline / shader / 参数
@@ -221,7 +221,6 @@ ctest --preset win-x64-debug -R 'Runtime(Scene|Graph|Gpu)' --output-on-failure
 
 > 2026-10-30 在 Windows x64、MSVC 19.51、RTX 3060 / NVIDIA 591.44、Vulkan SDK 1.4.357.0 验证迁入的 runtime：
 > standalone 动态 CRT 的 Debug/Release 各 16 项通过，`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，没有跳过。
-> 同一源码在 Raynium 的 `/MT` Debug/Release 消费中各通过 57 个 native/GPU 回归；没有进行 GUI 或游戏交互验证。
 > 另以 Release `/MT`、仅 core/render/runtime 的安装配置生成公共头与静态库，外部项目通过
 > `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 链接 `RadRay::runtime`，运行图编译与计划检查成功。
 > 这些检查不覆盖本机以外的 GPU/驱动或其他平台。

@@ -3,9 +3,37 @@
 #include <string_view>
 
 #include <radray/json.h>
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
 
 namespace radray {
 namespace {
+
+TEST(JsonTest, ParsedStringsUseConfiguredAllocatorAndSurviveDocumentMove) {
+    auto document = JsonDocument::Parse(R"({"payload":"allocator-owned string"})");
+    ASSERT_TRUE(document.has_value());
+    JsonDocument moved = std::move(*document);
+    const auto value = moved.Root()["payload"].AsString();
+    EXPECT_EQ(value, "allocator-owned string");
+#ifdef RADRAY_ENABLE_MIMALLOC
+    EXPECT_TRUE(mi_any_heap_contains(value.data()));
+#endif
+}
+
+TEST(JsonTest, LargeEscapedOutputSurvivesWriterMoveAndRepeatedWrites) {
+    const string payload(32768, '\n');
+    JsonWriter original;
+    original.RootObject().AddString("payload", payload);
+    JsonWriter writer = std::move(original);
+    for (bool pretty : {false, true}) {
+        const auto text = writer.Write(pretty);
+        ASSERT_TRUE(text.has_value());
+        auto document = JsonDocument::Parse(*text);
+        ASSERT_TRUE(document.has_value());
+        EXPECT_EQ(document->Root()["payload"].AsString(), payload);
+    }
+}
 
 TEST(JsonTest, SupportsNonNullTerminatedStringViews) {
     constexpr std::string_view stringKey{"string.trailing", 6};

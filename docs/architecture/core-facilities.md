@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
 
 # core 基础设施
 
@@ -34,17 +34,25 @@
 template <class T> using vector = std::vector<T, allocator<T>>;
 ```
 
-**底层就是 std + `std::allocator`。** 没有 EASTL，没有自定义分配器模板。
+**这些别名的底层就是 std + `std::allocator`，不接受自定义分配器参数。** 没有 EASTL。
 `unique_ptr` / `shared_ptr` / `weak_ptr` / `make_unique` / `make_shared` /
 `enable_shared_from_this` 也都被 `using` 拉进 `radray` 命名空间。
 
-`RADRAY_ENABLE_MIMALLOC`（默认 ON）通过 whole-archive 链接 `mimalloc-static`。
-是否替换标准分配取决于平台和 CRT：Windows 静态 CRT 路线使用 `/MT`，让上游替换参与最终映像
-的链接；原 `/MD[d]` 路线只链接库，不自动覆盖标准分配。具体配置、宿主约束与覆盖检查见
-[静态 CRT 与 mimalloc](../guide/build-test.md#静态-crt-与-mimalloc)。容器别名统一类型入口，
-不自行选择分配器。
+`RADRAY_ENABLE_MIMALLOC`（默认 ON）在 Windows `/MD[d]` 下链接动态库 target `mimalloc`，
+在 `/MT` 和其他平台下通过 whole-archive 链接 `mimalloc-static`。
+标准分配的覆盖交给该依赖提供，core 不包含 `mimalloc-new-delete.h` 或自行定义全局 `new/delete`。
+Windows 动态覆盖由最终程序负责部署 DLL 和安排加载；RadRay 不自动复制或强制加载 DLL。
+具体配置、宿主约束与覆盖检查见[动态 CRT](../guide/build-test.md#windows-动态-crt-与-mimalloc)
+和[静态 CRT](../guide/build-test.md#静态-crt-与-mimalloc)。容器别名统一类型入口，不自行选择分配器。
 
-`AGENTS.md` 要求 STL 容器一律走这些别名。
+`memory.h` 的 `Malloc/Free`、`AlignedAlloc/AlignedFree` 在启用 mimalloc 时由 `memory.cpp`
+直接调用 `mi_malloc/mi_free`、`mi_malloc_aligned/mi_free`，不依赖 CRT 符号覆盖；Windows `/MD[d]`
+也使用这条路径。ObjectArena 的底层块因此随该选项使用 mimalloc。关闭选项时保留标准 C 分配，
+Windows 对齐分配使用 `_aligned_malloc/_aligned_free`，其他平台使用 `std::aligned_alloc/std::free`。
+这些接口返回的内存必须通过对应 RadRay 释放接口配对释放，不能与调用方 CRT 的 free 混用。
+
+普通 STL 容器按 `AGENTS.md` 使用这些别名。需要显式配置下文 `ArenaAllocator<T>` 的用法直接
+实例化标准容器模板；本设施不增加容器别名，也不改变 `types.h` 的默认分配器。
 
 ### InlineVector
 
@@ -66,7 +74,79 @@ data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不�
 重定位优先使用不抛异常的移动，否则在可复制时复制。临时存储通过 RAII 清理；不可复制且移动可能失败的
 元素不保证在失败后保留原值。超过 `max_size()` 的容量请求通过 `RADRAY_ABORT` 拒绝。
 
-### SparseSet
+## ObjectArena 与 ArenaAllocator
+
+`object_arena.h` 提供独立的 `ObjectArena` 和 `ArenaAllocator<T>`，非模板实现位于同名 `.cpp`。
+它们不涉及 GPU 或帧调度；调用方负责确定所有使用已经完成。
+runtime 的 [FrameSlot](runtime.md#帧内分配与资源释放) 为每槽持有独立 arena，将回收接在帧完成与命令存储重置之后。
+arena 不可复制、不可移动，操作必须由调用方串行化。没有锁、TLS、全局池或 PMR 适配。
+
+### 存储和对象生命周期
+
+`ObjectArenaOptions` 默认普通块可用容量 `BlockSize = 64 KiB`，重置后保留预算
+`MaxRetainedBytes = 256 KiB`。BlockSize 必须大于零，违反时终止；预算允许为零。
+普通块使用线性游标分配，对象地址在扩容时不变。超出普通块容量的大请求或对齐需求单独分块，
+不消耗普通块的当前游标。所有块通过 `AlignedAlloc` / `AlignedFree` 配对管理，底层申请大小
+向分配对齐取整，并在加法、取整及地址跨度计算前验证溢出。
+
+| API | 契约 |
+|---|---|
+| `TryAllocateBytes(bytes, alignment)` | 只分配原始存储，不构造对象、不登记析构；无效对齐、大小溢出或分配失败返回空 |
+| `AllocateBytes(bytes, alignment)` | 同上，失败抛 `std::bad_alloc` |
+| `Emplace<T>(args...)` | 原样转发构造参数，返回 `T*`；允许构造异常传播，要求 T 可无异常析构 |
+| `Reset()` | 析构所有已登记对象，复位保留块并按预算归还动态存储；不申请新内存 |
+| `Release()` / 析构 | 析构所有已登记对象并归还全部动态存储；Release 后仍可重新使用 |
+| `GetReservedBytes()` | 遍历块计算保留字节，复杂度 O(块数)，用于预算诊断 |
+
+零字节请求按一字节处理；alignment 必须为非零的二次幂。返回的存储在下一次 Reset、Release
+或 arena 析构时失效，即使其地址随后被复用。原始存储中手动构造的对象由调用方管理析构。
+
+平凡析构类型没有析构记录。其他类型使用 `InlineVector<CleanupRecord, 16>` 保存对象指针与
+`noexcept` 析构函数，按**成功构造完成的逆序**销毁。构造前预留记录容量，包含嵌套未完成构造
+的需求；对象构造成功后登记不会再申请内存。构造失败时通过 RAII 撤销预留计数，不登记失败对象，
+已消耗字节和已成功构造的嵌套对象保留到回收时处理。不使用 catch，也不提供失败后的游标回滚。
+
+【已登记对象不得手动析构或 delete。】可以 Emplace 移入的 unique_ptr 等 RAII owner，或移入
+`ScopeGuard` 来保存清理回调；没有单独的 Retain/Defer 接口。构造期间不得调用该 arena 的
+Reset/Release，析构及清理回调不得重入同一 arena；Debug 对这些误用断言。
+
+Reset 先完成全部析构，再优先保留预算容纳的析构表堆容量；若表自身超过预算则全部释放其堆存储。
+剩余预算按创建顺序保留普通块，超额普通块及全部大块归还。预算包含块头、对齐填充和析构表堆容量，
+不包含 arena 本体的内联空间及系统分配器内部开销。因此默认预算不代表固定保留四个普通块。
+Reset/Release 可重复调用，不会重复执行已回收对象的析构；Release 后 GetReservedBytes 为零。
+
+### 标准容器适配
+
+`ArenaAllocator<T>` 非拥有地引用 arena，没有默认构造。allocate 检查元素数量乘法溢出并抛
+`std::bad_array_new_length`，底层存储失败抛 `std::bad_alloc`；deallocate 不单独回收存储。
+construct 使用 C++20 `std::uninitialized_construct_using_allocator`，可向兼容的嵌套容器和
+pair 元素传递同一个 arena，但不会改写普通业务对象内部成员的分配器。
+
+```cpp
+radray::ObjectArena arena;
+{
+    std::vector<int, radray::ArenaAllocator<int>> values{
+        radray::ArenaAllocator<int>{arena}};
+    values.reserve(256);
+    values.push_back(42);
+} // 容器先销毁元素，存储仍由 arena 持有。
+arena.Reset();
+```
+
+【容器元素的构造和析构由容器负责，不能逐元素登记到 arena。】通过 Emplace 创建顶层容器时，
+显式传入 allocator，仅登记容器本体的析构。外部持有的容器必须在 arena 重置前销毁；clear()
+仍保留 capacity，不能替代销毁。arena 必须比所有借用它的 allocator 和容器活得更久。
+扩容后弃用的旧存储要等到 arena 回收才可复用，因此可预测容量时优先 reserve。
+
+allocator 相等性按 arena 地址判断，跨类型转换保留同一 arena；is_always_equal 与复制赋值、
+移动赋值、swap 的传播标志均为 false。普通容器复制构造沿用来源 arena，赋值保留目标 arena；
+跨 arena 移动赋值可能逐元素移动，不能直接 swap 不同 arena 的容器。复制或移动不延长 arena 的生命期。
+
+正确性测试位于 `modules/core/tests/test_object_arena.cpp`，使用 `ObjectArenaTest` 和
+`ArenaAllocatorTest` suite，计数与事件顺序由测试 probe 保存。基准入口见
+[性能测量 / Object arena](../guide/performance.md#object-arena)。
+
+## SparseSet
 
 `sparse_set.h` 的 `SparseSet<T>` 用稀疏槽位、稠密值数组和空闲链管理可复用句柄。
 新槽 Generation 从 0 开始，Index 为 `std::numeric_limits<uint32_t>::max()` 表示无效句柄；Destroy 与 Clear 使被删除的
@@ -74,6 +154,7 @@ data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不�
 Get、Destroy 要求句柄存活，前置条件仅使用 Debug assert；可能失效的句柄使用 IsAlive 或 TryGet。
 增删只做必要的局部断言，不运行全表扫描；完整行为一致性校验由 `test_sparse_set.cpp` 的混合操作测试覆盖。
 删除用交换末项保持值数组稠密，可能移动其他值；句柄不因此改变，但值的地址与遍历顺序不稳定。
+`GetHandleAt(denseIndex)` 将当前 `Values()` 的有效下标 O(1) 转为稳定句柄；稠密下标不能跨删除保存。
 
 ## Nullable
 
@@ -247,6 +328,12 @@ template <> struct JsonDeserializer<T> {
     static bool Read(const JsonValue& value, T& output) noexcept;
 };
 ```
+
+解析文档、可变文档及写出缓冲区都显式传入 `yyjson_alc`。`json.cpp` 内的回调在
+启用 `RADRAY_ENABLE_MIMALLOC` 时直接配对调用 `mi_malloc/mi_realloc/mi_free`，
+关闭时使用标准 `malloc/realloc/free`；写出缓冲区复用同一个释放回调，避免与
+RadRay 通用内存接口的后续实现变化产生不一致。该路径不依赖 CRT 全局分配覆盖，
+也不改变直接调用 yyjson 的外部代码所用的分配器。
 
 失败返回 false 且不修改 output。读写上下文：`JsonWriteContext` / `JsonObjectWriter` /
 `JsonArrayWriter`、`JsonObjectReader` / `JsonArrayReader`。便捷助手 `JsonMember` +

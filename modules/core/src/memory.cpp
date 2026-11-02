@@ -2,8 +2,29 @@
 
 #include <cstdlib>
 
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 namespace radray {
 
+#ifdef RADRAY_ENABLE_MIMALLOC
+void* Malloc(size_t size) noexcept {
+    return mi_malloc(size);
+}
+
+void Free(void* ptr) noexcept {
+    mi_free(ptr);
+}
+
+void* AlignedAlloc(size_t alignment, size_t size) noexcept {
+    return mi_malloc_aligned(size, alignment);
+}
+
+void AlignedFree(void* ptr) noexcept {
+    mi_free(ptr);
+}
+#else
 void* Malloc(size_t size) noexcept {
     return std::malloc(size);
 }
@@ -28,6 +49,7 @@ void* AlignedAlloc(size_t alignment, size_t size) noexcept {
 void AlignedFree(void* ptr) noexcept {
     std::free(ptr);
 }
+#endif
 #endif
 
 }  // namespace radray

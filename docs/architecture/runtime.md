@@ -1,4 +1,4 @@
-> - 适用: 创建 runtime 环境与设备，组织材质与 Scene 绘制输入，扩展 MeshPassProcessor 并构建网格绘制命令
+> - 适用: 创建 runtime 环境与设备，组织材质与 Scene 绘制输入，扩展 MeshPassProcessor，驱动多槽帧循环
 > - 权威: 本文维护 runtime 当前接口边界与所有权；底层资源契约见 RHI 文档
 > - 锚点: `modules/runtime/include/radray/runtime/`, `modules/runtime/src/`, `modules/runtime/CMakeLists.txt`, `modules/core/include/radray/sparse_set.h`
 
@@ -9,22 +9,176 @@
 构建开关与包消费见[构建与测试](../guide/build-test.md#runtime-构建)。
 
 当前模块包含 `gpu_env.h/.cpp` 中的 `Environment`、`gpu_device.h/.cpp` 中的 `DeviceContext`，
-以及材质定义、实例参数、渲染快照，Scene 的 CPU 绘制输入数据、MeshDrawCommand、Processor 接口与命令输出 Context。
-候选遍历、Element 命令构建、具体 Pass 的筛选、shader 参数的 GPU 布局与绑定、PSO 选择与 RHI 录制由调用方实现。
-旧 Renderer、可编程管线、Render Graph、几何/临时资源池和 PSO 缓存仍未恢复；
+以及材质定义、实例参数、渲染快照，Scene 的 CPU 绘制输入数据、MeshDrawCommand、Processor 接口与命令输出 Context，
+以及增量命令缓存、按 Pass 的可见/动态命令列表和多槽帧循环。
+
+### 头文件布局
+
+公共头位于 `modules/runtime/include/radray/runtime/`，按概念分组：一个头文件集中声明同一阶段的类型，
+不为单个数据结构单独建头。声明了非内联函数的头文件有同名 `.cpp`；只含数据结构的头文件没有 `.cpp`。
+包含关系自上而下单向依赖，下表从底层到上层排列：
+
+| 头文件 | 声明 | `.cpp` |
+|---|---|---|
+| `gpu_env.h` | `Environment` | 有 |
+| `gpu_device.h` | `DeviceContext` | 有 |
+| `material_tag.h` | `MaterialTagId`、`MaterialTag`、`MaterialTagTable`、`MaterialTagSet` | 有 |
+| `material.h` | `MaterialRenderState`、`MaterialProperties`、`MaterialShaderProgram`、`MaterialResource`、`MaterialParameterValue`、`MaterialParameter`、`Material`、`MaterialInstance`、`MaterialRenderProxy` | 有 |
+| `vertex_input.h` | `VertexInputAttribute`、`VertexInputStream`、`VertexInput` | 无 |
+| `mesh_draw_command.h` | `MeshPassId`、命令绑定、`MeshDrawCommand`、`CachedMeshDrawCommandInfo`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`；`ValidateVertexInput`、`ValidateMeshDrawCommand`、`ResolveVisibleMeshDrawCommand`、`SubmitMeshDrawCommands` | 有 |
+| `mesh_batch.h` | `MeshSection`、`MeshBatchElement`、`MeshBatch`、`PrimitiveSceneInfo` | 无 |
+| `mesh_pass_processor.h` | `MeshBatchContext`、`MeshDrawCommandSharedState`、`MeshPassDrawListContext` 及缓存/动态两个实现、`MeshPassProcessor`、`MeshPassRegistration` | 有 |
+| `scene.h` | `VisibleMeshBatch`、`Scene` | 有 |
+| `frame_slot.h` | `MeshPassFrameDrawList`、`FrameSlot` | 有 |
+| `frame_pipeline.h` | `FramePipeline` | 有 |
+| `frame_scheduler.h` | `FrameScheduler` | 有 |
+
+`ValidateVertexInput` 与命令校验共用缓冲视图检查，因此和命令校验一起放在 `mesh_draw_command.h`；
+`MeshBatch` 保存 `CachedMeshDrawCommandInfo`，所以 `mesh_batch.h` 位于 `mesh_draw_command.h` 之上。
+Scene 管理关联与缓存同步，runtime 提供通用命令构建、校验和录制；可见性、具体 Pass 筛选、shader 参数的 GPU 布局、PSO 选择、Pass 边界和提交由调用方实现。
+旧 Renderer、Render Graph、几何/临时资源池和 PSO 缓存仍未恢复；
 删除前的设计、源码基线和旧测试入口见[设计归档](../history/2026-10-31-runtime-design-archive.md)，不作为当前接口契约。
+
+## 多槽帧循环
+
+当前实现串行调用、单 graphics queue、可配置槽数的 frames in flight 循环。
+每个槽保存一帧的录制资源，只有其上次提交完成才能复用；不同槽允许 CPU 录制与 GPU 执行重叠。
+没有渲染线程或交换链呈现集成，槽索引与交换链图像索引相互独立。
+
+| 文件对 | 职责 |
+|---|---|
+| `frame_slot.h/.cpp` | `FrameSlot` 拥有按 Pass 的 VisibleCommands/DynamicContext、帧内和退役 ObjectArena、command allocator、可复用的 command buffer 池；通过 GetScene 临时借用外部源 Scene |
+| `frame_pipeline.h/.cpp` | `FramePipeline` 定义 Pass 登记、`Extract`、`Record` 和 `Wait`；Record 负责 Pass 调度、申请命令、录制与提交 |
+| `frame_scheduler.h/.cpp` | `FrameScheduler` 独占一个 Pipeline 和多个 Slot，负责选槽、调用等待、重置、阶段调用与轮转 |
+
+`FrameScheduler::Create(device, pipeline, slotCount = 2)` 按值消费 Pipeline 的 owner，失败返回空。
+槽数必须大于 0，创建后固定；`GetSlotCount()` 返回槽数，`FrameSlot::GetIndex()` 返回稳定的 `[0, slotCount)` 索引。
+`FrameSlot::GetFrameId()` 返回 `uint64_t` 帧编号，在各 Scheduler 内从 0 独立递增，与循环使用的槽索引无关。
+Scheduler 先等待槽的旧帧完成，再在 Extract 前写入新编号，因此 Extract、Record 和对应的 Wait 看到同一个编号。
+每次 Record 正常返回后递增编号，空帧也会递增；帧执行错误带诊断终止程序，不提供回滚或重试。
+WaitIdle 不重置计数，槽清理后仍保留最后分配的编号。计数到达 `uint64_t` 最大值时带诊断终止，不回绕。
+DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`GetQueue()` 返回所属设备和队列的借用引用。
+`RunFrame(source)` 的顺序为：
+
+```text
+选取当前槽 → 若有在途提交：Pipeline.Wait(slot)，清除在途标记
+    → Reset command allocator → Reset 退役 arena → 清理槽内 CPU 数据 → Reset 帧内 arena → 分配当前帧编号
+    → 可写 Scene：SyncCachedMeshDrawCommands(GetMeshPassRegistrations())
+    → Extract(source, slot)：收集可见句柄、动态命令和当帧覆盖项
+    → Record(slot)：准备数据、申请 command buffer、Begin/End、自行提交
+    → 标记在途，下一帧编号递增，当前槽索引 = (当前槽索引 + 1) % slotCount
+```
+
+`RunFrame` 返回 `void`，正常返回只表示 Pipeline 已完成本帧录制与提交，不保证异步工作已完成。新槽和已回收的槽不调用 Wait；
+在途标记表示存在尚未由 Scheduler 回收的 Record；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
+`WaitIdle()` 先等待所有在途槽，再分两阶段清理：先对**全部槽**调用 `ResetCommandStorage()`，
+解除 command allocator 所有 epoch 引用，然后对全部槽调用 `ResetRetiredResources()`，最后对全部槽调用 `ResetFrameData()`，清空 CPU 数据和帧内 ObjectArena。
+不能逐槽完成这两个阶段，否则 Slot 0 的 arena 可能释放仍被 Slot 1 旧录制引用的 Buffer；
+它保留当前索引，重复调用不会重复等待已回收提交。Scheduler 析构先执行 WaitIdle，
+再销毁全部 Slot，最后销毁 Pipeline，确保 Pipeline 拥有的资源晚于命令存储释放。
+Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
+所有调用和析构遵守 [RHI 串行调用与命令存储契约](render-rhi.md#命令录制存储)，不可并发或重入。
+
+### 帧内分配与资源释放
+
+每个 Slot 独占一个使用默认 `ObjectArenaOptions` 的 arena，`GetArena()` 返回其借用引用。
+FramePipeline 通过各阶段的 `FrameSlot&` 访问当前槽的 arena。同一个 Pipeline 服务多个在途槽，
+因此帧内存储的所有权归各 Slot，回收时机由 Scheduler 控制。
+Pipeline 在 Extract / Record 中通过它分配临时存储、`Emplace<T>` 构造帧内对象，或登记拥有资源的 RAII 对象。
+对象和存储一直有效到对应 Wait 返回，随后在槽重置时统一回收。
+帧内分配不跨槽共享，CPU 写入仍须遵守各槽数据隔离要求。
+
+转移 `unique_ptr` 所有权即可延迟释放 GPU 资源，例如已成功创建的 `unique_ptr<render::Buffer> buffer`：
+
+```cpp
+auto* owner = slot.GetArena().Emplace<unique_ptr<render::Buffer>>(std::move(buffer));
+auto* borrowedBuffer = owner->get();
+```
+
+后续录制可借用 `borrowedBuffer`，资源 owner 在槽回收时析构。槽内 owner 默认只供该槽使用；
+若其他槽也引用它，必须在 owner 槽再次复用前调用两阶段 `WaitIdle()`，或将共享 owner 交给下述 `RetireResource`。`shared_ptr` 可同样保活共享资源；
+自定义清理通过 `MakeScopeGuard` 创建回调，再以 `Emplace<decltype(cleanup)>(std::move(cleanup))` 登记。
+非平凡对象按构造完成的逆序析构，因此有依赖的资源应先登记被依赖者、后登记引用者。
+arena 的底层分配、保留预算和 allocator 契约见 [ObjectArena 与 ArenaAllocator](core-facilities.md#objectarena-与-arenaallocator)。
+
+回收先 Reset command allocator，解除全部旧录制的资源引用，再 Reset 退役 arena，随后解除源 Scene 借用并清空各 Pass 的可见/动态命令，最后 Reset 帧内 arena。
+帧内 arena 的清理回调执行时 CPU 记录已为空；退役回调发生在 CPU 记录清理之前，不得假定记录已为空。
+两类回调执行时 Pipeline 和 DeviceContext 仍有效，回调不得重入 Slot、arena 或 Scheduler。
+正常槽复用与 Slot 析构沿用这一清理顺序，arena 成员析构归还全部保留内存。正常槽复用和 WaitIdle 使用 Reset，按默认预算保留存储。
+【调用方不得手动 Reset / Release 槽内 arena，不得手动销毁已登记对象；借用指针在回收后失效。】
+使用 `ArenaAllocator` 的外部容器必须在槽回收前销毁，clear 不足以结束存储借用；也可将容器本体登记到 arena，
+由它先销毁容器再回收存储。按 Pass 列表自身继续使用现有容器分配方式。
+
+`slot.RetireResource(std::move(owner))` 接收 RAII owner，存入该 Slot 私有的 `_retiredArena`。
+仅允许在当前槽的 Extract / Record 回调中调用；Wait、清理回调和帧外通过保存的槽引用登记均违反契约，并带诊断终止。
+调用前必须停止对旧资源的新使用；已有录制可以继续提交和执行。参数组等依赖对象应与底层 Buffer/布局组合为具有正确析构顺序的一个 owner。
+登记时当前槽已完成本轮清理；下一次复用该槽前，固定轮转已使其他槽在登记后重置过 allocator，
+再等待并重置当前槽 allocator，即可安全释放其全部退役 owner。没有批次、槽完成掩码或额外调度状态。
+退役 arena 使用 1 KiB 块、4 KiB 动态存储保留上限，空 arena 不分配堆内存；同一队列内按登记完成的逆序析构，不承诺跨槽析构顺序。
+`WaitIdle()` 在全部 allocator 重置后清空所有退役队列，因此不需要先轮转完未使用槽。Slot 析构最终释放 arena 的保留存储。
+帧外产生的旧 owner 由调用方保留到下一次 Extract / Record 再转交，或在 `WaitIdle()` 后直接释放。
+这只覆盖本 Scheduler 的单队列槽，不等待外部录制或其他队列。
+
+### 命令录制与 Pipeline 契约
+
+Pipeline 在 `Record(slot)` 中通过 `slot.AcquireCommandBuffer()` 申请命令缓冲。
+Slot 初始不创建 command buffer，每次申请返回本轮尚未借出的一个 buffer；缓存不足时创建，创建失败返回空。
+同一轮内每次申请返回不同对象，所有权始终留在 Slot。槽重置时 allocator 统一 Reset，借用结束，
+下一轮从池首复用；池保留历史最大数量，不因本轮使用较少而销毁多余对象。
+Pipeline 不得跨槽复用保存的借用，每条命令在本轮最多 Begin/End 一次、提交一次。
+同槽共享一个 allocator，为满足 D3D12 契约，同一时间只允许一条命令处于 Begin/End 区间。
+
+Record 自行决定申请数量（可以为 0）、Begin/End、提交批次和时机，通过 `slot.GetQueue()` 提交。
+Scheduler 不接收或操作单条 command buffer，也不提供独立的 Prepare、Submit 阶段。
+Record 正常返回前，Pipeline 必须保存足够的按槽完成状态，供 `Wait(slot)` 等待本槽全部提交。
+`Wait` 是同步 `void` 接口，
+返回即保证全部槽内工作完成、录制存储和帧数据可重置或销毁；不允许将超时当作完成返回。
+具体实现可以使用 fence、事件或其他机制；无提交或同步完成的 Record 可搭配空操作 Wait。
+
+Extract / Record 均为 `void noexcept`，只允许正常完成或在发现错误的位置带诊断终止程序。
+无效输入、资源准备或录制失败由 Pipeline 使用 `RADRAY_ABORT` 处理，不依赖仅在 Debug 生效的断言；
+Scheduler 没有失败回滚、部分提交恢复或重试分支，不捕获异常恢复执行。
+Record 正常返回前必须关闭全部 encoder 并 End 全部已开启的 command buffer；Extract 不得提交异步工作。
+没有可见物体或没有绘制命令是正常空帧，不属于失败。
+
+Pipeline 按槽索引维护完成状态及可复用的上传缓冲、常量等可写帧资源；可以预分配或首次使用时创建。
+仅供当前帧使用的资源可交由槽内 arena 持有并释放。
+这些资源必须按槽独立分配或使用互不重叠的存储区域，在对应 Wait 返回前不能覆盖。
+同一个 Pipeline 可以被多个槽依次调用，但不能共用一块每帧覆盖的上传数据。
+
+`RunFrame(Scene&)` 在 Extract 前同步脏命令；`RunFrame(const Scene&)` 保留原入口，由调用方负责同步。
+`GetMeshPassRegistrations()` 默认返回空 span，已有不使用网格缓存的 Pipeline 可保持原实现。
+`slot.GetScene()` 仅在 Extract / Record 回调期间借用此次 source；Record 返回后为空，Wait 不借用源 Scene。
+FrameSlot 不拥有源 Scene 副本，也没有独立的 DrawCommands；可见命令和动态命令统一使用 `GetPassDrawList(pass)`。
+源 Scene 由调用方持有，需保证回调期间有效。需要在 Wait 使用的 CPU 数据应保存到槽内 arena 或 Pipeline 的对应槽状态；
+复制 CPU 记录不会延长外部 GPU 资源的寿命。
+外部资源保持有效至最后一次引用它的 command allocator 重置，或通过 `RetireResource` 保活。
+
+`slot.GetPassDrawList(pass)` 按紧凑 `MeshPassId::Value` 取得槽内列表；不能跨后续列表扩容保存其引用。
+`MeshPassFrameDrawList` 包含 `VisibleCommands` 和自动绑定到该列表的 `DynamicContext`。
+列表搬移时会重新绑定 DynamicContext，避免 vector 扩容后继续向旧列表写入。
+Extract 可先收集缓存命令，再将 Processor 切到 DynamicContext 生成当帧命令；调用后恢复原 Context。
+`SortVisibleCommands()` 按 SortKey 稳定升序排序，`Submit(encoder, scene.GetCachedDrawList(pass), submitArgs)` 汇合两条路径，
+并转发 Pass 级参数组与实例流；不需要这些绑定时可省略 `submitArgs`。
+槽清理保留列表容量，清空全部可见/动态命令后才重置 arena。
+
+教学样例的 `MeshDrawingFramePipeline` 使用同一流程，默认双槽连续六帧。
+Pipeline 按槽持有实例缓冲、两份 Pass UBO/参数组、颜色/深度附件、读回缓冲和独立 fence；几何、shader、布局与 PSO 由外部共享。
+Extract 更新当前槽的数据并填充各 Pass 列表；Record 从槽申请命令缓冲、完成四个 Pass 和读回拷贝，提交时递增该槽的 fence 值。
+Wait 只等待该槽的 fence；主循环不逐帧等待整个队列，结束时 `WaitIdle()` 等待并重置全部槽，再保存最后一帧的图片。
+Frame 0 后更新绿色材质，Frame 1 的 `RunFrame(Scene&)` 自动增量同步命令，已有在途帧的参数与附件保持独立。
 
 ## Scene 绘制输入
 
-| 类型 | 文件对 | 当前内容 |
+| 类型 | 头文件 | 当前内容 |
 |---|---|---|
-| `Scene` | `scene.h/.cpp` | `Primitives`、`Meshes`、`Materials` 三个 SparseSet |
-| `PrimitiveSceneInfo` | `primitive_scene_info.h/.cpp` | 本地到世界变换、`Aabb LocalBounds`、MeshBatch 句柄列表 |
-| `MeshBatch` | `mesh_batch.h/.cpp` | 一个材质句柄、一个顶点输入引用、拓扑和内嵌的 Elements |
-| `MeshBatchElement` | `mesh_batch_element.h/.cpp` | 借用的索引缓冲与绘制范围，固定单实例 |
-| `VertexInput` | `vertex_input.h/.cpp` | 顶点布局、属性和借用的顶点缓冲流 |
-| `MeshSection` | `mesh_section.h/.cpp` | 几何资源的 submesh 分段：材质槽和索引范围；Scene 不存储它 |
-| `MaterialRenderProxy` | `material_render_proxy.h/.cpp` | 借用 MaterialResource，拥有已解析的 CPU 参数快照；见下文材质核心 |
+| `Scene` | `scene.h` | `Primitives`、`Meshes`、`Materials` 三个 SparseSet、按 Pass 的持久缓存与脏 Batch 集合 |
+| `PrimitiveSceneInfo` | `mesh_batch.h` | 本地到世界变换、`Aabb LocalBounds`、MeshBatch 句柄列表 |
+| `MeshBatch` | `mesh_batch.h` | 一个材质句柄、一个顶点输入引用、拓扑、Elements 与缓存命令句柄列表 |
+| `MeshBatchElement` | `mesh_batch.h` | 借用的索引缓冲、索引范围和默认实例范围 |
+| `VertexInput` | `vertex_input.h` | 顶点布局、属性和借用的顶点缓冲流 |
+| `MeshSection` | `mesh_batch.h` | 几何资源的 submesh 分段：材质槽和索引范围；Scene 不存储它 |
+| `MaterialRenderProxy` | `material.h` | 借用 MaterialResource，拥有已解析的 CPU 参数快照；见下文材质核心 |
 
 这些类型参考 UE 传统 Mesh Drawing Pipeline 的分工，当前是可修改的基础数据版本，
 不要求与 UE 的类层次或生命周期完全一致。Scene 不存储用户侧网格和材质资产。
@@ -40,12 +194,24 @@ Scene 直接持有 `SparseSet<PrimitiveSceneInfo>`、`SparseSet<MeshBatch>` 和 
 - `MeshBatch::Elements` 直接按值存储 `MeshBatchElement`，不另建 SparseSet；这些片段没有稳定独立身份。
 - `MeshBatch::VertexInput` 借用外部顶点输入描述，可被多个 Batch 共享。调用方必须维持其地址稳定，
   不可引用会因容器扩容、搬移或销毁而失效的对象。
+- `MeshBatch::OwningPrimitive`、`Dirty` 与 `CachedCommands` 由 Scene 维护；调用方不得把这些关联和缓存复制到另一 Batch。
+  通过 Scene 入口创建的 Batch 使用反向句柄 O(1) 解析所属 Primitive，`Dirty` 让标脏查重和可见收集的脏检查保持 O(1)。
 
 句柄沿用 `SparseSetHandle`，仅在所属容器内解释，当前没有类型或 Scene 身份校验。
 扩容与删除可能移动记录，不能把元素指针或稠密数组下标作为长期身份；
 详细容器契约见 [Core / SparseSet](core-facilities.md#sparseset)。
-Scene 暂不维护反向引用、级联删除或引用计数；调用方在删除 Batch/Material 前移除引用，
-删除 primitive 时自行处理其 Batch，并在访问前用所属容器的 `IsAlive` 检查句柄。
+优先通过 `Add/Update/RemoveMaterial`、`Add/RemovePrimitive`、`Add/Update/RemoveMeshBatch` 修改 Scene。
+Batch 入口验证 Primitive/Material 句柄、顶点布局/流、缓冲 usage/范围及索引和实例范围；失败返回无效句柄或 false，不改变现有记录。
+空 Batch 或零索引/零实例 Element 合法，不要求几何缓冲。`AddPrimitive` 可接管尚未关联且有效的 Batch，拒绝重复关联。
+删除 Batch 会移除 Primitive 关联、缓存与脏记录；删除 Primitive 会级联删除其 Batch。
+仍被 Batch 引用的 Material 拒绝删除，需先删除或重定向这些 Batch。所有操作只管理 CPU 记录，不拥有 GPU 资源。
+
+公开 SparseSet 仍可直接使用。直接编辑 Batch 后调用 `MarkBatchDirty`，直接更新 Proxy 后调用 `MarkMaterialDirty`；
+新插入的 Batch 必须关联到一个 Primitive，并在首次同步之后显式标脏。首次同步会发现已有的全部关联 Batch。
+直接插入且尚未建立反向句柄的 Batch 首次解析归属时扫描 Primitive 并回填；后续使用该句柄。
+直接调整关联时必须同步清除旧反向句柄；全量重建也会从 Primitive 关联重新填充它。
+直接删除必须自行维护所有关联与缓存，推荐使用上述删除接口。变换和 bounds 更新无需标脏；
+依赖其他外部 Pass 策略的 Processor 在策略变化后由调用方标脏受影响 Batch。
 
 ### 几何输入与 submesh
 
@@ -54,22 +220,29 @@ Scene 暂不维护反向引用、级联删除或引用计数；调用方在删�
 再将 `FirstIndex`、`IndexCount`、`VertexOffset` 填入 Element。Scene 不要求保留原始 Section。
 普通双材质网格可生成两个各含一个 Element 的 Batch；Section 与 Batch 不建立强制一一对应关系。
 
-当前只表达直接索引单实例绘制：`IndexCount` 是索引数量，三角形列表的一个三角形对应三个索引。
+当前表达直接索引实例绘制：`IndexCount` 是索引数量，三角形列表的一个三角形对应三个索引。
 `IndexBufferOffset` 是字节偏移，`IndexStride` 为 2 或 4；`FirstIndex` 相对此偏移，单位是索引。
-`VertexOffset` 是有符号的基础顶点偏移。Element 与 DrawCommand 均固定从实例 0 绘制一个实例，
-不提供实例范围字段或逐实例变换表。实例绘制、非索引绘制、间接绘制和 LOD 选择尚未实现。
+`VertexOffset` 是有符号的基础顶点偏移。Element 与 DrawCommand 的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；
+可见命令可覆盖该实例范围。逐实例数据由应用通过实例流提供；非索引绘制、间接绘制和 LOD 选择尚未实现。
 
-`VertexInput` 命名对应其顶点输入描述职责，当前只表达普通顶点缓冲输入；
+`VertexInput` 命名对应其顶点输入描述职责，表达普通顶点与实例缓冲输入；
 UE VertexFactory 的 shader permutation、蒙皮或自定义取数机制不在当前实现范围内。
 `Layouts` 使用 RHI 的 `VertexBufferLayout`，通过 Binding 对应 `Streams`；
 `Attributes` 使用拥有 `Semantic` 字符串的 `VertexInputAttribute`，避免长期保存 RHI `VertexAttribute` 的临时 string_view。
 属性的 `BufferBinding` 必须对应布局和已绑定的流，Offset/Size 使用字节单位。
+`ValidateVertexInput(input, true)` 允许唯一的 Instance 布局暂缺流；存在缺失流且 Instance 布局不止一个时拒绝输入，
+避免单个 Pass 级实例流槽位的歧义。所有流均已绑定时仍可使用多个 Instance 布局。
+Processor 开启 `AllowDeferredInstanceStream` 后，若恰有一个 Instance 布局，helper 将其 Binding 记录为
+`MeshDrawCommand::InstanceStreamBinding`。提交时通过 `MeshPassSubmitArgs::InstanceStream` 补齐或覆盖该槽位；
+已有默认流时可以不传，缺失默认流时必须传入。校验函数及 Debug 提交拒绝未声明槽位或传错 Binding；
+Release 提交要求调用方遵守相同契约，不允许覆盖普通 Vertex 流。
 
 所有 GPU Buffer 引用均为借用，不因记录销毁而释放。外部资源所有者负责保持 Buffer 有效，
-直到 CPU 不再使用相关描述且 GPU 已完成所有引用这些资源的工作。
+直到 CPU 不再使用相关描述、GPU 已完成且所有引用资源的 command allocator 已重置。
 默认构造只得到未填充记录：材质句柄无效、VertexInput 和 Buffer 引用为空、索引数量为零、Primitive 包围盒为空。
 用于实际绘制前，调用方必须补全引用、有效布局、缓冲范围及包围盒。
-Scene 与 Processor 基类不自动验证输入；句柄、布局及 GPU 资源检查、录制和提交由调用方负责。
+Scene 入口检查关联与几何，Processor helper 检查命令，Debug 提交再次预检；Release 提交信任已校验的输入。
+实际 shader/PSO 与输入的兼容性由应用和 RHI 校验层负责。
 
 `PrimitiveSceneInfo::LocalBounds` 使用 core 的 `Aabb`，端点位于物体本地空间；
 可用 `LocalBounds.Transform(LocalToWorld)` 得到世界空间 AABB，Scene 不自动维护其副本。
@@ -81,23 +254,24 @@ Scene 与 Processor 基类不自动验证输入；句柄、布局及 GPU 资源�
 
 ```cpp
 #include <radray/runtime/scene.h>
-#include <radray/runtime/mesh_section.h>
+#include <radray/runtime/mesh_batch.h>
 
 // scene must stop referencing cubeVertices and cubeIndices before they are destroyed.
 void AddCube(Scene& scene, const VertexInput& cubeVertices, render::Buffer& cubeIndices,
              const MaterialInstance& wood, const MaterialInstance& metal) {
+    MaterialRenderProxy woodProxy, metalProxy;
+    woodProxy.Update(wood);
+    metalProxy.Update(metal);
     const array<SparseSetHandle, 2> materials{
-        scene.Materials.Emplace(),  // wood
-        scene.Materials.Emplace()   // metal
+        scene.AddMaterial(std::move(woodProxy)),
+        scene.AddMaterial(std::move(metalProxy))
     };
-    scene.Materials.Get(materials[0]).Update(wood);
-    scene.Materials.Get(materials[1]).Update(metal);
     const array<MeshSection, 2> sections{
         MeshSection{.MaterialSlot = 0, .FirstIndex = 0, .IndexCount = 30},
         MeshSection{.MaterialSlot = 1, .FirstIndex = 30, .IndexCount = 6}
     };
 
-    const auto primitiveHandle = scene.Primitives.Emplace();
+    const auto primitiveHandle = scene.AddPrimitive();
     auto& primitive = scene.Primitives.Get(primitiveHandle);
     primitive.LocalBounds = Aabb{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
     for (const auto& section : sections) {
@@ -109,18 +283,18 @@ void AddCube(Scene& scene, const VertexInput& cubeVertices, render::Buffer& cube
             .FirstIndex = section.FirstIndex,
             .IndexCount = section.IndexCount,
             .VertexOffset = section.VertexOffset});
-        primitive.Meshes.push_back(scene.Meshes.Emplace(std::move(batch)));
+        const auto batchHandle = scene.AddMeshBatch(primitiveHandle, std::move(batch));
+        if (!batchHandle.IsValid()) return;
     }
 }
 ```
 
-示例在 `namespace radray` 内使用。材质/Pass 筛选策略、可见性、缓存失效与 GPU 资源退役，
-均不由上述数据容器隐式完成。
+示例在 `namespace radray` 内使用。Scene 接口自动维护关联与脏标记；材质/Pass 筛选策略、可见性和资源 owner 的退役仍由调用方组织。
 
 ## 材质核心
 
 材质描述表面使用的 shader、固定性质和可变参数；具体 Pass 结合这些信息、几何与本次渲染状态决定如何绘制。
-runtime 当前保留四个角色，每个类型有同名 `.h/.cpp`：
+runtime 当前保留四个角色，均声明在 `material.h`，实现在 `material.cpp`：
 
 | 类型 | 职责 | UE 5.8.4 对照（职责近似，不是完整复刻） |
 |---|---|---|
@@ -159,7 +333,8 @@ Pass Processor → 结合 Resource 选择 PSO；调用方把快照适配为 shad
 二者均替换整个快照。之后修改实例不会自动影响 Proxy，必须再次 Update。
 Proxy 不保留 Material/Instance 引用，同步后用户侧对象可以在无人借用时销毁。
 Proxy 的参数引用不能跨 Update、对象移动或 Scene 的 SparseSet 搬移保存。
-Update 与读取由调用方串行组织，当前没有渲染线程、变更通知、脏标记或自动上传。
+Update 与读取由调用方串行组织；`Scene::UpdateMaterial(handle, proxy)` 会标脏所有引用该 Proxy 的 Batch，
+也可在直接 Update 后调用 `Scene::MarkMaterialDirty`。没有渲染线程或自动 GPU 上传。
 
 Resource 及其借用的 Shader、PipelineLayout、TextureView、Sampler 仍由外部持有。
 Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且内容不变；具名程序名称须唯一。
@@ -195,9 +370,11 @@ Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且�
 
 PSO 还需要顶点输入、附件格式和经 Pass 确定的最终状态。runtime 材质不持有 PSO，不安排 Pass，
 也不定义参数在 uniform buffer、descriptor 或 push constant 中的 GPU 布局。
-`MeshDrawCommand` 继续仅持有 PSO、几何绑定和绘制范围，不重新加入 shader 参数。
-修改动态参数不要求重新创建 Resource/PSO，但本例已生成的 `PreparedDraw` 拥有参数副本，
-因此要重新生成样例输出才能看到新值；这不等价于 UE 的缓存命令 + 稳定 uniform buffer 绑定。
+`MeshDrawCommand` 保存 PSO、几何、静态参数组、自持有的命令级 push constants 与模板参考值。
+修改材质参数不要求重新创建 Resource/PSO；样例通过 `Scene::UpdateMaterial` 标脏关联缓存，
+Processor 重建时读取新 Proxy，将 `BaseColor * Brightness` 的 RGB 和原 alpha 复制进命令的 16 字节颜色常量。
+相机与局部缩放使用 Pass 级参数组，物体变换使用 Pass 级延迟实例流，均在提交时提供。
+这些每帧数据变化无需重建命令；材质的稳定 GPU uniform buffer 更新路径尚未实现。
 
 样例的 M1～M5 注释串起资源准备、定义/实例、Proxy 同步、PSO 准备和参数适配。
 八个实例使用三份参数声明相同的 Material/Resource：普通不透明、双面描边不透明和 alpha 混合透明材质；
@@ -207,9 +384,8 @@ Depth Pass 沿用材质剔除与深度偏移，显式选择 Less、开启深度�
 Color Pass 沿用材质颜色、深度和模板状态。双面材质使用 Always/Replace 写入模板参考值 7。
 Outline Pass 筛选描边标签，以放大几何和 NotEqual 7 绘制金色轮廓，不改写深度/模板；
 Transparent Pass 筛选透明标签，使用材质 alpha 混合、深度测试和关闭深度写入的状态。
-附件采用 D32_FLOAT_S8_UINT，参考值由样例 `PreparedDraw` 保存并在 Draw 前录制，
-不进入 runtime MeshDrawCommand；生命周期见 [RHI 模板参考值](render-rhi.md#模板参考值)。
-颜色默认值/覆盖和 Brightness 都从 Proxy 获取，准备阶段解析参数名称，绘制阶段使用索引。
+附件采用 D32_FLOAT_S8_UINT，参考值由持久 `MeshDrawCommand` 保存并在 Draw 前录制；生命周期见 [RHI 模板参考值](render-rhi.md#模板参考值)。
+颜色默认值/覆盖和 Brightness 都由 Processor 从 Proxy 获取，准备阶段解析参数名称，构建命令时使用索引。
 Processor 同时检查各自要求的材质标签与样例 `BatchPassPolicy`。没有材质图、编译/静态变体、fallback、纹理绑定演示、
 uniform expression 求值、GPU 参数缓存或热重载。
 
@@ -247,66 +423,82 @@ shader 程序名和参数名维持已有准备阶段解析方式，不使用标�
 
 | 文件对 | 接口与职责 |
 |---|---|
-| `mesh_draw_command.h/.cpp` | `MeshDrawCommand` 纯数据结构：PSO、几何绑定和绘制范围 |
-| `mesh_pass_processor.h/.cpp` | `MeshBatchContext`、`MeshPassProcessor`，单个 Batch 的处理接口与输出 Context 引用 |
-| `mesh_pass_draw_list_context.h/.cpp` | `MeshPassDrawListContext` 输出接口、`DynamicMeshPassDrawListContext` 本次命令存储 |
+| `mesh_draw_command.h/.cpp` | 两级命令、自持有命令常量、Pass 提交参数、命令解析、校验与统一录制 |
+| `mesh_pass_processor.h/.cpp` | `MeshBatchContext`、Pass 筛选接口、共享状态与 Element 构建 helper、Pass 登记；持久缓存与当帧动态两条输出路径的 Context |
+| `scene.h/.cpp` | 脏追踪、增量同步、可见命令收集 |
 
-调用关系为：
+### 增量持久缓存
 
-```text
-调用方组织候选 Batch，解析句柄并提供所属 Primitive
-  processor.AddMeshBatch(context)             void，具体 Pass 策略
-    筛选 Batch，选择 PSO
-    调用方实现 Element 命令构建
-      DrawListContext.AddCommand(initializer)  返回输出存储中的命令引用
-      DrawListContext.FinalizeCommand(...)     填入该 Element 的绘制范围
-```
+`Scene::SyncCachedMeshDrawCommands(passes)` 仅对脏 Batch 调用各已登记 Processor 的 `AddMeshBatch`。
+首次同步处理全部关联 Batch；登记的 Pass ID 或 Processor 身份变化时全量重建。
+Pass ID 是 `CachedDrawLists` 的紧凑数组下标，不可重复或使用最大 uint32 值；不是任意稀疏 ID。
+Pass 被撤销时删除其缓存；登记身份不变、且 Batch/Material 未标脏时，Processor 不再调用，缓存句柄保持不变。
+无效的直接编辑在同步时清除旧缓存并保留脏标记，修复后可再次同步。
+更新 Batch 时保留其归属、脏状态和旧缓存句柄，重复标脏只入队一次；同步处理前清除脏位，失败时重新入队。
+首次同步或 Pass 登记变化会清空脏队列、重置全部 Batch 的脏位，再回填归属并标脏全部关联 Batch。
 
-调用方派生 `MeshPassProcessor`，构造时传入输出 Context，实现返回 void 的 `AddMeshBatch`。
-Pass 名称和教学日志由样例自行组织，不属于 Processor 基类接口。
-Context 必须晚于 Processor 销毁。相机、材质参数表与 Pass 策略
-由具体 Processor 持有或借用，不放进通用接口。`MeshBatchContext` 携带本次 Primitive/Batch 的 const
-引用及句柄，仅在该次调用期间有效；构建期间不得修改输入记录或使这些引用失效。
-候选收集、Primitive/Batch 遍历及句柄解析由调用方负责，runtime 不接收 Scene 或候选列表，
-也不做可见性、LOD 或 Pass 分组。调用方为每个候选 Batch 调用 `AddMeshBatch`，
-具体 Processor 自行组织 Element 选择与命令构建。Processor 头文件只依赖所需记录类型，不包含 Scene 容器。
+每次同步暂时将 Processor 切换到 `CachedPassMeshDrawListContext`，结束后恢复原 Context。
+`MeshBatchContext` 借用匹配的 Primitive/Batch、句柄和已解析 Material，仅在本次调用有效；Processor 不得修改输入或 Scene。
+`AddMeshBatch` 保持 void：按 Pass 策略筛选，接受后调用受保护的 `BuildMeshDrawCommands(context, sharedState)`。
+helper 构造一次共享 initializer，校验 PSO、VB、静态 ParameterSets 和 PushConstants，并复制 BaseSortKey 与 StencilReference。
+用首个有效 Element 就地校验共享绑定与几何，其余有效 Element 仅校验 IB 和索引/实例范围，不复制命令来预检。
+校验整个 Batch 后，为每个非零索引/实例 Element 调用 `AddCommand → FinalizeCommand`；无效输入返回 false，不输出部分 Element。
+`MeshDrawCommandSharedState::PushConstants` 是仅在构建调用期间借用的 `MeshPushConstantBinding`；helper 将字节复制为
+`MeshPushConstantCommandBinding::Data`（`InlineVector<byte, 64>`），命令跨帧保存独立副本，不依赖 FrameSlot 的 ObjectArena。
+helper 在提交参数尚不可用时预检已有绑定，再记录唯一 Instance 布局的槽位；Debug 提交完整校验缺失流的补齐参数。
+应用负责处理 helper 的失败；Scene 不定义 Processor 失败回滚。空输出可表示合法的 Pass 筛选跳过。
 
-`AddMeshBatch` 返回 void，通过 Context 输出零条或多条命令；跳过 Batch 时直接返回。
-runtime 不提供 Batch/Element 构建 helper，也不定义统一错误返回或回滚策略。
-调用方负责提供与 Primitive/Batch/Material 句柄匹配的有效记录、检查输入并填充命令。
+`AddCommand` 返回的引用只保证存活到本条 Finalize，必须完成后才能再次 Add。
+Finalize 填写 Element 的 IB 与索引/实例范围；静态 Context 把命令放入 `SparseSet<MeshDrawCommand>`，
+并把 `(Pass, ElementIndex, CommandHandle, BaseSortKey, FirstInstance, InstanceCount)` 记录到 Batch 的 `CachedCommands`。
+`MeshDrawCommand` 拥有绑定描述与可选 PushConstants，并以可选 `InstanceStreamBinding` 声明提交时可补齐或覆盖的实例流槽位；
+不借用 Primitive、Batch、VertexInput 或构建时的常量源。PSO、Buffer 和 ShaderParameterSet 仍由外部 owner 保活。
+`VertexBuffers` 使用 `InlineVector<render::VertexBufferBinding, 4>`，前四个流内联存储，更多流可扩容。
+缓存只保存跨视角稳定的数据，相机矩阵、物体变换与 Pass 常量不进入持久命令。
 
-`MeshPassDrawListContext::AddCommand` 将共享的 PSO/顶点绑定描述复制到 Context 自己的输出存储，
-返回供本次填充的命令引用；`FinalizeCommand` 默认填入指定 Element 的索引绑定及绘制范围。
-派生 Context 可在调用基类实现后处理自己的额外输出。它收到的 Batch 上下文引用仅在调用期间有效。
-调用方必须在下次 Add 前完成本条命令的 Finalize；返回的命令引用不保证在下一次 Add 或容器修改后有效。
+### 当帧可见与动态路径
 
-`DynamicMeshPassDrawListContext` 使用拥有命令值的 `Commands` 列表，无缓存、去重或跨帧失效管理。
-Processor 生成的命令始终追加到其 Context。
-调用方每次渲染新建 Context，或在不再使用旧输出后自行清空。成功生成零条命令也是合法结果。
+`GatherVisibleMeshDrawCommands` 从指定 Batch/Element 的缓存索引追加 `VisibleMeshDrawCommand`；
+`GatherVisiblePrimitives` 收集各可见 Primitive 下全部 Batch。可见性和 LOD 选择由应用完成。
+无效句柄、未同步脏 Batch 或越界 Element 使调用失败并回滚本次追加，调用前已有输出保留。
+Pass 筛选未生成命令时输出为空。单条基础命令通过 SparseSet 句柄 O(1) 解析，扩容或交换删除不会使其他存活句柄失效。
+删除或重建目标自身会使旧句柄失效，非零实例条目提交解析失败，调用方应重新收集。
+收集仅校验命令句柄存活，默认实例范围直接读取 `CachedMeshDrawCommandInfo`，不访问稠密命令元素；
+`FirstInstanceOverride` 与 `InstanceCountOverride` 各自独立覆盖默认值。
+`SortKey = BaseSortKey | VisibilitySortKey`，应用应为当帧排序预留不重叠的低 32 位；同键维持输入顺序。
 
-`MeshDrawCommand` 拥有顶点/索引绑定描述及绘制范围，不保存 Scene、Primitive、MeshBatch 或
-VertexInput 的引用，也不保存 shader 参数。构建完成后修改这些 CPU 几何描述不会改变已生成的命令。
-PSO 与 GPU Buffer 仍为借用，调用方必须维持它们有效，直至所有命令录制和 GPU 使用结束，并遵守
-[RHI command epoch 与资源所有权](render-rhi.md)契约。当前没有静态命令缓存或失效管理。
+`VisibleMeshDrawCommand` 仅保存 `Source`、`CommandHandle`、`SortKey`、`FirstInstance` 与 `InstanceCount`，
+大小固定为 32 字节，可平凡复制，不携带 RHI 绑定或基础命令指针。
+`VisibleMeshBatch` 仅描述 Batch/Element、VisibilitySortKey 与可选实例范围覆盖；改变这些值或 Primitive 变换无需重建缓存。
 
-runtime 材质管理 CPU 参数默认值、覆盖和快照；shader 参数的 GPU 存储、上传、布局校验和绑定由调用方组织。
-runtime 不提供 push constant 或 `ShaderParameterSet` 的逐 Draw 绑定契约，也没有完整材质编译系统。
-实际 shader/PSO 必须与 Batch 的拓扑、顶点布局及参数声明匹配，这由调用方保证。
-runtime 不检查布局/流对应关系、PSO/Buffer 有效性、Vertex/Index usage、缓冲范围、
-索引宽度与偏移，也不读取索引内容或反射 shader。调用方按上述单实例约定录制 RHI 绘制。
+动态 Batch 可通过同一 Processor 写入 `DynamicMeshPassDrawListContext`。
+它拥有本帧 `Commands`，Finalize 自动向绑定的可见列表追加 `Source == Dynamic` 的条目；
+动态句柄是数组下标、Generation 为 0，只在该 Context 本帧有效，Clear 后不得保留。
+动态输入由调用方提供匹配的上下文；临时更换 Context 后须在返回前恢复默认 Context。
+静态与动态可见项一起排序，`ResolveVisibleMeshDrawCommand` 根据 Source 从缓存 SparseSet 或动态 span 解析。
 
-runtime 不提供绘制命令校验或录制接口。调用方读取 `MeshDrawCommand`，自行检查 GPU 资源和绘制范围，
-使用 RHI 绑定 PSO、几何缓冲、shader 参数并绘制。viewport/scissor、Pass 开闭、附件、barrier、
-队列提交、等待和资源销毁均由调用方控制。
+### 校验与录制
 
-[教学样例](../guide/build-test.md#mesh-drawing-pipeline-教学样例)在 `sample.cpp` 内用私有的 `BuildMeshDrawCommandList`
-遍历候选 Primitive/Batch，检查 Scene 句柄，失效项记录错误并跳过。
-两个派生 Processor 筛选后调用 `pipeline.cpp` 内私有的 `BuildMeshDrawCommands`，
-检查顶点布局/流、准备 PSO/顶点绑定，并展开全部非空 Element；无效 Batch 不生成命令，已有输出保留。
-由样例自己的 `SampleDrawListContext` 保存 `PreparedDraw`、准备参数并输出教学日志，
-随后自行用 RHI 录制带参数的 Draw。它的参数错误标志只属于样例，不是 runtime 的统一构建状态。
-保留中文步骤注释和 UE 5.8.4 对照。输出 Context 的 CPU 契约测试位于 `modules/runtime/tests/test_mesh_drawing_pipeline.cpp`，
-测试替身和观测数据全部由测试自身持有。
+`SubmitMeshDrawCommands` 首先检查 encoder 有效性。`RADRAY_IS_DEBUG` 下，先单次预检 Pass 参数组与实例流，
+再在首次绑定前解析并预检全部条目，预检失败不会留下部分 Draw。
+Release 跳过提交期预检，信任构建期命令和调用方提供的提交参数；录制循环先跳过零实例项，再逐条解析一次并录制，
+不调用 `Buffer::GetDesc`。直接构造或修改命令的调用方可显式调用 `ValidateMeshDrawCommand`，该函数在两种配置下均完整校验。
+末尾可选参数 `MeshPassSubmitArgs` 借用本次提交共用的 `ParameterSets`，并保存可选 `InstanceStream` 绑定描述。
+Pass 级和命令级参数组各自不得重复 GroupIndex，两者也不得占用相同组；两级动态 offset 各自不得重复 `(BindingId, ArrayIndex)`。
+校验 PSO/Buffer/参数组有效性、Vertex/Index usage、范围、索引宽度/对齐、重复 VB/参数组槽位、
+重复动态 offset、实例整数范围、声明的实例槽位与命令级 push constants 的非空及 4 字节对齐/范围。零实例可见项不绘制。
+随后依次绑定 PSO、Pass 级 ParameterSets、有效 VB（含 Pass 实例流）、IB、StencilReference、命令级 ParameterSets、命令级 PushConstants，再 DrawIndexed。
+本次调用内的局部状态缓存对 PSO、按槽位的 VB、IB、StencilReference 和按 GroupIndex 的命令级参数组去重，跨调用重新绑定。
+VB 比较 Buffer/Offset/Size，IB 比较 Buffer/Offset/Stride；参数组比较对象指针及全部动态 offset 的数量、顺序和内容。
+PSO 切换后重绑 Pass 参数组并清空 VB 与命令级参数组缓存，保留 IB 与 StencilReference；PushConstants 仍逐命令写入。
+被实例流覆盖的命令级绑定不下发。变化的 VB 按槽位排序后拆为连续区间绑定，避免后端覆盖区间中未提供的槽位。
+解析失败或 `SetPushConstants` 失败时返回 false，调用方须放弃此份录制，不能提交已有的部分 Draw。
+
+RHI 的 PSO/ShaderParameterSet 公共接口不暴露布局和已写资源，因此 runtime 无法预检布局兼容、必需参数是否齐全、
+动态 offset 的设备对齐或最终缓冲范围，也不读取索引内容。上述检查交给 RHI 校验层；shader/PSO、拓扑、顶点输入与参数语义由应用保证匹配。
+Pass 开闭、viewport/scissor、附件、barrier、队列提交和等待仍由应用组织。
+教学样例展示四个 Processor 的持久缓存、绿色材质局部失效后命令颜色的数值更新，以及 Pass UBO / 实例流与命令颜色常量的分工。
+测试位于 `test_mesh_drawing_pipeline.cpp` 与 `test_frame_scheduler.cpp`，观测数据全部由 fixture/probe 持有。
 
 ## 环境
 
@@ -335,8 +527,9 @@ Environment 必须晚于 DeviceContext 及所有依赖它的 GPU 资源销毁。
 再销毁 DeviceContext，最后销毁 Environment。DeviceContext 析构会等待其 Direct 队列，然后释放 Device owner。
 如果外部仍持有同一 Device 的共享引用，Environment 也必须继续存活。
 
-调用方在环境的创建线程串行组织生命周期，RHI 的 CPU 调用遵守其串行化契约。模块不提供帧槽、
-自动资源退役或帧提交循环；应用直接使用 RHI 录制绘制命令，并安排 Pass、资源同步和队列提交。
+调用方在环境的创建线程串行组织生命周期，RHI 的 CPU 调用遵守其串行化契约。
+应用可使用上述多槽帧循环，或直接通过 RHI 组织 Pass、录制、同步和提交；帧资源释放由 Slot 的 ObjectArena 承担，
+共享旧资源可通过当前 Slot 的 `RetireResource` 保活；跨 Scheduler 或跨队列的通用退役仍由应用组织。
 
 可失败工厂返回 `Nullable<unique_ptr<T>>`，失败处记录日志，调用方检查返回值；不通过接口传递错误字符串。
 Vulkan instance 和 D3D12 factory 的底层环境约束仍由 RHI 管理。
