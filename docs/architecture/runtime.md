@@ -498,7 +498,8 @@ RHI 的 PSO/ShaderParameterSet 公共接口不暴露布局和已写资源，因�
 动态 offset 的设备对齐或最终缓冲范围，也不读取索引内容。上述检查交给 RHI 校验层；shader/PSO、拓扑、顶点输入与参数语义由应用保证匹配。
 Pass 开闭、viewport/scissor、附件、barrier、队列提交和等待仍由应用组织。
 教学样例展示四个 Processor 的持久缓存、绿色材质局部失效后命令颜色的数值更新，以及 Pass UBO / 实例流与命令颜色常量的分工。
-测试位于 `test_mesh_drawing_pipeline.cpp` 与 `test_frame_scheduler.cpp`，观测数据全部由 fixture/probe 持有。
+测试位于 `modules/runtime/tests/` 的 `test_mesh_draw_command.cpp`、`test_mesh_pass_processor.cpp`、`test_frame_slot.cpp`
+与 `test_frame_scheduler.cpp`，使用 `test_fakes.h` 的 CPU fake，观测数据全部由 fake/fixture 持有。
 
 ## 环境
 

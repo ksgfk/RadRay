@@ -229,7 +229,7 @@ compiler 配置通过 `find_package(RadRayDXC CONFIG REQUIRED GLOBAL COMPONENTS 
 
 client 默认用裸名 `dxcompiler` 动态加载，先尝试 exe 同目录，再走系统动态库搜索路径。
 开发时，CLI、测试与 fixture generator 通过启动环境查找 SDK，不复制 DXC DLL；Windows preset
-负责构建与测试的 `PATH`，IDE 和手动运行入口见[开发时加载 DXC](../guide/build-test.md#开发时加载-dxc)。
+负责构建与测试的 `PATH`，IDE 和手动运行入口见[开发时加载运行库](../guide/build-test.md#开发时加载运行库)。
 
 client handshake 校验 RadRay extension 的 ABI、schema、toolchain identity；stock DXC
 不会被当作兼容 compiler，`RADRAY_SHADER_COMPILER_FORK` 在 compiler 构建中恒定义。
@@ -252,10 +252,11 @@ RadRay 安装包导出 `RadRay::shadercompiler` 与可选 `RadRay::shader_compil
 [安装与包消费](../guide/build-test.md#安装与包消费)。
 
 当前没有正式 shader artifact publisher 或索引；fork SDK autobuild 只发布 compiler package。
-shader 测试读取本地生成的 metadata，并保留版本控制中的 golden hash 文本断言；render 测试只读取
+shader 测试读取本地生成的 artifact，对 metadata 做结构化断言，不比较 golden hash；render 测试只读取
 独立的 raw stage 字节码。生成的 `.bin` 不入库，统一由 `tools/compile_test_shaders.py` 显式准备到
-被忽略的 `build/test_shaders/`（测试可用 `RADRAY_TEST_SHADER_DIR` 改写）。脚本组合 compiler 侧
-`EXCLUDE_FROM_ALL` 的 `radray_shader_fixture_generator` 与 raw DXC 配方；普通测试构建只验证
+被忽略的 `build/test_shaders/`（CMake 缓存变量 `RADRAY_TEST_SHADER_DIR` 可改写）。脚本组合 compiler 侧
+`EXCLUDE_FROM_ALL` 的 `radray_shader_fixture_generator`（`shader_artifacts/`）与
+`tools/compile_render_fixtures.py` 的 raw DXC 配方（`shader_bytecode/`）；普通测试构建只验证
 源指纹和产物，不构建/调用生成器。compiler 关闭的消费者需预先准备夹具，但仍不查找或加载 DXC。
 生成依赖、增量校验与干净检出步骤见[本地测试 shader](../guide/build-test.md#本地测试-shader)。
 这些 fixture 不代表产品 artifact 发布链，也不参与产品安装。

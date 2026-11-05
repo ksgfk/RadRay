@@ -416,25 +416,34 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 
 ## 测试
 
-除 `test_inline_vector.cpp` 外，下表源文件链进 `test_radray_core`。该文件替换全局 `operator new`，单独成 exe。
-`ctest -R` 使用套件名。
+测试源文件在 `modules/core/tests/`，按被测头文件命名。除 `test_inline_vector.cpp` 外都链进 `test_radray_core`；
+该文件替换全局 `operator new`，单独成 exe。`ctest -R` 使用套件名，编写约定见[编写测试](../guide/testing.md)。
 
 | 文件 | 套件名 |
 |---|---|
-| `test_buddy_alloc.cpp` | `BuddyAllocatorTest` |
-| `test_first_fit_alloc.cpp` | `Core_Allocator_FirstFit` |
-| `test_wavefront_obj.cpp` | `Core_WaveObjTest` |
-| `test_str_convert.cpp` | `Core_Utility` |
-| `test_img_rw.cpp` | `PNG`（仅 `RADRAY_ENABLE_LIBPNG`，需 `RADRAY_ASSETS_DIR`） |
-| `test_nullable.cpp` | `NullableTest` |
-| `test_inline_vector.cpp` | `InlineVectorTest`（内联零分配、元素寿命、溢出复用、别名插入、复制移动与对齐） |
-| `test_intrusive_ptr.cpp` | `IntrusivePtr` |
+| `test_allocator.cpp` | `BuddyAllocatorTest`、`FirstFitAllocatorTest` |
+| `test_basic_math.cpp` | `BasicMathTest` |
+| `test_binary_io.cpp` | `BinaryIoTest` |
+| `test_channel.cpp` | `ChannelTest` |
+| `test_coroutine.cpp` | `ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest` |
 | `test_enum_flags.cpp` | `EnumFlagsTest` |
+| `test_file.cpp` | `FileTest` |
+| `test_guid.cpp` | `GuidTest` |
+| `test_hash.cpp` | `HashTest` |
+| `test_image_data.cpp` | `ImageDataTest` |
+| `test_img_rw.cpp` | `PngTest`、`PngTest/PngRoundTripTest`（仅 `RADRAY_ENABLE_LIBPNG`） |
+| `test_inline_vector.cpp` | `InlineVectorTest`（独立 exe `test_inline_vector`） |
+| `test_intrusive_ptr.cpp` | `IntrusivePtrTest` |
+| `test_json.cpp` | `JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest` |
+| `test_memory.cpp` | `MemoryTest` |
+| `test_memory_override.cpp` | `MimallocOverrideTest`（仅 Windows 静态 CRT 且启用 mimalloc） |
+| `test_nullable.cpp` | `NullableTest` |
+| `test_object_arena.cpp` | `ObjectArenaTest`、`ArenaAllocatorTest` |
+| `test_runtime_type.cpp` | `RuntimeTypeIdTest` |
+| `test_scope_guard.cpp` | `ScopeGuardTest` |
 | `test_sparse_set.cpp` | `SparseSetTest` |
 | `test_structured_buffer.cpp` | `StructuredBufferTest` |
-| `test_pod_hash.cpp` | `PodHashTest`, `HashCodeTest` |
-| `test_runtime_type.cpp` | `RuntimeTypeIdTest` |
-| `test_binary_io.cpp` | `BinaryIoTest` |
-| `test_json.cpp` | `JsonTest` |
-| `test_json_serializer.cpp` | `JsonSerializerTest` |
-| `test_json_deserializer.cpp` | `JsonDeserializerTest` |
+| `test_text_encoding.cpp` | `TextEncodingTest` |
+| `test_utility.cpp` | `UtilityTest` |
+| `test_wavefront_obj.cpp` | `WavefrontObjTest` |
+| `test_xml.cpp` | `XmlTest` |

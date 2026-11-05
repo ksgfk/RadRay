@@ -832,10 +832,8 @@ Vulkan 分两步录制本地 layout 转换与 `VK_QUEUE_FAMILY_EXTERNAL` ↔ 当
 
 D3D12 句柄的四种后端组合与 opaque Vulkan→Vulkan 都有原生代码路径，成功与否由运行时决定。
 能力查询通过后的数据错误必须判失败；定位时仍需逐项排查应用契约、runtime、隐式层和驱动，不能仅凭 validation 无错误归因于驱动。
-测试可在执行已知失败组合前，按已验证的适配器、驱动、方向、句柄和完整描述显式隔离；不改变生产能力报告或执行结果。
-隔离计数与unsupported分别记录，`RADRAY_TEST_RUN_KNOWN_GPU_ISSUES=1`恢复严格复现；查询错误和未匹配组合继续按原规则失败。
-具体参数和部分覆盖约束见[已知 GPU 问题的测试隔离](../guide/build-test.md#已知-gpu-问题的测试隔离)。
-验收方法、实际成功范围和已知内容错误见[构建与测试](../guide/build-test.md#windows-资源互操作验收)。
+`Routes/ExternalResourceTest` 在同一进程内覆盖四种后端组合的 buffer 与 2D RGBA8 纹理往返，能力查询不支持时跳过；
+覆盖范围见[render 测试](../guide/build-test.md#render-测试)。
 
 ### 互操作规范边界
 
@@ -1062,16 +1060,17 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
 ## 测试
 
-| 套件 | 覆盖 |
+| 文件 | 套件 |
 |---|---|
-| `AttachmentOperations` | 混合 DS 权限与同 fragment SRV、PSO 拒绝、局部颜色/DS resolve、逐 sample 源保留、区域外/未 resolve aspect、sampler 普通/immutable 读回与能力限制 |
-| `ExplicitBindingLayoutTest` | 双后端真实 dispatch/读回、不同 DX/VK 坐标、set 空洞、数组、各类 buffer、texture、普通/固定 sampler、动态偏移、部分及多块 push、组/参数集共享 |
-| `ExplicitLayoutOwnershipD3D12` | 通过原生 debug 消息观察独立创建与最终释放，不依赖句柄比较 |
-| `ExplicitLayoutOwnershipVulkan` | 测试侧函数表 probe 观察独立创建、私有空洞、幂等释放和部分失败清理 |
-| `DescriptorDirtyRangesD3D12Test` | 描述符 dirty range 合并与未初始化空洞 |
-| `D3D12DiagnosticsTest`、`D3D12DiagnosticsSmoke` | callback/基础队列、DXGI 原生错误、采集完整性 smoke |
-| `VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`、`VulkanSwapChainWsiTest` | 保留的交换链回收与 WSI 验证 |
+| `test_device.cpp` | `DeviceTest` |
+| `test_buffer.cpp` | `BufferTest` |
+| `test_compute_binding.cpp` | `ComputeBindingTest` |
+| `test_render_pass.cpp` | `RenderPassTest` |
+| `test_texture_view.cpp` | `TextureViewTest` |
+| `test_external_resource.cpp` | `ExternalResourceTest`（实例名 `Routes`） |
+| `test_vulkan_device_features.cpp` | `VulkanDeviceFeaturePolicy` |
+| `test_vulkan_swapchain.cpp` | `VulkanSwapChainRetirement`、`VulkanSwapChainWindowTest` |
 
-render 测试只使用版本控制的原始 stage 字节码和手写布局；artifact/contract 测试归 shader 模块。
-测试侧 probe/原生诊断负责观测，生产对象不添加测试计数。
-后端不可用与初始化失败的判定见[GPU 测试规则](../guide/build-test.md#测试)；必测后端缺失或跳过不得算作通过。
+各 suite 的覆盖内容、GPU 测试环境变量与跳过规则见[render 测试](../guide/build-test.md#render-测试)。
+GPU 用例以读回内容断言行为，使用 `modules/render/tests/data/` 中的 HLSL 编译出的 stage 字节码和手写布局；
+artifact/contract 测试归 shader 模块。生产对象不添加测试计数。

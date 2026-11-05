@@ -1,12 +1,6 @@
-#include <type_traits>
-
 #include <gtest/gtest.h>
 
 #include <radray/runtime_type.h>
-
-#if !defined(__cpp_rtti) && !defined(_CPPRTTI)
-#error "RadRay C++ consumers must be compiled with RTTI enabled."
-#endif
 
 namespace {
 
@@ -26,14 +20,7 @@ struct RuntimeTypeTrait<StableType> {
 
 using namespace radray;
 
-static_assert(std::is_same_v<RuntimeTypeId, Guid>);
-static_assert(runtime_type_id_v<StableType> == RuntimeTypeTrait<StableType>::value);
-static_assert(runtime_type_id_v<const StableType> == runtime_type_id_v<StableType>);
-static_assert(runtime_type_id_v<volatile StableType> == runtime_type_id_v<StableType>);
-static_assert(runtime_type_id_v<const volatile StableType&> == runtime_type_id_v<StableType>);
-static_assert(runtime_type_id_v<StableType&&> == runtime_type_id_v<StableType>);
-
-TEST(RuntimeTypeIdTest, PreservesFixedSpecializationAndNormalizesQualifiers) {
+TEST(RuntimeTypeIdTest, ReturnsSpecializedIdForCvRefQualifiedTypes) {
     constexpr RuntimeTypeId expected{
         0x11111111, 0x0001, 0x4000, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
 

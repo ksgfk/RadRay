@@ -1,18 +1,24 @@
 include_guard(GLOBAL)
 
+function(_radray_windows_runtime runtime shared)
+    if (DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+        set(value "${CMAKE_MSVC_RUNTIME_LIBRARY}")
+    else()
+        set(value "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+    endif()
+    if (value STREQUAL "")
+        message(FATAL_ERROR
+            "Windows mimalloc linkage cannot be selected from an empty CMAKE_MSVC_RUNTIME_LIBRARY; choose an explicit CRT value")
+    endif()
+    set(${runtime} "${value}" PARENT_SCOPE)
+    set(${shared} "$<OR:$<STREQUAL:$<GENEX_EVAL:${value}>,MultiThreadedDLL>,$<STREQUAL:$<GENEX_EVAL:${value}>,MultiThreadedDebugDLL>>" PARENT_SCOPE)
+endfunction()
+
 function(radray_get_mimalloc_linkage targets libraries)
     set(required_targets mimalloc-static)
     set(link_libraries "$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>")
     if (WIN32)
-        if (DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
-            set(runtime "${CMAKE_MSVC_RUNTIME_LIBRARY}")
-        else()
-            set(runtime "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-        endif()
-        if (runtime STREQUAL "")
-            message(FATAL_ERROR
-                "Windows mimalloc linkage cannot be selected from an empty CMAKE_MSVC_RUNTIME_LIBRARY; choose an explicit CRT value")
-        endif()
+        _radray_windows_runtime(runtime shared)
         if (runtime MATCHES "DLL$")
             set(required_targets mimalloc)
         elseif(runtime STREQUAL "MultiThreaded" OR runtime STREQUAL "MultiThreadedDebug" OR
@@ -21,13 +27,22 @@ function(radray_get_mimalloc_linkage targets libraries)
         else()
             set(required_targets mimalloc mimalloc-static)
         endif()
-        set(shared "$<OR:$<STREQUAL:$<GENEX_EVAL:${runtime}>,MultiThreadedDLL>,$<STREQUAL:$<GENEX_EVAL:${runtime}>,MultiThreadedDebugDLL>>")
         set(link_libraries
             "$<${shared}:mimalloc>"
             "$<$<NOT:${shared}>:$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>>")
     endif()
     set(${targets} "${required_targets}" PARENT_SCOPE)
     set(${libraries} "${link_libraries}" PARENT_SCOPE)
+endfunction()
+
+# 仓库自有可执行文件链接 radraycore 后调用。/MD[d] 下强制引用 mi_version，
+# 让 mimalloc DLL 排在导入表最前，先于 ucrtbase 初始化，redirect 才能生效。
+function(radray_load_mimalloc_early target)
+    if (NOT WIN32 OR NOT MSVC OR NOT RADRAY_ENABLE_MIMALLOC)
+        return()
+    endif()
+    _radray_windows_runtime(runtime shared)
+    target_link_options(${target} PRIVATE "$<${shared}:/INCLUDE:mi_version>")
 endfunction()
 
 # Repository triplets describe both the compiler and the CRT ABI of prepared packages.

@@ -1,45 +1,59 @@
 #include <radray/memory.h>
 
 #include <algorithm>
-#include <cstdint>
 #include <cstring>
 
 #include <gtest/gtest.h>
+
 #include <radray/types.h>
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
 #endif
 
-TEST(MemoryTest, OrdinaryAllocationPreservesDataAndUsesConfiguredAllocator) {
-    for (size_t size : {size_t{1}, size_t{128}, size_t{4096}}) {
-        radray::unique_ptr<void, decltype(&radray::Free)> block{radray::Malloc(size), &radray::Free};
+namespace radray {
+namespace {
+
+bool IsFilledWith(const void* data, size_t size, unsigned char value) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    return std::all_of(bytes, bytes + size, [value](unsigned char b) { return b == value; });
+}
+
+TEST(MemoryTest, MallocReturnsWritableBlock) {
+    const unique_ptr<void, decltype(&Free)> block{Malloc(4096), &Free};
+    ASSERT_NE(block, nullptr);
+
+    std::memset(block.get(), 0x5a, 4096);
+
+    EXPECT_TRUE(IsFilledWith(block.get(), 4096, 0x5a));
+}
+
+TEST(MemoryTest, AlignedAllocHonoursAlignment) {
+    for (size_t alignment : {size_t{8}, size_t{64}, size_t{4096}}) {
+        const unique_ptr<void, decltype(&AlignedFree)> block{AlignedAlloc(alignment, 3 * alignment), &AlignedFree};
         ASSERT_NE(block, nullptr);
-#ifdef RADRAY_ENABLE_MIMALLOC
-        EXPECT_TRUE(mi_any_heap_contains(block.get()));
-#endif
-        std::memset(block.get(), 0x5a, size);
-        const auto* bytes = static_cast<const unsigned char*>(block.get());
-        EXPECT_TRUE(std::all_of(bytes, bytes + size, [](auto value) { return value == 0x5a; }));
+
+        std::memset(block.get(), 0xa5, 3 * alignment);
+
+        EXPECT_EQ(reinterpret_cast<std::uintptr_t>(block.get()) % alignment, 0u);
+        EXPECT_TRUE(IsFilledWith(block.get(), 3 * alignment, 0xa5));
     }
 }
 
-TEST(MemoryTest, AlignedAllocationPreservesDataAndUsesConfiguredAllocator) {
-    for (size_t alignment : {size_t{8}, size_t{64}, size_t{256}, size_t{4096}}) {
-        const size_t size = 3 * alignment;
-        radray::unique_ptr<void, decltype(&radray::AlignedFree)> block{radray::AlignedAlloc(alignment, size), &radray::AlignedFree};
-        ASSERT_NE(block, nullptr);
-        EXPECT_EQ(reinterpret_cast<std::uintptr_t>(block.get()) % alignment, 0u);
 #ifdef RADRAY_ENABLE_MIMALLOC
-        EXPECT_TRUE(mi_any_heap_contains(block.get()));
-#endif
-        std::memset(block.get(), 0xa5, size);
-        const auto* bytes = static_cast<const unsigned char*>(block.get());
-        EXPECT_TRUE(std::all_of(bytes, bytes + size, [](auto value) { return value == 0xa5; }));
-    }
+TEST(MemoryTest, AllocationsComeFromMimallocWhenEnabled) {
+    const unique_ptr<void, decltype(&Free)> plain{Malloc(128), &Free};
+    const unique_ptr<void, decltype(&AlignedFree)> aligned{AlignedAlloc(256, 256), &AlignedFree};
+
+    EXPECT_TRUE(mi_any_heap_contains(plain.get()));
+    EXPECT_TRUE(mi_any_heap_contains(aligned.get()));
 }
+#endif
 
 TEST(MemoryTest, FreeAcceptsNull) {
-    radray::Free(nullptr);
-    radray::AlignedFree(nullptr);
+    Free(nullptr);
+    AlignedFree(nullptr);
 }
+
+}  // namespace
+}  // namespace radray

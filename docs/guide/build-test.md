@@ -1,6 +1,6 @@
 > - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
 > - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
-> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/RuntimeLibrary.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`, `modules/core/tests/test_memory_override.cpp`, `tools/compile_test_shaders.py`, `tools/compile_attachment_fixtures.py`, `cmake/TestShaders.cmake`
+> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/RuntimeLibrary.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/dev_env.ps1`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`, `modules/core/tests/test_memory_override.cpp`, `tools/compile_test_shaders.py`, `tools/compile_render_fixtures.py`, `cmake/TestShaders.cmake`
 
 # 构建与测试
 
@@ -56,22 +56,27 @@ ctest --preset win-x64-debug-clangcl
 `RADRAY_BUILD_PATH` 改写基础路径。macOS 是否可用还取决于 manifest 对应平台 SDK；当前 DXC
 manifest 只有 Windows 包，macOS 无匹配包时须关闭 compiler。不能将 Windows 验收结果当作 macOS 验证。
 
-### 开发时加载 DXC
+### 开发时加载运行库
 
-Windows configure preset 将 `SDKs/radray_dxc/extracted/bin` 加到子进程 `PATH` 前端，关联的 build/test
-preset 默认继承该环境，覆盖构建期测试发现和 CTest。测试、shader CLI 与 fixture generator 不再复制
-DXC DLL；它们从启动环境查找 SDK。VS Code 调试配置见[开发环境](dev-env.md#launchjson)。
+仓库可执行文件在启动时需要两类 SDK 中的 DLL：DXC fork（`SDKs/radray_dxc/extracted/bin`）和
+`/MD[d]` 三元组的 mimalloc（`SDKs/mimalloc/<三元组>/<配置>/bin`，Debug 为 `mimalloc-debug.dll`）。
+构建不复制这些 DLL，程序从启动环境的 `PATH` 查找它们。
+
+Windows configure preset 把这两个目录加到子进程 `PATH` 前端，三元组与配置由 preset 环境变量
+`RADRAY_PRESET_TRIPLET`、`RADRAY_PRESET_CONFIG` 决定。关联的 build/test preset 默认继承该环境，
+覆盖构建期测试发现和 CTest。VS Code 调试配置见[开发环境](dev-env.md#launchjson)。
 
 `cmake --build <目录>`、`ctest --test-dir <目录>`、直接运行 exe 和其他脚本不会读取 preset 环境。
-使用这些入口时，先在仓库根为当前 PowerShell 设置一次：
+使用这些入口时，先在仓库根为当前 PowerShell dot-source 环境脚本，三元组与配置须和构建目录一致：
 
 ```powershell
-$env:PATH = "$(Resolve-Path ./SDKs/radray_dxc/extracted/bin);$env:PATH"
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Debug
 ```
 
-环境只作用于当前终端及其子进程，configure 不会修改父终端。`CMAKE_PREFIX_PATH`、包 `_DIR` 和
-`RADRAY_DXC_ROOT` 只决定 CMake 找包；改用其他 DXC 包时，启动环境也应指向该包的 bin。
-旧构建目录中已复制的 `dxcompiler.dll`、`dxil.dll` 应显式移除；exe 同目录副本会优先于 `PATH`。
+脚本只修改当前终端及其子进程的 `PATH`；重复执行会替换上次加入的 SDK 路径，切换配置不会叠加。
+缺少 DLL 时 exe 以 `0xC0000135`（STATUS_DLL_NOT_FOUND）退出，构建期 GTest discovery 也会因此失败。
+`CMAKE_PREFIX_PATH`、包 `_DIR` 和 `RADRAY_DXC_ROOT` 只决定 CMake 找包；改用其他 DXC 包时，
+启动环境也应指向该包的 bin。exe 同目录的 `dxcompiler.dll`、`dxil.dll` 副本会优先于 `PATH`，应显式移除。
 
 ### 手动准备依赖包
 
@@ -133,20 +138,21 @@ Windows `/MD[d]` 下，启用 `RADRAY_ENABLE_MIMALLOC` 时 core 链接上游动�
 python tools/build_third_party.py build --triplet windows-x64-clangcl --config Debug --only mimalloc --clean
 ```
 
-RadRay 主工程只发现并链接依赖，不复制或安装这两个外部 DLL，不修改启动 `PATH`，不添加强制
-符号引用、初始化调用或导入表修补来保证 DLL 加载。最终程序负责 DLL 搜索路径与部署、实际导入
-以及尽早加载 mimalloc DLL。动态覆盖只有在 DLL 成功加载且 redirect 生效后才会接管经动态 CRT
-发起的分配；不能仅凭链接声明断言进程已覆盖。宿主可通过 `mi_is_redirected()` 或
-`MIMALLOC_VERBOSE=1` 检查状态，并验证目标分配的归属。见
+redirect 要求 mimalloc DLL 先于 `ucrtbase(d).dll` 初始化，即位于最终可执行文件导入表的前部。
+链接器按符号解析顺序排列导入的 DLL；render、runtime 等链接 D3D12/DXGI 的程序中 mimalloc 会被排到后面，
+启动时报告 `mimalloc-redirect.dll seems to be initialized after ucrtbase.dll` 并退回普通 malloc。
+仓库自有可执行文件（测试、benchmark、示例、shader CLI 与 fixture generator）在 `radray_set_build_path`
+后调用 `cmake/RuntimeLibrary.cmake` 的 `radray_load_mimalloc_early(<target>)`：`/MD[d]` 且启用 mimalloc 时
+链接 `/INCLUDE:mi_version`，让 mimalloc DLL 排在导入表首位；其他 CRT、平台或关闭 mimalloc 时不做任何事。
+新增链接 core 的可执行文件时同样调用它。可用 `dumpbin /dependents <exe>` 确认第一项是 mimalloc DLL。
+
+RadRay 不复制或安装这两个外部 DLL，也不向库目标的使用者传递 `/INCLUDE`。外部宿主负责 DLL 搜索路径、
+部署和导入顺序，可在自己的可执行文件上使用同样的链接选项。动态覆盖只有在 DLL 成功加载且 redirect
+生效后才会接管经动态 CRT 发起的分配；不能仅凭链接声明断言进程已覆盖。可通过 `mi_is_redirected()` 或
+`MIMALLOC_VERBOSE=1`（输出 `malloc is redirected`）检查状态。见
 [mimalloc 3.5.3 Windows 动态覆盖说明](https://github.com/microsoft/mimalloc/blob/v3.5.3/readme.md#dynamic-override-on-windows)。
 
-开发者运行需要 mimalloc DLL 的程序或构建期 GTest discovery 前，可显式设置当前启动环境：
-
-```powershell
-$env:PATH = "$(Resolve-Path ./SDKs/mimalloc/windows-x64-clangcl/Debug/bin);$env:PATH"
-```
-
-Release 或其他编译器应使用对应 SDK 前缀；外部宿主自行管理其运行环境。
+运行时的 DLL 搜索路径见[开发时加载运行库](#开发时加载运行库)。
 
 ### 静态 CRT 与 mimalloc
 
@@ -202,18 +208,18 @@ Windows `/MT` 下 mimalloc 默认以 C++ 编译并自带 `new/delete`，宿主�
 
 `test_inline_vector` 自己替换 `new/delete` 以计数，只编译容器测试与现有 `logger.cpp`，链接
 fmt、spdlog 和 GTest，不链接 core 的 mimalloc 依赖。其余 core 测试仍链接完整 core；静态 CRT
-且启用 mimalloc 时加入 `MimallocOverride` suite，检查标准 C 分配及 realloc 数据保留、RadRay
+且启用 mimalloc 时加入 `MimallocOverrideTest` suite，检查标准 C 分配及 realloc 数据保留、RadRay
 分配、对齐分配、C++ 对象/数组和标准容器的 mimalloc 归属。构建完成后可单独执行：
 
 ```powershell
-ctest --preset win-x64-release-staticcrt -R MimallocOverride
+ctest --preset win-x64-release-staticcrt -R MimallocOverrideTest
 ```
 
 `MemoryTest` 在所有配置下验证 RadRay 普通/对齐分配的数据、对齐与配对释放；启用 mimalloc 时
 额外使用 `mi_any_heap_contains` 检查归属，包括 `/MD[d]` 构建，不以全局 CRT 覆盖为前提。
 
 `MemoryTest` 只验证 RadRay 分配接口；静态 CRT 和最终 DLL 的标准分配覆盖仍需使用
-`MimallocOverride` 及目标映像分别验证。
+`MimallocOverrideTest` 及目标映像分别验证。
 
 ### 编译契约与优化
 
@@ -317,7 +323,7 @@ target_link_libraries(shader_app PRIVATE RadRay::shadercompiler)
 ## 安装与包消费
 
 ```powershell
-$env:PATH = "$(Resolve-Path ./SDKs/radray_dxc/extracted/bin);$env:PATH"
+. tools/dev_env.ps1 -Triplet windows-x64-msvc -Config Debug
 cmake --preset win-x64-debug -B build_install_debug -DRADRAY_INSTALL=ON
 cmake --build build_install_debug --config Debug --parallel 8
 cmake --install build_install_debug --config Debug --prefix "C:/local/RadRay"
@@ -366,136 +372,78 @@ Tracy、CPU/GPU 基准、配对测量与内存口径统一见[性能测量](perf
 同一模块的 GTest 源文件链接进一个可执行文件，替换全局 operator new 的 `test_inline_vector` 独占进程。
 测试直接使用 CMake `GoogleTest` 模块的 `gtest_discover_tests` 注册，不附加测试专用的 CMake 版本限制。
 未设置发现模式时采用官方默认 POST_BUILD；可通过 `CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE` 选择模式。
-POST_BUILD 在链接后运行测试程序枚举用例，所需运行库应在启动环境中可查找；使用上面的开发环境配置。
+POST_BUILD 在链接后运行测试程序枚举用例，所需 DLL 须在启动环境中可查找，见[开发时加载运行库](#开发时加载运行库)。
+测试的取舍、用例形态与 TDD 流程见[编写测试](testing.md)。
 
-| 目标 | suite 示例 |
+```powershell
+cmake --build --preset win-x64-debug-clangcl --parallel 8
+ctest --preset win-x64-debug-clangcl
+```
+
+| 目标 | suite |
 |---|---|
-| `test_radray_core` | `RuntimeTypeIdTest`、`ManualCoroutineScheduler`、`MemoryTest`、`ObjectArenaTest`、`ArenaAllocatorTest` |
-| `test_radray_render` | `ExplicitBindingLayoutTest`、`ExplicitLayoutOwnershipD3D12`、`ExplicitLayoutOwnershipVulkan`、`DescriptorDirtyRangesD3D12Test` |
-| `test_radray_render`（D3D12 诊断） | `D3D12DiagnosticsTest`、`D3D12DiagnosticsSmoke` |
-| `test_radray_render`（Vulkan） | `VulkanDeviceFeaturePolicy`、`VulkanDeviceFeatureConsumers`、`VulkanDeviceFeatureGpu`、`VulkanSwapChainRetirementTest`、`VulkanSwapChainNativeTest`；Win32 另含 `VulkanSwapChainWsiTest` |
-| `test_radray_window`（Win32） | 用 `ctest -N` 查看当前注册用例 |
-| `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderArtifact`、`RadRayShaderContract`（不依赖 compiler） |
-| `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayShaderLibPass` |
+| `test_radray_core` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BasicMathTest`、`BinaryIoTest`、`ChannelTest`、`ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest`、`EnumFlagsTest`、`FileTest`、`GuidTest`、`HashTest`、`ImageDataTest`、`IntrusivePtrTest`、`JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest`、`MemoryTest`、`NullableTest`、`ObjectArenaTest`、`ArenaAllocatorTest`、`RuntimeTypeIdTest`、`ScopeGuardTest`、`SparseSetTest`、`StructuredBufferTest`、`TextEncodingTest`、`UtilityTest`、`WavefrontObjTest`、`XmlTest`；libpng 开启时另有 `PngTest`、`PngTest/PngRoundTripTest`；静态 CRT 且启用 mimalloc 时另有 `MimallocOverrideTest` |
+| `test_inline_vector` | `InlineVectorTest` |
+| `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
+| `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
+| `test_radray_render` | 见下文 [render 测试](#render-测试) |
+| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`（CPU fake，不需要 GPU 或 shader） |
+| `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
-ObjectArena 与 STL allocator 的独立验证入口如下，不需要 GPU 或外部资产。完整 core 回归还包含
-使用 assets 的测试；内存复用基准见[性能测量](performance.md#object-arena)。
+core 测试使用内联数据或临时目录，不依赖 `assets/`。
+`SubmitMeshDrawCommandsTest.DebugPreflightRejectsInvalidListBeforeRecording` 验证 Debug 预检，Release 中跳过。
 
-```powershell
-cmake --build --preset win-x64-debug-clangcl --target test_radray_core --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(ObjectArenaTest|ArenaAllocatorTest)\.' --output-on-failure --timeout 30
-```
+### render 测试
 
-```powershell
-cmake --build --preset win-x64-debug --parallel 8
-ctest --preset win-x64-debug
-```
-
-render 测试覆盖显式布局、各类资源、数组、固定 sampler、动态偏移、部分 push 更新、跨 PSO/布局共享，
-通过双后端真实 dispatch/读回和原生验证检查行为。三组绑定用例按 view/material/object 分层录制，
-在普通参数集切换及同一 object 参数集配合动态偏移两种路径下，验证只重绑 object 时其他组仍有效。
-参数集分配范围通过 D3D12 实际 CPU/GPU descriptor 区间和 Vulkan 测试侧原生分配调用记录验证，
-确保每个实例只分配所属组的 descriptors；Vulkan pool 可按页预留多个实例的容量。
-布局直接创建、释放和失败清理使用测试侧 probe 或原生 debug 消息观察，
-不在生产代码添加测试字段。交换链回收/WSI 测试保留。
-D3D12 根签名 debug 消息按实际 COM 对象身份计数，不作为创建 API 调用计数；生命周期回归覆盖
-相同/不同描述、重复销毁，以及销毁一个 owner 后通过另一个完成真实 dispatch/读回。
-计数观察结构化 probe 的消息区间，不清空原生队列或修改原生过滤器。
-普通 validation 下消息数严格对应实际 COM 对象；GBV 可能创建内部辅助根签名，
-因此额外记录每个创建区间的消息增量，检查独立释放和最终创建/销毁平衡，不硬编码辅助对象倍数。
-render 测试读取 `RADRAY_TEST_SHADER_DIR/shader_bytecode/` 中的本地预生成字节码，运行时无需 shader/compiler/DXC；准备步骤见[本地测试 shader](#本地测试-shader)。
-Vulkan feature 策略测试覆盖全支持时的精确请求集、逐位缺失、必需/可选分离、查询结果不变、
-独立创建链与无链接快照；consumer probe 验证 sampler 及 indirect batching / 单 draw 回退读取 Enabled。
-`VulkanDeviceFeatureGpu` 在启用 validation / synchronization validation 后分别测试物理设备索引 0、1，
-检查实际能力快照、UAV stages、buffer limits、普通/immutable sampler、timeline 等待及销毁。
-不存在的第二块设备单列跳过；已枚举 adapter 的设备创建失败必须失败，不能因为缺少 GOOGLE
-反射扩展而跳过。设置 `RADRAY_TEST_VULKAN_ADAPTER_INDEX` 可让公共 GPU fixture 显式选择设备，
-覆盖显式布局、dispatch/读回和 WSI；未设置时选择高性能设备，非法或不存在的指定索引必须失败。
-报告记录实际 adapter、索引、validation / synchronization validation 状态与原生错误计数。
-验收先分别构建 ClangCL Debug / Release，再运行上述 suites 和现有显式布局、传统 framebuffer、WSI 回归；
-另用 `RADRAY_ENABLE_VULKAN=OFF` 配置构建 render 测试，确认后端关闭时无 Vulkan 链接依赖。
-artifact golden 与 contract 测试位于 `modules/shader/tests/`。
-
-RenderPass2、view 格式契约与 framebuffer 回归使用以下 suites，同样链接到 `test_radray_render`：
+render 测试在 `test_radray_render` 中，共用 `modules/render/tests/gpu_test_fixture.h`。
+GPU suite 以后端参数化，测试名为 `Backends/<Suite>.<Case>/D3D12` 或 `/Vulkan`：
 
 | Suite | 验证内容 |
 |---|---|
-| `AttachmentOperations` | D3D12 与 Vulkan 四种 feature/cache 组合；非均匀 MSAA resolve、源逐 sample 读回、sRGB、浮点、区域外/未 resolve aspect、局部 layers、混合权限 SRV/PSO、普通/immutable sampler 真采样 |
-| `CoupledTextureViewContractTest` | 禁用 separateDepthStencilLayouts 后合法组合与独立转换拒绝 |
-| `TextureViewContractTest` | 双后端同格式与兼容格式、UNORM/sRGB 独立用途、后端兼容范围差异、depth/stencil plane、sRGB 清除读回、命令引用的销毁限制 |
-| `VulkanViewFormats` | Vulkan 格式兼容类与非 mutable 限制，depth/stencil 不与 color 混淆 |
-| `VulkanRenderObjects` | 测试侧 native probe 观察 RenderPass2 参数、缓存创建次数、约束区分、失败/预算、独立附件引用与销毁时序 |
-| `VulkanRenderScopeGpu` | 传统/imageless 两模式的 MRT、局部 clear/load/store、mip/layer、depth-only、DS、只读附件和 MSAA |
-| `VulkanFramebufferGraphicsGpu` | 两模式下现有 shader 的真实 graphics draw、PSO 与读回 |
-| `D3D12DiagnosticsSmoke` | 包含 swapchain UNORM 原生存储与逻辑 sRGB RTV 的回归 |
+| `DeviceTest` | 设备与 direct queue 可用，报告实际 adapter |
+| `BufferTest` | Upload→ReadBack 复制、persistent map 下的 flush/invalidate、未映射时 cache 操作被 RHI validation 拒绝 |
+| `ComputeBindingTest` | 显式布局下的 cbuffer、push constant、SRV/UAV buffer、纹理与 sampler、只重绑一个 group 时其他 group 仍有效、dynamic offset；均以读回内容断言 |
+| `RenderPassTest` | clear 读回、全屏三角形、深度测试保留最近片元、模板参考值动态设置且每个 Pass 重置为 0 |
+| `TextureViewTest` | 不兼容格式、纹理未声明的用途、越界 mip/layer、缺 stencil aspect 的 depth/stencil view 被拒绝；sRGB view 编码写入 UNORM 纹理；layer view 只写所属层 |
 
-`VulkanDeviceFeaturePolicy` 同时验证 imageless 为可选请求、缺失仍可创建设备，以及 RenderPass2 必需入口检查。
-传统/imageless GPU 测试在创建资源前选择缓存模式；不改 Supported/Enabled 快照。
-结构收益由 probe 比较相同附件约束的不同 views 所需的 framebuffer 创建数，不将 GTest 用作性能基准。
-非预期原生 validation 错误必须失败；不支持 imageless 的 GPU 用例明确跳过。
-`AttachmentOperations` 参数 0 为 D3D12，1/2 为 Vulkan imageless（独立/组合 DS），3/4 为传统 framebuffer（独立/组合 DS）。
-fixture 在 vkCreateDevice 前选择请求集，不在创建后伪造 Enabled；报告记录实际 separate_depth_stencil_layouts 与 imageless_framebuffer。
-D3D12 报告 render_passes_valid 与 programmable_sample_positions_tier；附件 resolve 能力不足的用例单列跳过。
-MinMaxFiltering 的负面格式用例在设备所有受支持 RHI 采样格式均支持时单列跳过，不能伪造格式能力。
-probe 验证 resolve 目标的有序附件、约束、缓存复用、去重引用、提前销毁、预算失败/重试；不增加生产观测字段。
-读回的误差只用于格式量化，测试结果不作帧率或带宽收益解释。
+其余 suite：
 
-`DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea` 可用
-`RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK=1` 开启分阶段读回，默认关闭。
-探针保留原始 render pass 与 ending resolve，在初始化后、resolve pass 的 `EndRenderPass` 后和最终检查前，
-通过现有 compute shader 将源逐 sample 与目标 depth/stencil 保存到读回缓冲的独立区域。
-三个快照在同一 command buffer 中录制，提交后统一等待队列完成，再映射读取；不依赖捕获工具。
-`EndRenderPass` 后的快照位于必要的 ShaderRead 转换之后。日志输出中央/区域外像素、目标 stencil 范围和中央源像素的四个 sample stencil，
-GTest XML 的 `resolve_probe_<depth>_<stencil>_<stage>` 属性额外保存完整 8×8 目标 stencil。
-测试检查初始化值以及 pass 结束快照与最终读回一致，原有内容断言继续执行。
-探针增加资源转换与 dispatch，排查时须对比开关两种运行，确认故障是否仍然复现。
+| Suite | 验证内容 |
+|---|---|
+| `Routes/ExternalResourceTest` | 同进程外部资源往返，`BufferRoundTrip`、`TextureRoundTrip`（2D RGBA8）各覆盖 `D3D12ToD3D12`、`D3D12ToVulkan`、`VulkanToD3D12`、`VulkanToVulkan`；VK→VK 使用 `OpaqueWin32` 句柄，其余使用 `D3D12Resource`。每个 route 使用独立 device，能力查询不支持时跳过 |
+| `VulkanSwapChainRetirement` | 交换链退休状态机，不需要 GPU |
+| `VulkanSwapChainWindowTest`（Win32） | 真实窗口上的 present 与 resize 冒烟 |
+| `VulkanDeviceFeaturePolicy` | 必需/可选 feature 的请求选择，不需要 GPU |
+
+设备默认开启原生 validation 与 RHI validation；用例结束时等待队列、销毁对象，原生 validation 错误或未被用例取走的
+RHI validation 诊断都使用例失败。以下环境变量作用于整个进程：
+
+| 变量 | 作用 |
+|---|---|
+| `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` | 列出的后端未编译或没有可用 adapter 时失败，而不是跳过 |
+| `RADRAY_TEST_GPU_VALIDATION=1` | 额外开启 GPU-assisted validation；不要用于性能比较 |
+| `RADRAY_TEST_D3D12_ADAPTER_INDEX`、`RADRAY_TEST_VULKAN_ADAPTER_INDEX` | 按各自枚举顺序选择 adapter；未设置时选择高性能设备，非法或不存在的索引失败 |
 
 ```powershell
-$env:RADRAY_TEST_D3D12_ADAPTER_INDEX = '0'
-$env:RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK = '1'
-ctest --preset win-x64-debug-clangcl -R 'AttachmentOperations.*DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea/0' --verbose
-Remove-Item Env:RADRAY_TEST_DEPTH_RESOLVE_STAGED_READBACK, Env:RADRAY_TEST_D3D12_ADAPTER_INDEX
-```
-
-同一测试的 D3D12 参数可设置 `RADRAY_TEST_DEPTH_RESOLVE_PIX_CAPTURE=1`，仅捕获 Average depth / None stencil 组合，默认关闭。
-从 PIX 的 GPU Capture 启动 `test_radray_render.exe`，工作目录为仓库根，参数使用
-`--gtest_filter=BackendsAndFeatures/AttachmentOperations.DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea/0`。
-测试使用 Windows SDK 的 `IDXGraphicsAnalysis::BeginCapture/EndCapture`，捕获前与结束前等待队列完成，
-不需要 Present 或额外 WinPixEventRuntime 依赖；未由 PIX 注入时启用此开关会明确失败。
-仅在此捕获模式下先提交初始化 clear passes 并等待完成，再开始捕获并重新录制初始化 clear passes、原始 resolve pass 与读回。
-预热避免捕获起点快照读取尚未初始化的 DS 资源；捕获内的 clear 确保每次回放显式恢复源与目标初值，
-不依赖工具恢复 MSAA DS 初始内容，报告记录 `depth_resolve_pix_initialization_submit=warmup_then_captured_clear`。
-可同时开启分阶段读回，将结果与 PIX 中的 `DepthResolveTarget1x`、`DepthResolveReadback` 对照。
-捕获完成后在 PIX 保存为 `.wpix`，在同一 GPU/驱动下 Start Analysis，查看原始 BeginRenderPass 的 ending access、resolve 参数与目标 stencil。
-PIX 的临时捕获文件可能保存在系统临时目录；没有自动打开页面时先检查 `.wpix` 是否已经生成。
-如果分析时报告 NVIDIA profiler session 冲突，可在 PIX 设置中启用 Disable GPU Plugins（旧版为关闭 Enable GPU Plugins）后重新打开捕获；
-此选项关闭硬件性能插件，API 参数和资源正确性分析仍可使用。命令行对应 `open-capture <file> --disable-gpu-plugins`。
-接口与注入要求见 [PIX 程序控制捕获](https://devblogs.microsoft.com/pix/programmatic-capture/)。
-
-```powershell
-cmake --build --preset win-x64-debug --target test_radray_render --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
-$env:RADRAY_TEST_GPU_VALIDATION = '1'
-ctest --preset win-x64-debug -R 'AttachmentOperations|TextureViewContract|Vulkan|ExplicitBindingLayoutTest|D3D12Diagnostic|ExplicitLayoutOwnership' --output-on-failure --timeout 60
+ctest --preset win-x64-debug-clangcl -R 'Backends/|Routes/|Vulkan' --output-on-failure --timeout 60
 ```
 
-Release 使用对应 `win-x64-release` preset，仍先构建后测试。按上面的 adapter 环境变量逐设备运行；
-另在独立构建目录分别配置 `RADRAY_ENABLE_VULKAN=OFF` 和 `RADRAY_ENABLE_D3D12=OFF`，
-构建 render 测试并运行仍启用后端的 suites，确认后端专属校验不会引入已关闭后端的链接依赖。
-`RadRayDxcMetadata.SpirvMetadataDoesNotRequireGoogleExtensions` 检查优化/调试编译组合的原始
-SPIR-V 不声明 GOOGLE 反射扩展且独立 metadata 仍完整；render 的字节码回归不依赖 DXC。
-`VulkanShaderBytecode` 检查所有原始 SPIR-V fixture 及对齐/非对齐输入原样提交；
-`VulkanGpuTest` 使用无 GOOGLE 扩展的 VS/PS 完成传统 framebuffer 绘制并验证像素读回。
+在本机 RTX 4080 上，Vulkan 不支持导出 `D3D12Resource` 句柄，`VulkanToD3D12` 两个用例跳过。
+后端专属代码的链接隔离用独立目录分别配置 `-DRADRAY_ENABLE_VULKAN=OFF`、`-DRADRAY_ENABLE_D3D12=OFF` 构建并运行
+`test_radray_render`；被关闭的后端参数与 route 跳过，Vulkan 专属 suite 不编译。
 
 ### 本地测试 shader
 
-Git 只保存测试 HLSL、生成代码和 metadata/GPU hash 的文本断言，不保存生成的 `.bin`。
-统一入口 `tools/compile_test_shaders.py` 先增量构建 compiler 侧的
-`radray_shader_fixture_generator`（`EXCLUDE_FROM_ALL`），生成 metadata 与 raw stage 字节码，
-再调用 `compile_attachment_fixtures.py` 的 DXC 配方生成附件、sampler、command 和 interop 变体。
-每次准备完整的 DXIL + SPIR-V 夹具，单后端测试也使用同一套输出；metadata 的 golden hash 不自动更新。
+Git 只保存测试 HLSL，不保存生成的 `.bin`。统一入口 `tools/compile_test_shaders.py` 准备两类夹具：
 
-干净检出先恢复并准备依赖、配置 compiler 开启且 tests 开启的构建，再运行脚本，最后构建和运行测试：
+- `shader_artifacts/`：先增量构建 compiler 侧的 `radray_shader_fixture_generator`（`EXCLUDE_FROM_ALL`），
+  由它编译 `modules/shader/tests/data/shader_sources/*.hlsl`，输出 DXIL / SPIR-V 的 metadata artifact，供 `test_radray_shader` 解码。
+- `shader_bytecode/`：`tools/compile_render_fixtures.py` 用 DXC 把 `modules/render/tests/data/*.hlsl` 的各 entry
+  编译为 `<source>.<entry>.<dxil|spirv>.bin`，供 `test_radray_render` 创建 shader。
+
+测试进程只读取这些文件，运行时不加载 DXC。干净检出先恢复并准备依赖、配置 compiler 与 tests 都开启的构建，
+再运行脚本，最后构建和运行测试：
 
 ```powershell
 cmake --preset win-x64-debug-clangcl
@@ -506,447 +454,38 @@ ctest --preset win-x64-debug-clangcl --output-on-failure
 
 需要 Python >= 3.10、CMake、该 build 目录对应的 C++ 工具链和匹配的 **RadRay DXC fork** 包。
 默认 DXC 是 `SDKs/radray_dxc/extracted/bin/dxc.exe`，也可传 `--dxc <fork-package>/bin/dxc.exe`；
-该目录须有匹配的 `dxcompiler.dll`、`dxil.dll`。CMake 找到的 fork headers/package 也必须匹配。
-stock DXC 不能生成 RadRay metadata。脚本只为子进程设置 DLL 搜索路径，不下载 SDK 或第三方依赖；
-缺包、compiler 关闭、配置不匹配、DXC 编译失败都会停止并显示原因，不将缺夹具的测试标成跳过。
+该目录须有匹配的 `dxcompiler.dll`、`dxil.dll`。stock DXC 不能生成 RadRay metadata。
+脚本只为子进程设置 DLL 搜索路径，不下载 SDK 或第三方依赖；缺包、compiler 关闭、配置不匹配或 DXC 编译失败都会停止并显示原因。
 
-默认输出为仓库的 `build/test_shaders/`，含 `shader_artifacts/`、`shader_bytecode/` 和
-`fixtures.sha256`。它们属于被忽略的本地构建产物，不应加入 Git；旧源码下的两个生成目录也加入
-`.gitignore`，防止旧命令重新产生的 bin 被误提交。真实 HLSL、TSV 及其他测试数据仍在源码目录。
-不同 Debug/Release、单/双后端与 compiler-disabled 配置可共享该完整目录，不并发运行生成脚本。
-
-脚本每次请求 CMake 增量构建生成器；输入源码、include、配方、生成器及 DXC 内容都不变且产物完整时
-跳过 shader 编译。输入变化、bin 丢失/损坏或 `--force` 会重新生成；两类生成全部成功后才替换夹具，
-清理该输出目录内已不需要的 bin，最后写校验清单。新内容与旧内容相同时保留 bin 时间戳。
+默认输出为仓库的 `build/test_shaders/`，含两个夹具目录和 `fixtures.sha256`，属于被忽略的本地构建产物。
+Debug/Release、单/双后端与 compiler-disabled 配置可共享同一目录，不并发运行生成脚本。
+输入源码、include、配方、生成器及 DXC 都不变且产物完整时脚本跳过编译；输入变化、bin 丢失/损坏或 `--force` 时重新生成，
+两类生成全部成功后才替换夹具并写校验清单。
 
 ```powershell
 python tools/compile_test_shaders.py --check
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug --force
 ```
 
-shader/render 测试及 IPC worker 的构建依赖 `radray_check_test_shaders`，只检查源指纹、清单与文件
-SHA-256，不启动 DXC。缺失或过期时构建失败并提示上面的生成命令；configure 允许夹具尚未存在，
-因此可以先构建生成器。直接运行已有 exe/CTest 不会触发构建检查，修改输入或搬运产物后先运行 `--check`。
+shader/render 测试的构建依赖 `radray_check_test_shaders`，只检查源指纹、清单与文件 SHA-256，不启动 DXC。
+夹具缺失或过期时构建失败并提示生成命令；configure 允许夹具尚未存在，因此可以先构建生成器。
+直接运行已有 exe/CTest 不触发该检查，修改输入或搬运产物后先运行 `--check`。
 
-关闭 compiler 时保留原有边界：库、测试和 IPC worker 均不增加 DXC 链接或运行时依赖；
-首次准备必须使用另一个 compiler 开启、tests 开启的配置，之后再配置/构建 compiler-disabled 消费者。
-纯库构建（`RADRAY_BUILD_TESTS=OFF`）不要求这些夹具或 Python 检查器。
-目前 compiler client 只在 Windows 支持生成；其他平台可从同版本源码的 Windows 准备环境复制完整目录
-并运行 `--check`，不把 Windows 的测试结果当作其他平台验证。
-
+关闭 compiler 的配置不增加 DXC 链接或运行时依赖，但首次准备夹具必须使用另一个 compiler 与 tests 都开启的配置。
+纯库构建（`RADRAY_BUILD_TESTS=OFF`）不要求夹具或 Python 检查器。目前只在 Windows 生成夹具；
+其他平台可复制同版本源码在 Windows 生成的完整目录并运行 `--check`，Windows 的测试结果不能当作其他平台验证。
 自定义目录需让生成脚本与所有消费配置一致：
 
 ```powershell
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --output-dir build/custom_test_shaders
 cmake --preset win-x64-debug-clangcl -B build/no_compiler -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF -DRADRAY_TEST_SHADER_DIR="$PWD/build/custom_test_shaders"
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Debug
 cmake --build build/no_compiler --config Debug --parallel 8
 ctest --test-dir build/no_compiler -C Debug --output-on-failure
 ```
 
 `RADRAY_TEST_SHADER_DIR` 只影响测试数据路径，不改变源码根或产品安装内容。
-底层 `compile_attachment_fixtures.py --output-dir <raw-directory>` 仅供维护局部 DXC 配方，不能替代完整
-准备步骤，也不更新完整清单；使用它后应再运行统一入口。
-
-GPU 用例区分后端未编译、无 adapter、缺验证层与初始化失败；可选后端不可用可跳过，
-原生资源、PSO、提交或读回错误必须失败。通过 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`
-将后端设为必测，`RADRAY_TEST_GPU_VALIDATION=1` 开启 GPU 验证。缺失与跳过必须单列，不能计为通过。
-部分 core 测试需要被忽略的 `assets/`，通过源码仓库外渠道准备。
-
-Vulkan 交换链的退休状态机与原生函数表故障测试不要求 GPU；Win32 WSI 用例使用真实设备与
-短暂的无激活测试窗口，覆盖连续呈现、resize、可用 present mode、双交换链、创建/部分初始化
-失败后重试，以及 RHI 校验包装。WSI 测试启用 Vulkan validation 和 synchronization validation，
-不启用 maintenance1。关闭时无验证错误不代表无扩展的呈现完成保证已补足，契约见
-[RHI 同步](../architecture/render-rhi.md#同步)。其他平台不注册 Win32 WSI 用例。
-
-```powershell
-$env:RADRAY_TEST_REQUIRED_BACKENDS = 'vulkan'
-cmake --build --preset win-x64-debug-clangcl --target test_radray_render --parallel 8
-ctest --preset win-x64-debug-clangcl -R VulkanSwapChain --output-on-failure --timeout 45
-```
-
-双 GPU P0 验收先用 `VulkanDeviceFeatureGpu` 的报告确认索引与设备名称，再分别指定索引运行
-Vulkan suites；Debug / Release 各自先构建后测试，不并发构建与测试。例如每个配置构建完成后：
-
-```powershell
-$env:RADRAY_TEST_REQUIRED_BACKENDS = 'vulkan'
-foreach ($adapterIndex in 0, 1) {
-    $env:RADRAY_TEST_VULKAN_ADAPTER_INDEX = "$adapterIndex"
-    ctest --preset win-x64-debug-clangcl -R 'Vulkan|ExplicitBindingLayoutTest.*<01-' -E 'ExplicitBindingLayoutTest.*<00-' --output-on-failure --timeout 60
-    if ($LASTEXITCODE -ne 0) { break }
-}
-Remove-Item Env:RADRAY_TEST_VULKAN_ADAPTER_INDEX
-```
-
-`tools/run_render_validation.py --help` 提供已构建配置的串行 CTest 与后端证据收集；它不负责构建。
-D3D12 descriptor 正确性由 `ExplicitBindingLayoutTest` 与 `DescriptorDirtyRangesD3D12Test` 覆盖。
-
-
-### Windows 资源互操作验收
-
-`ExternalResourceConfigurationTest` 覆盖双后端默认关闭、显式开启、重复查询与 RHI validation 包装行为，
-以及关闭时的普通资源创建和 Vulkan Win32 external 能力关闭状态。下述互操作 fixture 与 IPC worker
-在 device descriptor 中显式开启 `EnableExternalResource`。
-
-`test_radray_render` 的 `ExternalResourceTest` 覆盖运行时能力失败、错误消息及原生诊断、设备身份兼容性、独立句柄的
-移动/关闭，以及非对齐 Buffer 和共享纹理范围内各格式 `257×131` 纹理的重复双向读写。copy、sampled、storage、render-target
-分别创建并执行，检查帧号、每个像素及边界；同时验证 GENERAL→GENERAL ownership 转移和第一次导入内容。
-BGRA8 的四种 usage 使用独立用例，检查内存 B/G/R/A 顺序与采样 R/G/B/A 值；storage 实际执行 shader 写入，
-Vulkan 侧要求已启用 `shaderStorageImageWriteWithoutFormat`。资源能力或该可选 feature 缺失时明确跳过成功路径；
-资源创建不支持仍由失败用例断言。
-`ExternalResourceTextureTest` 将 route、描述和用途拆为独立 case：七种维度、1/3/5 mip、非二次幂尺寸、12 层 CubeArray、奇数深度 3D；
-小尺寸二维数组遍历全部颜色格式的 copy/sample/storage/RT，深度组覆盖四种 DS 格式及两个 aspect、多 mip/层，MSAA 查询 2/4/8/16 samples。
-检查创建/导出/导入描述，关闭句柄后执行四次双向往返，核对所有 texel 和最后子资源；各端分别计算复制布局，D3D12 使用真实 plane footprint。
-Storage 逐子资源写入并逐范围回到 Common 后整资源 Release；DS 使用部分 scissor 与混合 DSV 权限，核对另一 aspect 和未写区域。
-MSAA 逐 sample 读取；UNORM 附件允许一个量化单位。格式策略组创建 sRGB SRV/RTV，使用中间亮度图案验证 sRGB 采样解码，并检查后端特有兼容格式。
-该组 raw copy 逐字节比较；sRGB 解码误差在编码域内按半个 8-bit code value 判断。
-这是 [Direct3D 功能规范 v1.17 §3.2.3.7](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm) 的精度判据；
-Vulkan 侧目前沿用它作为项目验收阈值，不能声称它是 Vulkan 的规范保证。
-Vulkan 1.2 的 [Texel Input Format Conversion](https://github.com/KhronosGroup/Vulkan-Docs/blob/v1.2.198/chapters/textures.txt)
-规定 EOTF、alpha 不变，但没有该半码值条款；其数值章节的一般浮点精度也不能直接推导固定功能 EOTF 的这一误差界。
-typed RGBA8/BGRA8 拒绝 sRGB view；D3D12 原生 DENY_SHADER_RESOURCE 用例检查附件导入成功而 sampled 导入失败。
-DS 另有不声明附件用途的纯复制用例。MSAA 的 LocalControl 使用同一个原对象完成往返，供区分本地命令和导入对象问题。
-新纹理组使用独立 RHI device；同后端 Vulkan 共用 instance，D3D12 共用显式诊断上下文。
-D3D12 在同进程、同适配器上复用原生 device（测试记录 COM identity）；独立原生 device 的验收依赖 IPC，不能用两个 RHI wrapper 代替。
-`ExternalResourceTextureMapping` 无需 GPU 即可检查原生描述与完整 ownership range，不能替代 GPU 内容验收。
-查询不支持只跳过该 case；查询支持后，创建、导入、提交、view 或读回错误都必须失败。
-每条 Fence 只由一端 signal，导入方的 `GetLastSignaledValue()` 不随远端 signal 改变。
-`ExternalResourceIpcTest` 由父进程监督两个独立 GPU worker，覆盖单 slot、三 slot、延迟消费者、四个 generation（RGBA8 2D、RGBA16 多 mip 数组、BGRA8 CubeArray、R32 奇数深度 3D）与 resize、
-旧 generation 拒绝、正常退出与消费者异常退出；阻塞的生产端由监督进程终止，不复用其在途资源。
-
-```powershell
-cmake --build --preset win-x64-debug --target test_radray_render --parallel 8
-ctest --preset win-x64-debug -R ExternalResource --output-on-failure --timeout 90
-```
-
-两端 native validation 和 RHI validation 默认开启；可用 `RADRAY_TEST_GPU_VALIDATION=1` 额外开启 GPU-assisted 检查。
-route 参数 0/1/2/3 分别是 D3D12 句柄的 DX→DX、DX→VK、VK→DX、VK→VK，参数 4 是显式选择 opaque 的 VK→VK。
-原有同进程同后端 route 使用同一 device 上的独立导入对象；opaque route 使用两个独立 device，
-共用由源 fixture 管理的 instance，销毁两个 device 后才关闭 instance；该 instance 收集两端的 native validation。
-`ExternalResourceOpaqueTest` 另外验证 UUID 与本端设备的兼容性、实际 memory requirements 对内存类型及分配大小的限制、
-输入句柄借用和失败边界单次 error。测试不再向扩展提交违反描述、对象归属/存活、导出资格或 barrier 前置条件的调用，
-也不要求这些误用返回失败；外部资源契约检查已移除。支持路径仍以两端 native validation 和数据读回验证交接正确性。
-IPC 测试覆盖独立 device / 进程。helper 是独立可执行文件，GTest 用例仍在现有 render 测试目标。
-也可在构建输出目录直接执行：
-
-```powershell
-.\radray_external_worker.exe d3d12 vulkan 3 normal
-.\radray_external_worker.exe d3d12 vulkan 3 interrupt
-.\radray_external_worker.exe vulkan vulkan 3 normal opaque-win32
-.\radray_external_worker.exe vulkan vulkan 3 interrupt opaque-win32
-```
-
-末尾模式参数可选，省略或传入 `d3d12-resource` 使用原路径；`opaque-win32` 要求两个后端均为 Vulkan。
-返回 0 表示通过，77 表示设备/能力缺失（对应成功路径未覆盖），78 表示下述明确已知问题隔离，1 表示失败。
-查询 NativeApi/NativeCode 表示的非 FORMAT_NOT_SUPPORTED 原生错误返回 1；双方 hello 中一方失败、另一方返回 77 时优先返回 1。
-IPC 在 generation 不支持、已知问题隔离或失败时停止本 case，后续 generation 属于未执行，不能由聚合 skip/失败推断它们的能力或内容结果。
-已知问题返回 78 前正常停止两端 worker 并检查退出；清理或退出失败仍返回 1。
-worker 使用本地 named pipe、版本 5 逐字段小端编码和 `DuplicateHandle`，拒绝旧协议；
-设备身份仍为 LUID / NodeMask；helper 的 hello 另传 backend、vendor/device ID 与原始 driver version，用于精确限定测试隔离范围，获取失败通过响应状态报告。
-资源导出描述不携带版本字段，协议版本仅由 helper 管理。
-导出描述按类型解码和编码转发，包含完整纹理描述、格式重解释策略、句柄类型与可选 Vulkan 元数据，不使用固定字段数定位句柄；不传 C++ struct 内存布局或源进程裸句柄值给目标使用。
-当前工作目录的 `interop-worker-<supervisor pid>-<0|1>.log` 保存两端 native diagnostics。
-父进程对 IPC 设 30 秒上限，并以 kill-on-close job object 管理 worker；GPU 等待超时不会被当作资源完成。
-
-#### 已知 GPU 问题的测试隔离
-
-默认测试在实际能力查询成功后，按 [known_gpu_issues.cpp](../../modules/render/tests/known_gpu_issues.cpp) 的精确描述跳过已复现的内容错误。
-来源必须 CanCreateExportable、接收端必须 CanImport；原生查询异常先失败，能力不支持保留原 unsupported skip。
-这只改变测试选择，不修改生产 ExternalSupport、资源参数、usage、同步和内容判据。所有根因仍未确认。
-每次命中打印 `KNOWN_ISSUE_SKIP`，XML 写入 `known_issue_skip_count` 和 `known_issue_skips`；统计时与能力不支持及缺后端分开，不能记作通过。
-普通纹理参数化 case 在 SetUp 查询后整体隔离，因此命中 case 的创建、导入、view 和内容阶段本轮均未执行；这些阶段需用复现开关检查，不能用本轮 skip 替代历史证据。
-
-环境只匹配 NVIDIA GeForce RTX 4080 的 PCI vendor/device `10de:2704` 与 NVIDIA 621.01：
-D3D12 使用 DXGI `32.0.16.2101`（原始值 `0x0020000000100835`），Vulkan 使用 `driverVersion=0x9b404000`。
-DXGI 版本来自 [CheckInterfaceSupport(IDXGIDevice)](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiadapter-checkinterfacesupport) 的 UMD 版本，
-Vulkan 使用 [VkPhysicalDeviceProperties](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceProperties.html) 的 vendorID/deviceID 及供应商编码的 driverVersion；不把它当作 apiVersion 解析。
-跨 API 两端都必须匹配，仍通过现有 LUID/node 检查确保同一物理设备；MSAA 两端都是 D3D12，外部句柄都为 D3D12_RESOURCE。
-本机 Intel、其他 NVIDIA 型号、未知/其他驱动、opaque 句柄、反向 route 和 LocalControl 不命中。
-已验证环境为 ksgfk-big 的默认 implicit layers 和关闭 implicit layers 两组；runtime/驱动根因未分离。
-当前规则以型号和 driver version 为匹配边界，进行 OS/runtime/层版本对照时必须使用下面的复现开关。
-
-设置 `RADRAY_TEST_RUN_KNOWN_GPU_ISSUES=1` 可恢复原始执行。变量只作用于当前进程及其 IPC 子进程；取消设置即恢复隔离。
-例如在已构建的 Debug 目录执行：
-
-```powershell
-$env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
-$env:RADRAY_TEST_RUN_KNOWN_GPU_ISSUES = '1'
-& ./build/windows-x64-clangcl/Debug/_build/Debug/test_radray_render.exe '--gtest_filter=ExternalResourceNativeProbe.*:*Shape_2DArray_RGBA8_UNORM_M3_U2_Route1:*Msaa_2D_RGBA8_UNORM_S2_Route0'
-Remove-Item Env:RADRAY_TEST_RUN_KNOWN_GPU_ISSUES
-```
-
-copy-only D32+S8 的复现需显式选择 `*DepthCopyOnly_D32_FLOAT_S8_UINT_Route1`，历史会 DeviceLost；默认保留隔离，不在常规复现命令中包含它。
-`KnownGpuIssueContract` 用独立 [已观测 case 清单](../../modules/render/tests/data/known_gpu_issue_cases.tsv) 校验 188+20+1 个纹理条目，
-并检查相邻尺寸/mip/layer/sample、用途、格式策略、句柄、未知设备/驱动以及查询错误不误命中；IPC/native 的额外描述和 resolve 模式单独校验。
-此清单是测试输入，208 个已完成纹理失败加 1 个历史崩溃，不代表 209 个独立根因。
-
-以下 C 表示 CopySource|CopyDestination；所有外部描述均为 Device memory、dedicated，未列出的字段组合不推断为同一已知问题。
-
-| 已知问题及历史数量 | 精确形状、格式策略和用途 |
-|---|---|
-| DX→VK 部分 mip 数组：8 个 shape | 1DArray=17×1/3层、2DArray=17×9/3层、Cube=17×17/6层、CubeArray=17×17/12层；全部3 mip、1×；RGBA8_UNORM或RGBA16_FLOAT；typed；C|UnorderedAccess。 |
-| 同上：166 个 color format/use | 2DArray，9×5、2层、2 mip、1×、typed；下表42个颜色格式分别为 C、C|Resource、C|UnorderedAccess、C|RenderTarget。两个 sRGB storage 组合由能力查询否定，仍属于 unsupported，不在166项内。 |
-| 同上：12 个 depth/use | 2DArray，9×5、2层、3 mip、1×；D16_UNORM、D32_FLOAT、D24_UNORM_S8_UINT、D32_FLOAT_S8_UINT；C|DepthStencilWrite 为typed，增加Resource时开启重解释，附件测试为 C|DepthStencilRead|DepthStencilWrite 且typed。 |
-| 同上：2 个 reinterpret | 2DArray，9×5、2层、3 mip、1×；RGBA8_UNORM或BGRA8_UNORM；开启重解释；C|Resource|RenderTarget|UnorderedAccess。以上四组共188项。 |
-| D3D12→D3D12 shared MSAA：20 项 | 8×8、1 mip，2D/1层或2DArray/2层，2×或8×；RGBA8_UNORM、RGBA16_FLOAT、R32_UINT使用Resource|RenderTarget且typed；D32_FLOAT、D24_UNORM_S8_UINT使用Resource|DepthStencilRead|DepthStencilWrite并开启重解释。4×、16×及LocalControl不在规则内。 |
-| DX→VK copy-only D32+S8：额外1个崩溃 | 2D，9×5、1层、3 mip、1×，D32_FLOAT_S8_UINT，typed，C。不能把它与188个数组内容错误合并为同一已确认原因。 |
-| DX→VK IPC：2 个 case | SingleSlot/1、ThreeSlotsResizeDelayedConsumer/1 的generation 1：RGBA16_FLOAT、2DArray、35×19、3层、3 mip、1×、typed、C。generation 0先正常执行；XML记录完成代数、隔离代数及后续未执行代数，后续CubeArray/3D不被推断为已知失败或通过。 |
-| D3D12 native MSAA 与 IPC MSAA 诊断 | 仅RGBA8_UNORM、2D、8×8、1层、1 mip、2×/8×、typed。native用RenderTarget；IPC generation 0用C|Resource|RenderTarget。未观察到的后续RGBA16/array generation不扩大匹配。 |
-| 非共享 depth Average resolve | D3D12，D32_FLOAT_S8_UINT，2D、8×8、1层、1 mip、4×源和1×目标，DepthStencilRead|DepthStencilWrite|Resource，区域(2,2,4,4)，仅depth=Average/stencil=None。其余10个受支持模式继续执行。 |
-
-上表166项覆盖的42个颜色格式固定如下；未来新增格式不会自动进入隔离集合：
-
-| 格式族 | 格式 |
-|---|---|
-| R8 / RG8 | R8_SINT、R8_UINT、R8_SNORM、R8_UNORM；RG8_SINT、RG8_UINT、RG8_SNORM、RG8_UNORM |
-| R16 / RG16 | R16_SINT、R16_UINT、R16_SNORM、R16_UNORM、R16_FLOAT；RG16_SINT、RG16_UINT、RG16_SNORM、RG16_UNORM、RG16_FLOAT |
-| R32 / RG32 | R32_SINT、R32_UINT、R32_FLOAT；RG32_SINT、RG32_UINT、RG32_FLOAT |
-| RGBA8 / BGRA8 | RGBA8_SINT、RGBA8_UINT、RGBA8_SNORM、RGBA8_UNORM、RGBA8_UNORM_SRGB；BGRA8_UNORM、BGRA8_UNORM_SRGB |
-| packed | RGB10A2_UINT、RGB10A2_UNORM、RG11B10_FLOAT |
-| RGBA16 / RGBA32 | RGBA16_SINT、RGBA16_UINT、RGBA16_SNORM、RGBA16_UNORM、RGBA16_FLOAT；RGBA32_SINT、RGBA32_UINT、RGBA32_FLOAT |
-
-原生数组探针的9×5、2层、2 mip、RGBA8、C|Resource已在166项内；1/4 mip控制继续执行。
-原生 MSAA 的4×、两种barrier模式继续执行。聚合 probe/resolve 只有在其余组合无失败后才将整个 GTest case标为已知问题skip，
-并保存 `executed_mip_combinations`、`executed_sample_barrier_combinations`、`executed_resolve_modes`，不将部分覆盖报告为完整通过。
-能力查询、环境读取、后续操作或清理产生错误时仍失败，不能由后来的已知问题skip覆盖。
-
-规范与根因证据边界见 [RHI 互操作规范边界](../architecture/render-rhi.md#互操作规范边界) 及下文的原生实验说明。
-尤其不能由这些隔离条目宣称 COMMON↔GENERAL 完整跨 API 映射已获权威确认，也不能据此省略独立 native stencil 复现或 runtime/驱动版本对照。
-
-#### 当前隔离配置的验证
-
-2026-10-29，ksgfk-big，Windows x64 / ClangCL，RTX 4080 / 621.01；关闭全部 implicit layers，保留显式 native/RHI validation。
-下表为当前代码重新构建后的结果；每批串行执行，并检查 XML 用例数量，未执行项不计入通过。
-
-| 配置与范围 | 通过 | 已知问题 skip | 能力不足 skip | 不适用/缺后端 skip | 失败 |
-|---|---:|---:|---:|---:|---:|
-| Debug，完整 ExternalResource + KnownGpuIssueContract，1465 项 | 649 | 213 | 602 | 1 | 0 |
-| Release，同上，1465 项 | 649 | 213 | 602 | 1 | 0 |
-| Debug / Release，各自的视图、附件、命令、framebuffer 与 device feature 回归，113 项 | 107 | 1 | 1 | 4 | 0 |
-| Release，IPC MSAA 2×/4×/8×，3 项 | 1 | 2 | 0 | 0 | 0 |
-| Release，Intel UHD 770 / 32.0.101.7092 对照，7 项 | 6 | 0 | 1 | 0 | 0 |
-| Release，GPU validation 重点纹理，5 项 | 4 | 1 | 0 | 0 | 0 |
-| D3D12-only Debug，CPU/query/native/纹理/resolve 定点，14 项 | 7 | 3 | 0 | 4 | 0 |
-| Vulkan-only Debug，同上，14 项 | 8 | 0 | 0 | 6 | 0 |
-
-完整矩阵逐项对照隔离前索引：原 641 个通过项全部继续通过，原 210 个失败项全部变为明确的已知问题 skip；
-额外 3 个已知 skip 是 copy-only D32+S8 历史崩溃与两个 native probe。213 不是修复数量，也不是成功路径数量。
-能力不足的 602 项保持原分类；另一项为 D3D12 原生契约在其他 route 上不适用。
-回归的 4 个条件 skip 是设备所有受支持采样格式均支持 min/max、无法构造不支持格式；另 1 个能力 skip 是 Intel 只有一条可用队列。
-Intel 的数组 native probe 返回 FORMAT_NOT_SUPPORTED；其 MSAA native/RHI 与旧 resolve 对照通过，不命中 NVIDIA 隔离规则。
-
-聚合覆盖继续显式记录：数组 native probe 执行 1/4 mip 两项，跳过 2 mip；MSAA native probe 执行 4× 的两种 barrier 模式，跳过 2×/8× 的四项；
-旧 resolve 执行其余 10 个模式，只跳过 Average/None。两个 DX→VK IPC case 完成 generation 0，在 generation 1 隔离，后两代未执行。
-默认矩阵没有重新触发 copy-only D32+S8 DeviceLost。
-
-开启 `RADRAY_TEST_RUN_KNOWN_GPU_ISSUES=1` 的 Release 复现组为 **1 通过、5 原始内容失败、0 已知 skip**：
-两个 native probe、一个部分 mip 数组、一个导入 MSAA 和旧 depth Average resolve 失败，MSAA LocalControl 通过。
-独立 IPC 2× 复现另有 **1 原始失败、0 已知 skip**。这验证了复现入口，不能将预期复现失败重新记为通过。
-
-完整矩阵没有 native/RHI error 或诊断采集失败；每个配置的 native MSAA 对照有 4 条预期 D3D12 ID 820 性能 warning。
-启用复现和 Intel native MSAA 对照各有 12 条同类 warning。GPU validation 另有一条同时启用 core 与 GPU-assisted 的性能设置 warning；
-Loader 的 forced-disabled layer 提示单独保留，不当作内容错误。所有这些 warning 均不构成根因结论。
-
-双后端 Debug/Release 和两个单后端 Debug 均构建通过；双后端 Release、两个单后端 Debug 分别安装到新的独立前缀，外部 CMake 消费工程配置、编译和运行通过。
-消费工程只包含公共 external_resource 头并链接 RadRay::render，限定对应的 CMAKE_CONFIGURATION_TYPES；不准备或下载依赖。
-文档检查与 diff whitespace 检查通过。本地 `build/external-texture-known-issues/` 保存分批 XML、worker 日志、逐项索引和复现输出；不新增开发历史。
-本轮未完成 runtime/驱动版本对照、独立 native stencil 复现、跨 API 完整布局对应的权威核对，以及缺失导出方向的硬件内容验收。
-
-#### 隔离前的内容错误与规范调查
-
-以下失败计数来自引入已知问题隔离前的运行；复现开关恢复这些原始路径。引入 skip 不改变内容正确性尚未验收的结论。
-调查机器为 RTX 4080 / NVIDIA 621.01。Vulkan 的 D3D12_RESOURCE 与 timeline D3D12_FENCE 仍仅含 IMPORTABLE，
-VK→DX、D3D12 句柄 VK→VK 的成功路径属于硬件待验收；OPAQUE_WIN32 memory 和 timeline semaphore 支持双向。
-DX→VK 的部分 mip 链数组存在查询支持但内容不一致的失败；DX→DX 的 2×/8× MSAA 导入对象往返也有内容错误，
-相同 MSAA 描述的 LocalControl 通过。DX→VK 的 D32_FLOAT_S8_UINT 纯复制用例触发 DeviceLost，后续批次明确排除重跑，
-不能把该项列为成功或能力 skip。GPU validation 重点用例没有新增原生错误，但内容错误仍存在；其同时启用 core validation 的性能 warning 单列。
-Intel UHD 770 / 32.0.101.7092 对照中，2×/8× RGBA8 MSAA 导入往返通过。
-此前 Intel 数组跨后端失败受 `VK_LAYER_OBS_HOOK` 干扰：本机 graphics-hook64.dll 1.8.7.0 加载时查询报告 IMPORTABLE，
-仅关闭该层后精确描述返回 `VK_ERROR_FORMAT_NOT_SUPPORTED`。分别关闭 NV_present、NV_optimus 不能消除该差异。
-因此不能把此前 Intel 的内容错误归为 Intel 原生驱动缺陷，也不能把关闭 OBS 后的 skip 算作成功路径。
-原生 API 记录确认了失败数组用例的完整创建描述、dedicated/offset 0 和整资源 ownership range，不能以参数映射测试替代内容验收。
-旧 RTX 3060 / 591.44 记录不代表本次机器已验证。
-
-定位互操作故障时，应另开进程并用 `VK_LOADER_LAYERS_DISABLE=~implicit~` 对照，同时保留显式 validation。
-Loader Layer Filtering 需要以 Vulkan headers 1.3.234 或更新版本构建的 loader；必须从 loader 日志确认实际禁用生效。
-该变量只用于测试进程，不修改系统层注册或生产设备配置。必须重新查询并记录能力，不能沿用带 hook 的查询结果。
-`ExternalResourceNativeProbe` 提供两条原生对照：数组探针直接创建 D3D12 committed texture，逐 mip/layer 原生复制写入，
-手动调用 Vulkan external image/allocate/bind、整资源 acquire 和紧凑读回，绕过 RHI 描述转换、纹理复制及 VMA image 分配；
-MSAA 探针直接 shared handle/open、RTV clear、resolve 和读回，无 shader 或 RHI render pass；
-分别运行独立 ExecuteCommandLists、独立提交再加 `{nullptr, nullptr}` aliasing barrier 两种模式。
-两种模式在 NVIDIA 上均为 2×/8×失败、4×通过，Intel 均通过；该额外 barrier 仅为诊断对照，不是 committed resource 的新增生产要求。
-带 committed resource 指针的 aliasing barrier 被原生验证拒绝（ID 528），属于无效实验，已从探针移除，不能作为 GPU 内容证据。
-RTX 4080 在关闭全部隐式层后，前者单 mip/完整 4 mip 链通过、部分 2 mip 链第二层为零；后者 4×通过、2×/8×在导入对象写入后失败。
-相同 MSAA 原生程序在 Intel 上通过；IPC 单 slot 的 2×/8×失败、4×通过，排除了同进程 device 复用这一解释。
-IPC MSAA 诊断入口为进程环境变量 `RADRAY_TEST_EXTERNAL_IPC_MSAA=2|4|8`，使用 RGBA8/RGBA16、2D/2DArray 四代资源，XML 记录实际 samples；不计入默认复制矩阵。
-这些结果将问题定位到原生互操作路径，仍需驱动版本对照或厂商确认才能确定内部原因，不能由原生 validation 无错误直接推断驱动有错。
-
-D32_FLOAT_S8_UINT 的拆分诊断中，生产端本地预检通过；关闭隐式层后 depth-only 四轮往返通过，stencil-only 首次导入读取就 DeviceLost，未执行消费者写回。
-保持尺寸、mip 和复制操作，显式增加 DepthStencilWrite 用途后两个 aspect 四轮往返通过。
-这支持检查原生 DS 创建模式与 stencil 布局兼容性的假设，尚未证明必须增加用途；生产映射未自动增加该用途，原始纯复制用例仍未验收。
-上述缩减 aspect/只读/增加用途的临时探针已移出正式用例，源码快照和结果保存在本地 `build/external-texture-investigation-probes/` 与 `build/external-texture-investigation-*.log/.xml`。
-
-完整矩阵的验收结果（Windows x64 / ClangCL，RTX 4080 / 621.01；默认隐式层环境，不含后续两个 native probe）：
-
-| 配置与范围 | 通过 | 失败 | skip |
-|---|---:|---:|---:|
-| Debug，ExternalResource，主矩阵与补测按 case 最新结果合并 | 641 | 210 | 603 |
-| Release，ExternalResource，主矩阵及格式策略复测 | 641 | 210 | 603 |
-| Debug / Release，各自的视图、附件、命令和设备 feature 回归 | 107 | 1 | 5 |
-| Debug，D3D12-only 的本后端 route | 284 | 20 | 22 |
-| Debug，Vulkan-only 的 opaque route | 274 | 0 | 13 |
-| Release，GPU validation 重点纹理用例 | 5 | 2 | 0 |
-
-Debug 的纯复制 D32+S8 DeviceLost 属于额外一个崩溃用例，不在表中已完成用例计数内；Release 没有重跑它。
-关闭隐式层的后续 Debug/Release 定点验收各执行 5 个用例，3 个常规控制通过、两个 native probe 失败；未重新执行完整矩阵。
-此前单模式 MSAA 探针各报告 6 条 ID 820 未提供 optimized clear value 的性能 warning；当前双模式为 12 条，原生错误为 0；数组探针错误/警告均为 0。
-主矩阵的 210 项失败包含 188 项部分 mip 数组、20 项 D3D12 MSAA 和 2 项受数组问题影响的 IPC。
-Release XML 逐项审计确认，208 个纹理内容失败的来源 CanCreateExportable 和接收端 CanImport 均为 true，
-没有同一 case 同时含 failure 与 skip。603 个 skip 分为：512 个来源 Vulkan 无 D3D12_RESOURCE 导出能力、
-60 个请求 16× MSAA 不支持、10 个 sRGB storage 不支持、20 个旧资源/fence/IPC route 聚合不支持、1 个后端不适用。
-旧完整矩阵没有记录全部原生查询数值，不能将后来的 native 数值回填为当时观测。
-常规回归的失败是 D3D12 `DepthStencilResolveModesPreserveUntouchedAspectAndOutsideArea`；保留的 2026-10-23 Release 程序也能复现，
-该原有 resolve 路径本次未修改。分阶段读回确认初始化 stencil=19，depth-only Average resolve 后矩形内变为 0，矩形外保持 19；
-本地独立原生 `depth_resolve_repro` 在 NVIDIA 复现、Intel 通过，无 native error/warning，排除了本次共享纹理改动及测试采样 shader。
-已有[原生复现报告](https://forums.developer.nvidia.com/t/d3d12-rtx-4080-depth-only-average-resolve-clears-destination-stencil-driver-32-0-16-2101/386685)，当前未见厂商确认；不据此猜测压缩或写掩码内部机制。
-sRGB 原先固定线性域 1e-4 不能用于要求所有 D3D 实现通过；目前阈值与 Direct3D 规则一致。
-此前将同一依据用于断定 Vulkan 的偏差也必然合法，证据不足；Vulkan 当前结果只表示通过项目阈值，raw copy 仍逐字节校验。
-普通互操作运行的原生错误、警告与诊断采集失败计数为零，不能因此忽略内容错误。
-双后端 Release 和两个单后端 Debug 均完成安装及外部 CMake 消费检查。单后端测试不计入被排除的另一后端 route。
-
-规范审计的当前分类（规则与官方链接见 [RHI 规范边界](../architecture/render-rhi.md#互操作规范边界)）：
-
-| 分类 | 结论与仍需的证据 |
-|---|---|
-| 规范明确要求，已满足已审项目 | 完整形状、mip/layer/sample 查询、external handle 链、dedicated/offset 0、memory type、NT handle 生命周期、完整 ownership range、release/fence/acquire、导入不从 Undefined 丢弃。原生数组探针也执行上述步骤，读回有 transfer→host 屏障、等待和 invalidate。此列表不是全路径合规认证。 |
-| 规范明确要求，原实现有遗漏，已修正 | Vulkan 附件尺寸还受 framebuffer 上限约束；external 查询已补检查并有颜色/深度、宽/高测试。数组原生探针现在区分 FORMAT_NOT_SUPPORTED 与其他查询错误，并核对返回 limits，其他错误不再 skip。此修正不解释小尺寸数组或 copy-only DS 失败。 |
-| 观察到平台相关行为，根因未确认 | D3D12 shared MSAA 2×/8×、旧 depth-only Average resolve 在 NVIDIA 的原生程序失败、Intel 通过。共同的查询、状态、提交、plane 与采样模式约束已核对，尚未分离 OS runtime 和驱动版本。不能只靠无 validation error 或原生复现宣布驱动缺陷。 |
-| 跨 API 规范或实验依据仍不足 | 部分 mip 数组和 copy-only D32+S8 的跨 API 布局对应未得到独立权威确认；后者尚缺完全绕过 RHI 的 stencil-only 原生程序。增加附件用途通过只是改变创建模式的对照，不是合法性证明或可静默采用的修复。 |
-| 测试判据需区分 API | D3D sRGB 使用规范半码值；Vulkan 使用同一项目阈值，完整规范精度验收仍待核对 Vulkan 对应 CTS/厂商依据。不能将 OpenCL 或 D3D 精度条款移植为 Vulkan 要求。 |
-| 环境影响已确认，层内部原因未确认 | 仅关闭本机 OBS 层就改变 Intel 的精确 external 查询结果；符合 layer 可拦截调用这一机制，但尚未定位 OBS 1.8.7.0 的具体拦截代码或驱动交互，不能推断当前 OBS 上游均有同一问题。 |
-
-规范审计使用 Vulkan 1.2.198 作为历史基线，并与当前官方 refpage 对照；实际设备仍以项目 Vulkan 1.2 请求运行，
-需要驱动提供 Win32 external memory/semaphore 扩展及启用 timelineSemaphore。NVIDIA 报告的物理设备 API 为 1.4.357，
-本机验证层来自 Vulkan SDK 1.4.363.0；没有因此启用 synchronization2 或其他新版 feature。
-本机 D3D12Core.dll/d3d12.dll 文件版本为 10.0.26100.9549，项目没有导出 Agility SDK 选择符；文件版本不替代捕获中实际加载模块的证据。
-旧 resolve 原生程序检查 OPTIONS2 的 ProgrammableSamplePositionsTier、4× quality、单采样目标、默认 sample positions 和 depth plane 0。
-[D3D12_RESOLVE_MODE](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resolve_mode) 允许 depth Average、禁止 stencil Average；
-[Programmable Sample Positions v0.5](https://microsoft.github.io/DirectX-Specs/d3d/ProgrammableSamplePositions.html) 还要求 clear/resolve/transition 的 sample positions 一致。
-因此仅 depth resolve 不应把未指定的 stencil plane 当作输出；已观察到的矩形内 stencil 清零仍是失败，外部区域保持不变。
-
-下一步应保留相同描述与相同二进制，分别做 runtime/驱动版本对照；为 copy-only DS 补独立原生 stencil 复现，
-将 D3D12 desc、Vulkan create info、handle properties、query limits、barrier 与 fence 完整交给厂商核对跨 API 对应。
-OBS 对照必须记录实际加载层、单独 disable OBS 和全部 implicit disable 三组重新查询结果，不能复用另一组能力。
-Loader 的过滤机制见 [Khronos Loader Layer Interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md)。
-这些动作完成前，已知失败按前述精确条件隔离；开启复现时保留原始失败判据。缺失的导出方向继续列为硬件待验收。
-
-隔离前规范审计的定点回归（关闭全部 implicit layers，保留显式 validation；不替代上面的完整矩阵）：
-
-| 配置/检查 | 结果 |
-|---|---|
-| Debug、Release，各 16 个用例 | 各 13 通过、2 原生复现失败、1 不适用 skip；覆盖新限制、native probe、映射、MSAA4、本地对照、opaque 格式策略、配置与句柄兼容性 |
-| Release，GPU validation，3 个用例 | 2 通过、1 原生 MSAA 复现失败；无新增原生 error，性能 warning 单列 |
-| D3D12-only Debug，6 个用例 | 3 通过、1 原生 MSAA 失败、2 缺 Vulkan skip |
-| Vulkan-only Debug，5 个用例 | 3 通过、2 缺 D3D12 skip |
-| Intel 原生对照 | MSAA 的两种 barrier 模式均通过；跨 API 数组查询不支持，记 skip |
-| 保留的独立 depth resolve 程序，D32，两个 GPU × none/average/min/max | 7 通过；仅 NVIDIA average 失败，16 个矩形内 stencil 值改变，native error/warning 均为 0 |
-
-双后端 Debug/Release 与两个单后端 Debug 构建通过；文档检查与 diff whitespace 检查通过。
-该次规范审计没有重跑完整 1455 个用例、重新安装消费或重新触发 D32+S8 DeviceLost；这些状态沿用前述明确范围，不能计作新通过。
-本地审计证据为 `build/external-texture-spec-audit/` 内的 XML/log 与规范来源快照，不属于受版本控制的开发历史。
-
-隔离前的查询与 skip 判定复核（ksgfk-big，2026-10-29 12:35 起，完整矩阵之后；内容定点关闭 implicit layers）：
-
-- `QueryEveryTextureCaseWithoutCreatingResources` 查询生成器的全部 268 个描述，NVIDIA 的 D3D12、Vulkan D3D12_RESOURCE、Vulkan opaque 共 804 次；没有查询异常。
-  每组 256 个可用描述、10 个不支持的 16× 描述、2 个 sRGB storage 描述。Vulkan D3D12 句柄的 256 个描述只支持导入，不能运行反向导出 route。
-  这是能力查询覆盖，不创建或执行纹理，不能替代 GPU 内容验收，也不等于全部合法 RHI 描述的穷举。
-- Intel 默认层、仅禁 OBS、禁全部 implicit 三组，各 536 次查询，无查询异常。后两组的全部 268 个 D3D12_RESOURCE 描述返回 FORMAT_NOT_SUPPORTED；
-  默认层有 256 个可导入描述。错误返回时不解释输出结构的其他字段；opaque 不受此变化影响。
-- Debug 定点 33 项：16 通过、8 失败、9 skip；Release 定点和视图/设备 feature 回归 55 项：49 通过、5 失败、1 skip。
-  两组失败均为已有 native probe、部分 mip 数组、MSAA 2×/8×，Debug 另含两个 IPC 数组失败；Release 的 skip 是 Intel 多队列硬件限制。
-- 独立进程重新运行两个 IPC 数组 case、MSAA 2×/4×/8×：数组两项和 2×/8×失败，4×通过。数组失败在 generation 1 的 RGBA16_FLOAT、35×19、3 层、3 mip；后续 generation 没有执行。
-  没有以降低参数、增加附件 usage 或改变内容判据绕过错误。
-- 完整字节日志修正后 Debug 的 9 项针对性检查为 7 通过、2 个已有数组失败；两个单后端各 4 项为 2 通过、2 缺后端 skip。
-  旧 depth Average resolve 的当前 Release RHI 用例重新运行：NVIDIA 失败、Intel 通过；与前述独立原生程序对照一致。
-  双后端 Debug/Release 和两个单后端 Debug 构建、文档检查及 diff whitespace 检查通过。
-- D3D12 查询现已保留失败 HRESULT；公共纹理测试、旧用例和 IPC 在 skip 前检查查询错误；opaque 同时检查两端能力。
-  旧聚合纹理循环对单个不支持组合继续查询其余组合，XML 的 completed_combinations / unsupported_combinations 单列覆盖；独立参数矩阵仍是主要验收入口。
-  CPU contract 覆盖错误分类，但未向真实驱动注入内存耗尽或 CheckFeatureSupport 故障。复制失败日志改为打印全部比较字节，内容比较未改变。
-
-本地 `build/external-texture-capability-audit/` 的 `historical-release-index.json` / `historical-failed.csv` / `historical-skipped.csv`
-提供全部 1454 项索引及每个失败/skip 的原 XML、时间、日志行、方向和 RHI 查询结果；`current-queries.json` 独立保存当前原生返回值。
-该次审计的代码基线为 `7cf4f1f` 加当时未提交工作树，源码 SHA-256 在本地审计目录；旧完整矩阵为默认隐式层环境，该次定点不是一次完整重验收。
-该次审计没有重新执行 copy-only D32+S8 DeviceLost、完整内容矩阵或安装消费；未具备的导出方向继续单列，旧 depth Average 与 Vulkan sRGB 精度的证据边界保持上述结论。
-
-D3D12 句柄的导出缺失是一项运行时验收限制，不能为此新增 D3D12 分配桥接或替代路径。换 GPU/驱动后重新查询并执行相同用例。
-测试 shader 的源文件在 `modules/render/tests/data/interop_*.hlsl`，通过[本地测试 shader](#本地测试-shader)的统一脚本同时生成 DXIL / SPIR-V fixture；配置/普通测试构建不调用 DXC。
-
-Release 使用 `win-x64-release` 先构建后测试。单后端分别以独立目录配置
-`-DRADRAY_ENABLE_VULKAN=OFF` / `-DRADRAY_ENABLE_D3D12=OFF`，构建并运行 ExternalResource suites；
-依赖缺失的 route 会跳过。安装消费按本节前面的安装流程，外部工程包含
-`<radray/render/external_resource.h>` 并仅链接 `RadRay::render`，检查公共头不暴露原生 SDK 类型。
-启用 Tracy 时，直接在同一进程运行完整纹理矩阵可能耗尽 GPU context 编号；使用上述逐 case CTest，
-或将 GTest filter 分为小批次串行运行。不能把进程异常、缺失 XML 或未执行的用例计作通过。
-
-### D3D12 / DXGI 采集验收
-
-公共 GPU fixture 先创建 `DXGIDiagnosticContext` 并订阅结构化诊断，再将同一上下文传给 Factory，
-用唯一应用消息和同步检查点确认 D3D12/DXGI 通路。同一 case 同时创建多个 Factory 时，必须显式
-传入同一个上下文；`TryCreateDevice` 的 diagnosticContext 参数接受共享上下文。顺序 case 各自创建并最终释放上下文。
-没有后台自检。报告记录 callback/polling、原生 InfoQueue1 查询 HRESULT、native/base-interface-only
-选择、callback/checked_clear 策略、完整性、同步检查点、最终收尾、预期匹配及错误/警告数。
-`RADRAY_TEST_D3D12_ADAPTER_INDEX` 与 Vulkan 的同名索引变量分别选择各自枚举中的 adapter；
-非法或不存在的索引失败，不回退。
-
-`D3D12DiagnosticsTest` 覆盖自然选择、强制基础接口、最后一步错误、fixture 清理阶段错误、
-重复检查点、结构化原生 allocator Reset 错误。`D3D12DiagnosticsSmoke` 覆盖 DXGI 两个 producer、
-容量违约、全部队列/slot、重复 Reset、共享通道、再次创建及 swapchain 重建，也检查 debug Factory
-缺少显式上下文时拒绝创建，以及 Factory 先释放后 Device 仍能采集、最终上下文无残留引用。
-`D3D12DiagnosticsReaders` 使用真实小容量队列与测试侧 COM spy，覆盖完整复制、读取失败、
-复制期间变化、复制后清空前插入、清空后新消息、溢出、外部清空和多 Factory 聚合；另以活动上下文与
-未建立原生通道的空上下文验证检查点、observer 和完整性故障不会跨上下文传播。
-callback 回归检查立即分发日志/probe、零存储队列调用、注册失败不降级与在途注销。
-`diagnostic_callback_runtime=native/modeled` 区分原生接口与旧系统上的测试模型；模型通过不能
-替代支持 InfoQueue1 的实际运行时验收。`D3D12DiagnosticCounters` 检查异常计数，
-`D3D12DiagnosticFinalizer` 检查未预期错误、故障和区间外消息会产生 GTest 失败。
-实际资源销毁消息由 `ExplicitLayoutOwnershipD3D12` 覆盖。
-
-预期错误/故障在测试侧按来源、producer、ID、severity、数量、消息区间以及故障类型/HRESULT
-精确匹配，直接运行 GTest 也会断言；`evidence_class` 与预期计数只用于报告归类，不能代替匹配。
-`run_render_validation.py` 要求必测后端实际执行 validation-enabled 用例；缺失 GTest/CTest 证据、
-崩溃、超时、自检/收尾/匹配失败、模式不一致、非预期错误或采集故障都失败。预期采集故障允许
-对应检查点为 failed，但最终匹配必须通过。warning 和可选 skip 分列，不默认为零错误。
-算法证据使用 `diagnostic_algorithm`，不依赖测试名称特判。
-每次使用空输出目录，保存 metadata、GTest XML、CTest 日志和 summary.json：
-
-```powershell
-python tools/run_render_validation.py --self-test
-cmake --build --preset win-x64-debug-clangcl --target test_radray_render --parallel 8
-$env:RADRAY_TEST_D3D12_ADAPTER_INDEX = '0'
-$env:RADRAY_TEST_VULKAN_ADAPTER_INDEX = '0'
-python tools/run_render_validation.py --build-dir build/windows-x64-clangcl/Debug --config Debug --output-dir build/validation/debug-gpu0 --required-backends d3d12,vulkan --regex 'D3D12Diagnostic|Vulkan|ExplicitBindingLayoutTest|ExplicitLayoutOwnership|DescriptorDirtyRangesD3D12Test'
-Remove-Item Env:RADRAY_TEST_D3D12_ADAPTER_INDEX, Env:RADRAY_TEST_VULKAN_ADAPTER_INDEX
-```
-
-对 NVIDIA / Intel 分别选择索引执行；Release 使用对应 preset、配置及独立报告目录，
-始终先构建再测试。另选 `D3D12DiagnosticsGbv.AsyncErrorIsDeliveredBeforeFinalization` 和单个 dispatch/readback 用例，
-加 `--gpu-validation` 做小范围 GBV；前者验证 GPU 异步状态错误在最终收尾前送达，默认运行跳过。
-不要将 GBV 用于性能比较。用独立构建目录分别设置 `RADRAY_ENABLE_VULKAN=OFF`、
-`RADRAY_ENABLE_D3D12=OFF`，构建 render 测试并运行剩余后端回归；缺失后端不列为必测。
-fixture/报告改动也必须运行受影响的 Vulkan validation / synchronization validation 回归。
-
-**Win10 验收是独立必需项，不能用本机 Win11 结果代替。** 在真实 Win10 安装 Graphics Tools，
-记录 OS caption/version/build/UBR、GPU 驱动和系统 D3D12/D3D12Core/SDKLayers/dxgidebug 文件版本
-（不存在的拆分 runtime 文件明确记录 not_present）。不要求挂 debugger：
-必须观察原生 InfoQueue1 查询 `E_NOINTERFACE`，正常创建自动选择 polling，
-同步自检、allocator Reset 与 DXGI 原生错误被收到，复制清空累计计数、多 Factory 和共享通道生命周期测试通过。
-Debug/Release 都先构建后运行；NVIDIA/Intel 分别保留实际可用设备的证据，硬件缺失明确列为未覆盖。
-在上述完整回归命令后加 `--require-win10-legacy`，任一环境或证据缺失使报告失败。
-Windows 11 上强制 base-interface-only 只是算法/路径测试；默认报告的
-`win10_legacy_acceptance` 会保持 pending 并列出缺失证据，不能据此宣布 Win10 验收完成。
-若 Win10 实测 ClearStoredMessages 不保留累计 accepted 语义，应报告不支持/采集不完整，
-不得静默跳过对账或当作零错误通过。
-
-采集契约与 callback 覆盖边界见 [RHI 诊断通道](../architecture/render-rhi.md#d3d12--dxgi-诊断通道)。
+单独运行 `compile_render_fixtures.py --output-dir <raw-directory>` 只用于调试 render 配方，不更新校验清单；之后应再运行统一入口。
 
 ## 编译数据库与文档检查
 
@@ -1019,26 +558,13 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 
 安装消费继续使用 `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 和 `RadRay::runtime`，
 传递加载 render/core，不要求 shader 或 DXC。`RADRAY_BUILD_TESTS=ON` 时提供
-`test_radray_runtime`，验证材质标签登记/查询/复制、参数类型、默认值/覆盖、显式快照同步与生命周期，
-以及命令缓存的增量重建、句柄稳定性、静态/动态合并、参数绑定与录制预检。以下 suite 不要求 GPU 或预编译 shader：
+`test_radray_runtime`，用 `modules/runtime/tests/test_fakes.h` 中的 CPU fake 代替 RHI 对象，不需要 GPU 或预编译 shader。
+它覆盖材质标签、材质参数与快照、MeshDrawCommand 校验与录制、Processor 构建、Scene 增量缓存，
+以及 FrameScheduler 的槽位轮转、等待、Scene 借用、退役资源与析构顺序。suite 列表见[测试](#测试)：
 
 ```powershell
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(MaterialSystem|MaterialTags|MeshDrawingPipeline)\.' --output-on-failure
-```
-
-同一可执行文件中的 `FrameLoop` suite 使用已编译的 D3D12/Vulkan 后端和 validation，
-以每槽独立的 buffer 拷贝/读回验证 1/2/3 槽轮转、跨槽帧编号、可写数据隔离、
-多 command buffer 的池化复用、批量与分次提交，以及外部 Scene 的借用边界、WaitIdle 和析构顺序。
-同时覆盖同步提交加空操作 Wait 的无显式 fence 实现、可写 Scene 自动增量同步、const Scene 入口与未修改帧的命令复用。
-上传缓冲由槽内 ObjectArena 持有，覆盖帧内分配隔离、完成后逆序清理、WaitIdle 幂等与析构顺序。
-共享 Buffer 在 Extract / Record 中交给 `FrameSlot::RetireResource`，验证完整轮转后释放，
-以及 WaitIdle 先重置全部 allocator 再释放帧内和退役 owner。退役队列另覆盖连续登记、逆序析构、
-未使用槽、WaitIdle 后重新登记、Scheduler 析构，以及回调之外登记时终止进程；帧执行不提供失败恢复路径。
-不需要 shader，后端初始化失败视为测试失败：
-
-```powershell
-ctest --preset win-x64-debug-clangcl -R FrameLoop --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame)' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -1212,13 +738,13 @@ Vulkan 用它们同步前一次写入和后一次读写。初始 barrier 还将�
 设为不存在的目录检查缺失 shader 提示，将 `--output` 指向已有目录检查路径错误；不会生成伪造图片。
 正常退出及帧外返回错误的路径在 GPU 完成后才读取或释放资源；帧执行中的致命错误直接终止，不承诺执行清理回调。
 
-模板参考值的 GPU 回归位于 `AttachmentOperations.StencilReferenceIsDynamicMaskedAndResetPerPass`，
-复用现有测试 shader，读回检查 Replace/Equal、掩码、切换 PSO 和新 Pass 重置行为。
-在已显式准备测试 shader 后运行（Release 将 preset 改为 `win-x64-release-clangcl`）：
+描边依赖的模板参考值行为由 `RenderPassTest.StencilReferenceIsDynamicAndResetsEachPass` 覆盖，
+读回检查 Replace/Equal、切换 PSO 保留参考值和新 Pass 重置为 0。在已显式准备测试 shader 后运行
+（Release 将 preset 改为 `win-x64-release-clangcl`）：
 
 ```powershell
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime test_radray_render --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
-ctest --preset win-x64-debug-clangcl -R 'MaterialSystem|MaterialTags|MeshDrawingPipeline|AttachmentOperations.*StencilReference' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame)|StencilReference' --output-on-failure
 Remove-Item Env:RADRAY_TEST_REQUIRED_BACKENDS
 ```

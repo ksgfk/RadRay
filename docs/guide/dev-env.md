@@ -115,7 +115,7 @@ Visual Studio/MSBuild 不创建该目标，也不自动调用或串联 `win_gen_
             "environment": [
                 {
                     "name": "PATH",
-                    "value": "${workspaceFolder}/SDKs/radray_dxc/extracted/bin;${env:PATH}"
+                    "value": "${workspaceFolder}/SDKs/radray_dxc/extracted/bin;${workspaceFolder}/SDKs/mimalloc/windows-x64-clangcl/${command:cmake.buildType}/bin;${env:PATH}"
                 }
             ],
             "console": "integratedTerminal"
@@ -125,8 +125,10 @@ Visual Studio/MSBuild 不创建该目标，也不自动调用或串联 `win_gen_
 ```
 
 先选择当前存在的测试、工具或基准 CMake launch target，再按目标填写参数。Windows `PATH` 用分号分隔，
-直接包含 SDK 的 bin；测试和工具不再向输出目录复制 DXC。此环境属于该调试配置，不修改集成终端。
-终端手动运行程序的环境设置见[开发时加载 DXC](build-test.md#开发时加载-dxc)。
+直接包含 SDK 的 bin；构建不向输出目录复制 DXC 或 mimalloc。示例按 ClangCL 三元组书写，
+`${command:cmake.buildType}` 由 CMake Tools 提供当前配置；使用 MSVC 预设时把三元组改为 `windows-x64-msvc`，
+静态 CRT 三元组不需要 mimalloc 路径。此环境属于该调试配置，不修改集成终端。
+终端手动运行程序的环境设置见[开发时加载运行库](build-test.md#开发时加载运行库)。
 
 ## 格式化
 

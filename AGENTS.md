@@ -10,6 +10,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 |---|---|
 | 定位子系统、理解当前设计 | [架构地图](docs/architecture/overview.md)，再读所属子系统文档 |
 | 配置、构建、测试、恢复依赖 | [构建与测试](docs/guide/build-test.md) |
+| 编写或评审测试、按 TDD 开发 | [编写测试](docs/guide/testing.md) |
 | 性能采样、运行基准、比较改动 | [性能测量](docs/guide/performance.md) |
 | 编写 C++ | [C++ 约定](docs/guide/cpp-conventions.md) |
 | 编写 HLSL、修改 binding | [Shader authoring](docs/guide/shader-authoring.md)、[Shader pipeline](docs/architecture/shader-pipeline.md) |

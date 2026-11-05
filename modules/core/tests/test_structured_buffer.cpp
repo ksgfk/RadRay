@@ -10,93 +10,146 @@ using namespace radray;
 
 namespace {
 
-// 建一个与 MaterialParameterLayout::CreateStorageTemplate 同形的存储:
-// 单根 cbuffer,字段各为独立原子类型,按反射偏移落位。
-//   offset 0:  float4 BaseColor
-//   offset 16: float4 Extra
-//   offset 32: float  Scalar
-std::optional<StructuredBufferStorage> BuildCb() {
+// gCB: float4 BaseColor @0, float4 Extra @16, float Scalar @32, size 48.
+std::optional<StructuredBufferStorage> BuildConstantBuffer() {
     StructuredBufferStorage::Builder builder{};
-    StructuredBufferId cb = builder.AddType("CB", 48);
-    StructuredBufferId f4a = builder.AddType("BaseColor", 16);
-    StructuredBufferId f4b = builder.AddType("Extra", 16);
-    StructuredBufferId f1 = builder.AddType("Scalar", 4);
-    builder.AddMemberForType(cb, f4a, "BaseColor", 0);
-    builder.AddMemberForType(cb, f4b, "Extra", 16);
-    builder.AddMemberForType(cb, f1, "Scalar", 32);
+    const StructuredBufferId cb = builder.AddType("CB", 48);
+    const StructuredBufferId baseColor = builder.AddType("float4", 16);
+    const StructuredBufferId scalar = builder.AddType("float", 4);
+    builder.AddMemberForType(cb, baseColor, "BaseColor", 0);
+    builder.AddMemberForType(cb, baseColor, "Extra", 16);
+    builder.AddMemberForType(cb, scalar, "Scalar", 32);
     builder.AddRoot("gCB", cb);
     return builder.Build();
 }
 
+template <class T>
+T ReadAt(std::span<const byte> data, size_t offset) {
+    T value{};
+    std::memcpy(&value, data.data() + offset, sizeof(T));
+    return value;
+}
+
 }  // namespace
 
-// ① 按名写一个不存在的字段名 → TrySetValue 返回 false(而非静默吞掉)。
-TEST(StructuredBufferTest, TrySetValueUnknownFieldFails) {
-    auto storageOpt = BuildCb();
-    ASSERT_TRUE(storageOpt.has_value());
-    StructuredBufferStorage& storage = storageOpt.value();
-    auto root = storage.GetVar("gCB");
+TEST(StructuredBufferTest, WritesFieldsAtReflectedOffsets) {
+    auto storage = BuildConstantBuffer();
+    ASSERT_TRUE(storage.has_value());
+    auto root = storage->GetVar("gCB");
     ASSERT_TRUE(root.IsValid());
 
-    const Eigen::Vector4f v{1.0f, 2.0f, 3.0f, 4.0f};
-    EXPECT_FALSE(root.TrySetValue("DoesNotExist", v));
-    // 已知字段仍成功。
-    EXPECT_TRUE(root.TrySetValue("BaseColor", v));
+    ASSERT_TRUE(root.TrySetValue("Extra", Eigen::Vector4f{1.0f, 2.0f, 3.0f, 4.0f}));
+    ASSERT_TRUE(root.TrySetValue("Scalar", 5.0f));
+
+    const auto data = storage->GetData();
+    ASSERT_EQ(data.size(), 48u);
+    EXPECT_EQ(ReadAt<float>(data, 16), 1.0f);
+    EXPECT_EQ(ReadAt<float>(data, 28), 4.0f);
+    EXPECT_EQ(ReadAt<float>(data, 32), 5.0f);
+    EXPECT_EQ(ReadAt<float>(data, 0), 0.0f);
 }
 
-// ② 用与反射字段大小不符的类型写入 → TrySetValue 返回 false。
-TEST(StructuredBufferTest, TrySetValueSizeMismatchFails) {
-    auto storageOpt = BuildCb();
-    ASSERT_TRUE(storageOpt.has_value());
-    StructuredBufferStorage& storage = storageOpt.value();
-    auto root = storage.GetVar("gCB");
-    ASSERT_TRUE(root.IsValid());
+TEST(StructuredBufferTest, UnknownNamesReturnInvalidViews) {
+    auto storage = BuildConstantBuffer();
+    ASSERT_TRUE(storage.has_value());
 
-    // 把 float(4B)写进 float4(16B)字段 → 尺寸不符,响亮失败。
-    const float tooSmall = 1.0f;
-    EXPECT_FALSE(root.TrySetValue("BaseColor", tooSmall));
-
-    // 把 float4(16B)写进 float(4B)字段 → 尺寸不符,响亮失败。
-    const Eigen::Vector4f tooBig{1.0f, 2.0f, 3.0f, 4.0f};
-    EXPECT_FALSE(root.TrySetValue("Scalar", tooBig));
-
-    // 匹配大小则成功。
-    EXPECT_TRUE(root.TrySetValue("Scalar", 5.0f));
-    EXPECT_TRUE(root.TrySetValue("BaseColor", tooBig));
+    EXPECT_FALSE(storage->GetVar("Missing").IsValid());
+    auto root = storage->GetVar("gCB");
+    EXPECT_FALSE(root.GetVar("Missing").IsValid());
+    EXPECT_FALSE(root.TrySetValue("Missing", 1.0f));
 }
 
-// ③ 句柄缓存命中后写入结果与按名写入逐字节一致。
-TEST(StructuredBufferTest, CachedHandleWriteMatchesByName) {
-    auto storageByName = BuildCb();
-    auto storageByHandle = BuildCb();
-    ASSERT_TRUE(storageByName.has_value());
-    ASSERT_TRUE(storageByHandle.has_value());
+TEST(StructuredBufferTest, TrySetValueRejectsSizeMismatch) {
+    auto storage = BuildConstantBuffer();
+    ASSERT_TRUE(storage.has_value());
+    auto root = storage->GetVar("gCB");
+    const vector<byte> before(storage->GetData().begin(), storage->GetData().end());
 
-    const Eigen::Vector4f base{0.25f, 0.5f, 0.75f, 1.0f};
-    const Eigen::Vector4f extra{-1.0f, -2.0f, -3.0f, -4.0f};
-    const float scalar = 42.0f;
+    EXPECT_FALSE(root.TrySetValue("BaseColor", 1.0f));
+    EXPECT_FALSE(root.TrySetValue("Scalar", Eigen::Vector4f{1.0f, 2.0f, 3.0f, 4.0f}));
 
-    // 路径 A:每次按名 GetVar 写入。
-    {
-        auto root = storageByName->GetVar("gCB");
-        ASSERT_TRUE(root.GetVar("BaseColor").TrySetValue(base));
-        ASSERT_TRUE(root.GetVar("Extra").TrySetValue(extra));
-        ASSERT_TRUE(root.GetVar("Scalar").TrySetValue(scalar));
-    }
+    const auto after = storage->GetData();
+    EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin(), after.end()));
+}
 
-    // 路径 B:解析一次取稳定 globalId 句柄,之后用句柄复用写入。
-    {
-        auto root = storageByHandle->GetVar("gCB");
-        StructuredBufferId hBase = root.GetVar("BaseColor").GetId();
-        StructuredBufferId hExtra = root.GetVar("Extra").GetId();
-        StructuredBufferId hScalar = root.GetVar("Scalar").GetId();
-        ASSERT_TRUE(StructuredBufferView(&storageByHandle.value(), hBase).TrySetValue(base));
-        ASSERT_TRUE(StructuredBufferView(&storageByHandle.value(), hExtra).TrySetValue(extra));
-        ASSERT_TRUE(StructuredBufferView(&storageByHandle.value(), hScalar).TrySetValue(scalar));
-    }
+TEST(StructuredBufferTest, InvalidViewRejectsWrites) {
+    StructuredBufferView view{};
 
-    std::span<const byte> a = storageByName->GetData();
-    std::span<const byte> b = storageByHandle->GetData();
-    ASSERT_EQ(a.size(), b.size());
-    EXPECT_EQ(std::memcmp(a.data(), b.data(), a.size()), 0);
+    EXPECT_FALSE(view.IsValid());
+    EXPECT_FALSE(view.TrySetValue(1.0f));
+    EXPECT_FALSE(view.TrySetValue("Scalar", 1.0f));
+}
+
+TEST(StructuredBufferTest, CachedGlobalIdWritesSameField) {
+    auto storage = BuildConstantBuffer();
+    ASSERT_TRUE(storage.has_value());
+    const StructuredBufferId scalarId = storage->GetVar("gCB").GetVar("Scalar").GetId();
+
+    ASSERT_TRUE(StructuredBufferView(&storage.value(), scalarId).TrySetValue(7.0f));
+
+    EXPECT_EQ(ReadAt<float>(storage->GetData(), 32), 7.0f);
+    EXPECT_EQ(ReadAt<float>(storage->GetSpan(scalarId), 0), 7.0f);
+}
+
+TEST(StructuredBufferTest, ArrayElementsAreStridedByElementSize) {
+    StructuredBufferStorage::Builder builder{};
+    const StructuredBufferId block = builder.AddType("Block", 16);
+    const StructuredBufferId scalar = builder.AddType("float", 4);
+    builder.AddMemberForType(block, scalar, "Values", 0, 4);
+    builder.AddRoot("gBlock", block);
+    auto storage = builder.Build();
+    ASSERT_TRUE(storage.has_value());
+    auto values = storage->GetVar("gBlock").GetVar("Values");
+    ASSERT_TRUE(values.IsValid());
+
+    ASSERT_TRUE(values.GetArrayElement(2).TrySetValue(3.0f));
+
+    EXPECT_FALSE(values.GetArrayElement(4).IsValid());
+    EXPECT_EQ(values.GetArrayElement(2).GetGlobalOffset(), 8u);
+    EXPECT_EQ(ReadAt<float>(storage->GetData(), 8), 3.0f);
+    EXPECT_EQ(ReadAt<float>(storage->GetSpan(values.GetId(), 2), 0), 3.0f);
+}
+
+TEST(StructuredBufferTest, AlignmentPadsEachRootAndTotalSize) {
+    StructuredBufferStorage::Builder builder{};
+    const StructuredBufferId scalar = builder.AddType("float", 4);
+    builder.AddRoot("a", scalar);
+    builder.AddRoot("b", scalar);
+    builder.SetAlignment(16);
+    auto storage = builder.Build();
+    ASSERT_TRUE(storage.has_value());
+
+    EXPECT_EQ(storage->GetVar("a").GetGlobalOffset(), 0u);
+    EXPECT_EQ(storage->GetVar("b").GetGlobalOffset(), 16u);
+    EXPECT_EQ(storage->GetData().size(), 32u);
+}
+
+TEST(StructuredBufferTest, BuildFailsForNonPowerOfTwoAlignment) {
+    StructuredBufferStorage::Builder builder{};
+    builder.AddRoot("a", builder.AddType("float", 4));
+    builder.SetAlignment(12);
+
+    EXPECT_FALSE(builder.IsValid());
+    EXPECT_FALSE(builder.Build().has_value());
+}
+
+TEST(StructuredBufferTest, BuildFailsWhenMemberExceedsParent) {
+    StructuredBufferStorage::Builder builder{};
+    const StructuredBufferId parent = builder.AddType("Parent", 8);
+    const StructuredBufferId scalar = builder.AddType("float", 4);
+    builder.AddMemberForType(parent, scalar, "Tail", 6);
+    builder.AddRoot("p", parent);
+
+    EXPECT_FALSE(builder.IsValid());
+    EXPECT_FALSE(builder.Build().has_value());
+}
+
+TEST(StructuredBufferTest, BuildFailsWhenArrayMemberExceedsParent) {
+    StructuredBufferStorage::Builder builder{};
+    const StructuredBufferId parent = builder.AddType("Parent", 8);
+    const StructuredBufferId scalar = builder.AddType("float", 4);
+    builder.AddMemberForType(parent, scalar, "Values", 0, 3);
+    builder.AddRoot("p", parent);
+
+    EXPECT_FALSE(builder.Build().has_value());
 }

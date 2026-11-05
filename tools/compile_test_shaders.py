@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 
-from compile_attachment_fixtures import compile_fixtures
+from compile_render_fixtures import compile_fixtures
 
 
 def file_hash(path):
@@ -16,7 +16,7 @@ def file_hash(path):
 
 def source_hash(root):
     files = [root / "tools/compile_test_shaders.py",
-             root / "tools/compile_attachment_fixtures.py",
+             root / "tools/compile_render_fixtures.py",
              root / "modules/shader_compiler/tests/shader_fixture_generator.cpp",
              root / "project_manifest.json"]
     for directory in ("shaderlib", "modules/shader/include", "modules/shader/src",

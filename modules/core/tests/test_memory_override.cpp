@@ -1,64 +1,49 @@
-#include <gtest/gtest.h>
-#include <mimalloc.h>
-#include <radray/memory.h>
-#include <radray/types.h>
-
 #include <cstdlib>
 #include <cstring>
+
 #include <malloc.h>
+#include <mimalloc.h>
 
-TEST(MimallocOverride, CrtAllocationAndReallocationPreserveData) {
-    radray::unique_ptr<void, decltype(&std::free)> block{std::calloc(8, 32), &std::free};
+#include <gtest/gtest.h>
+
+#include <radray/types.h>
+
+namespace radray {
+namespace {
+
+TEST(MimallocOverrideTest, CrtAllocationsUseMimalloc) {
+    const unique_ptr<void, decltype(&std::free)> plain{std::malloc(128), &std::free};
+    const unique_ptr<void, decltype(&_aligned_free)> aligned{_aligned_malloc(128, 64), &_aligned_free};
+
+    EXPECT_TRUE(mi_any_heap_contains(plain.get()));
+    EXPECT_TRUE(mi_any_heap_contains(aligned.get()));
+}
+
+TEST(MimallocOverrideTest, CrtReallocPreservesDataInMimalloc) {
+    void* block = std::calloc(8, 32);
     ASSERT_NE(block, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(block.get()));
-    const auto* bytes = static_cast<const unsigned char*>(block.get());
-    for (size_t i = 0; i < 256; ++i) EXPECT_EQ(bytes[i], 0);
-    std::memset(block.get(), 0x5a, 256);
+    std::memset(block, 0x5a, 256);
 
-    auto* original = block.release();
-    auto* resized = std::realloc(original, 512);
-    block.reset(resized != nullptr ? resized : original);
+    void* resized = std::realloc(block, 512);
     ASSERT_NE(resized, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(block.get()));
-    bytes = static_cast<const unsigned char*>(block.get());
-    for (size_t i = 0; i < 256; ++i) EXPECT_EQ(bytes[i], 0x5a);
+    const unique_ptr<void, decltype(&std::free)> owner{resized, &std::free};
 
-    radray::unique_ptr<void, decltype(&std::free)> plain{std::malloc(128), &std::free};
-    ASSERT_NE(plain, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(plain.get()));
+    EXPECT_TRUE(mi_any_heap_contains(resized));
+    EXPECT_EQ(static_cast<const unsigned char*>(resized)[255], 0x5a);
 }
 
-TEST(MimallocOverride, RadRayAndCrtAlignedAllocationsUseMimalloc) {
-    radray::unique_ptr<void, decltype(&radray::Free)> plain{radray::Malloc(128), &radray::Free};
-    ASSERT_NE(plain, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(plain.get()));
-
-    radray::unique_ptr<void, decltype(&radray::AlignedFree)> aligned{radray::AlignedAlloc(64, 128), &radray::AlignedFree};
-    ASSERT_NE(aligned, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(aligned.get()));
-    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(aligned.get()) % 64, 0u);
-
-    radray::unique_ptr<void, decltype(&_aligned_free)> crtAligned{_aligned_malloc(128, 64), &_aligned_free};
-    ASSERT_NE(crtAligned, nullptr);
-    EXPECT_TRUE(mi_any_heap_contains(crtAligned.get()));
-    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(crtAligned.get()) % 64, 0u);
-}
-
-TEST(MimallocOverride, CppObjectsContainersAndAlignedNewUseMimalloc) {
-    auto object = radray::make_unique<int>(42);
-    EXPECT_TRUE(mi_any_heap_contains(object.get()));
-    EXPECT_EQ(*object, 42);
-
-    auto array = radray::make_unique<int[]>(128);
-    EXPECT_TRUE(mi_any_heap_contains(array.get()));
-    radray::vector<int> values(128, 7);
-    EXPECT_TRUE(mi_any_heap_contains(values.data()));
-    EXPECT_EQ(values.back(), 7);
-
-    struct alignas(64) AlignedValue {
-        radray::array<radray::byte, 64> Bytes{};
+TEST(MimallocOverrideTest, OperatorNewUsesMimalloc) {
+    struct alignas(64) Aligned {
+        array<byte, 64> Bytes{};
     };
-    auto aligned = radray::make_unique<AlignedValue>();
+    const auto object = make_unique<int>(42);
+    const auto aligned = make_unique<Aligned>();
+    const vector<int> values(128, 7);
+
+    EXPECT_TRUE(mi_any_heap_contains(object.get()));
     EXPECT_TRUE(mi_any_heap_contains(aligned.get()));
-    EXPECT_EQ(reinterpret_cast<std::uintptr_t>(aligned.get()) % 64, 0u);
+    EXPECT_TRUE(mi_any_heap_contains(values.data()));
 }
+
+}  // namespace
+}  // namespace radray

@@ -47,6 +47,7 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | 主题 | 文档 |
 |---|---|
 | 配置、恢复依赖、构建、测试、编译数据库 | [构建与测试](../guide/build-test.md) |
+| 测试取舍、用例形态、GPU 测试约定与 TDD 流程 | [编写测试](../guide/testing.md) |
 | 选择基准、Tracy、配对测量、CPU/GPU 与内存口径 | [性能测量](../guide/performance.md) |
 | 命名、接口、异常、测试和注释约定 | [C++ 约定](../guide/cpp-conventions.md) |
 | IDE、clangd、调试器 | [开发环境](../guide/dev-env.md) |

@@ -1,19 +1,14 @@
-#include <gtest/gtest.h>
-#include <fmt/format.h>
 #include <radray/enum_flags.h>
+
+#include <gtest/gtest.h>
 
 enum class TestFlags : uint32_t {
     None = 0,
     A = 1 << 0,
     B = 1 << 1,
     C = 1 << 2,
-    D = 1 << 3,
+    Far = 1 << 10,
 };
-
-namespace radray {
-template <>
-struct is_flags<TestFlags> : std::true_type {};
-}  // namespace radray
 
 enum class CompoundFlags : uint32_t {
     None = 0,
@@ -22,93 +17,93 @@ enum class CompoundFlags : uint32_t {
     B = Base | (Base << 2),
 };
 
-std::string_view format_as(CompoundFlags v) noexcept {
-    switch (v) {
+std::string_view format_as(CompoundFlags value) noexcept {
+    switch (value) {
+        case CompoundFlags::Base: return "Base";
         case CompoundFlags::A: return "A";
         case CompoundFlags::B: return "B";
-        case CompoundFlags::Base: return "Base";
         default: return "UNKNOWN";
     }
 }
 
 namespace radray {
+
+template <>
+struct is_flags<TestFlags> : std::true_type {};
 template <>
 struct is_flags<CompoundFlags> : std::true_type {};
 template <>
 struct is_compound_enum_flags<CompoundFlags> : std::true_type {};
+
+namespace {
+
+using Flags = EnumFlags<TestFlags>;
+
+TEST(EnumFlagsTest, DefaultHasNoBits) {
+    const Flags flags;
+
+    EXPECT_EQ(flags.value(), 0u);
+    EXPECT_FALSE(static_cast<bool>(flags));
+}
+
+TEST(EnumFlagsTest, BitwiseOperatorsCombineFlags) {
+    const Flags ab = TestFlags::A | TestFlags::B;
+
+    EXPECT_EQ(ab.value(), 3u);
+    EXPECT_EQ((ab & TestFlags::A), TestFlags::A);
+    EXPECT_EQ((ab ^ TestFlags::A), TestFlags::B);
+    EXPECT_FALSE((~Flags{TestFlags::A}).HasFlag(TestFlags::A));
+    EXPECT_TRUE((~Flags{TestFlags::A}).HasFlag(TestFlags::C));
+}
+
+TEST(EnumFlagsTest, CompoundAssignmentUpdatesValue) {
+    Flags flags = TestFlags::A;
+
+    flags |= TestFlags::B;
+    flags &= TestFlags::B;
+    flags ^= TestFlags::C;
+
+    EXPECT_EQ(flags, TestFlags::B | TestFlags::C);
+}
+
+TEST(EnumFlagsTest, HasFlagRequiresEveryRequestedBit) {
+    const Flags flags = TestFlags::A;
+
+    EXPECT_TRUE(flags.HasFlag(TestFlags::A));
+    EXPECT_FALSE(flags.HasFlag(TestFlags::A | TestFlags::B));
+}
+
+TEST(EnumFlagsTest, FormatsSetFlagsByName) {
+    EXPECT_EQ(fmt::format("{}", Flags{}), "[]");
+    EXPECT_EQ(fmt::format("{}", Flags{TestFlags::A}), "[A]");
+    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B | TestFlags::Far), "[A | B | Far]");
+}
+
+TEST(EnumFlagsTest, FormatsUnnamedBitsAsBinary) {
+    const Flags unnamed{static_cast<TestFlags>(1u << 5)};
+
+    EXPECT_EQ(unnamed.FormatByName(), "0b00000000000000000000000000100000");
+}
+
+TEST(EnumFlagsTest, CompoundFlagsFormatThroughAdlFormatAs) {
+    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A}), "[A]");
+    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A | CompoundFlags::B}), "[UNKNOWN]");
+    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{}), "[]");
+}
+
+TEST(EnumFlagsTest, FlagBitNameReachesBitsOutsideReflectionRange) {
+    EXPECT_TRUE(EnumName(TestFlags::Far).empty());
+    EXPECT_EQ(EnumNameOr(TestFlags::Far, "fallback"), "fallback");
+    EXPECT_EQ(EnumFlagBitName(TestFlags::Far), "Far");
+    EXPECT_TRUE(EnumFlagBitName(static_cast<TestFlags>(TestFlags::A | TestFlags::B)).empty());
+}
+
+TEST(EnumFlagsTest, FlagsCastParsesNamesAndRejectsUndefinedBits) {
+    EXPECT_EQ(EnumFlagsCast<TestFlags>("A|Far"), TestFlags::A | TestFlags::Far);
+    EXPECT_FALSE(EnumFlagsCast<TestFlags>("A|Missing").has_value());
+    EXPECT_EQ(EnumFlagsCast<TestFlags>(3u), TestFlags::A | TestFlags::B);
+    EXPECT_FALSE(EnumFlagsCast<TestFlags>(1u << 5).has_value());
+}
+
+}  // namespace
 }  // namespace radray
-
-TEST(EnumFlagsTest, BasicConstructionAndEvaluation) {
-    radray::EnumFlags<TestFlags> flag1;
-    EXPECT_EQ(flag1.value(), 0);
-    EXPECT_FALSE(static_cast<bool>(flag1));
-
-    radray::EnumFlags<TestFlags> flag2(TestFlags::A);
-    EXPECT_EQ(flag2.value(), 1);
-    EXPECT_TRUE(static_cast<bool>(flag2));
-    EXPECT_TRUE(flag2.HasFlag(TestFlags::A));
-    EXPECT_FALSE(flag2.HasFlag(TestFlags::B));
-}
-
-TEST(EnumFlagsTest, BitwiseOperators) {
-    auto flagA = radray::EnumFlags<TestFlags>(TestFlags::A);
-    auto flagB = radray::EnumFlags<TestFlags>(TestFlags::B);
-
-    auto flagAB = flagA | flagB;
-    EXPECT_TRUE(flagAB.HasFlag(TestFlags::A));
-    EXPECT_TRUE(flagAB.HasFlag(TestFlags::B));
-    EXPECT_FALSE(flagAB.HasFlag(TestFlags::C));
-    EXPECT_EQ(flagAB.value(), 3);
-
-    auto flagA_again = flagAB & flagA;
-    EXPECT_EQ(flagA_again.value(), 1);
-
-    auto flagB_only = flagAB ^ flagA;
-    EXPECT_EQ(flagB_only.value(), 2);
-
-    auto notA = ~flagA;
-    EXPECT_FALSE(notA.HasFlag(TestFlags::A));
-    EXPECT_TRUE(notA.HasFlag(TestFlags::B));
-}
-
-TEST(EnumFlagsTest, CompoundAssignmentOperators) {
-    radray::EnumFlags<TestFlags> flag(TestFlags::A);
-    flag |= TestFlags::B;
-    EXPECT_TRUE(flag.HasFlag(TestFlags::A));
-    EXPECT_TRUE(flag.HasFlag(TestFlags::B));
-
-    flag &= TestFlags::A;
-    EXPECT_TRUE(flag.HasFlag(TestFlags::A));
-    EXPECT_FALSE(flag.HasFlag(TestFlags::B));
-
-    flag ^= TestFlags::C;
-    EXPECT_TRUE(flag.HasFlag(TestFlags::A));
-    EXPECT_TRUE(flag.HasFlag(TestFlags::C));
-}
-
-TEST(EnumFlagsTest, EqualityAndInequality) {
-    auto flag1 = radray::EnumFlags<TestFlags>(TestFlags::A) | TestFlags::B;
-    auto flag2 = radray::EnumFlags<TestFlags>(TestFlags::B) | TestFlags::A;
-    auto flag3 = radray::EnumFlags<TestFlags>(TestFlags::C);
-
-    EXPECT_TRUE(flag1 == flag2);
-    EXPECT_FALSE(flag1 == flag3);
-    EXPECT_TRUE(flag1 != flag3);
-
-    EXPECT_TRUE(flag1 == (TestFlags::A | TestFlags::B));
-    EXPECT_TRUE((TestFlags::A | TestFlags::B) == flag1);
-}
-
-TEST(EnumFlagsTest, FormatByNameBitwise) {
-    EXPECT_EQ(radray::EnumFlags<TestFlags>{}.FormatByName(), "[]");
-    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<TestFlags>(TestFlags::A)), "[A]");
-    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B), "[A | B]");
-    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B | TestFlags::C), "[A | B | C]");
-}
-
-TEST(EnumFlagsTest, FormatByNameCompound) {
-    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::A)), "[A]");
-    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::A | CompoundFlags::B)), "[UNKNOWN]");
-    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::Base)), "[Base]");
-    EXPECT_EQ(fmt::format("{}", radray::EnumFlags<CompoundFlags>(CompoundFlags::None)), "[]");
-}
