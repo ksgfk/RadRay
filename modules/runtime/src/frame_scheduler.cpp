@@ -47,10 +47,14 @@ void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableS
     slot.ResetFrameData();
     slot._frameId = _nextFrameId;
     if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(_pipeline->GetMeshPassRegistrations());
-    slot._sourceScene = &source;
+#if RADRAY_IS_DEBUG
+    slot._inFrameCallback = true;
+#endif
     _pipeline->Extract(source, slot);
     _pipeline->Record(slot);
-    slot._sourceScene = nullptr;
+#if RADRAY_IS_DEBUG
+    slot._inFrameCallback = false;
+#endif
     slot._inFlight = true;
     ++_nextFrameId;
     _currentSlotIndex = (_currentSlotIndex + 1) % GetSlotCount();

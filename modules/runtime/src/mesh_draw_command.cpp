@@ -86,6 +86,11 @@ struct MeshDrawCommandStateCache {
     }
 };
 
+Nullable<const MeshDrawCommand*> ResolveIndexedMeshDrawCommand(SparseSetHandle handle, std::span<const MeshDrawCommand> commands) noexcept {
+    if (handle.Generation != 0 || !handle.IsValid() || handle.Index >= commands.size()) return nullptr;
+    return &commands[handle.Index];
+}
+
 }  // namespace
 
 bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStream) noexcept {
@@ -177,30 +182,44 @@ Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
     if (visibleCommand.Source == MeshDrawCommandSource::Cached) {
         return cachedDrawList ? cachedDrawList->Commands.TryGet(visibleCommand.CommandHandle) : nullptr;
     }
-    if (visibleCommand.Source == MeshDrawCommandSource::Dynamic && visibleCommand.CommandHandle.Generation == 0 &&
-        visibleCommand.CommandHandle.IsValid() && visibleCommand.CommandHandle.Index < dynamicCommands.size()) {
-        return &dynamicCommands[visibleCommand.CommandHandle.Index];
+    if (visibleCommand.Source == MeshDrawCommandSource::Dynamic) {
+        return ResolveIndexedMeshDrawCommand(visibleCommand.CommandHandle, dynamicCommands);
     }
     return nullptr;
 }
 
-bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
-                            std::span<const VisibleMeshDrawCommand> visibleCommands,
-                            Nullable<const CachedPassMeshDrawList*> cachedDrawList,
-                            std::span<const MeshDrawCommand> dynamicCommands,
-                            const MeshPassSubmitArgs& submitArgs) noexcept {
+Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
+    const VisibleMeshDrawCommand& visibleCommand, std::span<const MeshDrawCommand> cachedCommands,
+    std::span<const MeshDrawCommand> dynamicCommands) noexcept {
+    if (visibleCommand.Source == MeshDrawCommandSource::Cached) {
+        return ResolveIndexedMeshDrawCommand(visibleCommand.CommandHandle, cachedCommands);
+    }
+    if (visibleCommand.Source == MeshDrawCommandSource::Dynamic) {
+        return ResolveIndexedMeshDrawCommand(visibleCommand.CommandHandle, dynamicCommands);
+    }
+    return nullptr;
+}
+
+namespace {
+
+template <typename TCachedCommands>
+bool SubmitMeshDrawCommandsImpl(render::GraphicsCommandEncoder& encoder,
+                                std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                TCachedCommands cachedCommands,
+                                std::span<const MeshDrawCommand> dynamicCommands,
+                                const MeshPassSubmitArgs& submitArgs) noexcept {
     if (!encoder.IsValid()) return false;
 #if RADRAY_IS_DEBUG
     if (!ValidateSubmitArgs(submitArgs)) return false;
     for (const auto& visible : visibleCommands) {
-        const auto command = ResolveVisibleMeshDrawCommand(visible, cachedDrawList, dynamicCommands);
+        const auto command = ResolveVisibleMeshDrawCommand(visible, cachedCommands, dynamicCommands);
         if (!command || !ValidateMeshDrawCommandImpl(*command, visible, submitArgs)) return false;
     }
 #endif
     MeshDrawCommandStateCache stateCache;
     for (const auto& visible : visibleCommands) {
         if (visible.InstanceCount == 0) continue;
-        const auto commandPtr = ResolveVisibleMeshDrawCommand(visible, cachedDrawList, dynamicCommands);
+        const auto commandPtr = ResolveVisibleMeshDrawCommand(visible, cachedCommands, dynamicCommands);
         if (!commandPtr) return false;
         const auto& command = *commandPtr;
         if (stateCache.Pipeline.Get() != command.Pipeline.Get()) {
@@ -247,6 +266,24 @@ bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
         encoder.DrawIndexed(command.IndexCount, visible.InstanceCount, command.FirstIndex, command.VertexOffset, visible.FirstInstance);
     }
     return true;
+}
+
+}  // namespace
+
+bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
+                            std::span<const VisibleMeshDrawCommand> visibleCommands,
+                            Nullable<const CachedPassMeshDrawList*> cachedDrawList,
+                            std::span<const MeshDrawCommand> dynamicCommands,
+                            const MeshPassSubmitArgs& submitArgs) noexcept {
+    return SubmitMeshDrawCommandsImpl(encoder, visibleCommands, cachedDrawList, dynamicCommands, submitArgs);
+}
+
+bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
+                            std::span<const VisibleMeshDrawCommand> visibleCommands,
+                            std::span<const MeshDrawCommand> cachedCommands,
+                            std::span<const MeshDrawCommand> dynamicCommands,
+                            const MeshPassSubmitArgs& submitArgs) noexcept {
+    return SubmitMeshDrawCommandsImpl(encoder, visibleCommands, cachedCommands, dynamicCommands, submitArgs);
 }
 
 }  // namespace radray

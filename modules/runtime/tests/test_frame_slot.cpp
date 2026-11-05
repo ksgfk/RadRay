@@ -69,6 +69,7 @@ TEST(MeshPassFrameDrawListTest, SortOrdersBySortKeyAndKeepsTies) {
 
 TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
     vector<MeshPassFrameDrawList> lists(1);
+    lists[0].CachedCommands.emplace_back().BaseSortKey = 42;
     lists.resize(16);
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
@@ -77,15 +78,40 @@ TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
     auto& command = list.DynamicContext.AddCommand({});
     list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
     EXPECT_EQ(list.VisibleCommands.size(), 1u);
+    ASSERT_EQ(list.CachedCommands.size(), 1u);
+    EXPECT_EQ(list.CachedCommands[0].BaseSortKey, 42u);
 }
 
-TEST(MeshPassFrameDrawListTest, ClearEmptiesVisibleAndDynamicCommands) {
+TEST(MeshPassFrameDrawListTest, MoveAssignmentKeepsSnapshotsAndRebindsDynamicContext) {
+    MeshPassFrameDrawList source;
+    source.CachedCommands.emplace_back().BaseSortKey = 42;
+    MeshPassFrameDrawList target;
+    target = std::move(source);
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.emplace_back();
+    auto& command = target.DynamicContext.AddCommand({});
+    target.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+    EXPECT_EQ(target.VisibleCommands.size(), 1u);
+    ASSERT_EQ(target.CachedCommands.size(), 1u);
+    EXPECT_EQ(target.CachedCommands[0].BaseSortKey, 42u);
+}
+
+TEST(MeshPassFrameDrawListTest, ClearEmptiesAllCommandsAndKeepsCapacity) {
     MeshPassFrameDrawList list;
+    list.CachedCommands.emplace_back();
     list.VisibleCommands.emplace_back();
     list.DynamicContext.Commands.emplace_back();
+    const auto cachedCapacity = list.CachedCommands.capacity();
+    const auto visibleCapacity = list.VisibleCommands.capacity();
+    const auto dynamicCapacity = list.DynamicContext.Commands.capacity();
     list.Clear();
+    EXPECT_TRUE(list.CachedCommands.empty());
     EXPECT_TRUE(list.VisibleCommands.empty());
     EXPECT_TRUE(list.DynamicContext.Commands.empty());
+    EXPECT_EQ(list.CachedCommands.capacity(), cachedCapacity);
+    EXPECT_EQ(list.VisibleCommands.capacity(), visibleCapacity);
+    EXPECT_EQ(list.DynamicContext.Commands.capacity(), dynamicCapacity);
 }
 
 TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
@@ -109,6 +135,43 @@ TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
     ASSERT_EQ(encoder.Draws.size(), 2u);
     EXPECT_EQ(encoder.Draws[0].FirstIndex, 0u);
     EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
+}
+
+TEST(MeshPassFrameDrawListTest, SubmitSnapshotsAndDynamicCommandsWithPassBindings) {
+    FakePipeline pipeline;
+    FakeBuffer vertices{128, render::BufferUse::Vertex};
+    FakeBuffer instances{128, render::BufferUse::Vertex};
+    FakeBuffer indices{128, render::BufferUse::Index};
+    test::FakeParameterSet parameters;
+    MeshDrawCommand command;
+    command.Pipeline = &pipeline;
+    command.VertexBuffers.push_back({0, {&vertices, 0, 48}});
+    command.InstanceStreamBinding = 1;
+    command.IndexBuffer = {&indices, 0, 4};
+    command.IndexCount = 3;
+    MeshPassFrameDrawList list;
+    list.CachedCommands.push_back(command);
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CommandHandle = {0, 0}, .FirstInstance = 7, .InstanceCount = 2});
+    command.FirstIndex = 3;
+    list.DynamicContext.Commands.push_back(command);
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CommandHandle = {0, 0}, .FirstInstance = 9});
+    const MeshShaderParameterBinding passBinding{0, &parameters, {}};
+    const MeshPassSubmitArgs args{
+        .ParameterSets = std::span{&passBinding, 1},
+        .InstanceStream = render::VertexBufferBinding{1, {&instances, 0, 128}}};
+    RecordingEncoder encoder;
+    ASSERT_TRUE(list.Submit(encoder, args));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 0u);
+    EXPECT_EQ(encoder.Draws[0].FirstInstance, 7u);
+    EXPECT_EQ(encoder.Draws[0].InstanceCount, 2u);
+    EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
+    EXPECT_EQ(encoder.Draws[1].FirstInstance, 9u);
+    ASSERT_EQ(encoder.ParameterBinds.size(), 1u);
+    EXPECT_EQ(encoder.ParameterBinds[0].Set, &parameters);
+    ASSERT_EQ(encoder.VertexCalls.size(), 1u);
+    ASSERT_EQ(encoder.VertexCalls[0].size(), 2u);
+    EXPECT_EQ(encoder.VertexCalls[0][1].View.Target, &instances);
 }
 
 }  // namespace

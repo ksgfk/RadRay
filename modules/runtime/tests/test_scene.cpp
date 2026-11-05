@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <radray/runtime/frame_slot.h>
 #include <radray/runtime/scene.h>
 
 #include "test_fakes.h"
@@ -339,6 +340,119 @@ TEST_F(SceneTest, GatheredHandleStaysValidAcrossOtherCacheChanges) {
     const auto resolved = ResolveVisibleMeshDrawCommand(visible[0], World.GetCachedDrawList(Pass));
     ASSERT_TRUE(resolved);
     EXPECT_EQ(resolved.Get(), &CachedCommand(kept));
+}
+
+TEST_F(SceneTest, FrameDrawListSubmitsSortedSnapshotsAfterSceneClear) {
+    Processor.SortKey = uint64_t{3} << 32;
+    const auto batch = AddBatch(2);
+    Sync();
+    auto& command = World.CachedDrawLists[Pass.Value].Commands.Get(CommandHandle(batch));
+    command.PushConstants = MeshPushConstantCommandBinding{0, 0, {}};
+    for (size_t index = 0; index < 80; ++index) command.PushConstants->Data.push_back(byte{0x17});
+    const array<VisibleMeshBatch, 2> requests{{{.Batch = batch, .ElementIndex = 1, .VisibilitySortKey = 7, .FirstInstanceOverride = 20, .InstanceCountOverride = 2},
+                                               {.Batch = batch, .ElementIndex = 0, .VisibilitySortKey = 3}}};
+    MeshPassFrameDrawList list;
+    ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, requests, list));
+    ASSERT_EQ(list.CachedCommands.size(), 2u);
+    ASSERT_EQ(list.VisibleCommands.size(), 2u);
+    EXPECT_EQ(list.VisibleCommands[0].CommandHandle, (SparseSetHandle{0, 0}));
+    EXPECT_EQ(list.VisibleCommands[1].CommandHandle, (SparseSetHandle{1, 0}));
+    EXPECT_EQ(list.VisibleCommands[0].SortKey, (uint64_t{3} << 32) | 7);
+    World.Clear();
+
+    list.SortVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(list.Submit(encoder));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 0u);
+    EXPECT_EQ(encoder.Draws[0].FirstInstance, 0u);
+    EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
+    EXPECT_EQ(encoder.Draws[1].FirstInstance, 20u);
+    EXPECT_EQ(encoder.Draws[1].InstanceCount, 2u);
+    ASSERT_EQ(encoder.Pushes.size(), 1u);
+    EXPECT_EQ(encoder.Pushes[0], (vector<byte>(80, byte{0x17})));
+}
+
+TEST_F(SceneTest, FrameGatherAppendsOnlyRequestedPassAndKeepsPreviousSnapshots) {
+    AddBatch();
+    RecordingProcessor other{DefaultOutput, Pipeline};
+    other.SortKey = 99;
+    const array<MeshPassRegistration, 2> passes{{{Pass, &Processor}, {{1}, &other}}};
+    World.SyncCachedMeshDrawCommands(passes);
+    MeshPassFrameDrawList list;
+    ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, list));
+    ASSERT_TRUE(World.GatherVisiblePrimitives({1}, std::span{&Primitive, 1}, list));
+    ASSERT_EQ(list.CachedCommands.size(), 2u);
+    ASSERT_EQ(list.VisibleCommands.size(), 2u);
+    EXPECT_EQ(list.VisibleCommands[0].CommandHandle, (SparseSetHandle{0, 0}));
+    EXPECT_EQ(list.VisibleCommands[1].CommandHandle, (SparseSetHandle{1, 0}));
+    EXPECT_EQ(list.CachedCommands[0].BaseSortKey, 0u);
+    EXPECT_EQ(list.CachedCommands[1].BaseSortKey, 99u);
+}
+
+TEST_F(SceneTest, FrameGatherRollsBackBothListsOnInvalidBatch) {
+    const auto batch = AddBatch();
+    Sync();
+    const VisibleMeshBatch valid{.Batch = batch, .VisibilitySortKey = 7};
+    MeshPassFrameDrawList list;
+    ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, std::span{&valid, 1}, list));
+    const array<VisibleMeshBatch, 2> invalid{{valid, {.Batch = {}}}};
+    EXPECT_FALSE(World.GatherVisibleMeshDrawCommands(Pass, invalid, list));
+    ASSERT_EQ(list.CachedCommands.size(), 1u);
+    ASSERT_EQ(list.VisibleCommands.size(), 1u);
+    EXPECT_EQ(list.VisibleCommands[0].CommandHandle, (SparseSetHandle{0, 0}));
+    EXPECT_EQ(list.VisibleCommands[0].SortKey, 7u);
+}
+
+TEST_F(SceneTest, FrameGatherRejectsStaleCachedCommandWithoutChangingEarlierOutput) {
+    const auto validBatch = AddBatch();
+    const auto staleBatch = AddBatch();
+    Sync();
+    const VisibleMeshBatch valid{.Batch = validBatch};
+    MeshPassFrameDrawList list;
+    ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, std::span{&valid, 1}, list));
+    World.CachedDrawLists[Pass.Value].Commands.Destroy(CommandHandle(staleBatch));
+    const array<VisibleMeshBatch, 2> invalid{{valid, {.Batch = staleBatch}}};
+    EXPECT_FALSE(World.GatherVisibleMeshDrawCommands(Pass, invalid, list));
+    EXPECT_EQ(list.CachedCommands.size(), 1u);
+    EXPECT_EQ(list.VisibleCommands.size(), 1u);
+}
+
+TEST_F(SceneTest, FramePrimitiveGatherRollsBackBothListsOnInvalidPrimitive) {
+    AddBatch();
+    AddBatch(2);
+    Sync();
+    MeshPassFrameDrawList list;
+    ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, list));
+    const array<SparseSetHandle, 2> invalid{Primitive, {}};
+    EXPECT_FALSE(World.GatherVisiblePrimitives(Pass, invalid, list));
+    EXPECT_EQ(list.CachedCommands.size(), 3u);
+    EXPECT_EQ(list.VisibleCommands.size(), 3u);
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(list.Submit(encoder));
+    EXPECT_EQ(encoder.Draws.size(), 3u);
+}
+
+TEST_F(SceneTest, RecordUsesExtractedSnapshotAfterMeshBatchRemoval) {
+    const auto batch = AddBatch();
+    test::FakeGpu gpu;
+    test::RecordingEncoder encoder;
+    test::CallbackPipeline* callbacks{nullptr};
+    auto scheduler = test::CreateScheduler(gpu.Context, callbacks, 1);
+    ASSERT_TRUE(scheduler);
+    callbacks->Passes = {{Pass, &Processor}};
+    callbacks->OnExtract = [&](const Scene& source, FrameSlot& slot) {
+        ASSERT_TRUE(source.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, slot.GetPassDrawList(Pass)));
+    };
+    callbacks->OnRecord = [&](FrameSlot& slot) {
+        ASSERT_TRUE(World.RemoveMeshBatch(Primitive, batch));
+        auto& list = slot.GetPassDrawList(Pass);
+        list.SortVisibleCommands();
+        ASSERT_TRUE(list.Submit(encoder));
+    };
+    scheduler->RunFrame(World);
+    ASSERT_EQ(encoder.Draws.size(), 1u);
+    EXPECT_EQ(encoder.Draws[0].IndexCount, 3u);
 }
 
 TEST_F(SceneTest, ClearRemovesRecordsAndCommands) {

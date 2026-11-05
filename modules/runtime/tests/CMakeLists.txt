@@ -6,6 +6,7 @@ add_executable(test_radray_runtime
     test_scene.cpp
     test_frame_slot.cpp
     test_frame_scheduler.cpp
+    test_rdg.cpp
     test_gpu_device.cpp)
 target_link_libraries(test_radray_runtime PRIVATE RadRay::runtime GTest::gtest_main)
 radray_default_compile_flags(test_radray_runtime)

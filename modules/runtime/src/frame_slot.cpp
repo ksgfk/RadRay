@@ -11,12 +11,13 @@ namespace radray {
 MeshPassFrameDrawList::MeshPassFrameDrawList() noexcept : DynamicContext(VisibleCommands) {}
 
 MeshPassFrameDrawList::MeshPassFrameDrawList(MeshPassFrameDrawList&& other) noexcept
-    : VisibleCommands(std::move(other.VisibleCommands)), DynamicContext(std::move(other.DynamicContext)) {
+    : CachedCommands(std::move(other.CachedCommands)), VisibleCommands(std::move(other.VisibleCommands)), DynamicContext(std::move(other.DynamicContext)) {
     DynamicContext.BindVisibleCommands(VisibleCommands);
 }
 
 MeshPassFrameDrawList& MeshPassFrameDrawList::operator=(MeshPassFrameDrawList&& other) noexcept {
     if (this != &other) {
+        CachedCommands = std::move(other.CachedCommands);
         VisibleCommands = std::move(other.VisibleCommands);
         DynamicContext = std::move(other.DynamicContext);
         DynamicContext.BindVisibleCommands(VisibleCommands);
@@ -30,12 +31,17 @@ void MeshPassFrameDrawList::SortVisibleCommands() {
     });
 }
 
+bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
+    return SubmitMeshDrawCommands(encoder, VisibleCommands, std::span<const MeshDrawCommand>{CachedCommands}, DynamicContext.Commands, submitArgs);
+}
+
 bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
                                    const MeshPassSubmitArgs& submitArgs) const noexcept {
     return SubmitMeshDrawCommands(encoder, VisibleCommands, cachedDrawList, DynamicContext.Commands, submitArgs);
 }
 
 void MeshPassFrameDrawList::Clear() noexcept {
+    CachedCommands.clear();
     VisibleCommands.clear();
     DynamicContext.Clear();
 }
@@ -66,8 +72,6 @@ uint32_t FrameSlot::GetIndex() const noexcept { return _index; }
 
 uint64_t FrameSlot::GetFrameId() const noexcept { return _frameId; }
 
-Nullable<const Scene*> FrameSlot::GetScene() const noexcept { return _sourceScene; }
-
 MeshPassFrameDrawList& FrameSlot::GetPassDrawList(MeshPassId pass) {
     RADRAY_ASSERT(pass.Value != std::numeric_limits<uint32_t>::max());
     if (pass.Value >= _passDrawLists.size()) _passDrawLists.resize(size_t{pass.Value} + 1);
@@ -96,7 +100,9 @@ void FrameSlot::ResetCommandStorage() noexcept {
 void FrameSlot::ResetRetiredResources() noexcept { _retiredArena.Reset(); }
 
 void FrameSlot::ResetFrameData() noexcept {
-    _sourceScene = nullptr;
+#if RADRAY_IS_DEBUG
+    _inFrameCallback = false;
+#endif
     for (auto& drawList : _passDrawLists) drawList.Clear();
     _arena.Reset();
 }

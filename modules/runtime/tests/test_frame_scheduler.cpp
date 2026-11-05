@@ -90,22 +90,6 @@ TEST_F(FrameSchedulerTest, WaitIdleKeepsNextSlotAndFrameNumber) {
     EXPECT_EQ(Log, (vector<string>{"E2:2", "R2:2", "E0:3", "R0:3"}));
 }
 
-TEST_F(FrameSchedulerTest, SourceSceneIsBorrowedOnlyDuringExtractAndRecord) {
-    auto scheduler = Create(1);
-    ASSERT_TRUE(scheduler);
-    Nullable<FrameSlot*> used{nullptr};
-    Pipeline->OnExtract = [&](const Scene& source, FrameSlot& slot) {
-        EXPECT_EQ(slot.GetScene().Get(), &source);
-        used = &slot;
-    };
-    Pipeline->OnRecord = [&](FrameSlot& slot) { EXPECT_EQ(slot.GetScene().Get(), &Source); };
-    Pipeline->OnWait = [&](FrameSlot& slot) { EXPECT_FALSE(slot.GetScene()); };
-    scheduler->RunFrame(Source);
-    ASSERT_TRUE(used);
-    EXPECT_FALSE(used->GetScene());
-    scheduler->RunFrame(Source);
-}
-
 TEST_F(FrameSchedulerTest, MutableSceneSyncsDirtyBatchesBeforeExtract) {
     DynamicMeshPassDrawListContext output;
     CountingProcessor processor{output};
@@ -156,8 +140,10 @@ TEST_F(FrameSchedulerTest, DrawListsAreEmptyWhenSlotIsReused) {
     ASSERT_TRUE(scheduler);
     Pipeline->OnExtract = [](const Scene&, FrameSlot& slot) {
         auto& list = slot.GetPassDrawList({0});
+        EXPECT_TRUE(list.CachedCommands.empty());
         EXPECT_TRUE(list.VisibleCommands.empty());
         EXPECT_TRUE(list.DynamicContext.Commands.empty());
+        list.CachedCommands.emplace_back();
         list.VisibleCommands.emplace_back();
         list.DynamicContext.Commands.emplace_back();
     };
@@ -189,6 +175,33 @@ TEST_F(FrameSchedulerTest, WaitIdleReleasesRetiredOwners) {
     scheduler->RunFrame(Source);
     scheduler->WaitIdle();
     EXPECT_TRUE(released);
+}
+
+TEST_F(FrameSchedulerTest, RetireResourceRejectsWaitCallback) {
+#if RADRAY_IS_DEBUG
+    auto scheduler = Create(1);
+    ASSERT_TRUE(scheduler);
+    scheduler->RunFrame(Source);
+    EXPECT_DEATH({
+        Pipeline->OnWait = [](FrameSlot& slot) { slot.RetireResource(unique_ptr<int>{}); };
+        scheduler->WaitIdle(); }, "");
+#else
+    GTEST_SKIP() << "Release retirement trusts the callback precondition";
+#endif
+}
+
+TEST_F(FrameSchedulerTest, RetireResourceRejectsCallsOutsideFrame) {
+#if RADRAY_IS_DEBUG
+    auto scheduler = Create(1);
+    ASSERT_TRUE(scheduler);
+    Nullable<FrameSlot*> used{nullptr};
+    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) { used = &slot; };
+    scheduler->RunFrame(Source);
+    ASSERT_TRUE(used);
+    EXPECT_DEATH(used->RetireResource(unique_ptr<int>{}), "");
+#else
+    GTEST_SKIP() << "Release retirement trusts the callback precondition";
+#endif
 }
 
 TEST_F(FrameSchedulerTest, WaitIdleResetsEveryAllocatorBeforeReleasingAnyResource) {

@@ -96,12 +96,23 @@ Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
     const VisibleMeshDrawCommand& visibleCommand, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
     std::span<const MeshDrawCommand> dynamicCommands = {}) noexcept;
 
+// Snapshot cached handles, like dynamic handles, use frame-local indices and generation zero.
+Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
+    const VisibleMeshDrawCommand& visibleCommand, std::span<const MeshDrawCommand> cachedCommands,
+    std::span<const MeshDrawCommand> dynamicCommands = {}) noexcept;
+
 // Debug preflights the whole list; Release trusts validated commands and submit arguments.
 // State is deduplicated within this call. On failure, discard the recording (it may be partial).
 // Pass boundaries, viewport/scissor and submission belong to the caller.
 bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
                             std::span<const VisibleMeshDrawCommand> visibleCommands,
                             Nullable<const CachedPassMeshDrawList*> cachedDrawList,
+                            std::span<const MeshDrawCommand> dynamicCommands = {},
+                            const MeshPassSubmitArgs& submitArgs = {}) noexcept;
+
+bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
+                            std::span<const VisibleMeshDrawCommand> visibleCommands,
+                            std::span<const MeshDrawCommand> cachedCommands,
                             std::span<const MeshDrawCommand> dynamicCommands = {},
                             const MeshPassSubmitArgs& submitArgs = {}) noexcept;
 

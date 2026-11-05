@@ -39,7 +39,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     const array<MeshSection, 2> sections{
         MeshSection{.MaterialSlot = 0, .FirstIndex = 0, .IndexCount = 30},
         MeshSection{.MaterialSlot = 1, .FirstIndex = 30, .IndexCount = 6}};
-    if (!gpu.UploadGeometry(std::as_bytes(std::span{vertices}), indices)) return 3;
+    if (!gpu.PrepareGeometry(std::as_bytes(std::span{vertices}), indices)) return 3;
 
     VertexInput vertexInput;
     vertexInput.Layouts.push_back({0, sizeof(vertices[0]), render::VertexStepMode::Vertex});
@@ -155,8 +155,8 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     }
     RADRAY_INFO_LOG("步骤 3：创建固定视图，候选 Primitive 全部可见");
 
-    auto pipeline = make_unique<MeshDrawingFramePipeline>(gpu, scene, pass, candidates, policies, parameters);
-    if (!pipeline->Initialize(slotCount)) return 3;
+    auto pipeline = make_unique<MeshDrawingFramePipeline>(gpu, scene, pass, candidates, policies, parameters, slotCount);
+    if (!pipeline->Initialize()) return 3;
     auto* drawing = pipeline.get();
     auto scheduler = FrameScheduler::Create(*gpu.Device, std::move(pipeline), slotCount);
     if (!scheduler) return 3;

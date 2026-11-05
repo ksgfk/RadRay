@@ -3,8 +3,30 @@
 #include <algorithm>
 
 #include <radray/logger.h>
+#include <radray/runtime/frame_slot.h>
 
 namespace radray {
+namespace {
+
+bool SnapshotVisibleMeshDrawCommands(Nullable<const CachedPassMeshDrawList*> cachedDrawList, size_t firstVisible,
+                                     MeshPassFrameDrawList& outDrawList) {
+    const auto initialCachedSize = outDrawList.CachedCommands.size();
+    for (size_t index = firstVisible; index < outDrawList.VisibleCommands.size(); ++index) {
+        auto& visible = outDrawList.VisibleCommands[index];
+        const auto command = ResolveVisibleMeshDrawCommand(visible, cachedDrawList);
+        if (!command || outDrawList.CachedCommands.size() >= std::numeric_limits<uint32_t>::max()) {
+            outDrawList.CachedCommands.resize(initialCachedSize);
+            outDrawList.VisibleCommands.resize(firstVisible);
+            return false;
+        }
+        const auto commandIndex = static_cast<uint32_t>(outDrawList.CachedCommands.size());
+        outDrawList.CachedCommands.push_back(*command);
+        visible.CommandHandle = {commandIndex, 0};
+    }
+    return true;
+}
+
+}  // namespace
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
     if (!Materials.IsAlive(batch.Material) || batch.Elements.size() > std::numeric_limits<uint32_t>::max()) return false;
@@ -276,6 +298,20 @@ bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHa
         }
     }
     return true;
+}
+
+bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
+                                          MeshPassFrameDrawList& outDrawList) const {
+    const auto firstVisible = outDrawList.VisibleCommands.size();
+    if (!GatherVisibleMeshDrawCommands(pass, visibleBatches, outDrawList.VisibleCommands)) return false;
+    return SnapshotVisibleMeshDrawCommands(GetCachedDrawList(pass), firstVisible, outDrawList);
+}
+
+bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
+                                    MeshPassFrameDrawList& outDrawList) const {
+    const auto firstVisible = outDrawList.VisibleCommands.size();
+    if (!GatherVisiblePrimitives(pass, visiblePrimitives, outDrawList.VisibleCommands)) return false;
+    return SnapshotVisibleMeshDrawCommands(GetCachedDrawList(pass), firstVisible, outDrawList);
 }
 
 void Scene::Clear() noexcept {

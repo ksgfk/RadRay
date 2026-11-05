@@ -11,7 +11,7 @@
 // CPU-side stand-ins for the RHI objects runtime touches. Each fake records only what tests observe.
 namespace radray::test {
 
-class FakeBuffer final : public render::Buffer {
+class FakeBuffer : public render::Buffer {
 public:
     FakeBuffer(uint64_t size, render::BufferUses usage) noexcept : Desc{.Size = size, .Usage = usage} {}
     bool IsValid() const noexcept override { return true; }
@@ -102,7 +102,7 @@ public:
     vector<render::DrawIndexedIndirectArguments> Draws;
 };
 
-class FakeCommandBuffer final : public render::CommandBuffer {
+class FakeCommandBuffer : public render::CommandBuffer {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -152,7 +152,7 @@ public:
 };
 
 // Creates command allocators and buffers; every other factory fails.
-class FakeDevice final : public render::Device {
+class FakeDevice : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}

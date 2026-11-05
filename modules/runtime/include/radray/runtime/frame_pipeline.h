@@ -14,13 +14,14 @@ public:
     virtual std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept { return {}; }
 
     // Callbacks are serialized and must not re-enter the scheduler. Extract must not
-    // submit asynchronous work. Source is borrowed through Record via slot.GetScene().
-    // Retain data in slot for any later use, including Wait.
+    // submit asynchronous work. Source is borrowed only through the Extract argument.
+    // Snapshot commands and retain data in slot for Record and any later use, including Wait.
     // Use slot.GetArena() for frame-lifetime objects and slot.RetireResource() for retired owners.
     // Frame errors are fatal; report diagnostics and abort instead of returning incomplete work.
     virtual void Extract(const Scene& source, FrameSlot& slot) noexcept = 0;
 
     // Prepare data, acquire buffers from slot, Begin/End and submit on slot.GetQueue().
+    // Source is no longer borrowed. Use only extracted frame data.
     // Frame resource owners may be moved into slot.GetArena() to retain them through Wait.
     // Close all encoders and recordings before returning. Return requires a subsequent Wait,
     // including empty frames. Frame errors are fatal, with no rollback or retry protocol.

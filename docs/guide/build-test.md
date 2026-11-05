@@ -387,7 +387,7 @@ ctest --preset win-x64-debug-clangcl
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_render` | 见下文 [render 测试](#render-测试) |
-| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`（CPU fake，不需要 GPU 或 shader） |
+| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`（CPU fake，不需要 GPU 或 shader） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -560,11 +560,11 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 传递加载 render/core，不要求 shader 或 DXC。`RADRAY_BUILD_TESTS=ON` 时提供
 `test_radray_runtime`，用 `modules/runtime/tests/test_fakes.h` 中的 CPU fake 代替 RHI 对象，不需要 GPU 或预编译 shader。
 它覆盖材质标签、材质参数与快照、MeshDrawCommand 校验与录制、Processor 构建、Scene 增量缓存，
-以及 FrameScheduler 的槽位轮转、等待、Scene 借用、退役资源与析构顺序。suite 列表见[测试](#测试)：
+以及 FrameScheduler 的槽位轮转、等待、Scene 借用、退役资源与析构顺序；RDG 覆盖裁剪、上传、同槽物理状态复用、原地 Compute、UAV 与附件屏障及管线钩子顺序。suite 列表见[测试](#测试)：
 
 ```powershell
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(Material|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame)' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline)' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -630,16 +630,16 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 |---|---|
 | [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，连续 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
 | [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
-| [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 实现 Pass 登记、Extract/Record/Wait，使用槽内 Pass 列表与命令池 |
+| [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 快照与提交/等待 |
 | [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、可切换输出 Context、共享状态和 Element 构建 helper；AddMeshBatch 返回 void。静态 Context 存入 SparseSet 并回写缓存句柄；动态 Context 自动追加当帧可见命令 |
 | [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 两级命令、自持有 PushConstants、Pass 提交参数与延迟实例流，稳定句柄解析和 SubmitMeshDrawCommands |
-| [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 持有共享只读资源，GpuFrameResources 持有每槽可写资源与 fence；PSO 准备、上传和按行跨度读回 |
+| [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
 
 源码对照基线为本地 `F:/cpp/UnrealEngine` 的 UE **5.8.4**（`Engine/Build/Build.version`），
 注释中的 UE 路径相对其 `Engine/Source/Runtime/`。对应关系用于解释传统 Mesh Drawing Pipeline 的职责：
 本例直接组装 Batch、假定全部候选可见，用 Scene 的持久缓存和脏追踪更新命令，按相同排序键稳定排序；
-省略 UE 的多线程代理同步、可见性剔除、LOD、自动实例化、完整材质和 RDG。Color Pass 只是纯色上色，不等价于 UE 完整 Base Pass。
+省略 UE 的多线程代理同步、可见性剔除、LOD、自动实例化和完整材质；RDG 使用本项目的单队列整资源实现。Color Pass 只是纯色上色，不等价于 UE 完整 Base Pass。
 `BasePassRendering.cpp` 的 `FBasePassMeshProcessor::ShouldDraw` 区分不透明和透明类别，
 `TranslucentRendering.cpp` 的 `GetTranslucentBlendState` 选择混合状态；本例用应用标签表达类别，状态由材质显式提供。
 `CustomDepthRendering.cpp` 的 `FCustomDepthPassMeshProcessor::TryAddMeshBatch` 设置模板状态和参考值，
@@ -661,21 +661,27 @@ Scene 为脏 Batch 创建静态 Context，Processor 完成 Pass 筛选后调用 
 Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Brightness，将 RGB 相乘并保留 alpha，
 经 runtime 构建 helper 复制为命令自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
 命令颜色与 UE 的 `FMeshDrawShaderBindings::LooseData` 职责近似，源栈数据在构建后即可失效。
-每个 `GpuFrameResources` 独立创建 Binding 1 的实例缓冲、Group 0 / Binding 0 的两份 Pass UBO 与参数组，
-以及颜色/深度附件、读回缓冲和 completion fence。初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符。
-Extract 在槽完成等待并重置 allocator 后，通过 `UploadSceneParameters` 按候选 Primitive 顺序写入五个 64 字节 `LocalToWorld` 矩阵；
-两份 Pass UBO 保存同一 `ViewProjection` 和分别为 1.0 / 1.12 的 `LocalScale`。CBuffer 按设备要求对齐、补零并 FlushMappedRange。
-Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数组。
-`PreparePassDrawCommands` 只向 `slot.GetPassDrawList(pass)` 收集句柄并把候选 Primitive 下标写入 `FirstInstance`，不访问材质参数。
-Record 通过 `slot.GetScene()` 访问源 Scene，使用 `slot.AcquireCommandBuffer()` 申请本槽命令缓冲；
-`RecordPass` 设置 viewport/scissor，将本槽 Pass 参数组和实例流通过 `MeshPassSubmitArgs` 交给该 Pass 列表的 Submit。
-runtime 先绑定 PSO，再在首次绑定或切换 PSO 后重绑 Pass 参数组，最后完成几何、模板、命令参数和 DrawIndexed；
-相机、局部缩放或变换变化不需要重新调用 Processor，材质变化则重建关联命令的颜色副本。
-每帧最后记录颜色读回拷贝，提交时 signal 本槽 fence 并返回；复用槽时由 Pipeline.Wait 等待该值。
-每槽上传缓冲、附件和读回缓冲均独立；共享几何只在首次提交时从 HostWrite 转为 Vertex/Index。
-后续复用沿用本槽颜色 CopySource、深度 DepthWrite 和读回 HostRead 的结束状态，重新写入上传缓冲前先等待并重置 allocator。
+`GpuResources::PrepareGeometry` 创建共享的 Device VB / IB 空壳并保存 CPU 字节，Scene 可在上传前引用这些合法缓冲。
+每个 `GpuFrameResources` 独立创建 Binding 1 的实例缓冲、Group 0 / Binding 0 的两份 Pass UBO、参数组、读回缓冲和 completion fence。
+初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符；颜色/深度附件及其 View 由基类每槽的 RDG 瞬态池拥有。
+`ExtractFrameData` 按候选 Primitive 顺序把五个 64 字节 `LocalToWorld` 矩阵及两份 Pass UBO 的 CPU 字节保存到当前槽 arena，
+UBO 按设备要求对齐并补零，LocalScale 分别为 1.0 / 1.12。此时不 Map GPU 缓冲，也不收集逐 Pass 命令。
+`SetupGraph` 没有 Scene 参数，声明上传、瞬态深度/颜色附件、四个 Raster Pass 与 Readback Copy。
+首帧共享几何经 RDG 的 Device Staging Copy 上传，并通过 MarkOutput 保活，终态为 Vertex / Index；后续帧沿用该状态。
+实例/常量缓冲上传只由消费者保活，图末恢复 HostWrite；读回缓冲终态为 HostRead。
+
+Compile 先裁剪，再通过 `ExtractMeshPass` 调用 `PreparePassDrawCommands` 固化存活 Pass 的缓存命令快照，
+并把候选 Primitive 下标写入 `FirstInstance`，不访问材质参数。持久缓存的脏同步仍覆盖全部登记的 Processor。
+基类 Record 先稳定排序存活列表，再通过本槽命令缓冲执行图，按存活访问自动生成转换及同状态写屏障。
+`RecordPass` 只设置 viewport/scissor，将本槽 Pass 参数组和实例流通过 `MeshPassSubmitArgs` 交给列表的 `Submit(encoder, submitArgs)`，无需回查 Scene。
+Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数组；runtime 先绑定 PSO，再在首次绑定或切换 PSO 后重绑 Pass 参数组，
+最后完成几何、模板、命令参数和 DrawIndexed。相机、局部缩放或变换变化不需要重新调用 Processor，材质变化则重建关联命令的颜色副本。
+
+每帧最后由图记录颜色读回拷贝与收尾屏障，`SubmitFrame` signal 本槽 fence 后返回；复用槽时由 Pipeline.Wait 等待该值。
+每槽上传缓冲、瞬态附件池和读回缓冲独立；颜色 CopySource、深度 DepthWrite 的真实物理终态保存在池内，复用时作为首次 barrier 的 Before。
 主循环只调用 RunFrame，结束时调用 WaitIdle，再从 `(frameCount - 1) % slotCount` 对应的读回缓冲保存图片。
-Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才销毁 Pipeline 的每槽资源；外部共享资源和源 Scene 晚于 Scheduler 销毁。
+Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才销毁 Pipeline 的每槽资源和瞬态池；外部共享资源和源 Scene 晚于 Scheduler 销毁。
+完整接口、裁剪与上传约束见 [RDG 与 RenderGraphFramePipeline](../architecture/runtime.md#rdg-与-rendergraphframepipeline)。
 未同步材质、标签表不一致、缺失 PSO、参数类型不匹配或构建失败会使样例放弃渲染；具体校验边界见 [命令校验与录制](../architecture/runtime.md#校验与录制)。
 
 ### 准备 shader 与构建
@@ -721,14 +727,15 @@ Windows 默认 D3D12，其他平台默认 Vulkan；未指定目录时从编译�
 每次运行请求开启后端验证（Vulkan 同时请求同步验证），实际启用情况和诊断见后端启动日志。
 日志应打印五个 Primitive、十个 Batch，以及每帧各 Pass 的 `对象 / Primitive / Batch / Element → Draw`
 对应关系；Draw 编号为当前 Pass 输出列表中的序号。跳过日志按 Batch 输出一次，
-不分配 Draw 编号，并打印原因。每帧出现 `Frame=<编号> Slot=<槽下标>`、
-`Depth=5，Color=6，Outline=2，Transparent=2，总计 15 条单实例 Draw` 和 fence 提交/等待日志；默认槽次序为 0、1、0、1、0、1。
+不分配 Draw 编号，并打印原因。每帧逐 Pass 打印 `Frame=<编号> Slot=<槽下标> MeshPass=<0～3>`，
+四个 Pass 的 Draw 数分别为 5、6、2、2（总计 15），并打印 fence 提交/等待日志；默认槽次序为 0、1、0、1、0、1。
 最后打印 PNG 路径及六帧完成日志。同一槽的四个 Pass 使用一份 D32_FLOAT_S8_UINT 附件；Depth Pass 清深度为 1、模板为 0 并保存，
 Color Pass `Load` 深度和模板，以材质默认的 `LessEqual` 测试并写深度。
 这样既能复用预深度，也能接纳 `ColorOnly` 对象并处理其自身和相互遮挡；如果仍使用 `Equal`，
 没有预深度的表面会消失。后续 Outline/Transparent 均 `Load` 颜色、深度和模板。
-Pass 之间保留显式 `DepthWrite → DepthWrite`，颜色继续使用时增加 `RenderTarget → RenderTarget` barrier，
-Vulkan 用它们同步前一次写入和后一次读写。初始 barrier 还将实例流转为 Vertex，将两份 Pass UBO 转为 CBuffer。
+RDG 将 Color、Outline、Transparent 合并到同一 RenderPass，组内省略重复的附件写屏障，每个逻辑 Pass 入口重置模板参考值。
+Depth 与 Color 之间仍保留跨组 `DepthWrite → DepthWrite` barrier；组入口批量转换实例流为 Vertex、两份 Pass UBO 为 CBuffer，
+其中 Outline 才首次使用的 UBO 屏障前移到合并组入口。合并条件与重排契约见 [RDG](../architecture/runtime.md#确定性重排与合并)。
 录制顺序为 PSO → Pass 参数组 → 顶点/索引缓冲 → 模板参考值 → 命令参数/颜色常量 → DrawIndexed。
 检查 800×600 图片中的三个不透明物体、左侧背景色缺口、右侧物体金色轮廓，以及前方青色物体透出的绿色和背景。
 读回逐行去除 padding，日志打印实际 GPU row pitch；Vulkan 使用负 viewport 高度统一输出方向。
@@ -745,6 +752,6 @@ Vulkan 用它们同步前一次写入和后一次读写。初始 barrier 还将�
 ```powershell
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime test_radray_render --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
-ctest --preset win-x64-debug-clangcl -R '^(Material|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame)|StencilReference' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline)|StencilReference' --output-on-failure
 Remove-Item Env:RADRAY_TEST_REQUIRED_BACKENDS
 ```

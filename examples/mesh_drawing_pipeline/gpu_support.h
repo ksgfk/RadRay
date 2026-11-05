@@ -53,7 +53,8 @@ struct GpuResources {
     GpuResources& operator=(const GpuResources&) = delete;
 
     bool Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory);
-    bool UploadGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
+    // Creates Device buffers and retains CPU bytes for the first frame's graph upload.
+    bool PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
     bool CreatePipelines(const VertexInput& input, const MaterialResource& resource);
 
     uint32_t Width{800};
@@ -62,6 +63,8 @@ struct GpuResources {
     Nullable<unique_ptr<DeviceContext>> Device{nullptr};
     Nullable<unique_ptr<render::Buffer>> VertexBuffer{nullptr};
     Nullable<unique_ptr<render::Buffer>> IndexBuffer{nullptr};
+    vector<byte> PendingVertexBytes;
+    vector<byte> PendingIndexBytes;
     Nullable<unique_ptr<render::Shader>> VertexShader{nullptr};
     Nullable<unique_ptr<render::Shader>> PixelShader{nullptr};
     Nullable<unique_ptr<render::BindingGroupLayout>> PassGroupLayout{nullptr};
@@ -79,8 +82,6 @@ struct GpuResources {
 // Each slot owns distinct writable resources; release only after its allocator has reset.
 struct GpuFrameResources {
     bool Initialize(const GpuResources& shared, uint32_t instanceCount);
-    // Requires completed slot use and reset command storage. Matrix order matches visible FirstInstance.
-    bool UploadSceneParameters(const Eigen::Matrix4f& viewProjection, std::span<const Eigen::Matrix4f> localToWorlds);
     // Requires the corresponding completion fence; saves the latest frame recorded into this slot.
     bool SaveImage(const std::filesystem::path& output) const;
 
@@ -89,18 +90,12 @@ struct GpuFrameResources {
     uint64_t RowPitch{0};
     Nullable<unique_ptr<render::Buffer>> InstanceBuffer{nullptr};
     array<Nullable<unique_ptr<render::Buffer>>, 2> PassBuffers{};
-    Nullable<unique_ptr<render::Texture>> ColorTexture{nullptr};
-    Nullable<unique_ptr<render::Texture>> DepthTexture{nullptr};
     Nullable<unique_ptr<render::Buffer>> Readback{nullptr};
-    Nullable<unique_ptr<render::TextureView>> ColorView{nullptr};
-    Nullable<unique_ptr<render::TextureView>> DepthWriteView{nullptr};
     array<Nullable<unique_ptr<render::ShaderParameterSet>>, 2> PassParameterSets{};
     Nullable<unique_ptr<render::Fence>> CompletionFence{nullptr};
     uint64_t CompletionValue{0};
 };
 
 bool PrepareOutputDirectory(const std::filesystem::path& output);
-void TransitionTexture(render::CommandBuffer& command, render::Texture& texture,
-                       render::TextureStates before, render::TextureStates after);
 
 }  // namespace radray::examples::mesh_drawing

@@ -12,7 +12,6 @@ namespace radray {
 
 class DeviceContext;
 class FrameScheduler;
-struct Scene;
 
 struct MeshPassFrameDrawList {
     MeshPassFrameDrawList() noexcept;
@@ -22,10 +21,14 @@ struct MeshPassFrameDrawList {
     MeshPassFrameDrawList& operator=(const MeshPassFrameDrawList&) = delete;
 
     void SortVisibleCommands();
+    // Uses frame-local cached snapshots and dynamic commands; no Scene borrowing is required.
+    bool Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
+    // Compatibility path for visible handles gathered without snapshots; do not mix handle domains.
     bool Submit(render::GraphicsCommandEncoder& encoder, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
                 const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
     void Clear() noexcept;
 
+    vector<MeshDrawCommand> CachedCommands;
     vector<VisibleMeshDrawCommand> VisibleCommands;
     DynamicMeshPassDrawListContext DynamicContext;
 };
@@ -48,8 +51,6 @@ public:
     // Starts at zero and advances after every completed Record.
     uint64_t GetFrameId() const noexcept;
 
-    // Borrowed only during Extract/Record; empty outside RunFrame callbacks.
-    Nullable<const radray::Scene*> GetScene() const noexcept;
     MeshPassFrameDrawList& GetPassDrawList(MeshPassId pass);
 
     // Allocate/register frame objects during Extract or Record; they survive through Wait.
@@ -61,9 +62,12 @@ public:
     // Retains the owner until the next slot reuse or WaitIdle, after every slot's old
     // command storage has reset. Group dependent owners in one RAII object.
     // Cleanup must not re-enter the slot or scheduler.
+    // Debug checks the callback window; Release relies on this precondition.
     template <typename T>
     void RetireResource(T&& resourceOwner) {
-        if (!_sourceScene) RADRAY_ABORT("FrameSlot: RetireResource requires the current Extract or Record callback");
+#if RADRAY_IS_DEBUG
+        if (!_inFrameCallback) RADRAY_ABORT("FrameSlot: RetireResource requires the current Extract or Record callback");
+#endif
         _retiredArena.Emplace<std::remove_cvref_t<T>>(std::forward<T>(resourceOwner));
     }
 
@@ -90,10 +94,12 @@ private:
     ObjectArena _arena;
     ObjectArena _retiredArena{ObjectArenaOptions{.BlockSize = 1024, .MaxRetainedBytes = 4 * 1024}};
     vector<MeshPassFrameDrawList> _passDrawLists;
-    Nullable<const radray::Scene*> _sourceScene{nullptr};
     size_t _nextCommandIndex{0};
     const uint32_t _index;
     bool _inFlight{false};
+#if RADRAY_IS_DEBUG
+    bool _inFrameCallback{false};
+#endif
 };
 
 }  // namespace radray

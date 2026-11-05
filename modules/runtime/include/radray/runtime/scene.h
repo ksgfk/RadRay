@@ -13,6 +13,8 @@
 
 namespace radray {
 
+struct MeshPassFrameDrawList;
+
 struct VisibleMeshBatch {
     SparseSetHandle Batch{};
     // The maximum value selects all elements in this pass.
@@ -54,6 +56,12 @@ struct Scene {
                                        vector<VisibleMeshDrawCommand>& outCommands) const;
     bool GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
                                  vector<VisibleMeshDrawCommand>& outCommands) const;
+    // Snapshot cached commands into frame-local storage. Invalid input rolls back both appended lists.
+    // RHI objects remain borrowed through command allocator reset.
+    bool GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
+                                       MeshPassFrameDrawList& outDrawList) const;
+    bool GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
+                                 MeshPassFrameDrawList& outDrawList) const;
     void Clear() noexcept;
 
 private:

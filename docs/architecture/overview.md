@@ -68,6 +68,8 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 保留价值与当前归属 |
 |---|---|
+| [Runtime RDG Pass 重排与合并实现计划](../history/2026-11-06-runtime-rdg-pass-reorder-merge-plan.md) | `6050639` 基线下补齐 RDG WAR 依赖、确定性贪心拓扑重排、Raster/Compute Pass 合并折叠与批量 Barrier 下发的已确认实现计划 |
+| [Runtime RDG 接入与 FramePipeline 跨线程接口拆分计划](../history/2026-11-05-runtime-rdg-pipeline-interface-plan.md) | `e443cef` 基线下针对 RDG 剔除避免 MeshPass 无效收集/排序、切断 `Record` 对 `Scene` 借用以支持跨线程分离的分阶段接口演进计划 |
 | [Runtime MDC 性能优化计划](../history/2026-11-04-runtime-mdc-performance-plan.md) | `c8bc3bd` 基线下針對 `SubmitMeshDrawCommands` 预检/状态去重、`Scene` $O(1)$ 脏追踪及 `GatherVisible`/`VertexBuffers` 内联的已确认设计方案 |
 | [Runtime 精简前设计归档](../history/2026-10-31-runtime-design-archive.md) | `07d41dc` 的对象关系、场景/绘制/RDG 分层、所有权、帧提交和旧测试入口；重设计以保留的环境与设备为起点 |
 | [显式 RHI 绑定布局转向与实施计划](../history/2026-10-22-explicit-rhi-binding-layout-rationale.md) | shader artifact 布局权威转向调用方定义的原因、实施前所有权快照、当时的接口与验收要求；当前直接所有权和取消缓存决定见 RHI 文档 |
@@ -98,7 +100,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 |---|---|
 | Runtime 后端环境 | `modules/runtime/include/radray/runtime/gpu_env.h` |
 | Runtime 设备与队列 | `modules/runtime/include/radray/runtime/gpu_device.h` |
-| Runtime 多槽帧循环 | `modules/runtime/include/radray/runtime/frame_scheduler.h`、`frame_pipeline.h`、`frame_slot.h` |
+| Runtime 多槽帧循环与 RDG | `modules/runtime/include/radray/runtime/frame_scheduler.h`、`frame_pipeline.h`、`frame_slot.h`、`render_graph_pipeline.h`、`rdg.h` |
 | Runtime 场景存储 | `modules/runtime/include/radray/runtime/scene.h` |
 | Runtime 材质资源、定义、实例与渲染快照 | `modules/runtime/include/radray/runtime/material.h` |
 | Runtime 材质标签表 / 集合 | `modules/runtime/include/radray/runtime/material_tag.h` |

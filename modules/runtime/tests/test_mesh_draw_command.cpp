@@ -171,6 +171,15 @@ TEST_F(MeshDrawCommandTest, ResolvesCachedCommandByHandle) {
     EXPECT_EQ(resolved.Get(), &list.Commands.Get(handle));
 }
 
+TEST_F(MeshDrawCommandTest, ResolvesSnapshotCachedCommandByIndex) {
+    const array<MeshDrawCommand, 2> cached{MakeCommand(), MakeCommand()};
+    const auto commands = std::span<const MeshDrawCommand>{cached};
+    EXPECT_EQ(ResolveVisibleMeshDrawCommand({.CommandHandle = {1, 0}}, commands).Get(), &cached[1]);
+    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.CommandHandle = {2, 0}}, commands));
+    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.CommandHandle = {1, 1}}, commands));
+    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({}, commands));
+}
+
 TEST_F(MeshDrawCommandTest, ResolvesDynamicCommandByIndex) {
     const array<MeshDrawCommand, 2> dynamic{MakeCommand(), MakeCommand()};
     const auto source = MeshDrawCommandSource::Dynamic;
