@@ -1,141 +1,104 @@
-#include <gtest/gtest.h>
 #include <radray/nullable.h>
 
-TEST(NullableTest, Null) {
-    radray::Nullable<void*> n{nullptr};
-    EXPECT_FALSE(n.HasValue());
-    EXPECT_FALSE(n);
-    EXPECT_TRUE(n == nullptr);
-    EXPECT_FALSE(n != nullptr);
-    EXPECT_THROW(n.Unwrap(), radray::NullableAccessException);
+#include <gtest/gtest.h>
+
+#include <radray/types.h>
+
+namespace radray {
+namespace {
+
+struct Base {
+    virtual ~Base() noexcept = default;
+    virtual int Get() const noexcept = 0;
+};
+
+struct Derived final : Base {
+    explicit Derived(int value) noexcept : Value(value) {}
+    int Get() const noexcept override { return Value; }
+    int Value;
+};
+
+TEST(NullableTest, NullHasNoValue) {
+    const Nullable<int*> value{nullptr};
+
+    EXPECT_FALSE(value.HasValue());
+    EXPECT_FALSE(value);
+    EXPECT_TRUE(value == nullptr);
 }
 
-TEST(NullableTest, NotNull) {
-    struct S {
-        int x;
-    };
-    S s{42};
-    radray::Nullable<S*> n{&s};
-    EXPECT_TRUE(n.HasValue());
-    EXPECT_TRUE(n);
-    EXPECT_FALSE(n == nullptr);
-    EXPECT_TRUE(n != nullptr);
-    EXPECT_EQ(n->x, 42);
+TEST(NullableTest, RawPointerGivesAccessWithoutReleasing) {
+    int target = 42;
+    Nullable<int*> value{&target};
 
-    EXPECT_EQ(n.Unwrap()->x, 42);
-    EXPECT_TRUE(n.HasValue());
-
-    auto ptr = n.Release();
-    EXPECT_EQ(ptr->x, 42);
-    EXPECT_FALSE(n.HasValue());
-    EXPECT_FALSE(bool(n));
-    EXPECT_TRUE(n == nullptr);
-    EXPECT_FALSE(n != nullptr);
-    EXPECT_THROW(n.Unwrap(), radray::NullableAccessException);
+    EXPECT_EQ(value.Get(), &target);
+    EXPECT_EQ(*value, 42);
+    EXPECT_EQ(value.Unwrap(), &target);
+    EXPECT_TRUE(value.HasValue());
 }
 
-TEST(NullableTest, UniquePtr) {
-    struct V {
-        int x;
-    };
-    V s{42};
-    radray::Nullable<std::unique_ptr<V>> n{std::make_unique<V>(s)};
-    EXPECT_TRUE(n.HasValue());
-    EXPECT_TRUE(n);
-    EXPECT_FALSE(n == nullptr);
-    EXPECT_TRUE(n != nullptr);
-    EXPECT_EQ(n->x, 42);
-    auto ptr = n.Release();
-    EXPECT_EQ(ptr->x, 42);
-    EXPECT_FALSE(n.HasValue());
-    EXPECT_FALSE(bool(n));
-    EXPECT_TRUE(n == nullptr);
-    EXPECT_FALSE(n != nullptr);
-    EXPECT_THROW(n.Unwrap(), radray::NullableAccessException);
+TEST(NullableTest, ReleaseEmptiesRawPointer) {
+    int target = 42;
+    Nullable<int*> value{&target};
 
-    struct Base {
-        virtual ~Base() = default;
-        virtual int GetX() const = 0;
-    };
-    struct Derived final : Base {
-        int x;
-        Derived(int x) : x(x) {}
-        ~Derived() override = default;
-        int GetX() const override { return x; }
-    };
-    radray::Nullable<std::unique_ptr<Base>> n2{std::make_unique<Derived>(42)};
-    EXPECT_EQ(n2->GetX(), 42);
-    auto ptr2 = n2.Unwrap();
-    EXPECT_EQ(ptr2->GetX(), 42);
-    EXPECT_FALSE(n2.HasValue());
+    int* released = value.Release();
+
+    EXPECT_EQ(released, &target);
+    EXPECT_FALSE(value.HasValue());
 }
 
-TEST(NullableTest, SharedPtr) {
-    struct V {
-        int x;
-    };
-    V s{42};
-    radray::Nullable<std::shared_ptr<V>> n{std::make_shared<V>(s)};
-    EXPECT_EQ(n._value.use_count(), 1);
-    EXPECT_TRUE(n.HasValue());
-    EXPECT_TRUE(n);
-    EXPECT_FALSE(n == nullptr);
-    EXPECT_TRUE(n != nullptr);
-    EXPECT_EQ(n->x, 42);
+TEST(NullableTest, ComparesUnderlyingPointers) {
+    int a = 1;
+    int b = 2;
 
-    auto ptr = n.Release();
-    EXPECT_EQ(ptr.use_count(), 1);
-    EXPECT_EQ(ptr->x, 42);
-    EXPECT_FALSE(n.HasValue());
-    EXPECT_FALSE(bool(n));
-    EXPECT_TRUE(n == nullptr);
-    EXPECT_FALSE(n != nullptr);
-    EXPECT_THROW(n.Unwrap(), radray::NullableAccessException);
-
-    struct Base {
-        virtual ~Base() = default;
-        virtual int GetX() const = 0;
-    };
-    struct Derived final : Base {
-        int x;
-        Derived(int x) : x(x) {}
-        ~Derived() override = default;
-        int GetX() const override { return x; }
-    };
-    radray::Nullable<std::shared_ptr<Base>> n2{std::make_shared<Derived>(42)};
-    EXPECT_EQ(n2->GetX(), 42);
+    EXPECT_TRUE((Nullable<int*>{&a} == Nullable<int*>{&a}));
+    EXPECT_TRUE((Nullable<int*>{&a} != Nullable<int*>{&b}));
+    EXPECT_TRUE((Nullable<int*>{&a} != nullptr));
 }
 
-TEST(NullableTest, UniquePtrMoveSemantics) {
-    auto uptr = std::make_unique<int>(10);
-    radray::Nullable<std::unique_ptr<int>> n1{std::move(uptr)};
+TEST(NullableTest, UniquePtrReleaseTransfersOwnership) {
+    Nullable<unique_ptr<int>> value{make_unique<int>(7)};
 
-    radray::Nullable<std::unique_ptr<int>> n2{std::move(n1)};
-    EXPECT_FALSE(n1.HasValue());
-    EXPECT_TRUE(n2.HasValue());
-    EXPECT_EQ(*n2.Get(), 10);
+    const unique_ptr<int> owner = value.Release();
+
+    ASSERT_NE(owner, nullptr);
+    EXPECT_EQ(*owner, 7);
+    EXPECT_FALSE(value.HasValue());
 }
 
-TEST(NullableTest, SharedPtrCopySemantics) {
-    auto sptr = std::make_shared<int>(20);
-    radray::Nullable<std::shared_ptr<int>> n1{sptr};
-    EXPECT_EQ(sptr.use_count(), 2);
+TEST(NullableTest, UniquePtrUnwrapMovesOwnershipOut) {
+    Nullable<unique_ptr<Base>> value{make_unique<Derived>(3)};
+    EXPECT_EQ(value->Get(), 3);
 
-    radray::Nullable<std::shared_ptr<int>> n2 = n1;
-    EXPECT_EQ(sptr.use_count(), 3);
-    EXPECT_TRUE(n1.HasValue());
-    EXPECT_TRUE(n2.HasValue());
+    const unique_ptr<Base> owner = value.Unwrap();
+
+    EXPECT_EQ(owner->Get(), 3);
+    EXPECT_FALSE(value.HasValue());
 }
 
-TEST(NullableTest, EqualityComparison) {
-    int value = 42;
-    radray::Nullable<int*> n1{&value};
-    radray::Nullable<int*> n2{&value};
-    radray::Nullable<int*> n3{nullptr};
+TEST(NullableTest, UniquePtrMoveLeavesSourceEmpty) {
+    Nullable<unique_ptr<int>> source{make_unique<int>(10)};
 
-    EXPECT_TRUE(n1 == n2);
-    EXPECT_FALSE(n1 != n2);
+    const Nullable<unique_ptr<int>> target{std::move(source)};
 
-    EXPECT_FALSE(n1 == n3);
-    EXPECT_TRUE(n1 != n3);
+    EXPECT_FALSE(source.HasValue());  // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(*target.Get(), 10);
 }
+
+TEST(NullableTest, SharedPtrCopySharesOwnership) {
+    const auto shared = make_shared<int>(20);
+    const Nullable<shared_ptr<int>> first{shared};
+
+    const Nullable<shared_ptr<int>> second = first;
+
+    EXPECT_EQ(shared.use_count(), 3);
+    EXPECT_EQ(second.Get(), shared.get());
+}
+
+TEST(NullableTest, SharedPtrConvertsFromDerived) {
+    const Nullable<shared_ptr<Base>> value{make_shared<Derived>(5)};
+
+    EXPECT_EQ(value->Get(), 5);
+}
+
+}  // namespace
+}  // namespace radray

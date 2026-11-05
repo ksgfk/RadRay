@@ -1,5 +1,7 @@
 #include <radray/render/backend/vulkan_helper.h>
 
+#include <limits>
+
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
@@ -33,6 +35,35 @@
 #include <cstring>
 
 namespace radray::render::vulkan {
+
+VkImageCreateInfo MakeTextureImageCreateInfo(const TextureDescriptor& desc, bool allowFormatReinterpretation) noexcept {
+    VkImageCreateInfo result{};
+    result.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    result.flags = allowFormatReinterpretation ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
+    if (desc.Dim == TextureDimension::Cube || desc.Dim == TextureDimension::CubeArray) result.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    result.imageType = MapType(desc.Dim);
+    result.format = MapType(desc.Format);
+    const bool is3D = desc.Dim == TextureDimension::Dim3D;
+    result.extent = {desc.Width, desc.Height, is3D ? desc.DepthOrArraySize : 1u};
+    result.arrayLayers = is3D ? 1u : desc.DepthOrArraySize;
+    result.mipLevels = desc.MipLevels;
+    result.samples = MapSampleCount(desc.SampleCount);
+    result.tiling = VK_IMAGE_TILING_OPTIMAL;
+    if (desc.Usage.HasFlag(TextureUse::CopySource)) result.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (desc.Usage.HasFlag(TextureUse::CopyDestination)) result.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (desc.Usage.HasFlag(TextureUse::Resource)) result.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) result.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) result.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (desc.Usage & (TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) result.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    result.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    result.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    return result;
+}
+
+VkImageSubresourceRange MakeExternalTextureRange(const TextureDescriptor& desc) noexcept {
+    return {GetTextureFormatAspects(desc.Format).value(), 0, desc.MipLevels, 0,
+            desc.Dim == TextureDimension::Dim3D ? 1u : desc.DepthOrArraySize};
+}
 
 DeviceFeaturesVulkan::DeviceFeaturesVulkan() noexcept {
     Vulkan11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
@@ -80,6 +111,7 @@ FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
         .SamplerAnisotropy = Requirement::Optional,
         .VertexPipelineStoresAndAtomics = Requirement::Optional,
         .FragmentStoresAndAtomics = Requirement::Optional,
+        .ShaderStorageImageWriteWithoutFormat = Requirement::Optional,
         .TimelineSemaphore = Requirement::Required,
         .SamplerMirrorClampToEdge = Requirement::Optional,
         .SamplerFilterMinmax = Requirement::Optional,
@@ -112,6 +144,7 @@ FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& su
     select("samplerAnisotropy", requested.SamplerAnisotropy, supported.Core.samplerAnisotropy, core.samplerAnisotropy);
     select("vertexPipelineStoresAndAtomics", requested.VertexPipelineStoresAndAtomics, supported.Core.vertexPipelineStoresAndAtomics, core.vertexPipelineStoresAndAtomics);
     select("fragmentStoresAndAtomics", requested.FragmentStoresAndAtomics, supported.Core.fragmentStoresAndAtomics, core.fragmentStoresAndAtomics);
+    select("shaderStorageImageWriteWithoutFormat", requested.ShaderStorageImageWriteWithoutFormat, supported.Core.shaderStorageImageWriteWithoutFormat, core.shaderStorageImageWriteWithoutFormat);
     select("timelineSemaphore", requested.TimelineSemaphore, supported.Vulkan12.timelineSemaphore, vulkan12.timelineSemaphore);
     select("samplerMirrorClampToEdge", requested.SamplerMirrorClampToEdge, supported.Vulkan12.samplerMirrorClampToEdge, vulkan12.samplerMirrorClampToEdge);
     select("samplerFilterMinmax", requested.SamplerFilterMinmax, supported.Vulkan12.samplerFilterMinmax, vulkan12.samplerFilterMinmax);
@@ -144,7 +177,7 @@ std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkS
     const auto min = capabilities.minImageExtent;
     const auto max = capabilities.maxImageExtent;
     if (!max.width || !max.height || min.width > max.width || min.height > max.height) return std::nullopt;
-    const auto extent = capabilities.currentExtent.width == UINT32_MAX
+    const auto extent = capabilities.currentExtent.width == std::numeric_limits<uint32_t>::max()
                             ? VkExtent2D{std::clamp(requested.width, min.width, max.width), std::clamp(requested.height, min.height, max.height)}
                             : capabilities.currentExtent;
     if (!extent.width || !extent.height) return std::nullopt;

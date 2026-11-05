@@ -20,7 +20,7 @@ target_link_libraries(radraycore PUBLIC
     Eigen3::Eigen
     Pal::Sigslot
     STDEXEC::stdexec
-    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:$<LINK_LIBRARY:WHOLE_ARCHIVE,mimalloc-static>>
+    ${RADRAY_MIMALLOC_LIBRARIES}
     $<$<BOOL:${RADRAY_ENABLE_PROFILER}>:Tracy::TracyClient>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog

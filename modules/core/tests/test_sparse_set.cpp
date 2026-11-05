@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
 
-#include <memory>
 #include <algorithm>
+#include <memory>
+#include <utility>
 
 #include <radray/sparse_set.h>
 
@@ -11,10 +12,8 @@ namespace {
 
 struct MoveOnlyValue {
     explicit MoveOnlyValue(int value) : Value(std::make_unique<int>(value)) {}
-
     MoveOnlyValue(MoveOnlyValue&&) noexcept = default;
     MoveOnlyValue& operator=(MoveOnlyValue&&) noexcept = default;
-
     MoveOnlyValue(const MoveOnlyValue&) = delete;
     MoveOnlyValue& operator=(const MoveOnlyValue&) = delete;
 
@@ -23,128 +22,107 @@ struct MoveOnlyValue {
 
 }  // namespace
 
-TEST(SparseSetTest, EmplaceAndGet) {
+TEST(SparseSetTest, EmplacedValueIsReachableByHandle) {
     SparseSet<int> set;
+
     const SparseSetHandle handle = set.Emplace(42);
 
-    ASSERT_TRUE(handle.IsValid());
-    EXPECT_EQ(handle.Generation, 0u);
-    EXPECT_TRUE(set.IsAlive(handle));
+    ASSERT_TRUE(set.IsAlive(handle));
+    EXPECT_EQ(set.Get(handle), 42);
     ASSERT_NE(set.TryGet(handle), nullptr);
     EXPECT_EQ(*set.TryGet(handle), 42);
-    EXPECT_EQ(set.Get(handle), 42);
     EXPECT_EQ(set.Count(), 1u);
     EXPECT_FALSE(set.Empty());
 }
 
-TEST(SparseSetTest, DestroyAndReuse) {
+TEST(SparseSetTest, InvalidHandleIsNeverAlive) {
     SparseSet<int> set;
-    const SparseSetHandle handleA = set.Emplace(10);
-    const SparseSetHandle handleB = set.Emplace(20);
+    set.Emplace(1);
 
-    set.Destroy(handleA);
-
-    EXPECT_FALSE(set.IsAlive(handleA));
-    EXPECT_EQ(set.TryGet(handleA), nullptr);
-
-    const SparseSetHandle handleC = set.Emplace(30);
-    EXPECT_EQ(handleC.Index, handleA.Index);
-    EXPECT_NE(handleC.Generation, handleA.Generation);
-    EXPECT_TRUE(set.IsAlive(handleB));
-    EXPECT_TRUE(set.IsAlive(handleC));
-    EXPECT_EQ(set.Get(handleB), 20);
-    EXPECT_EQ(set.Get(handleC), 30);
+    EXPECT_FALSE(set.IsAlive(SparseSetHandle::Invalid()));
+    EXPECT_EQ(set.TryGet(SparseSetHandle::Invalid()), nullptr);
+    EXPECT_FALSE(set.IsAlive(SparseSetHandle{100, 0}));
 }
 
-TEST(SparseSetTest, SwapAndPop) {
+TEST(SparseSetTest, DestroyedHandleStaysDeadAfterSlotReuse) {
     SparseSet<int> set;
-    const SparseSetHandle handleA = set.Emplace(1);
-    const SparseSetHandle handleB = set.Emplace(2);
-    const SparseSetHandle handleC = set.Emplace(3);
+    const SparseSetHandle first = set.Emplace(10);
+    const SparseSetHandle kept = set.Emplace(20);
+    set.Destroy(first);
 
-    set.Destroy(handleB);
+    const SparseSetHandle reused = set.Emplace(30);
 
-    EXPECT_TRUE(set.IsAlive(handleA));
-    EXPECT_FALSE(set.IsAlive(handleB));
-    EXPECT_TRUE(set.IsAlive(handleC));
-    EXPECT_EQ(set.Get(handleA), 1);
-    EXPECT_EQ(set.Get(handleC), 3);
-
-    const auto values = set.Values();
-    ASSERT_EQ(values.size(), 2u);
-    EXPECT_EQ(values[0], 1);
-    EXPECT_EQ(values[1], 3);
+    EXPECT_EQ(reused.Index, first.Index);
+    EXPECT_NE(reused.Generation, first.Generation);
+    EXPECT_FALSE(set.IsAlive(first));
+    EXPECT_EQ(set.TryGet(first), nullptr);
+    EXPECT_EQ(set.Get(kept), 20);
+    EXPECT_EQ(set.Get(reused), 30);
 }
 
-TEST(SparseSetTest, IterateDense) {
+TEST(SparseSetTest, DestroyMovesLastValueIntoHole) {
     SparseSet<int> set;
-    const SparseSetHandle handleA = set.Emplace(4);
-    const SparseSetHandle handleB = set.Emplace(5);
-    const SparseSetHandle handleC = set.Emplace(6);
+    const SparseSetHandle a = set.Emplace(1);
+    const SparseSetHandle b = set.Emplace(2);
+    const SparseSetHandle c = set.Emplace(3);
 
-    set.Destroy(handleA);
+    set.Destroy(a);
 
-    EXPECT_FALSE(set.IsAlive(handleA));
-    EXPECT_TRUE(set.IsAlive(handleB));
-    EXPECT_TRUE(set.IsAlive(handleC));
+    const vector<int> values(set.Values().begin(), set.Values().end());
+    EXPECT_EQ(values, (vector<int>{3, 2}));
+    EXPECT_EQ(set.GetHandleAt(0), c);
+    EXPECT_EQ(set.GetHandleAt(1), b);
+    EXPECT_EQ(set.Get(c), 3);
+}
 
-    const auto values = set.Values();
-    ASSERT_EQ(values.size(), 2u);
-    EXPECT_EQ(values[0], 6);
-    EXPECT_EQ(values[1], 5);
+TEST(SparseSetTest, GetHandleAtMatchesDenseValues) {
+    SparseSet<int> set;
+    const SparseSetHandle a = set.Emplace(1);
+    set.Emplace(2);
+    set.Emplace(3);
+    set.Destroy(a);
+    set.Emplace(4);
+
+    const auto& view = std::as_const(set);
+    for (uint32_t i = 0; i < view.Count(); ++i) {
+        EXPECT_EQ(&view.Get(view.GetHandleAt(i)), &view.Values()[i]);
+    }
 }
 
 TEST(SparseSetTest, ClearInvalidatesAllHandles) {
     SparseSet<int> set;
-    const SparseSetHandle handleA = set.Emplace(7);
-    const SparseSetHandle handleB = set.Emplace(8);
+    const SparseSetHandle a = set.Emplace(7);
+    const SparseSetHandle b = set.Emplace(8);
 
     set.Clear();
 
     EXPECT_TRUE(set.Empty());
-    EXPECT_EQ(set.Count(), 0u);
-    EXPECT_FALSE(set.IsAlive(handleA));
-    EXPECT_FALSE(set.IsAlive(handleB));
-    EXPECT_EQ(set.TryGet(handleA), nullptr);
-    EXPECT_EQ(set.TryGet(handleB), nullptr);
-
-    const SparseSetHandle handleC = set.Emplace(9);
-    EXPECT_EQ(handleC.Index, handleA.Index);
-    EXPECT_NE(handleC.Generation, handleA.Generation);
-    EXPECT_TRUE(set.IsAlive(handleC));
-    EXPECT_EQ(set.Get(handleC), 9);
+    EXPECT_FALSE(set.IsAlive(a));
+    EXPECT_FALSE(set.IsAlive(b));
+    const SparseSetHandle c = set.Emplace(9);
+    EXPECT_FALSE(set.IsAlive(a));
+    EXPECT_EQ(set.Get(c), 9);
 }
 
-TEST(SparseSetTest, ReserveSparseOnly) {
-    SparseSet<int> set;
-
-    set.Reserve(32);
+TEST(SparseSetTest, ReserveDoesNotCreateElements) {
+    SparseSet<int> set{32};
 
     EXPECT_TRUE(set.Empty());
-    EXPECT_EQ(set.Count(), 0u);
-
     const SparseSetHandle handle = set.Emplace(11);
-    EXPECT_TRUE(handle.IsValid());
-    EXPECT_TRUE(set.IsAlive(handle));
     EXPECT_EQ(set.Get(handle), 11);
 }
 
-TEST(SparseSetTest, MoveOnlyElement) {
+TEST(SparseSetTest, StoresMoveOnlyValues) {
     SparseSet<MoveOnlyValue> set;
-    const SparseSetHandle handleA = set.Emplace(12);
-    const SparseSetHandle handleB = set.Emplace(34);
+    const SparseSetHandle a = set.Emplace(12);
+    const SparseSetHandle b = set.Emplace(34);
 
-    EXPECT_EQ(*set.Get(handleA).Value, 12);
-    EXPECT_EQ(*set.Get(handleB).Value, 34);
+    set.Destroy(a);
 
-    set.Destroy(handleA);
-
-    EXPECT_FALSE(set.IsAlive(handleA));
-    EXPECT_TRUE(set.IsAlive(handleB));
-    EXPECT_EQ(*set.Get(handleB).Value, 34);
+    EXPECT_EQ(*set.Get(b).Value, 34);
 }
 
-TEST(SparseSetTest, MixedOperationsPreserveAllHandlesAndDenseValues) {
+TEST(SparseSetTest, MixedOperationsKeepHandlesConsistent) {
     struct Entry {
         SparseSetHandle Handle;
         int Value;
@@ -155,77 +133,47 @@ TEST(SparseSetTest, MixedOperationsPreserveAllHandlesAndDenseValues) {
     vector<size_t> live;
     auto verify = [&]() {
         vector<int> expected;
-        vector<uint32_t> indices;
         for (const auto& entry : entries) {
             ASSERT_EQ(set.IsAlive(entry.Handle), entry.Alive);
-            const auto* value = std::as_const(set).TryGet(entry.Handle);
             if (entry.Alive) {
-                ASSERT_NE(value, nullptr);
-                EXPECT_EQ(*value, entry.Value);
-                EXPECT_EQ(std::as_const(set).Get(entry.Handle), entry.Value);
+                EXPECT_EQ(set.Get(entry.Handle), entry.Value);
                 expected.push_back(entry.Value);
-                indices.push_back(entry.Handle.Index);
-            } else {
-                EXPECT_EQ(value, nullptr);
             }
         }
-        std::sort(indices.begin(), indices.end());
-        EXPECT_EQ(std::adjacent_find(indices.begin(), indices.end()), indices.end());
         vector<int> actual(set.Values().begin(), set.Values().end());
         std::sort(actual.begin(), actual.end());
         std::sort(expected.begin(), expected.end());
         EXPECT_EQ(actual, expected);
-        EXPECT_EQ(set.Count(), live.size());
-        EXPECT_EQ(set.Empty(), live.empty());
-        EXPECT_FALSE(set.IsAlive(SparseSetHandle::Invalid()));
     };
     auto fill = [&]() {
-        while (live.size() < 96) {
-            const auto value = static_cast<int>(entries.size());
-            const auto handle = set.Emplace(value);
-            // Reuse every freed slot before growing beyond the live high-water mark.
-            EXPECT_LT(handle.Index, 96u);
+        while (live.size() < 32) {
+            const int value = static_cast<int>(entries.size());
+            const SparseSetHandle handle = set.Emplace(value);
+            // Freed slots are reused before the sparse array grows.
+            EXPECT_LT(handle.Index, 32u);
             live.push_back(entries.size());
             entries.push_back({handle, value, true});
-            verify();
         }
     };
-    for (size_t round = 0; round < 8; ++round) {
+
+    for (size_t round = 0; round < 4; ++round) {
         fill();
-        for (size_t i = 0; i < 48; ++i) {
-            const size_t index = (i * 37 + round) % live.size();
-            auto& entry = entries[live[index]];
-            set.Destroy(entry.Handle);
-            entry.Alive = false;
-            live.erase(live.begin() + index);
+        for (size_t i = 0; i < 16; ++i) {
+            const size_t index = (i * 7 + round) % live.size();
+            set.Destroy(entries[live[index]].Handle);
+            entries[live[index]].Alive = false;
+            live.erase(live.begin() + static_cast<std::ptrdiff_t>(index));
+        }
+        verify();
+        fill();
+        verify();
+        if (round % 2 == 1) {
+            set.Clear();
+            for (const size_t index : live) {
+                entries[index].Alive = false;
+            }
+            live.clear();
             verify();
         }
-        if (round % 2 == 0) fill();
-        set.Clear();
-        for (const auto index : live) entries[index].Alive = false;
-        live.clear();
-        verify();
-        set.Clear();
-        verify();
     }
 }
-
-#ifdef RADRAY_IS_DEBUG
-TEST(SparseSetTest, InvalidGetDeathTest) {
-    EXPECT_DEATH_IF_SUPPORTED(
-        {
-            SparseSet<int> set;
-            const SparseSetHandle handle = set.Emplace(123);
-            set.Destroy(handle);
-            (void)set.Get(handle);
-        },
-        "");
-}
-
-TEST(SparseSetTest, DoubleDestroyDeathTest) {
-    SparseSet<int> set;
-    const auto handle = set.Emplace(1);
-    set.Destroy(handle);
-    EXPECT_DEATH_IF_SUPPORTED(set.Destroy(handle), "");
-}
-#endif

@@ -4,6 +4,9 @@
         {
             "name": "debug",
             "hidden": true,
+            "environment": {
+                "RADRAY_PRESET_CONFIG": "Debug"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "CMAKE_CONFIGURATION_TYPES": "Debug"
@@ -12,6 +15,9 @@
         {
             "name": "release",
             "hidden": true,
+            "environment": {
+                "RADRAY_PRESET_CONFIG": "Release"
+            },
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
                 "CMAKE_CONFIGURATION_TYPES": "Release"
@@ -21,7 +27,8 @@
             "name": "win-x64",
             "hidden": true,
             "environment": {
-                "PATH": "${sourceDir}/SDKs/radray_dxc/extracted/bin;$penv{PATH}"
+                "RADRAY_PRESET_TRIPLET": "windows-x64-msvc",
+                "PATH": "${sourceDir}/SDKs/radray_dxc/extracted/bin;${sourceDir}/SDKs/mimalloc/$env{RADRAY_PRESET_TRIPLET}/$env{RADRAY_PRESET_CONFIG}/bin;$penv{PATH}"
             },
             "generator": "Ninja",
             "architecture": {
@@ -37,7 +44,8 @@
             "name": "win-x64-clangcl",
             "hidden": true,
             "environment": {
-                "PATH": "${sourceDir}/SDKs/radray_dxc/extracted/bin;$penv{PATH}"
+                "RADRAY_PRESET_TRIPLET": "windows-x64-clangcl",
+                "PATH": "${sourceDir}/SDKs/radray_dxc/extracted/bin;${sourceDir}/SDKs/mimalloc/$env{RADRAY_PRESET_TRIPLET}/$env{RADRAY_PRESET_CONFIG}/bin;$penv{PATH}"
             },
             "generator": "Visual Studio 18 2026",
             "architecture": {
@@ -51,6 +59,30 @@
             "cacheVariables": {
                 "RADRAY_DEPENDENCY_TRIPLET": "windows-x64-clangcl",
                 "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+            }
+        },
+        {
+            "name": "win-x64-staticcrt",
+            "hidden": true,
+            "inherits": "win-x64",
+            "environment": {
+                "RADRAY_PRESET_TRIPLET": "windows-x64-msvc-staticcrt"
+            },
+            "cacheVariables": {
+                "RADRAY_DEPENDENCY_TRIPLET": "windows-x64-msvc-staticcrt",
+                "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded"
+            }
+        },
+        {
+            "name": "win-x64-clangcl-staticcrt",
+            "hidden": true,
+            "inherits": "win-x64-clangcl",
+            "environment": {
+                "RADRAY_PRESET_TRIPLET": "windows-x64-clangcl-staticcrt"
+            },
+            "cacheVariables": {
+                "RADRAY_DEPENDENCY_TRIPLET": "windows-x64-clangcl-staticcrt",
+                "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded"
             }
         },
         {
@@ -95,6 +127,26 @@
             "binaryDir": "${sourceDir}/build/windows-x64-clangcl/Release"
         },
         {
+            "name": "win-x64-debug-staticcrt",
+            "inherits": ["debug", "win-x64-staticcrt"],
+            "binaryDir": "${sourceDir}/build/windows-x64-msvc-staticcrt/Debug"
+        },
+        {
+            "name": "win-x64-release-staticcrt",
+            "inherits": ["release", "win-x64-staticcrt"],
+            "binaryDir": "${sourceDir}/build/windows-x64-msvc-staticcrt/Release"
+        },
+        {
+            "name": "win-x64-debug-clangcl-staticcrt",
+            "inherits": ["debug", "win-x64-clangcl-staticcrt"],
+            "binaryDir": "${sourceDir}/build/windows-x64-clangcl-staticcrt/Debug"
+        },
+        {
+            "name": "win-x64-release-clangcl-staticcrt",
+            "inherits": ["release", "win-x64-clangcl-staticcrt"],
+            "binaryDir": "${sourceDir}/build/windows-x64-clangcl-staticcrt/Release"
+        },
+        {
             "name": "macos-arm64-debug",
             "inherits": [
                 "debug",
@@ -112,6 +164,26 @@
         }
     ],
     "buildPresets": [
+        {
+            "name": "win-x64-debug-staticcrt",
+            "configurePreset": "win-x64-debug-staticcrt",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-release-staticcrt",
+            "configurePreset": "win-x64-release-staticcrt",
+            "configuration": "Release"
+        },
+        {
+            "name": "win-x64-debug-clangcl-staticcrt",
+            "configurePreset": "win-x64-debug-clangcl-staticcrt",
+            "configuration": "Debug"
+        },
+        {
+            "name": "win-x64-release-clangcl-staticcrt",
+            "configurePreset": "win-x64-release-clangcl-staticcrt",
+            "configuration": "Release"
+        },
         {
             "name": "win-x64-debug",
             "configurePreset": "win-x64-debug",
@@ -144,6 +216,30 @@
         }
     ],
     "testPresets": [
+        {
+            "name": "win-x64-debug-staticcrt",
+            "configurePreset": "win-x64-debug-staticcrt",
+            "configuration": "Debug",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "win-x64-release-staticcrt",
+            "configurePreset": "win-x64-release-staticcrt",
+            "configuration": "Release",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "win-x64-debug-clangcl-staticcrt",
+            "configurePreset": "win-x64-debug-clangcl-staticcrt",
+            "configuration": "Debug",
+            "output": { "outputOnFailure": true }
+        },
+        {
+            "name": "win-x64-release-clangcl-staticcrt",
+            "configurePreset": "win-x64-release-clangcl-staticcrt",
+            "configuration": "Release",
+            "output": { "outputOnFailure": true }
+        },
         {
             "name": "win-x64-debug",
             "configurePreset": "win-x64-debug",

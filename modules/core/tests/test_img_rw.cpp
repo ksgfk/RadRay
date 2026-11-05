@@ -1,130 +1,119 @@
-#include <fstream>
-#include <filesystem>
-#include <cstdlib>
-#include <vector>
-#include <memory>
-
-#include <gtest/gtest.h>
 #include <radray/image_data.h>
 
-static std::filesystem::path GetAssetsPath() {
-    if (auto env = std::getenv("RADRAY_ASSETS_DIR")) {
-        return std::filesystem::path{env};
-    }
-    return "assets";
-}
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 
-static std::filesystem::path MakeTempFilePath(const char* name) {
-    auto base = std::filesystem::temp_directory_path() / "radray_test_img_rw";
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    return base / name;
-}
+#include <gtest/gtest.h>
 
-TEST(PNG, SimpleLoad) {
-    auto filename = GetAssetsPath() / "1735141462310.png";
-    if (!std::filesystem::exists(filename)) {
-        GTEST_SKIP() << "Test image not found: " << filename;
-        return;
-    }
-    std::ifstream file{filename, std::ios::binary};
-    ASSERT_TRUE(file.is_open());
-    auto result = radray::ImageData::LoadPNG(file);
-    ASSERT_TRUE(result.has_value());
-    radray::ImageData img = std::move(result.value());
-    ASSERT_EQ(img.Width, 2560);
-    ASSERT_EQ(img.Height, 1440);
-}
+#include <radray/enum_flags.h>
 
-TEST(PNG, ToRGBA8) {
-    auto filename = GetAssetsPath() / "1735141462310.png";
-    if (!std::filesystem::exists(filename)) {
-        GTEST_SKIP() << "Test image not found: " << filename;
-        return;
-    }
-    std::ifstream file{filename, std::ios::binary};
-    ASSERT_TRUE(file.is_open());
-    auto result = radray::ImageData::LoadPNG(file);
-    ASSERT_TRUE(result.has_value());
-    radray::ImageData img = std::move(result.value());
-    ASSERT_EQ(img.Width, 2560);
-    ASSERT_EQ(img.Height, 1440);
+namespace radray {
+namespace {
 
-    radray::ImageData rgba = img.RGB8ToRGBA8(0xff);
-    ASSERT_EQ(rgba.Width, 2560);
-    ASSERT_EQ(rgba.Height, 1440);
-    ASSERT_EQ(rgba.Format, radray::ImageFormat::RGBA8_BYTE);
-}
-
-TEST(PNG, WriteReadRoundTripRGBA8) {
-    radray::ImageData img;
-    img.Width = 8;
-    img.Height = 4;
-    img.Format = radray::ImageFormat::RGBA8_BYTE;
-    img.Data = std::make_unique<radray::byte[]>(img.GetSize());
-
-    for (uint32_t y = 0; y < img.Height; ++y) {
-        for (uint32_t x = 0; x < img.Width; ++x) {
-            const size_t p = static_cast<size_t>(y) * img.Width * 4 + static_cast<size_t>(x) * 4;
-            img.Data[p + 0] = static_cast<radray::byte>((x * 17) & 0xFF);
-            img.Data[p + 1] = static_cast<radray::byte>((y * 33) & 0xFF);
-            img.Data[p + 2] = static_cast<radray::byte>(((x + y) * 23) & 0xFF);
-            img.Data[p + 3] = static_cast<radray::byte>(255);
-        }
+class ScopedTempFile {
+public:
+    explicit ScopedTempFile(std::string_view name)
+        : _path(std::filesystem::temp_directory_path() / fmt::format("radray_core_png_{}", name)) {}
+    ScopedTempFile(const ScopedTempFile&) = delete;
+    ScopedTempFile& operator=(const ScopedTempFile&) = delete;
+    ~ScopedTempFile() noexcept {
+        std::error_code ec;
+        std::filesystem::remove(_path, ec);
     }
 
-    auto path = MakeTempFilePath("roundtrip_rgba8.png");
-    ASSERT_TRUE(img.WritePNG({path.string(), false}));
+    string PathString() const { return string{_path.string()}; }
 
-    std::ifstream file{path, std::ios::binary};
-    ASSERT_TRUE(file.is_open());
-    auto loaded = radray::ImageData::LoadPNG(file);
+private:
+    std::filesystem::path _path;
+};
+
+ImageData MakeGradient(uint32_t width, uint32_t height, ImageFormat format) {
+    ImageData image;
+    image.Width = width;
+    image.Height = height;
+    image.Format = format;
+    image.Data = make_unique<byte[]>(image.GetSize());
+    for (size_t i = 0; i < image.GetSize(); ++i) image.Data[i] = static_cast<byte>((i * 37 + 11) & 0xff);
+    return image;
+}
+
+std::optional<ImageData> WriteAndLoad(const ImageData& image, std::string_view name, PNGLoadSettings settings = {}) {
+    const ScopedTempFile file{name};
+    const string path = file.PathString();
+    if (!image.WritePNG({path, false})) return std::nullopt;
+    std::ifstream stream{path, std::ios::binary};
+    return ImageData::LoadPNG(stream, settings);
+}
+
+bool SamePixels(const ImageData& a, const ImageData& b) {
+    return std::ranges::equal(a.GetSpan(), b.GetSpan());
+}
+
+class PngRoundTripTest : public testing::TestWithParam<ImageFormat> {};
+
+TEST_P(PngRoundTripTest, WrittenImageLoadsBackUnchanged) {
+    const ImageData image = MakeGradient(7, 5, GetParam());
+
+    const std::optional<ImageData> loaded = WriteAndLoad(image, EnumName(GetParam()));
+
     ASSERT_TRUE(loaded.has_value());
-
-    ASSERT_EQ(loaded->Width, img.Width);
-    ASSERT_EQ(loaded->Height, img.Height);
-    ASSERT_EQ(loaded->Format, radray::ImageFormat::RGBA8_BYTE);
-    ASSERT_EQ(loaded->GetSize(), img.GetSize());
-    EXPECT_EQ(std::memcmp(loaded->Data.get(), img.Data.get(), img.GetSize()), 0);
+    EXPECT_EQ(loaded->Width, image.Width);
+    EXPECT_EQ(loaded->Height, image.Height);
+    EXPECT_EQ(loaded->Format, image.Format);
+    EXPECT_TRUE(SamePixels(*loaded, image));
 }
 
-TEST(PNG, WriteReadRoundTripRGB8) {
-    radray::ImageData img;
-    img.Width = 7;
-    img.Height = 5;
-    img.Format = radray::ImageFormat::RGB8_BYTE;
-    img.Data = std::make_unique<radray::byte[]>(img.GetSize());
+INSTANTIATE_TEST_SUITE_P(
+    PngTest,
+    PngRoundTripTest,
+    testing::Values(ImageFormat::RGB8_BYTE, ImageFormat::RGBA8_BYTE),
+    [](const testing::TestParamInfo<ImageFormat>& info) { return std::string{EnumName(info.param)}; });
 
-    for (uint32_t y = 0; y < img.Height; ++y) {
-        for (uint32_t x = 0; x < img.Width; ++x) {
-            const size_t p = static_cast<size_t>(y) * img.Width * 3 + static_cast<size_t>(x) * 3;
-            img.Data[p + 0] = static_cast<radray::byte>((x * 19 + y) & 0xFF);
-            img.Data[p + 1] = static_cast<radray::byte>((y * 27 + x) & 0xFF);
-            img.Data[p + 2] = static_cast<radray::byte>(((x * 3 + y * 5) * 11) & 0xFF);
-        }
-    }
+TEST(PngTest, LoadWithFlipYReversesRows) {
+    ImageData image = MakeGradient(3, 4, ImageFormat::RGBA8_BYTE);
 
-    auto path = MakeTempFilePath("roundtrip_rgb8.png");
-    ASSERT_TRUE(img.WritePNG({path.string(), false}));
+    const std::optional<ImageData> loaded = WriteAndLoad(image, "flip", PNGLoadSettings{.AddAlphaIfRGB = std::nullopt, .IsFlipY = true});
 
-    std::ifstream file{path, std::ios::binary};
-    ASSERT_TRUE(file.is_open());
-    auto loaded = radray::ImageData::LoadPNG(file);
     ASSERT_TRUE(loaded.has_value());
-
-    ASSERT_EQ(loaded->Width, img.Width);
-    ASSERT_EQ(loaded->Height, img.Height);
-    ASSERT_EQ(loaded->Format, radray::ImageFormat::RGB8_BYTE);
-    ASSERT_EQ(loaded->GetSize(), img.GetSize());
-    EXPECT_EQ(std::memcmp(loaded->Data.get(), img.Data.get(), img.GetSize()), 0);
+    image.FlipY();
+    EXPECT_TRUE(SamePixels(*loaded, image));
 }
 
-TEST(PNG, WriteUnsupportedFormatFails) {
-    radray::ImageData img;
-    img.Width = 4;
-    img.Height = 4;
-    img.Format = radray::ImageFormat::R16_USHORT;
-    img.Data = std::make_unique<radray::byte[]>(img.GetSize());
-    auto path = MakeTempFilePath("unsupported.png");
-    EXPECT_FALSE(img.WritePNG({path.string(), false}));
+TEST(PngTest, AddAlphaIfRGBExpandsToRGBA) {
+    const ImageData rgb = MakeGradient(3, 2, ImageFormat::RGB8_BYTE);
+
+    const std::optional<ImageData> loaded = WriteAndLoad(rgb, "alpha", PNGLoadSettings{.AddAlphaIfRGB = 77});
+
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->Format, ImageFormat::RGBA8_BYTE);
+    EXPECT_TRUE(SamePixels(*loaded, rgb.RGB8ToRGBA8(77)));
 }
+
+TEST(PngTest, IsPNGChecksSignatureWithoutConsumingStream) {
+    const ScopedTempFile file{"signature"};
+    ASSERT_TRUE(MakeGradient(1, 1, ImageFormat::RGBA8_BYTE).WritePNG({file.PathString(), false}));
+    std::ifstream png{file.PathString(), std::ios::binary};
+    std::istringstream text{"definitely not a png"};
+
+    EXPECT_TRUE(ImageData::IsPNG(png));
+    EXPECT_EQ(png.tellg(), std::streampos{0});
+    EXPECT_FALSE(ImageData::IsPNG(text));
+}
+
+TEST(PngTest, LoadRejectsNonPngData) {
+    std::istringstream text{"definitely not a png"};
+
+    EXPECT_FALSE(ImageData::LoadPNG(text).has_value());
+}
+
+TEST(PngTest, WriteRejectsUnsupportedFormat) {
+    const ScopedTempFile file{"unsupported"};
+    const ImageData image = MakeGradient(4, 4, ImageFormat::R16_USHORT);
+
+    EXPECT_FALSE(image.WritePNG({file.PathString(), false}));
+}
+
+}  // namespace
+}  // namespace radray

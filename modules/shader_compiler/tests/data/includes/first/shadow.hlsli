@@ -1,1 +1,1 @@
-#define SHADOW_VALUE 1.0
+#define SHADOW_REGISTER t1

@@ -1,10 +1,11 @@
-add_executable(test_radray_shader test_shader_diagnostics.cpp
-    test_shader_artifact.cpp
-    test_radray_shader_contract.cpp)
+add_executable(test_radray_shader
+    test_diagnostic_result.cpp
+    test_shader_compiler_contract.cpp
+    test_shader_artifact.cpp)
 target_link_libraries(test_radray_shader PRIVATE radrayshader GTest::gtest_main)
 radray_default_compile_flags(test_radray_shader)
 radray_optimize_flags_binary(test_radray_shader)
 radray_set_build_path(test_radray_shader)
+radray_load_mimalloc_early(test_radray_shader)
+radray_use_test_shaders(test_radray_shader)
 gtest_discover_tests(test_radray_shader)
-
-target_compile_definitions(test_radray_shader PRIVATE RADRAY_PROJECT_DIR="${RADRAY_SOURCE_ROOT}")

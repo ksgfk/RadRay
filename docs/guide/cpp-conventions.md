@@ -1,5 +1,5 @@
 > - 适用: 写这个仓库的 C++ 代码；不确定某个写法是否符合仓库惯例
-> - 权威: 本文是命名、文件组织、接口风格、测试写法的唯一说明。硬规则（会被判定为缺陷的那些）在 `AGENTS.md`
+> - 权威: 本文是命名、文件组织、接口风格、测试文件组织与注册的唯一说明；测试取舍、用例形态与 TDD 流程在 testing。硬规则（会被判定为缺陷的那些）在 `AGENTS.md`
 > - 锚点: `.clang-format`, `cmake/Utility.cmake`
 
 # C++ 约定
@@ -53,6 +53,9 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 见上文命名一节。
 
 ## 接口风格
+
+整数上下界统一使用 `<limits>` 中的 `std::numeric_limits<T>::min()` / `max()`，使用处直接包含 `<limits>`；
+不使用 `<cstdint>` / `<stdint.h>` 的整数边界宏。
 
 **可空指针用 `Nullable<T>`，可空值用 `std::optional`。** 这条分界在仓库里执行得很干净：
 
@@ -121,8 +124,8 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 目前是 `test_inline_vector`，它替换全局 `operator new` / `operator delete`。`EXPECT_DEATH` / `EXPECT_EXIT`
 已经在子进程里跑断言，不因此再拆可执行文件。
 
-测试观测遵守 [AGENTS.md](../../AGENTS.md) 的字段限制，优先通过生命周期回调、实际输出和对象状态验证，
-不增加专用计数接口；运行时性能插桩沿用 `RADRAY_PROFILE_*`。
+测什么、怎样组织用例以及 TDD 流程见[编写测试](testing.md)。测试观测遵守 [AGENTS.md](../../AGENTS.md)
+的字段限制，优先通过实际输出和对象状态验证，不增加专用计数接口；运行时性能插桩沿用 `RADRAY_PROFILE_*`。
 
 ```cmake
 add_executable(test_radray_core test_foo.cpp test_bar.cpp)
@@ -130,32 +133,35 @@ target_link_libraries(test_radray_core PRIVATE radraycore GTest::gtest_main)
 radray_default_compile_flags(test_radray_core)
 radray_optimize_flags_binary(test_radray_core)
 radray_set_build_path(test_radray_core)
+radray_load_mimalloc_early(test_radray_core)
 gtest_discover_tests(test_radray_core)
 ```
+
+链接 core 的可执行文件都调用 `radray_load_mimalloc_early`，原因见
+[Windows 动态 CRT 与 mimalloc](build-test.md#windows-动态-crt-与-mimalloc)；不链接 core 的 `test_inline_vector` 不调用。
 
 顶层开启测试时加载 CMake `GoogleTest` 模块，各模块直接调用官方接口注册。
 `gtest_discover_tests` 枚举可执行文件中的用例；发现模式见[构建与测试](build-test.md#测试)。
 通过 `PROPERTIES` 设置测试环境变量、超时或串行运行要求；需要划分不同属性的用例组时，
 可使用互不重叠的 `TEST_FILTER` 分别发现。依赖 DXC 的测试通过启动环境查找 SDK，不复制 DLL；
-构建期 discovery 与测试执行的环境配置见[开发时加载 DXC](build-test.md#开发时加载-dxc)。
+构建期 discovery 与测试执行的环境配置见[开发时加载运行库](build-test.md#开发时加载运行库)。
 
 **`ctest -R` 匹配 gtest 套件名（C++ 类名），不是 cmake 目标名。** 对照表在
 [build-test](build-test.md)。
 
-需要 GPU 的测试按已构建测试目标注册，由公共 fixture 区分后端未编译、无 adapter、缺验证层与初始化失败。
-仅可选后端不可用时 `GTEST_SKIP()`；指定为必测的后端缺失，以及 native 创建、提交或读回失败，都必须失败。
-使用 `RADRAY_TEST_REQUIRED_BACKENDS` 和现有 GPU fixture，具体入口见[构建与测试](build-test.md#测试)，
-不要把所有空 device 结果统一跳过。
+需要 GPU 的测试使用公共 fixture，跳过与失败的规则见[编写测试](testing.md#gpu-测试)。
 
 现成的测试辅助设施：
 
 | 设施 | 在哪 | 用途 |
 |---|---|---|
-| `Scoped*`（`ScopedDirectory` 等） | 各测试文件 | 临时目录 / 临时输入 |
+| `ScopedTempDirectory`、`ScopedTempFile` | 各测试文件的匿名命名空间 | 临时目录 / 临时文件，析构时删除 |
+| `GpuTest`、`BackendTest`、`LoadShader`、`ReadBuffer`/`ReadTexture` 等 | `modules/render/tests/gpu_test_fixture.h` | 后端参数化、设备创建、字节码加载、上传与读回 |
+| `FakeDevice`、`FakeGpu`、`RecordingEncoder` 等 | `modules/runtime/tests/test_fakes.h` | runtime 测试的 CPU fake，不需要 GPU |
+| `DiscoverAndCompile`、`DecodeLane` 等 | `modules/shader_compiler/tests/compiler_test_utils.h` | 编译 shaderlib 源并解码各 target 的 artifact |
 
-需要仓库根路径的测试从 `RADRAY_PROJECT_DIR` 环境变量取，编译期有
-`RADRAY_PROJECT_DIR_DEFAULT` 兜底。两者都要，因为 ctest 注册的用例走环境变量，
-而直接跑可执行文件时没有。
+需要仓库根路径的测试使用编译期定义 `RADRAY_PROJECT_DIR`，目前只有 shader_compiler 测试与 fixture 生成器使用。
+本地测试 shader 的目录由编译期定义 `RADRAY_TEST_SHADER_DIR` 提供。
 
 ## 格式化
 

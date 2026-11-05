@@ -21,23 +21,11 @@ struct FixtureDescription {
 };
 
 constexpr FixtureDescription kFixtures[] = {
-    {"no_resource_graphics"},
-    {"vertex_only"},
-    {"depth_only"},
     {"texture_sampler"},
     {"shadow_static_sampler"},
-    {"multiple_root_constants"},
     {"spirv_push_constant"},
-    {"target_specific_bindings"},
     {"nested_types"},
-    {"multiple_cbuffers"},
     {"compute"},
-    {"unused_resource"},
-    {"shared_cbuffer_type"},
-    {"nested_cbuffer_roots"},
-    {"explicit_bindings"},
-    {"explicit_multiple_push"},
-    {"explicit_layered_groups"},
 };
 
 bool ReadFile(const std::filesystem::path& path, vector<byte>& output) {
@@ -71,26 +59,35 @@ bool WriteArtifact(
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "usage: radray_shader_fixture_generator <output-directory>\n";
+        return 1;
+    }
+    const std::filesystem::path outputRoot{argv[1]};
     const std::filesystem::path root{RADRAY_PROJECT_DIR};
     const std::filesystem::path sourceRoot = root / "modules/shader/tests/data/shader_sources";
-    const std::filesystem::path artifactRoot = root / "modules/shader/tests/data/shader_artifacts";
+    const std::filesystem::path artifactRoot = outputRoot / "shader_artifacts";
     const vector<std::filesystem::path> includePaths{root / "shaderlib"};
-    std::filesystem::create_directories(artifactRoot);
-    const auto rawRoot = root / "modules/render/tests/data/shader_bytecode";
-    std::filesystem::create_directories(rawRoot);
+    std::error_code error;
+    std::filesystem::create_directories(artifactRoot, error);
+    if (error) {
+        std::cerr << "cannot create " << artifactRoot << ": " << error.message() << '\n';
+        return 1;
+    }
 
     Client client;
     if (!client.IsAvailable()) {
+        std::cerr << "RadRay DXC fork is unavailable; check the SDK package and DLL search path.\n";
         return 2;
     }
 
     for (const FixtureDescription& fixture : kFixtures) {
         vector<byte> source;
         const string fileName = string{fixture.Name} + ".hlsl";
-        const bool explicitFixture = std::string_view{fixture.Name}.starts_with("explicit_");
-        const auto sourcePath = explicitFixture ? root / "modules/shader_compiler/tests/data" / fileName : sourceRoot / fileName;
+        const auto sourcePath = sourceRoot / fileName;
         if (!ReadFile(sourcePath, source)) {
+            std::cerr << "cannot read " << sourcePath << '\n';
             return 3;
         }
 
@@ -131,12 +128,7 @@ int main() {
                 return 6;
             }
             const string suffix = target == ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
-            for (const auto& stage : lane->Stages) {
-                std::ofstream raw(rawRoot / (string{fixture.Name} + "." + stage.EntryPoint + suffix), std::ios::binary | std::ios::trunc);
-                raw.write(reinterpret_cast<const char*>(stage.Bytecode.data()), static_cast<std::streamsize>(stage.Bytecode.size()));
-                if (!raw.good()) return 8;
-            }
-            if (!explicitFixture && !WriteArtifact(artifactRoot / (string{fixture.Name} + suffix), *lane)) {
+            if (!WriteArtifact(artifactRoot / (string{fixture.Name} + suffix), *lane)) {
                 return 7;
             }
         }

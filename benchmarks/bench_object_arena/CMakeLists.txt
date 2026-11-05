@@ -1,0 +1,6 @@
+add_executable(bench_object_arena bench_object_arena.cpp)
+target_link_libraries(bench_object_arena PRIVATE radraycore benchmark::benchmark)
+radray_default_compile_flags(bench_object_arena)
+radray_optimize_flags_binary(bench_object_arena)
+radray_set_build_path(bench_object_arena)
+radray_load_mimalloc_early(bench_object_arena)

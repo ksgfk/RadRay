@@ -39,6 +39,9 @@
 
 namespace radray::render::vulkan {
 
+VkImageCreateInfo MakeTextureImageCreateInfo(const TextureDescriptor& desc, bool allowFormatReinterpretation) noexcept;
+VkImageSubresourceRange MakeExternalTextureRange(const TextureDescriptor& desc) noexcept;
+
 struct DeviceFeaturesVulkan {
     DeviceFeaturesVulkan() noexcept;
 
@@ -66,6 +69,7 @@ struct FeatureRequestsVulkan {
     FeatureRequirementVulkan SamplerAnisotropy{};
     FeatureRequirementVulkan VertexPipelineStoresAndAtomics{};
     FeatureRequirementVulkan FragmentStoresAndAtomics{};
+    FeatureRequirementVulkan ShaderStorageImageWriteWithoutFormat{};
     FeatureRequirementVulkan TimelineSemaphore{};
     FeatureRequirementVulkan SamplerMirrorClampToEdge{};
     FeatureRequirementVulkan SamplerFilterMinmax{};

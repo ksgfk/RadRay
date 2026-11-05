@@ -1,16 +1,19 @@
 add_executable(test_radray_shader_compiler
-    test_radray_shader_compiler_client.cpp
-    test_radray_dxc_metadata.cpp
+    test_client.cpp
+    test_contract_discovery.cpp
+    test_dxc_metadata.cpp
     test_shaderlib_passes.cpp)
-target_link_libraries(test_radray_shader_compiler PRIVATE radrayshadercompiler RadRayDXC::Headers GTest::gtest_main)
+target_link_libraries(test_radray_shader_compiler PRIVATE radrayshadercompiler GTest::gtest_main)
+target_compile_definitions(test_radray_shader_compiler PRIVATE RADRAY_PROJECT_DIR="${RADRAY_SOURCE_ROOT}")
 radray_default_compile_flags(test_radray_shader_compiler)
 radray_optimize_flags_binary(test_radray_shader_compiler)
 radray_set_build_path(test_radray_shader_compiler)
+radray_load_mimalloc_early(test_radray_shader_compiler)
 gtest_discover_tests(test_radray_shader_compiler)
-target_compile_definitions(test_radray_shader_compiler PRIVATE RADRAY_PROJECT_DIR="${RADRAY_SOURCE_ROOT}")
 
 add_executable(radray_shader_fixture_generator EXCLUDE_FROM_ALL shader_fixture_generator.cpp)
 target_compile_definitions(radray_shader_fixture_generator PRIVATE RADRAY_PROJECT_DIR="${RADRAY_SOURCE_ROOT}")
 target_link_libraries(radray_shader_fixture_generator PRIVATE radrayshadercompiler)
 radray_default_compile_flags(radray_shader_fixture_generator)
 radray_set_build_path(radray_shader_fixture_generator)
+radray_load_mimalloc_early(radray_shader_fixture_generator)

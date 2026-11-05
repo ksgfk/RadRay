@@ -10,6 +10,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 |---|---|
 | 定位子系统、理解当前设计 | [架构地图](docs/architecture/overview.md)，再读所属子系统文档 |
 | 配置、构建、测试、恢复依赖 | [构建与测试](docs/guide/build-test.md) |
+| 编写或评审测试、按 TDD 开发 | [编写测试](docs/guide/testing.md) |
 | 性能采样、运行基准、比较改动 | [性能测量](docs/guide/performance.md) |
 | 编写 C++ | [C++ 约定](docs/guide/cpp-conventions.md) |
 | 编写 HLSL、修改 binding | [Shader authoring](docs/guide/shader-authoring.md)、[Shader pipeline](docs/architecture/shader-pipeline.md) |
@@ -33,7 +34,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - 新增或引入使用全局变量、全局 `static` 变量或函数内 `static` 共享状态前，必须先询问用户并获得同意，不得直接使用。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。
-- 模块基础依赖：shader → core，window → core，render → core；可选 shadercompiler → shader/core。
+- 模块基础依赖：shader → core，window → core，render → core，runtime → render/core；可选 shadercompiler → shader/core。
 - shader 不依赖 DXC 或 render；公共 shader/render 契约不依赖 DXC SDK 头。
 - `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。依赖分为用户手动执行的 fetch、`build_third_party.py` 和主工程 `find_package` 三阶段；配置、构建、安装不自动拉取或准备依赖。安装只导出 RadRay 自身，外部依赖由包发现提供。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。

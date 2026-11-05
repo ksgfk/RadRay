@@ -5,11 +5,51 @@
 #include <limits>
 
 #include <yyjson.h>
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
 
 #include <radray/file.h>
 
 namespace radray {
 namespace {
+
+void* JsonAllocate(void*, size_t size) noexcept {
+#ifdef RADRAY_ENABLE_MIMALLOC
+    return mi_malloc(size);
+#else
+    return std::malloc(size);
+#endif
+}
+
+void JsonFree(void*, void* ptr) noexcept {
+#ifdef RADRAY_ENABLE_MIMALLOC
+    mi_free(ptr);
+#else
+    std::free(ptr);
+#endif
+}
+
+void* JsonReallocate(void*, void* ptr, size_t, size_t size) noexcept {
+    if (size == 0) {
+        JsonFree(nullptr, ptr);
+        return nullptr;
+    }
+#ifdef RADRAY_ENABLE_MIMALLOC
+    return mi_realloc(ptr, size);
+#else
+    return std::realloc(ptr, size);
+#endif
+}
+
+yyjson_alc MakeJsonAllocator() noexcept {
+    return {JsonAllocate, JsonReallocate, JsonFree, nullptr};
+}
+
+yyjson_mut_doc* MakeJsonMutableDocument() noexcept {
+    const auto allocator = MakeJsonAllocator();
+    return yyjson_mut_doc_new(&allocator);
+}
 
 const char* StringViewData(std::string_view value) noexcept {
     return value.data() != nullptr ? value.data() : "";
@@ -189,7 +229,8 @@ JsonDocument& JsonDocument::operator=(JsonDocument&& other) noexcept {
 }
 
 std::optional<JsonDocument> JsonDocument::Parse(std::string_view text) noexcept {
-    yyjson_doc* doc = yyjson_read(text.data(), text.size(), 0);
+    const auto allocator = MakeJsonAllocator();
+    yyjson_doc* doc = yyjson_read_opts(const_cast<char*>(StringViewData(text)), text.size(), 0, &allocator, nullptr);
     if (doc == nullptr) {
         return std::nullopt;
     }
@@ -277,7 +318,7 @@ JsonRef JsonRef::AppendArray() noexcept {
 
 // ------------------------------ JsonWriter -------------------------------
 
-JsonWriter::JsonWriter() noexcept : _doc(yyjson_mut_doc_new(nullptr)) {}
+JsonWriter::JsonWriter() noexcept : _doc(MakeJsonMutableDocument()) {}
 
 JsonWriter::~JsonWriter() noexcept {
     if (_doc != nullptr) {
@@ -316,13 +357,13 @@ JsonRef JsonWriter::RootArray() noexcept {
 std::optional<string> JsonWriter::Write(bool pretty) const noexcept {
     yyjson_write_flag flag = pretty ? YYJSON_WRITE_PRETTY : 0;
     size_t len = 0;
-    char* raw = yyjson_mut_write(_doc, flag, &len);
-    if (raw == nullptr) {
+    const auto allocator = MakeJsonAllocator();
+    const auto freeBuffer = [](char* ptr) noexcept { JsonFree(nullptr, ptr); };
+    unique_ptr<char, decltype(freeBuffer)> raw{yyjson_mut_write_opts(_doc, flag, &allocator, &len, nullptr), freeBuffer};
+    if (!raw) {
         return std::nullopt;
     }
-    string result{raw, len};
-    std::free(raw);
-    return result;
+    return string{raw.get(), len};
 }
 
 bool JsonWriter::WriteFile(const std::filesystem::path& path, bool pretty) const noexcept {

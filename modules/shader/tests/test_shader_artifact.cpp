@@ -1,918 +1,809 @@
 #include <radray/shader/shader_artifact.h>
 
-#include "shader_contract_fixtures.h"
-
-#include <gtest/gtest.h>
-
-#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 
-namespace radray::shader_tests {
+#include <fmt/format.h>
+#include <gtest/gtest.h>
+
+namespace radray::shader {
 namespace {
 
-using shader::DecodeDxilShaderArtifact;
-using shader::DecodeShaderArtifact;
-using shader::DecodeSpirvShaderArtifact;
-using shader::DxilShaderArtifactView;
-using shader::ShaderArtifactDecodeOptions;
-using shader::ShaderArtifactView;
-using shader::SpirvShaderArtifactView;
+constexpr GpuArtifactHash kSyntheticArtifact{{0x5a, 0x01}};
+constexpr uint32_t kBytecodeSize = 4;
+constexpr uint32_t kVertexBit = 1u << static_cast<uint8_t>(ShaderStage::Vertex);
+constexpr uint32_t kPixelBit = 1u << static_cast<uint8_t>(ShaderStage::Pixel);
 
-// The identity moves with the wire schema, so every fixture decode names the same constant instead
-// of repeating the literal and drifting apart from it.
-constexpr uint64_t kFixtureToolchainIdentity = shader::kShaderToolchainIdentity;
+template <typename T>
+WireBlobRange AppendRecords(vector<byte>& blob, const vector<T>& records) {
+    const WireBlobRange range{static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(records.size() * sizeof(T))};
+    const auto* data = reinterpret_cast<const byte*>(records.data());
+    blob.insert(blob.end(), data, data + range.Size);
+    return range;
+}
 
-vector<byte> ReadBinary(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return {};
+template <typename T, typename Member>
+vector<T> RebaseNames(vector<T> records, Member member) {
+    for (T& record : records) {
+        (record.*member).Offset += static_cast<uint32_t>(sizeof(WireMetadataEnvelope));
     }
-    file.seekg(0, std::ios::end);
-    const std::streamoff size = file.tellg();
-    if (size <= 0) {
-        return {};
+    return records;
+}
+
+// Hand-built artifact for decoder rules. Record names are offsets into a pool that Encode places
+// right after the header.
+struct SyntheticArtifact {
+    ShaderTarget Target{ShaderTarget::DXIL};
+    uint64_t ToolchainIdentity{kShaderToolchainIdentity};
+    vector<WireEntryRecord> Entries{};
+    vector<WireBindingRecord> Bindings{};
+    vector<WireTypeRecord> Types{};
+    vector<WireRootConstantRecord> RootConstants{};
+    vector<WireVertexInputRecord> VertexInputs{};
+    vector<WireSamplerRecord> Samplers{};
+    vector<byte> RootSignature{};
+    string Names{};
+
+    WireBlobRange Name(std::string_view text) {
+        const WireBlobRange range{static_cast<uint32_t>(Names.size()), static_cast<uint32_t>(text.size())};
+        Names.append(text);
+        return range;
     }
-    file.seekg(0, std::ios::beg);
-    vector<byte> data(static_cast<size_t>(size));
-    file.read(reinterpret_cast<char*>(data.data()), size);
-    return file.good() || file.eof() ? data : vector<byte>{};
-}
 
-shader::GpuArtifactHash ExpectedArtifact(uint8_t fixture, shader::ShaderTarget target) {
-    shader::GpuArtifactHash result{};
-    result.Bytes[0] = fixture;
-    result.Bytes[1] = static_cast<uint8_t>(target);
-    result.Bytes[2] = 0x4d;
-    result.Bytes[3] = 0x30;
-    return result;
-}
-
-std::optional<size_t> FindFixtureIndex(std::string_view name) {
-    const auto fixtures = test::GetShaderContractFixtures();
-    for (size_t index = 0; index < fixtures.size(); ++index) {
-        if (fixtures[index].Name == name) {
-            return index;
-        }
+    void AddEntry(std::string_view name, ShaderStage stage) {
+        Entries.push_back({.Name = Name(name), .Stage = static_cast<uint8_t>(stage), .InterfaceOffset = 0, .InterfaceSize = kBytecodeSize});
     }
-    return std::nullopt;
-}
 
-vector<byte> ReadFixtureArtifact(std::string_view name, shader::ShaderTarget target) {
-    const std::optional<size_t> fixtureIndex = FindFixtureIndex(name);
-    if (!fixtureIndex.has_value()) {
-        return {};
+    WireBindingRecord& AddBinding(std::string_view name, ShaderBindingKind kind, uint32_t group, uint32_t binding) {
+        return Bindings.emplace_back(WireBindingRecord{
+            .Name = Name(name),
+            .Group = group,
+            .Binding = binding,
+            .Type = static_cast<uint32_t>(kind),
+            .Count = 1,
+            .StageMask = kPixelBit});
     }
-    const string suffix = target == shader::ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
-    return ReadBinary(
-        std::filesystem::path{RADRAY_PROJECT_DIR} /
-        "modules/shader/tests/data/shader_artifacts" /
-        (string{name} + suffix));
-}
 
-ShaderArtifactDecodeOptions FixtureDecodeOptions(
-    std::string_view name,
-    shader::ShaderTarget target) {
-    const std::optional<size_t> fixtureIndex = FindFixtureIndex(name);
-    EXPECT_TRUE(fixtureIndex.has_value());
-    return ShaderArtifactDecodeOptions{
-        .Target = target,
-        .ExpectedGpuArtifact = test::ExpectedGpuArtifact(fixtureIndex.value_or(0), target),
-        .ExpectedToolchainIdentity = kFixtureToolchainIdentity};
-}
+    // Struct records get no scalar shape; every other kind is a float with one component per 4 bytes.
+    uint32_t AddType(std::string_view name, ShaderTypeKind kind, uint32_t size, uint32_t parent = kShaderNoType, uint32_t offset = 0) {
+        const bool aggregate = kind == ShaderTypeKind::Struct;
+        Types.push_back({
+            .Name = Name(name),
+            .ParentIndex = parent,
+            .Kind = static_cast<uint32_t>(kind),
+            .ElementCount = 1,
+            .Offset = offset,
+            .Size = size,
+            .Stride = size,
+            .ScalarKind = static_cast<uint32_t>(aggregate ? ShaderScalarKind::None : ShaderScalarKind::Float),
+            .RowCount = aggregate ? 0u : 1u,
+            .ColumnCount = aggregate ? 0u : size / 4});
+        return static_cast<uint32_t>(Types.size() - 1);
+    }
 
-struct FixtureArtifact {
-    vector<byte> Blob;
-    std::optional<ShaderArtifactView> Value;
-    string Diagnostics;
+    WireRootConstantRecord& AddRootConstant(std::string_view name, uint32_t size) {
+        return RootConstants.emplace_back(WireRootConstantRecord{.Name = Name(name), .Size = size, .StageMask = kVertexBit});
+    }
+
+    WireVertexInputRecord& AddVertexInput(std::string_view semantic, uint32_t location) {
+        return VertexInputs.emplace_back(WireVertexInputRecord{
+            .Semantic = Name(semantic),
+            .Location = location,
+            .ComponentType = static_cast<uint32_t>(ShaderVertexComponentType::Float),
+            .ComponentCount = 3});
+    }
+
+    vector<byte> Encode() const {
+        WireMetadataEnvelope envelope{};
+        envelope.Target = static_cast<uint8_t>(Target);
+        envelope.ToolchainIdentity = ToolchainIdentity;
+        envelope.GpuArtifact = kSyntheticArtifact;
+        vector<byte> blob(sizeof(envelope));
+        const auto* names = reinterpret_cast<const byte*>(Names.data());
+        blob.insert(blob.end(), names, names + Names.size());
+        envelope.EntryRecords = AppendRecords(blob, RebaseNames(Entries, &WireEntryRecord::Name));
+        envelope.BindingRecords = AppendRecords(blob, RebaseNames(Bindings, &WireBindingRecord::Name));
+        envelope.TypeRecords = AppendRecords(blob, RebaseNames(Types, &WireTypeRecord::Name));
+        envelope.RootConstantRecords = AppendRecords(blob, RebaseNames(RootConstants, &WireRootConstantRecord::Name));
+        envelope.VertexInputRecords = AppendRecords(blob, RebaseNames(VertexInputs, &WireVertexInputRecord::Semantic));
+        envelope.SamplerRecords = AppendRecords(blob, Samplers);
+        envelope.RootSignature = AppendRecords(blob, RootSignature);
+        envelope.Bytecode = AppendRecords(blob, vector<byte>(kBytecodeSize, byte{0xcc}));
+        envelope.TotalSize = static_cast<uint32_t>(blob.size());
+        std::memcpy(blob.data(), &envelope, sizeof(envelope));
+        return blob;
+    }
 };
 
-FixtureArtifact DecodeFixtureArtifact(std::string_view name, shader::ShaderTarget target) {
-    FixtureArtifact result;
-    result.Blob = ReadFixtureArtifact(name, target);
-    if (result.Blob.empty()) {
-        result.Diagnostics = "fixture artifact is missing";
-        return result;
-    }
-    auto decoded = DecodeShaderArtifact(result.Blob, FixtureDecodeOptions(name, target));
-    result.Value = std::move(decoded.Value);
-    result.Diagnostics = std::move(decoded.Diagnostics);
-    return result;
+SyntheticArtifact MakeArtifact(ShaderTarget target = ShaderTarget::DXIL) {
+    SyntheticArtifact artifact{.Target = target};
+    artifact.AddEntry("VSMain", ShaderStage::Vertex);
+    return artifact;
 }
 
-vector<byte> MakeSyntheticArtifact() {
-    constexpr uint32_t entryCount = 2;
-    constexpr uint32_t bindingCount = 2;
-    constexpr uint32_t typeCount = 2;
-    constexpr uint32_t rootConstantCount = 1;
-    constexpr std::string_view names[] = {
-        "VSMain", "PSMain", "Color", "Linear", "Constants", "Value", "PushBlock"};
-    constexpr uint32_t nameBytes = 6 + 6 + 5 + 6 + 9 + 5 + 9;
-    const uint32_t entryOffset = sizeof(shader::WireMetadataEnvelope);
-    const uint32_t bindingOffset = entryOffset + entryCount * sizeof(shader::WireEntryRecord);
-    const uint32_t typeOffset = bindingOffset + bindingCount * sizeof(shader::WireBindingRecord);
-    const uint32_t rootOffset = typeOffset + typeCount * sizeof(shader::WireTypeRecord);
-    const uint32_t nameOffset = rootOffset + rootConstantCount * sizeof(shader::WireRootConstantRecord);
-    const uint32_t bytecodeOffset = nameOffset + nameBytes;
-    const uint32_t totalSize = bytecodeOffset + 4;
+ShaderArtifactDecodeOptions SyntheticOptions(ShaderTarget target) {
+    return {.Target = target, .ExpectedGpuArtifact = kSyntheticArtifact, .ExpectedToolchainIdentity = kShaderToolchainIdentity};
+}
 
-    shader::WireMetadataEnvelope envelope{};
-    envelope.Target = static_cast<uint8_t>(shader::ShaderTarget::DXIL);
-    envelope.StageMask =
-        (1u << static_cast<uint8_t>(shader::ShaderStage::Vertex)) |
-        (1u << static_cast<uint8_t>(shader::ShaderStage::Pixel));
-    envelope.TotalSize = totalSize;
-    envelope.EntryRecords = {entryOffset, entryCount * sizeof(shader::WireEntryRecord)};
-    envelope.BindingRecords = {bindingOffset, bindingCount * sizeof(shader::WireBindingRecord)};
-    envelope.TypeRecords = {typeOffset, typeCount * sizeof(shader::WireTypeRecord)};
-    envelope.RootConstantRecords = {rootOffset, rootConstantCount * sizeof(shader::WireRootConstantRecord)};
-    envelope.Bytecode = {bytecodeOffset, 4};
-    envelope.GpuArtifact = ExpectedArtifact(0, shader::ShaderTarget::DXIL);
+DiagnosticResult<ShaderArtifactView> Decode(const SyntheticArtifact& artifact) {
+    return DecodeShaderArtifact(artifact.Encode(), SyntheticOptions(artifact.Target));
+}
 
-    vector<byte> blob(totalSize);
+template <typename Mutate>
+vector<byte> PatchEnvelope(vector<byte> blob, Mutate&& mutate) {
+    WireMetadataEnvelope envelope{};
+    std::memcpy(&envelope, blob.data(), sizeof(envelope));
+    mutate(envelope);
     std::memcpy(blob.data(), &envelope, sizeof(envelope));
-
-    uint32_t nameCursor = nameOffset;
-    const auto nextName = [&](std::string_view name) {
-        const shader::WireBlobRange range{nameCursor, static_cast<uint32_t>(name.size())};
-        std::memcpy(blob.data() + nameCursor, name.data(), name.size());
-        nameCursor += static_cast<uint32_t>(name.size());
-        return range;
-    };
-    vector<shader::WireEntryRecord> entries{
-        {nextName(names[0]), static_cast<uint8_t>(shader::ShaderStage::Vertex), 0, 0, 0, 4, 0},
-        {nextName(names[1]), static_cast<uint8_t>(shader::ShaderStage::Pixel), 0, 0, 0, 4, 0}};
-    constexpr uint32_t pixelStage = 1u << static_cast<uint8_t>(shader::ShaderStage::Pixel);
-    vector<shader::WireBindingRecord> bindings{
-        {.Name = nextName(names[2]),
-         .Group = 0,
-         .Binding = 0,
-         .Type = static_cast<uint32_t>(shader::ShaderBindingKind::Texture),
-         .Count = 1,
-         .StageMask = pixelStage},
-        {.Name = nextName(names[3]),
-         .Group = 0,
-         .Binding = 1,
-         .Type = static_cast<uint32_t>(shader::ShaderBindingKind::Sampler),
-         .Count = 1,
-         .StageMask = pixelStage}};
-    vector<shader::WireTypeRecord> types{
-        {.Name = nextName(names[4]),
-         .ParentIndex = shader::kShaderNoType,
-         .Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Struct),
-         .ElementCount = 1,
-         .Offset = 0,
-         .Size = 16,
-         .Stride = 16},
-        {.Name = nextName(names[5]),
-         .ParentIndex = 0,
-         .Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Vector),
-         .ElementCount = 1,
-         .Offset = 0,
-         .Size = 16,
-         .Stride = 16}};
-    // A push block is keyed on its declaration name now, so the record carries one.
-    vector<shader::WireRootConstantRecord> rootConstants{
-        {.Name = nextName(names[6]), .RegisterSpace = 0, .Register = 0, .Offset = 0, .Size = 16, .StageMask = pixelStage}};
-    std::memcpy(blob.data() + entryOffset, entries.data(), envelope.EntryRecords.Size);
-    std::memcpy(blob.data() + bindingOffset, bindings.data(), envelope.BindingRecords.Size);
-    std::memcpy(blob.data() + typeOffset, types.data(), envelope.TypeRecords.Size);
-    std::memcpy(blob.data() + rootOffset, rootConstants.data(), envelope.RootConstantRecords.Size);
-    blob[bytecodeOffset + 0] = byte{0x01};
-    blob[bytecodeOffset + 1] = byte{0x02};
-    blob[bytecodeOffset + 2] = byte{0x03};
-    blob[bytecodeOffset + 3] = byte{0x04};
     return blob;
 }
 
-TEST(RadRayShaderArtifact, LeafPaddingIsDxilOnly) {
-    for (auto target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        auto blob = MakeSyntheticArtifact();
-        shader::WireMetadataEnvelope envelope{};
+// Real compiler output, generated ahead of time by tools/compile_test_shaders.py. The decoder is
+// trusted with the envelope's own GPU artifact hash because these tests check decoding, not identity.
+DiagnosticResult<ShaderArtifactView> DecodeFixture(std::string_view name, ShaderTarget target) {
+    const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_artifacts" /
+                      (string{name} + (target == ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin"));
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return {std::nullopt, "missing fixture " + path.string()};
+    }
+    vector<byte> blob(static_cast<size_t>(file.tellg()));
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
+    WireMetadataEnvelope envelope{};
+    if (blob.size() >= sizeof(envelope)) {
         std::memcpy(&envelope, blob.data(), sizeof(envelope));
-        envelope.Target = static_cast<uint8_t>(target);
-        envelope.ToolchainIdentity = kFixtureToolchainIdentity;
-        std::memcpy(blob.data(), &envelope, sizeof(envelope));
-        const ShaderArtifactDecodeOptions options{
-            .Target = target, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = kFixtureToolchainIdentity};
-        ASSERT_TRUE(DecodeShaderArtifact(blob, options).Value.has_value());
-        shader::WireTypeRecord leaf{};
-        const auto offset = envelope.TypeRecords.Offset + sizeof(shader::WireTypeRecord);
-        std::memcpy(&leaf, blob.data() + offset, sizeof(leaf));
-        leaf.Stride = 12;
-        leaf.ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::Float);
-        leaf.RowCount = 1;
-        leaf.ColumnCount = 3;
-        std::memcpy(blob.data() + offset, &leaf, sizeof(leaf));
+    }
+    return DecodeShaderArtifact(blob, {.Target = target, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = kShaderToolchainIdentity});
+}
 
-        auto diagnosticResult1 = DecodeShaderArtifact(blob, options);
-        const auto padded = std::move(diagnosticResult1.Value);
-        EXPECT_EQ(padded.has_value(), target == shader::ShaderTarget::DXIL);
-        EXPECT_EQ(diagnosticResult1.Diagnostics.empty(), target == shader::ShaderTarget::DXIL);
-        auto matrixBlob = MakeSyntheticArtifact();
-        std::memcpy(&envelope, matrixBlob.data(), sizeof(envelope));
-        envelope.Target = static_cast<uint8_t>(target);
-        envelope.ToolchainIdentity = kFixtureToolchainIdentity;
-        std::memcpy(matrixBlob.data(), &envelope, sizeof(envelope));
-        shader::WireTypeRecord root{};
-        std::memcpy(&root, matrixBlob.data() + envelope.TypeRecords.Offset, sizeof(root));
-        std::memcpy(&leaf, matrixBlob.data() + offset, sizeof(leaf));
-        root.Size = root.Stride = 64;
-        leaf.Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Matrix);
-        leaf.Size = leaf.Stride = 64;
-        leaf.ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::Float);
-        leaf.RowCount = leaf.ColumnCount = 4;
-        std::memcpy(matrixBlob.data() + envelope.TypeRecords.Offset, &root, sizeof(root));
-        std::memcpy(matrixBlob.data() + offset, &leaf, sizeof(leaf));
-        ASSERT_TRUE(DecodeShaderArtifact(matrixBlob, options).Value.has_value());
-        root.Size = root.Stride = 80;
-        leaf.Size = 80;
-        std::memcpy(matrixBlob.data() + envelope.TypeRecords.Offset, &root, sizeof(root));
-        std::memcpy(matrixBlob.data() + offset, &leaf, sizeof(leaf));
-        auto diagnosticResult2 = DecodeShaderArtifact(matrixBlob, options);
-        EXPECT_FALSE(diagnosticResult2.Succeeded());
-        EXPECT_NE(diagnosticResult2.Diagnostics.find("type"), string::npos);
+std::string_view NameOf(const ShaderArtifactView& artifact, WireBlobRange range) {
+    return artifact.GetName(range).value_or(std::string_view{});
+}
+
+// --- Envelope and identity ---
+
+TEST(RadRayShaderArtifact, DecodesMinimalArtifact) {
+    const auto decoded = Decode(MakeArtifact());
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    ASSERT_EQ(decoded.Value->Entries().size(), 1u);
+    EXPECT_EQ(NameOf(*decoded.Value, decoded.Value->Entries()[0].Name), "VSMain");
+    EXPECT_EQ(decoded.Value->Bytecode().size(), kBytecodeSize);
+    EXPECT_TRUE(decoded.Value->SerializedRootSignature().empty());
+}
+
+TEST(RadRayShaderArtifact, RejectsTruncatedBlob) {
+    vector<byte> blob = MakeArtifact().Encode();
+    blob.resize(sizeof(WireMetadataEnvelope) - 1);
+
+    const auto decoded = DecodeShaderArtifact(blob, SyntheticOptions(ShaderTarget::DXIL));
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("truncated"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsRetiredSchema) {
+    const auto blob = PatchEnvelope(MakeArtifact().Encode(), [](WireMetadataEnvelope& envelope) { envelope.SchemaVersion = 7; });
+
+    const auto decoded = DecodeShaderArtifact(blob, SyntheticOptions(ShaderTarget::DXIL));
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("schema"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsRequestedTargetMismatch) {
+    const auto decoded = DecodeShaderArtifact(MakeArtifact(ShaderTarget::DXIL).Encode(), SyntheticOptions(ShaderTarget::SPIRV));
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_FALSE(decoded.Diagnostics.empty());
+}
+
+TEST(RadRayShaderArtifact, RejectsUnexpectedGpuArtifact) {
+    ShaderArtifactDecodeOptions options = SyntheticOptions(ShaderTarget::DXIL);
+    options.ExpectedGpuArtifact.Bytes[15] ^= 1;
+
+    const auto decoded = DecodeShaderArtifact(MakeArtifact().Encode(), options);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_FALSE(decoded.Diagnostics.empty());
+}
+
+TEST(RadRayShaderArtifact, RejectsToolchainIdentityMismatch) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.ToolchainIdentity = kShaderToolchainIdentity + 1;
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("toolchain"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, ZeroExpectedToolchainIdentitySkipsCheck) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.ToolchainIdentity = 0x1234;
+    ShaderArtifactDecodeOptions options = SyntheticOptions(ShaderTarget::DXIL);
+    options.ExpectedToolchainIdentity = 0;
+
+    const auto decoded = DecodeShaderArtifact(artifact.Encode(), options);
+
+    EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+}
+
+TEST(RadRayShaderArtifact, RejectsSectionInsideHeader) {
+    const auto blob = PatchEnvelope(MakeArtifact().Encode(), [](WireMetadataEnvelope& envelope) {
+        envelope.EntryRecords.Offset = 0;
+    });
+
+    EXPECT_FALSE(DecodeShaderArtifact(blob, SyntheticOptions(ShaderTarget::DXIL)).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsOverlappingSections) {
+    const auto blob = PatchEnvelope(MakeArtifact().Encode(), [](WireMetadataEnvelope& envelope) {
+        envelope.VertexInputRecords = {envelope.Bytecode.Offset, envelope.Bytecode.Size};
+    });
+
+    const auto decoded = DecodeShaderArtifact(blob, SyntheticOptions(ShaderTarget::DXIL));
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("overlaps"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsRootSignatureCarrierOnSpirv) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.RootSignature = {byte{1}, byte{2}, byte{3}, byte{4}};
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsSamplerRecordsOnDxil) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    artifact.Samplers.push_back({});
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, TypedDecoderRejectsOtherTargetOption) {
+    const vector<byte> dxil = MakeArtifact(ShaderTarget::DXIL).Encode();
+    const vector<byte> spirv = MakeArtifact(ShaderTarget::SPIRV).Encode();
+
+    EXPECT_FALSE(DecodeDxilShaderArtifact(dxil, SyntheticOptions(ShaderTarget::SPIRV)).Succeeded());
+    EXPECT_FALSE(DecodeSpirvShaderArtifact(spirv, SyntheticOptions(ShaderTarget::DXIL)).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, TypedDecoderKeepsGenericDiagnostics) {
+    const auto generic = DecodeShaderArtifact({}, SyntheticOptions(ShaderTarget::DXIL));
+    const auto dxil = DecodeDxilShaderArtifact({}, SyntheticOptions(ShaderTarget::DXIL));
+
+    EXPECT_FALSE(dxil.Succeeded());
+    EXPECT_EQ(dxil.Diagnostics, generic.Diagnostics);
+}
+
+// --- Entries ---
+
+TEST(RadRayShaderArtifact, FindStageBytecodeReturnsEntrySlice) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.Entries[0].InterfaceOffset = 1;
+    artifact.Entries[0].InterfaceSize = 2;
+
+    const auto decoded = Decode(artifact);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto vertex = decoded.Value->FindStageBytecode(ShaderStage::Vertex);
+    ASSERT_TRUE(vertex.has_value());
+    EXPECT_EQ(vertex->data(), decoded.Value->Bytecode().data() + 1);
+    EXPECT_EQ(vertex->size(), 2u);
+    EXPECT_FALSE(decoded.Value->FindStageBytecode(ShaderStage::Pixel).has_value());
+}
+
+TEST(RadRayShaderArtifact, RejectsDuplicateEntryNames) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddEntry("VSMain", ShaderStage::Pixel);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("duplicate entry"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsEntryOutsideBytecode) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.Entries[0].InterfaceOffset = 1;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, GetNameRejectsRangeOutsideBlob) {
+    const auto decoded = Decode(MakeArtifact());
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    EXPECT_FALSE(decoded.Value->GetName({decoded.Value->Envelope().TotalSize, 1}).has_value());
+}
+
+// --- Bindings ---
+
+TEST(RadRayShaderArtifact, FindBindingLooksUpDeclarationName) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 1, 3);
+
+    const auto decoded = Decode(artifact);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto binding = decoded.Value->FindBinding("Albedo");
+    ASSERT_TRUE(binding.has_value());
+    EXPECT_EQ(binding->Name, "Albedo");
+    EXPECT_EQ(binding->Record.Group, 1u);
+    EXPECT_EQ(binding->Record.Binding, 3u);
+    EXPECT_FALSE(decoded.Value->FindBinding("Missing").has_value());
+}
+
+TEST(RadRayShaderArtifact, DxilAllowsSameRegisterInDifferentNamespaces) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddBinding("Linear", ShaderBindingKind::Sampler, 0, 0);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+}
+
+TEST(RadRayShaderArtifact, DxilRejectsSameRegisterInSameNamespace) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddBinding("Normals", ShaderBindingKind::StructuredBuffer, 0, 0);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("duplicate binding"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, SpirvRejectsSameBindingAcrossKinds) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddBinding("Linear", ShaderBindingKind::Sampler, 0, 0);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("duplicate binding"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsDuplicateBindingNames) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 1);
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsUnknownBindingKind) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).Type = 0;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, AcceptsRootDescriptorForSingleBuffer) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+}
+
+TEST(RadRayShaderArtifact, RejectsRootDescriptorForTexture) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("placement"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsRootDescriptorArray) {
+    SyntheticArtifact artifact = MakeArtifact();
+    WireBindingRecord& binding = artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0);
+    binding.Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
+    binding.Count = 2;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, DxilAcceptsStaticSamplerPlacement) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+}
+
+TEST(RadRayShaderArtifact, SpirvRejectsStaticSamplerPlacement) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, SpirvSamplerReferencesImmutableState) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.Samplers.push_back({.MagFilter = 1, .MinFilter = 1, .CompareEnable = 1, .CompareOp = 3});
+    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).SamplerIndex = 0;
+
+    const auto decoded = Decode(artifact);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto binding = decoded.Value->FindBinding("Shadow");
+    ASSERT_TRUE(binding.has_value());
+    EXPECT_EQ(decoded.Value->Samplers()[binding->Record.SamplerIndex], artifact.Samplers[0]);
+}
+
+TEST(RadRayShaderArtifact, RejectsSamplerIndexOutsideSamplerRecords) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).SamplerIndex = 0;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsSamplerIndexOnNonSampler) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.Samplers.push_back({});
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).SamplerIndex = 0;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsSamplerStateOutsideVulkanRange) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.Samplers.push_back({.AddressModeU = kShaderSamplerMaxAddressMode + 1});
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("sampler record"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsSamplerWithInvertedLodRange) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
+    artifact.Samplers.push_back({.MinLod = 2.0f, .MaxLod = 1.0f});
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+// --- Payload owners and type tree ---
+
+TEST(RadRayShaderArtifact, CBuffersMayShareOnePayloadRoot) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Shared", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
+    artifact.AddBinding("First", ShaderBindingKind::CBuffer, 0, 0).TypeIndex = root;
+    artifact.AddBinding("Second", ShaderBindingKind::CBuffer, 1, 0).TypeIndex = root;
+
+    const auto decoded = Decode(artifact);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto first = decoded.Value->FindBinding("First");
+    const auto second = decoded.Value->FindBinding("Second");
+    ASSERT_TRUE(first.has_value() && second.has_value());
+    EXPECT_EQ(first->Record.TypeIndex, root);
+    EXPECT_EQ(second->Record.TypeIndex, root);
+}
+
+TEST(RadRayShaderArtifact, RejectsCBufferWithoutPayloadRoot) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Constants", ShaderBindingKind::CBuffer, 0, 0);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("type owner"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsCBufferOwnedByMemberRecord) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 16);
+    const uint32_t member = artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
+    artifact.AddBinding("Constants", ShaderBindingKind::CBuffer, 0, 0).TypeIndex = member;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsPayloadOwnerOnNonCBuffer) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
+    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).TypeIndex = root;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsUnknownTypeKind) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddType("Root", ShaderTypeKind::Struct, 16);
+    artifact.Types[0].Kind = 0;
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("type record"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsReservedTypeFlags) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 64);
+    artifact.AddType("Transform", ShaderTypeKind::Matrix, 64, root);
+    artifact.Types[1].Flags = kShaderTypeFlagRowMajor << 1;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsMemberOutsideParent) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root, 4);
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsOverlappingSiblings) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 32);
+    artifact.AddType("First", ShaderTypeKind::Vector, 16, root, 0);
+    artifact.AddType("Second", ShaderTypeKind::Vector, 16, root, 8);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("overlaps sibling"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsDuplicateSiblingNames) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 32);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root, 0);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root, 16);
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsCyclicParentChain) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Leaf", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
+    const uint32_t first = artifact.AddType("First", ShaderTypeKind::Struct, 16, 3);
+    artifact.AddType("Second", ShaderTypeKind::Struct, 16, first);
+    artifact.Types[2].TypeIndex = root;
+    artifact.Types[3].TypeIndex = root;
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("cyclic"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsArraySizeOtherThanStrideTimesCount) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 64);
+    const uint32_t array = artifact.AddType("Corners", ShaderTypeKind::Array, 64, root);
+    artifact.Types[array].Stride = 16;
+    artifact.Types[array].ElementCount = 3;
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("array size"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, LeafPaddingIsDxilOnly) {
+    for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
+        SyntheticArtifact artifact = MakeArtifact(target);
+        const uint32_t root = artifact.AddType("Lighting", ShaderTypeKind::Struct, 28);
+        const uint32_t padded = artifact.AddType("Direction0", ShaderTypeKind::Vector, 16, root, 0);
+        artifact.Types[padded].Stride = 12;
+        artifact.Types[padded].ColumnCount = 3;
+        artifact.AddType("Direction1", ShaderTypeKind::Vector, 12, root, 16);
+
+        const auto decoded = Decode(artifact);
+
+        EXPECT_EQ(decoded.Succeeded(), target == ShaderTarget::DXIL) << static_cast<uint32_t>(target) << ": " << decoded.Diagnostics;
     }
 }
 
-TEST(RadRayShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
-    // Driven off the fixture table so the golden hash indices cannot drift from it.
-    const std::span<const test::ShaderContractFixture> fixtures =
-        test::GetShaderContractFixtures();
-    const std::filesystem::path root = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts";
-    for (uint8_t index = 0; index < fixtures.size(); ++index) {
-        const std::string_view fixtureName = fixtures[index].Name;
-        for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-            const string suffix = target == shader::ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
-            const vector<byte> blob = ReadBinary(root / (string{fixtureName} + suffix));
-            ASSERT_FALSE(blob.empty());
+TEST(RadRayShaderArtifact, DxilAcceptsPaddedScalarLeaf) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    const uint32_t root = artifact.AddType("Lighting", ShaderTypeKind::Struct, 28);
+    const uint32_t padded = artifact.AddType("Brightness", ShaderTypeKind::Scalar, 12, root, 4);
+    artifact.Types[padded].Stride = 4;
+    artifact.Types[padded].ColumnCount = 1;
+    artifact.AddType("Tint", ShaderTypeKind::Vector, 12, root, 16);
 
-            auto diagnosticResult3 = DecodeShaderArtifact(
-                blob,
-                ShaderArtifactDecodeOptions{
-                    .Target = target,
-                    .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                    .ExpectedToolchainIdentity = kFixtureToolchainIdentity});
-            const auto artifact = std::move(diagnosticResult3.Value);
-            ASSERT_TRUE(artifact.has_value()) << diagnosticResult3.Diagnostics;
-            EXPECT_FALSE(artifact->Bytecode().empty());
-            for (const shader::WireEntryRecord& entry : artifact->Entries()) {
-                const auto stageBytecode = artifact->FindStageBytecode(
-                    static_cast<shader::ShaderStage>(entry.Stage));
-                ASSERT_TRUE(stageBytecode.has_value());
-                EXPECT_EQ(stageBytecode->size(), entry.InterfaceSize);
-                EXPECT_EQ(
-                    stageBytecode->data(),
-                    artifact->Bytecode().data() + entry.InterfaceOffset);
-            }
+    const auto decoded = Decode(artifact);
 
-            const test::ShaderContractFixture& fixture = test::GetShaderContractFixtures()[index];
-            ASSERT_EQ(artifact->Entries().size(), fixture.Entries.size());
-            for (const test::FixtureEntryFact& expected : fixture.Entries) {
-                const auto entry = std::find_if(
-                    artifact->Entries().begin(),
-                    artifact->Entries().end(),
-                    [&](const shader::WireEntryRecord& value) noexcept {
-                        return artifact->GetName(value.Name).value_or(std::string_view{}) == expected.Name;
-                    });
-                ASSERT_NE(entry, artifact->Entries().end()) << expected.Name;
-                EXPECT_EQ(entry->Stage, static_cast<uint8_t>(expected.Stage));
-                EXPECT_NE(entry->InterfaceSize, 0u);
-            }
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    EXPECT_EQ(decoded.Value->Types()[padded].Size, 12u);
+    EXPECT_EQ(decoded.Value->Types()[padded].Stride, 4u);
+}
 
-            const size_t expectedBindingCount = static_cast<size_t>(std::count_if(
-                fixture.Bindings.begin(),
-                fixture.Bindings.end(),
-                [](const test::FixtureBindingFact& value) noexcept {
-                    return value.Kind != test::FixtureResourceKind::RootConstant;
-                }));
-            ASSERT_EQ(artifact->Bindings().size(), expectedBindingCount);
-            // Only the DXIL lane carries the serialized policy, and it carries it exactly when the
-            // source declared one.
-            const bool hasPolicy = fixture.Name == std::string_view{"shadow_static_sampler"} ||
-                                   fixture.Name == std::string_view{"multiple_root_constants"};
-            EXPECT_EQ(
-                !artifact->SerializedRootSignature().empty(),
-                hasPolicy && target == shader::ShaderTarget::DXIL)
-                << fixture.Name;
-            for (const test::FixtureBindingFact& expected : fixture.Bindings) {
-                if (expected.Kind == test::FixtureResourceKind::RootConstant) {
-                    continue;
-                }
-                const auto binding = artifact->FindBinding(expected.Name);
-                ASSERT_TRUE(binding.has_value()) << expected.Name;
-                const uint32_t expectedGroup = target == shader::ShaderTarget::DXIL
-                                                   ? expected.D3D12Group
-                                                   : expected.VulkanSet;
-                const uint32_t expectedBinding = target == shader::ShaderTarget::DXIL
-                                                     ? expected.D3D12Binding
-                                                     : expected.VulkanBinding;
-                EXPECT_EQ(binding->Record.Group, expectedGroup) << expected.Name;
-                EXPECT_EQ(binding->Record.Binding, expectedBinding) << expected.Name;
-                EXPECT_EQ(binding->Record.StageMask, expected.StageMask) << expected.Name;
-                EXPECT_EQ(
-                    binding->Record.Type,
-                    static_cast<uint32_t>(test::ExpectedWireKind(expected.Kind)))
-                    << expected.Name;
-                // Placement is where the two targets legitimately disagree: the same policy slot is
-                // a D3D12 static sampler with no table entry, and a Vulkan table entry whose state
-                // comes from a published sampler record.
-                const uint32_t expectedPlacement = static_cast<uint32_t>(
-                    expected.PolicyStaticSampler && target == shader::ShaderTarget::DXIL
-                        ? shader::ShaderBindingPlacement::StaticSampler
-                        : shader::ShaderBindingPlacement::Table);
-                EXPECT_EQ(binding->Record.Placement, expectedPlacement) << expected.Name;
-                if (expected.PolicyStaticSampler && target == shader::ShaderTarget::SPIRV) {
-                    ASSERT_LT(binding->Record.SamplerIndex, artifact->Samplers().size())
-                        << expected.Name;
-                } else {
-                    EXPECT_EQ(binding->Record.SamplerIndex, shader::kShaderNoSampler)
-                        << expected.Name;
-                }
-                if (expected.PayloadType.empty()) {
-                    EXPECT_EQ(binding->Record.TypeIndex, shader::kShaderNoType)
-                        << expected.Name;
-                } else {
-                    ASSERT_LT(binding->Record.TypeIndex, artifact->Types().size())
-                        << expected.Name;
-                    const shader::WireTypeRecord& payload =
-                        artifact->Types()[binding->Record.TypeIndex];
-                    EXPECT_EQ(
-                        payload.Kind,
-                        static_cast<uint32_t>(shader::ShaderTypeKind::Struct))
-                        << expected.Name;
-                    EXPECT_EQ(payload.ParentIndex, shader::kShaderNoType)
-                        << expected.Name;
-                    EXPECT_EQ(
-                        artifact->GetName(payload.Name).value_or(std::string_view{}),
-                        expected.PayloadType)
-                        << expected.Name;
-                }
-            }
+TEST(RadRayShaderArtifact, DxilRejectsPaddedMatrixLeaf) {
+    SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
+    const uint32_t root = artifact.AddType("Object", ShaderTypeKind::Struct, 80);
+    const uint32_t matrix = artifact.AddType("Transform", ShaderTypeKind::Matrix, 80, root);
+    artifact.Types[matrix].Stride = 64;
+    artifact.Types[matrix].RowCount = 4;
+    artifact.Types[matrix].ColumnCount = 4;
 
-            const uint32_t expectedTypeRecordCount = target == shader::ShaderTarget::SPIRV &&
-                                                             fixture.SpirvTypeRecordCount != 0
-                                                         ? fixture.SpirvTypeRecordCount
-                                                         : fixture.TypeRecordCount;
-            EXPECT_EQ(artifact->Types().size(), expectedTypeRecordCount);
-            if (fixture.Name == std::string_view{"nested_types"}) {
-                constexpr std::string_view names[] = {
-                    "NestedLeaf",
-                    "Direction",
-                    "Weight",
-                    "NestedArray",
-                    "Values",
-                    "NestedRoot",
-                    "Transform",
-                    "Data"};
-                constexpr uint32_t parents[] = {
-                    0xffffffffu,
-                    0u,
-                    0u,
-                    0xffffffffu,
-                    3u,
-                    0xffffffffu,
-                    5u,
-                    5u};
-                constexpr uint32_t kinds[] = {4u, 2u, 1u, 4u, 5u, 4u, 3u, 4u};
-                constexpr uint32_t elementCounts[] = {1u, 1u, 1u, 1u, 2u, 1u, 1u, 1u};
-                constexpr uint32_t offsets[] = {0u, 0u, 12u, 0u, 0u, 0u, 0u, 64u};
-                constexpr uint32_t sizes[] = {16u, 12u, 4u, 32u, 32u, 96u, 64u, 32u};
-                constexpr uint32_t strides[] = {16u, 12u, 4u, 32u, 16u, 96u, 64u, 32u};
-                constexpr uint32_t typeIndices[] = {
-                    shader::kShaderNoType,
-                    shader::kShaderNoType,
-                    shader::kShaderNoType,
-                    shader::kShaderNoType,
-                    0u,
-                    shader::kShaderNoType,
-                    shader::kShaderNoType,
-                    3u};
-                ASSERT_EQ(artifact->Types().size(), std::size(names));
-                for (size_t typeIndex = 0; typeIndex < std::size(names); ++typeIndex) {
-                    const shader::WireTypeRecord& type = artifact->Types()[typeIndex];
-                    ASSERT_EQ(artifact->GetName(type.Name).value_or(std::string_view{}), names[typeIndex]);
-                    EXPECT_EQ(type.ParentIndex, parents[typeIndex]);
-                    EXPECT_EQ(type.Kind, kinds[typeIndex]);
-                    EXPECT_EQ(type.ElementCount, elementCounts[typeIndex]);
-                    EXPECT_EQ(type.Offset, offsets[typeIndex]);
-                    EXPECT_EQ(type.Size, sizes[typeIndex]);
-                    EXPECT_EQ(type.Stride, strides[typeIndex]);
-                    EXPECT_EQ(type.TypeIndex, typeIndices[typeIndex]);
-                }
-            }
-            if (fixture.Name == std::string_view{"unused_resource"}) {
-                EXPECT_FALSE(artifact->FindBinding("UnusedTexture").has_value());
-            }
-            const size_t rootFactCount = static_cast<size_t>(std::count_if(
-                fixture.Bindings.begin(),
-                fixture.Bindings.end(),
-                [](const test::FixtureBindingFact& value) noexcept {
-                    return value.Kind == test::FixtureResourceKind::RootConstant;
-                }));
-            const size_t expectedRootCount = fixture.HasSingleSpirvPushBlock
-                                                 ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
-                                             : target == shader::ShaderTarget::DXIL ? rootFactCount
-                                                                                    : 0u;
-            ASSERT_EQ(artifact->RootConstants().size(), expectedRootCount);
-            if (expectedRootCount != 0) {
-                for (size_t rootIndex = 0; rootIndex < expectedRootCount; ++rootIndex) {
-                    const test::FixtureBindingFact& expected = fixture.Bindings[std::find_if(
-                                                                                    fixture.Bindings.begin(),
-                                                                                    fixture.Bindings.end(),
-                                                                                    [](const test::FixtureBindingFact& value) noexcept {
-                                                                                        return value.Kind == test::FixtureResourceKind::RootConstant;
-                                                                                    }) -
-                                                                                fixture.Bindings.begin() + rootIndex];
-                    const shader::WireRootConstantRecord& rootConstant = artifact->RootConstants()[rootIndex];
-                    EXPECT_EQ(
-                        artifact->GetName(rootConstant.Name).value_or(std::string_view{}),
-                        expected.Name);
-                    EXPECT_EQ(rootConstant.RegisterSpace, expected.D3D12Group);
-                    EXPECT_EQ(rootConstant.Register, expected.D3D12Binding);
-                    EXPECT_EQ(rootConstant.StageMask, expected.StageMask);
-                    EXPECT_NE(rootConstant.Size, 0u);
-                    if (expected.PayloadType.empty()) {
-                        EXPECT_EQ(rootConstant.TypeIndex, shader::kShaderNoType);
-                    } else {
-                        ASSERT_LT(rootConstant.TypeIndex, artifact->Types().size());
-                        const shader::WireTypeRecord& payload = artifact->Types()[rootConstant.TypeIndex];
-                        EXPECT_EQ(
-                            payload.Kind,
-                            static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
-                        EXPECT_EQ(payload.ParentIndex, shader::kShaderNoType);
-                        EXPECT_EQ(
-                            artifact->GetName(payload.Name).value_or(std::string_view{}),
-                            expected.PayloadType);
-                    }
-                    if (fixture.HasSingleSpirvPushBlock) {
-                        EXPECT_EQ(rootConstant.Flags & 1u, 1u);
-                    }
-                }
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("type record"), string::npos);
+}
+
+// --- Root constants ---
+
+TEST(RadRayShaderArtifact, RootConstantMayOwnPayloadRoot) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("PushData", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Tint", ShaderTypeKind::Vector, 16, root);
+    artifact.AddRootConstant("Push", 16).TypeIndex = root;
+
+    const auto decoded = Decode(artifact);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    ASSERT_EQ(decoded.Value->RootConstants().size(), 1u);
+    EXPECT_EQ(NameOf(*decoded.Value, decoded.Value->RootConstants()[0].Name), "Push");
+    EXPECT_EQ(decoded.Value->RootConstants()[0].TypeIndex, root);
+}
+
+TEST(RadRayShaderArtifact, RejectsRootConstantSizeNotMultipleOfFour) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddRootConstant("Push", 6);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("root constant"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsRootConstantPayloadLargerThanRange) {
+    SyntheticArtifact artifact = MakeArtifact();
+    const uint32_t root = artifact.AddType("PushData", ShaderTypeKind::Struct, 16);
+    artifact.AddType("Tint", ShaderTypeKind::Vector, 16, root);
+    artifact.AddRootConstant("Push", 12).TypeIndex = root;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, RejectsRootConstantNamedLikeBinding) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddBinding("Shared", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddRootConstant("Shared", 16);
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+// --- Vertex inputs ---
+
+TEST(RadRayShaderArtifact, RejectsVertexInputsSharingLocation) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddVertexInput("POSITION", 0);
+    artifact.AddVertexInput("NORMAL", 0);
+
+    const auto decoded = Decode(artifact);
+
+    EXPECT_FALSE(decoded.Succeeded());
+    EXPECT_NE(decoded.Diagnostics.find("vertex input"), string::npos);
+}
+
+TEST(RadRayShaderArtifact, RejectsVertexInputWithMoreThanFourComponents) {
+    SyntheticArtifact artifact = MakeArtifact();
+    artifact.AddVertexInput("POSITION", 0).ComponentCount = 5;
+
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+// --- Compiler-generated fixtures ---
+
+TEST(RadRayShaderArtifact, DecodesCompilerFixturesForBothTargets) {
+    for (const std::string_view name : {"texture_sampler", "shadow_static_sampler", "spirv_push_constant", "nested_types", "compute"}) {
+        for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
+            SCOPED_TRACE(fmt::format("{} target={}", name, static_cast<uint32_t>(target)));
+
+            const auto decoded = DecodeFixture(name, target);
+
+            ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+            ASSERT_FALSE(decoded.Value->Entries().empty());
+            for (const WireEntryRecord& entry : decoded.Value->Entries()) {
+                const auto stage = decoded.Value->FindStageBytecode(static_cast<ShaderStage>(entry.Stage));
+                ASSERT_TRUE(stage.has_value());
+                EXPECT_FALSE(stage->empty());
             }
         }
     }
 }
 
-TEST(RadRayShaderArtifact, PolicyStaticSamplerLandsPerTargetWithoutLosingState) {
-    const vector<byte> dxilBlob = ReadFixtureArtifact("shadow_static_sampler", shader::ShaderTarget::DXIL);
-    ASSERT_FALSE(dxilBlob.empty());
-    auto diagnosticResult6 = DecodeDxilShaderArtifact(
-        dxilBlob,
-        FixtureDecodeOptions("shadow_static_sampler", shader::ShaderTarget::DXIL));
-    const auto dxil = std::move(diagnosticResult6.Value);
-    ASSERT_TRUE(dxil.has_value()) << diagnosticResult6.Diagnostics;
+TEST(RadRayShaderArtifact, FixtureBindingsUseTargetCoordinates) {
+    struct Expected {
+        ShaderTarget Target;
+        uint32_t Group;
+        uint32_t Binding;
+    };
+    for (const Expected expected : {Expected{ShaderTarget::DXIL, 0, 0}, Expected{ShaderTarget::SPIRV, 1, 7}}) {
+        const auto decoded = DecodeFixture("texture_sampler", expected.Target);
 
-    // On D3D12 the static sampler exists only inside the serialized carrier: it owns no descriptor
-    // table slot, so the layout must not reserve one, and no sampler state is published separately.
-    const auto dxilSampler = dxil->Generic().FindBinding("ShadowSampler");
-    ASSERT_TRUE(dxilSampler.has_value());
-    EXPECT_EQ(
-        dxilSampler->Record.Placement,
-        static_cast<uint32_t>(shader::ShaderBindingPlacement::StaticSampler));
-    EXPECT_EQ(dxilSampler->Record.SamplerIndex, shader::kShaderNoSampler);
-    EXPECT_TRUE(dxil->Generic().Samplers().empty());
-    EXPECT_FALSE(dxil->Generic().SerializedRootSignature().empty());
+        ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+        const auto texture = decoded.Value->FindBinding("AlbedoTexture");
+        ASSERT_TRUE(texture.has_value());
+        EXPECT_EQ(texture->Record.Type, static_cast<uint32_t>(ShaderBindingKind::Texture));
+        EXPECT_EQ(texture->Record.Group, expected.Group);
+        EXPECT_EQ(texture->Record.Binding, expected.Binding);
+        EXPECT_EQ(texture->Record.StageMask, kPixelBit);
+    }
+}
 
-    const vector<byte> spirvBlob = ReadFixtureArtifact("shadow_static_sampler", shader::ShaderTarget::SPIRV);
-    ASSERT_FALSE(spirvBlob.empty());
-    auto diagnosticResult7 = DecodeSpirvShaderArtifact(
-        spirvBlob,
-        FixtureDecodeOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV));
-    const auto spirv = std::move(diagnosticResult7.Value);
-    ASSERT_TRUE(spirv.has_value()) << diagnosticResult7.Diagnostics;
+TEST(RadRayShaderArtifact, FixtureComputeArtifactHasOnlyComputeStage) {
+    const auto decoded = DecodeFixture("compute", ShaderTarget::DXIL);
 
-    // On Vulkan the same policy slot is a table entry plus a full immutable sampler state. The
-    // comparison filter the policy asked for has to survive as compare-enabled state, because a
-    // downgrade here would silently change filtering.
-    const auto spirvSampler = spirv->Generic().FindBinding("ShadowSampler");
-    ASSERT_TRUE(spirvSampler.has_value());
-    EXPECT_EQ(
-        spirvSampler->Record.Placement,
-        static_cast<uint32_t>(shader::ShaderBindingPlacement::Table));
-    ASSERT_LT(spirvSampler->Record.SamplerIndex, spirv->Generic().Samplers().size());
-    EXPECT_TRUE(spirv->Generic().SerializedRootSignature().empty());
-    const shader::WireSamplerRecord& state =
-        spirv->Generic().Samplers()[spirvSampler->Record.SamplerIndex];
-    EXPECT_EQ(state.CompareEnable, 1u);
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    EXPECT_TRUE(decoded.Value->FindStageBytecode(ShaderStage::Compute).has_value());
+    EXPECT_FALSE(decoded.Value->FindStageBytecode(ShaderStage::Vertex).has_value());
+}
+
+TEST(RadRayShaderArtifact, FixtureDxilStaticSamplerLivesInRootSignature) {
+    const auto decoded = DecodeFixture("shadow_static_sampler", ShaderTarget::DXIL);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto sampler = decoded.Value->FindBinding("ShadowSampler");
+    ASSERT_TRUE(sampler.has_value());
+    EXPECT_EQ(sampler->Record.Placement, static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler));
+    EXPECT_FALSE(decoded.Value->SerializedRootSignature().empty());
+    EXPECT_TRUE(decoded.Value->Samplers().empty());
+}
+
+TEST(RadRayShaderArtifact, FixtureSpirvStaticSamplerKeepsFullState) {
+    const auto decoded = DecodeFixture("shadow_static_sampler", ShaderTarget::SPIRV);
+
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    const auto sampler = decoded.Value->FindBinding("ShadowSampler");
+    ASSERT_TRUE(sampler.has_value());
+    EXPECT_EQ(sampler->Record.Placement, static_cast<uint32_t>(ShaderBindingPlacement::Table));
+    ASSERT_LT(sampler->Record.SamplerIndex, decoded.Value->Samplers().size());
+    const WireSamplerRecord& state = decoded.Value->Samplers()[sampler->Record.SamplerIndex];
+    // FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT in Vulkan terms.
     EXPECT_EQ(state.MagFilter, 1u);
     EXPECT_EQ(state.MinFilter, 1u);
     EXPECT_EQ(state.MipmapMode, 0u);
+    EXPECT_EQ(state.CompareEnable, 1u);
+    EXPECT_TRUE(decoded.Value->SerializedRootSignature().empty());
 }
 
-TEST(RadRayShaderArtifact, VertexInterfaceMatchesExternalLayoutForBothTargets) {
-    for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        auto diagnosticResult8 = DecodeFixtureArtifact("nested_types", target);
-        const auto artifact = std::move(diagnosticResult8.Value);
-        ASSERT_TRUE(artifact.has_value()) << diagnosticResult8.Diagnostics;
-        ASSERT_EQ(artifact->VertexInputs().size(), 1u);
-        const shader::WireVertexInputRecord& input = artifact->VertexInputs().front();
-        EXPECT_EQ(artifact->GetName(input.Semantic).value_or(std::string_view{}), "POSITION");
-        EXPECT_EQ(input.SemanticIndex, 0u);
-        EXPECT_EQ(input.Location, 0u);
-        EXPECT_EQ(
-            input.ComponentType,
-            static_cast<uint32_t>(shader::ShaderVertexComponentType::Float));
-        EXPECT_EQ(input.ComponentCount, 3u);
+TEST(RadRayShaderArtifact, FixtureCBufferOwnsPayloadRoot) {
+    for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
+        const auto decoded = DecodeFixture("nested_types", target);
+
+        ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+        const auto constants = decoded.Value->FindBinding("Constants");
+        ASSERT_TRUE(constants.has_value());
+        const auto types = decoded.Value->Types();
+        ASSERT_LT(constants->Record.TypeIndex, types.size());
+        EXPECT_EQ(NameOf(*decoded.Value, types[constants->Record.TypeIndex].Name), "NestedRoot");
+        EXPECT_EQ(types[constants->Record.TypeIndex].ParentIndex, kShaderNoType);
     }
 }
 
-TEST(RadRayShaderArtifact, MultipleDxilRootConstantsRemainIndependent) {
-    auto diagnosticResult9 = DecodeFixtureArtifact(
-        "multiple_root_constants",
-        shader::ShaderTarget::DXIL);
-    const auto artifact = std::move(diagnosticResult9.Value);
-    ASSERT_TRUE(artifact.has_value()) << diagnosticResult9.Diagnostics;
-    ASSERT_EQ(artifact->RootConstants().size(), 2u);
-    EXPECT_EQ(artifact->RootConstants()[0].RegisterSpace, 0u);
-    EXPECT_EQ(artifact->RootConstants()[0].Register, 0u);
-    EXPECT_EQ(artifact->RootConstants()[0].Size, 64u);
-    EXPECT_EQ(artifact->RootConstants()[1].RegisterSpace, 0u);
-    EXPECT_EQ(artifact->RootConstants()[1].Register, 1u);
-    EXPECT_EQ(artifact->RootConstants()[1].Size, 16u);
-}
+TEST(RadRayShaderArtifact, FixtureSpirvPushBlockOwnsPayloadRoot) {
+    const auto decoded = DecodeFixture("spirv_push_constant", ShaderTarget::SPIRV);
 
-TEST(RadRayShaderArtifact, SingleSpirvPushBlockDoesNotBecomeMultipleConstants) {
-    auto diagnosticResult10 = DecodeFixtureArtifact("spirv_push_constant", shader::ShaderTarget::DXIL);
-    const auto dxil = std::move(diagnosticResult10.Value);
-    ASSERT_TRUE(dxil.has_value()) << diagnosticResult10.Diagnostics;
-    EXPECT_TRUE(dxil->RootConstants().empty());
-
-    auto diagnosticResult11 = DecodeFixtureArtifact("spirv_push_constant", shader::ShaderTarget::SPIRV);
-    const auto spirv = std::move(diagnosticResult11.Value);
-    ASSERT_TRUE(spirv.has_value()) << diagnosticResult11.Diagnostics;
-    ASSERT_EQ(spirv->RootConstants().size(), 1u);
-    EXPECT_EQ(spirv->RootConstants()[0].RegisterSpace, 0u);
-    EXPECT_EQ(spirv->RootConstants()[0].Register, 0u);
-    EXPECT_EQ(spirv->RootConstants()[0].Size, 16u);
-    EXPECT_EQ(spirv->RootConstants()[0].Flags & 1u, 1u);
-}
-
-TEST(RadRayShaderArtifact, NestedTypeTreeLayoutFactsRemainTargetStable) {
-    constexpr std::string_view names[] = {
-        "NestedLeaf",
-        "Direction",
-        "Weight",
-        "NestedArray",
-        "Values",
-        "NestedRoot",
-        "Transform",
-        "Data"};
-    constexpr uint32_t parents[] = {0xffffffffu, 0u, 0u, 0xffffffffu, 3u, 0xffffffffu, 5u, 5u};
-    constexpr uint32_t kinds[] = {4u, 2u, 1u, 4u, 5u, 4u, 3u, 4u};
-    constexpr uint32_t elementCounts[] = {1u, 1u, 1u, 1u, 2u, 1u, 1u, 1u};
-    constexpr uint32_t offsets[] = {0u, 0u, 12u, 0u, 0u, 0u, 0u, 64u};
-    constexpr uint32_t sizes[] = {16u, 12u, 4u, 32u, 32u, 96u, 64u, 32u};
-    constexpr uint32_t strides[] = {16u, 12u, 4u, 32u, 16u, 96u, 64u, 32u};
-
-    for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        auto diagnosticResult12 = DecodeFixtureArtifact("nested_types", target);
-        const auto artifact = std::move(diagnosticResult12.Value);
-        ASSERT_TRUE(artifact.has_value()) << diagnosticResult12.Diagnostics;
-        ASSERT_EQ(artifact->Types().size(), std::size(names));
-        for (size_t index = 0; index < std::size(names); ++index) {
-            const shader::WireTypeRecord& type = artifact->Types()[index];
-            ASSERT_EQ(artifact->GetName(type.Name).value_or(std::string_view{}), names[index]);
-            EXPECT_EQ(type.ParentIndex, parents[index]);
-            EXPECT_EQ(type.Kind, kinds[index]);
-            EXPECT_EQ(type.ElementCount, elementCounts[index]);
-            EXPECT_EQ(type.Offset, offsets[index]);
-            EXPECT_EQ(type.Size, sizes[index]);
-            EXPECT_EQ(type.Stride, strides[index]);
-        }
-    }
-}
-
-TEST(RadRayShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentity) {
-    const std::filesystem::path path = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts/nested_types.dxil.bin";
-    const vector<byte> original = ReadBinary(path);
-    ASSERT_FALSE(original.empty());
-    const std::optional<size_t> fixtureIndex = FindFixtureIndex("nested_types");
-    ASSERT_TRUE(fixtureIndex.has_value());
-
-    shader::WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, original.data(), sizeof(envelope));
-    ASSERT_EQ(envelope.TypeRecords.Size, 8u * sizeof(shader::WireTypeRecord));
-    vector<shader::WireTypeRecord> types(8);
-    std::memcpy(types.data(), original.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
-    // Reorder the two occupied ranges without overlap: the type tree may change
-    // independently of GPU identity, but must still describe a valid layout.
-    types[6].Offset = 32;
-    types[7].Offset = 0;
-    vector<byte> mutated = original;
-    std::memcpy(mutated.data() + envelope.TypeRecords.Offset, types.data(), envelope.TypeRecords.Size);
-
-    auto diagnosticResult13 = DecodeDxilShaderArtifact(
-        mutated,
-        ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::DXIL,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
-                fixtureIndex.value(), shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity});
-    const auto artifact = std::move(diagnosticResult13.Value);
-    ASSERT_TRUE(artifact.has_value()) << diagnosticResult13.Diagnostics;
-    EXPECT_EQ(
-        artifact->Generic().Envelope().GpuArtifact,
-        test::ExpectedGpuArtifact(fixtureIndex.value(), shader::ShaderTarget::DXIL));
-    // The former mutation placed Transform at [16,80) over Data at [64,96).
-    types[6].Offset = 16;
-    types[7].Offset = 64;
-    std::memcpy(mutated.data() + envelope.TypeRecords.Offset, types.data(), envelope.TypeRecords.Size);
-    auto diagnosticResult14 = DecodeDxilShaderArtifact(
-        mutated,
-        ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::DXIL,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
-                fixtureIndex.value(), shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity});
-    EXPECT_FALSE(diagnosticResult14.Succeeded());
-    EXPECT_NE(diagnosticResult14.Diagnostics.find("type"), string::npos);
-}
-
-TEST(RadRayShaderArtifact, FailsClosedForIdentityAndWireCorruption) {
-    const std::filesystem::path path = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                       "modules/shader/tests/data/shader_artifacts/no_resource_graphics.dxil.bin";
-    const shader::ShaderTarget target = shader::ShaderTarget::DXIL;
-    const shader::GpuArtifactHash expected = test::ExpectedGpuArtifact(0, target);
-    const vector<byte> original = ReadBinary(path);
-    ASSERT_FALSE(original.empty());
-
-    auto decode = [&](const vector<byte>& blob,
-                      uint64_t toolchain = 0) {
-        return DecodeShaderArtifact(
-            blob,
-            ShaderArtifactDecodeOptions{
-                .Target = target,
-                .ExpectedGpuArtifact = expected,
-                .ExpectedToolchainIdentity = toolchain});
-    };
-
-    auto diagnosticResult15 = decode(original, 0xdeadbeefull);
-    EXPECT_FALSE(diagnosticResult15.Succeeded());
-    EXPECT_NE(diagnosticResult15.Diagnostics.find("toolchain"), string::npos);
-    EXPECT_FALSE(decode(vector<byte>{original.begin(), original.begin() + sizeof(shader::WireMetadataEnvelope) - 1}).Value.has_value());
-
-    auto badMagic = original;
-    auto* magic = reinterpret_cast<uint32_t*>(badMagic.data());
-    *magic = 0;
-    EXPECT_FALSE(decode(badMagic).Value.has_value());
-
-    auto badRange = original;
-    shader::WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, badRange.data(), sizeof(envelope));
-    envelope.Bytecode.Offset = envelope.TotalSize - 1;
-    std::memcpy(badRange.data(), &envelope, sizeof(envelope));
-    EXPECT_FALSE(decode(badRange).Value.has_value());
-}
-
-TEST(RadRayShaderArtifact, RejectsDuplicateAndMalformedRecords) {
-    const vector<byte> original = MakeSyntheticArtifact();
-    const auto decode = [&](const vector<byte>& blob, uint8_t fixture) {
-        return DecodeShaderArtifact(
-            blob,
-            ShaderArtifactDecodeOptions{
-                .Target = shader::ShaderTarget::DXIL,
-                .ExpectedGpuArtifact = ExpectedArtifact(fixture, shader::ShaderTarget::DXIL)});
-    };
-
-    shader::WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, original.data(), sizeof(envelope));
-    auto spirvRootSignature = original;
-    envelope.Target = static_cast<uint8_t>(shader::ShaderTarget::SPIRV);
-    envelope.GpuArtifact = ExpectedArtifact(0, shader::ShaderTarget::SPIRV);
-    envelope.RootSignature = envelope.Bytecode;
-    std::memcpy(spirvRootSignature.data(), &envelope, sizeof(envelope));
-
-    auto diagnosticResult16 = DecodeShaderArtifact(
-        spirvRootSignature,
-        ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::SPIRV,
-            .ExpectedGpuArtifact = ExpectedArtifact(0, shader::ShaderTarget::SPIRV)});
-    EXPECT_FALSE(diagnosticResult16.Succeeded());
-    EXPECT_NE(diagnosticResult16.Diagnostics.find("root signature"), string::npos);
-
-    std::memcpy(&envelope, original.data(), sizeof(envelope));
-    vector<shader::WireEntryRecord> entries(2);
-    std::memcpy(
-        entries.data(),
-        original.data() + envelope.EntryRecords.Offset,
-        envelope.EntryRecords.Size);
-    entries[1].Name = entries[0].Name;
-    vector<byte> duplicateEntry = original;
-    std::memcpy(
-        duplicateEntry.data() + envelope.EntryRecords.Offset,
-        entries.data(),
-        envelope.EntryRecords.Size);
-
-    auto diagnosticResult17 = decode(duplicateEntry, 0);
-    EXPECT_FALSE(diagnosticResult17.Succeeded());
-    EXPECT_NE(diagnosticResult17.Diagnostics.find("duplicate entry"), string::npos);
-
-    vector<shader::WireBindingRecord> bindings(2);
-    std::memcpy(
-        bindings.data(),
-        original.data() + envelope.BindingRecords.Offset,
-        envelope.BindingRecords.Size);
-    bindings[1].Group = bindings[0].Group;
-    bindings[1].Binding = bindings[0].Binding;
-    bindings[1].Type = bindings[0].Type;
-    vector<byte> duplicateBinding = original;
-    std::memcpy(
-        duplicateBinding.data() + envelope.BindingRecords.Offset,
-        bindings.data(),
-        envelope.BindingRecords.Size);
-
-    auto diagnosticResult18 = decode(duplicateBinding, 0);
-    EXPECT_FALSE(diagnosticResult18.Succeeded());
-    EXPECT_NE(diagnosticResult18.Diagnostics.find("duplicate binding"), string::npos);
-    const auto expectInvalidBindingOwner = [&](auto&& mutate) {
-        vector<byte> mutated = original;
-        vector<shader::WireBindingRecord> records(
-            envelope.BindingRecords.Size / sizeof(shader::WireBindingRecord));
-        std::memcpy(
-            records.data(),
-            original.data() + envelope.BindingRecords.Offset,
-            envelope.BindingRecords.Size);
-        mutate(records.front());
-        std::memcpy(
-            mutated.data() + envelope.BindingRecords.Offset,
-            records.data(),
-            envelope.BindingRecords.Size);
-
-        auto diagnosticResult19 = decode(mutated, 0);
-        EXPECT_FALSE(diagnosticResult19.Succeeded());
-        EXPECT_NE(diagnosticResult19.Diagnostics.find("binding"), string::npos);
-    };
-    expectInvalidBindingOwner([](shader::WireBindingRecord& binding) {
-        binding.Type = static_cast<uint32_t>(shader::ShaderBindingKind::CBuffer);
-    });
-    expectInvalidBindingOwner([](shader::WireBindingRecord& binding) {
-        binding.Type = static_cast<uint32_t>(shader::ShaderBindingKind::CBuffer);
-        binding.TypeIndex = 2;
-    });
-    expectInvalidBindingOwner([](shader::WireBindingRecord& binding) {
-        binding.Type = static_cast<uint32_t>(shader::ShaderBindingKind::CBuffer);
-        binding.TypeIndex = 1;
-    });
-    expectInvalidBindingOwner([](shader::WireBindingRecord& binding) {
-        binding.TypeIndex = 0;
-    });
-
-    vector<shader::WireTypeRecord> types(
-        envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
-    std::memcpy(
-        types.data(),
-        original.data() + envelope.TypeRecords.Offset,
-        envelope.TypeRecords.Size);
-    types.back().ParentIndex = static_cast<uint32_t>(types.size());
-    vector<byte> invalidType = original;
-    std::memcpy(
-        invalidType.data() + envelope.TypeRecords.Offset,
-        types.data(),
-        envelope.TypeRecords.Size);
-
-    auto diagnosticResult20 = decode(invalidType, 0);
-    EXPECT_FALSE(diagnosticResult20.Succeeded());
-    EXPECT_NE(diagnosticResult20.Diagnostics.find("type"), string::npos);
-
-    const auto expectInvalidSyntheticType = [&](auto&& mutate) {
-        vector<byte> mutated = original;
-        vector<shader::WireTypeRecord> records(
-            envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
-        std::memcpy(
-            records.data(),
-            original.data() + envelope.TypeRecords.Offset,
-            envelope.TypeRecords.Size);
-        mutate(records.front());
-        std::memcpy(
-            mutated.data() + envelope.TypeRecords.Offset,
-            records.data(),
-            envelope.TypeRecords.Size);
-
-        auto diagnosticResult21 = decode(mutated, 0);
-        EXPECT_FALSE(diagnosticResult21.Succeeded());
-        EXPECT_NE(diagnosticResult21.Diagnostics.find("type"), string::npos);
-    };
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.Kind = 0; });
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.ElementCount = 0; });
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.Offset = 1; });
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.Stride = 8; });
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) {
-        type.Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Array);
-        type.ElementCount = 2;
-        type.Size = 15;
-    });
-    expectInvalidSyntheticType([](shader::WireTypeRecord& type) { type.ParentIndex = 0; });
-
-    const vector<byte> nested = ReadBinary(
-        std::filesystem::path{RADRAY_PROJECT_DIR} /
-        "modules/shader/tests/data/shader_artifacts/nested_types.dxil.bin");
-    ASSERT_FALSE(nested.empty());
-    const std::optional<size_t> nestedFixtureIndex = FindFixtureIndex("nested_types");
-    ASSERT_TRUE(nestedFixtureIndex.has_value());
-    shader::WireMetadataEnvelope nestedEnvelope{};
-    std::memcpy(&nestedEnvelope, nested.data(), sizeof(nestedEnvelope));
-    ASSERT_EQ(nestedEnvelope.TypeRecords.Size, 8u * sizeof(shader::WireTypeRecord));
-    const auto expectInvalidNestedType = [&](auto&& mutate) {
-        vector<byte> mutated = nested;
-        vector<shader::WireTypeRecord> records(8);
-        std::memcpy(
-            records.data(),
-            nested.data() + nestedEnvelope.TypeRecords.Offset,
-            nestedEnvelope.TypeRecords.Size);
-        mutate(records);
-        std::memcpy(
-            mutated.data() + nestedEnvelope.TypeRecords.Offset,
-            records.data(),
-            nestedEnvelope.TypeRecords.Size);
-        const auto artifact = DecodeShaderArtifact(
-                                  mutated,
-                                  ShaderArtifactDecodeOptions{
-                                      .Target = shader::ShaderTarget::DXIL,
-                                      .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
-                                          nestedFixtureIndex.value(), shader::ShaderTarget::DXIL),
-                                      .ExpectedToolchainIdentity = kFixtureToolchainIdentity})
-                                  .Value;
-        EXPECT_FALSE(artifact.has_value());
-    };
-    expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[7].Offset = 80; });
-    expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[1].ParentIndex = 2; });
-    expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[2].Name = types[1].Name; });
-    expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[7].TypeIndex = 1; });
-
-    ASSERT_EQ(nestedEnvelope.VertexInputRecords.Size, sizeof(shader::WireVertexInputRecord));
-    vector<shader::WireVertexInputRecord> vertexInputs(1);
-    std::memcpy(
-        vertexInputs.data(),
-        nested.data() + nestedEnvelope.VertexInputRecords.Offset,
-        nestedEnvelope.VertexInputRecords.Size);
-    vertexInputs.front().ComponentCount = 0;
-    vector<byte> invalidVertexInput = nested;
-    std::memcpy(
-        invalidVertexInput.data() + nestedEnvelope.VertexInputRecords.Offset,
-        vertexInputs.data(),
-        nestedEnvelope.VertexInputRecords.Size);
-
-    auto diagnosticResult22 = DecodeShaderArtifact(
-        invalidVertexInput,
-        ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::DXIL,
-            .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
-                nestedFixtureIndex.value(), shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = kFixtureToolchainIdentity});
-    EXPECT_FALSE(
-        diagnosticResult22.Succeeded());
-    EXPECT_NE(diagnosticResult22.Diagnostics.find("vertex input"), string::npos);
-
-    const auto expectInvalidRootOwner = [&](auto&& mutate) {
-        vector<byte> mutated = original;
-        vector<shader::WireRootConstantRecord> records(
-            envelope.RootConstantRecords.Size /
-            sizeof(shader::WireRootConstantRecord));
-        std::memcpy(
-            records.data(),
-            original.data() + envelope.RootConstantRecords.Offset,
-            envelope.RootConstantRecords.Size);
-        mutate(records.front());
-        std::memcpy(
-            mutated.data() + envelope.RootConstantRecords.Offset,
-            records.data(),
-            envelope.RootConstantRecords.Size);
-
-        auto diagnosticResult23 = decode(mutated, 0);
-        EXPECT_FALSE(diagnosticResult23.Succeeded());
-        EXPECT_NE(diagnosticResult23.Diagnostics.find("root constant"), string::npos);
-    };
-    expectInvalidRootOwner([](shader::WireRootConstantRecord& constant) {
-        constant.TypeIndex = 2;
-    });
-    expectInvalidRootOwner([](shader::WireRootConstantRecord& constant) {
-        constant.TypeIndex = 1;
-    });
-    expectInvalidRootOwner([](shader::WireRootConstantRecord& constant) {
-        constant.TypeIndex = 0;
-        constant.Size = 12;
-    });
-
-    vector<shader::WireRootConstantRecord> constants(1);
-    std::memcpy(
-        constants.data(),
-        original.data() + envelope.RootConstantRecords.Offset,
-        envelope.RootConstantRecords.Size);
-    constants.front().Size = 2;
-    vector<byte> invalidRoot = original;
-    std::memcpy(
-        invalidRoot.data() + envelope.RootConstantRecords.Offset,
-        constants.data(),
-        envelope.RootConstantRecords.Size);
-
-    auto diagnosticResult24 = decode(invalidRoot, 0);
-    EXPECT_FALSE(diagnosticResult24.Succeeded());
-    EXPECT_NE(diagnosticResult24.Diagnostics.find("root constant"), string::npos);
+    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+    ASSERT_EQ(decoded.Value->RootConstants().size(), 1u);
+    const WireRootConstantRecord& push = decoded.Value->RootConstants()[0];
+    EXPECT_EQ(NameOf(*decoded.Value, push.Name), "PushConstants");
+    ASSERT_LT(push.TypeIndex, decoded.Value->Types().size());
+    EXPECT_EQ(NameOf(*decoded.Value, decoded.Value->Types()[push.TypeIndex].Name), "PushData");
 }
 
 }  // namespace
-}  // namespace radray::shader_tests
+}  // namespace radray::shader
