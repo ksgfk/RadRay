@@ -25,6 +25,8 @@ struct VisibleMeshBatch {
 };
 
 // See docs/architecture/runtime.md for the scene storage contract.
+// Render-thread-owned storage; each Scene owns independent caches. External mutations must
+// occur outside RunFrame. After cache synchronization, Extract/Record only borrow read-only data.
 struct Scene {
     SparseSet<PrimitiveSceneInfo> Primitives;
     SparseSet<MeshBatch> Meshes;
@@ -52,11 +54,12 @@ struct Scene {
     // Processor default contexts are restored before returning. Calls must be serialized.
     void SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> passes);
     // Append to output; invalid input rolls back this call's appended commands.
+    // Output borrows cache pointers: finish recording before mutating this Scene or its caches.
     bool GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
                                        vector<VisibleMeshDrawCommand>& outCommands) const;
     bool GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
                                  vector<VisibleMeshDrawCommand>& outCommands) const;
-    // Snapshot cached commands into frame-local storage. Invalid input rolls back both appended lists.
+    // Append borrowed cached pointers to the frame list, with the same lifetime and rollback rules.
     // RHI objects remain borrowed through command allocator reset.
     bool GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
                                        MeshPassFrameDrawList& outDrawList) const;

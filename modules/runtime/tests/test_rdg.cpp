@@ -159,7 +159,7 @@ protected:
             EXPECT_EQ(Trace.BufferAllocations.size(), buffers);
             EXPECT_EQ(Trace.TextureAllocations.size(), textures);
         };
-        pipeline->OnRecord = [&](FrameSlot& slot) {
+        pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
             if (!Compiled) return;
             Pool.BeginFrame();
             auto command = slot.AcquireCommandBuffer();
@@ -888,12 +888,14 @@ public:
     void Wait(FrameSlot&) noexcept override {}
     vector<string> Events;
     vector<MeshPassId> Extracted;
+    std::function<void(RDGBuilder&, const Scene&)> OnSetup;
     bool Reorder{false};
 
 protected:
     void ExtractFrameData(const Scene&, FrameSlot&) noexcept override { Events.push_back("frame"); }
-    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
+    void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override {
         Events.push_back("setup");
+        if (OnSetup) OnSetup(graph, source);
         // A dead list remains untouched, including its initial order.
         slot.GetPassDrawList({7}).VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
         const auto live = graph.CreateTexture(ColorDescriptor());
@@ -950,6 +952,31 @@ TEST(RenderGraphFramePipeline, ExtractionKeepsDeclarationOrderWhenGpuPassesReord
     EXPECT_EQ(pipeline->Extracted, (vector<MeshPassId>{{3}, {1}, {2}}));
     EXPECT_EQ(pipeline->Events, (vector<string>{"frame", "setup", "mesh", "mesh", "mesh", "execute", "tail", "other", "submit"}));
     EXPECT_EQ(trace.RasterScopes.size(), 2);
+}
+
+TEST(RenderGraphFramePipeline, SetupAndExecuteBorrowCurrentSceneUntilRecordCompletes) {
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    DeviceContext context{device, &device->Queue};
+    Scene scene;
+    const auto primitive = scene.AddPrimitive();
+    auto owner = make_unique<FilteringPipeline>(context);
+    vector<uint32_t> recordedCounts;
+    owner->OnSetup = [&](RDGBuilder& graph, const Scene& source) {
+        EXPECT_EQ(&source, &scene);
+        ASSERT_TRUE(source.Primitives.IsAlive(primitive));
+        graph.AddCopyPass("borrow scene", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [&source, &recordedCounts](RDGCopyPassContext&) {
+            recordedCounts.push_back(source.Primitives.Count());
+            return true; });
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(owner), 1);
+    ASSERT_TRUE(scheduler);
+    scheduler->RunFrame(scene);
+    scene.AddPrimitive();
+    scheduler->RunFrame(scene);
+    EXPECT_EQ(recordedCounts, (vector<uint32_t>{1, 2}));
+    scene.Clear();
+    scheduler->WaitIdle();
 }
 
 }  // namespace

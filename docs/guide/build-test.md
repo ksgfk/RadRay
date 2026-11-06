@@ -631,9 +631,9 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 |---|---|
 | [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，连续 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
 | [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
-| [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 快照与提交/等待 |
+| [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 命令借用与提交/等待 |
 | [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、可切换输出 Context、共享状态和 Element 构建 helper；AddMeshBatch 返回 void。静态 Context 存入 SparseSet 并回写缓存句柄；动态 Context 自动追加当帧可见命令 |
-| [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 两级命令、自持有 PushConstants、Pass 提交参数与延迟实例流，稳定句柄解析和 SubmitMeshDrawCommands |
+| [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 两级命令、自持有 PushConstants、Pass 提交参数与延迟实例流，可见命令指针与 SubmitMeshDrawCommands |
 | [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
 
@@ -657,14 +657,14 @@ Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Bri
 初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符；颜色/深度附件及其 View 由基类每槽的 RDG 瞬态池拥有。
 `ExtractFrameData` 按候选 Primitive 顺序把五个 64 字节 `LocalToWorld` 矩阵及两份 Pass UBO 的 CPU 字节保存到当前槽 arena，
 UBO 按设备要求对齐并补零，LocalScale 分别为 1.0 / 1.12。此时不 Map GPU 缓冲，也不收集逐 Pass 命令。
-`SetupGraph` 没有 Scene 参数，声明上传、瞬态深度/颜色附件、四个 Raster Pass 与 Readback Copy。
+`SetupGraph` 接收只读 Scene，本例使用已准备的共享几何资源声明上传、瞬态深度/颜色附件、四个 Raster Pass 与 Readback Copy。
 首帧共享几何经 RDG 的 Device Staging Copy 上传，并通过 MarkOutput 保活，终态为 Vertex / Index；后续帧沿用该状态。
 实例/常量缓冲上传只由消费者保活，图末恢复 HostWrite；读回缓冲终态为 HostRead。
 
-Compile 先裁剪，再通过 `ExtractMeshPass` 调用 `PreparePassDrawCommands` 固化存活 Pass 的缓存命令快照，
+Compile 先裁剪，再通过 `ExtractMeshPass` 调用 `PreparePassDrawCommands` 收集存活 Pass 的缓存命令只读指针，
 并把候选 Primitive 下标写入 `FirstInstance`，不访问材质参数。持久缓存的脏同步仍覆盖全部登记的 Processor。
 基类 Record 先稳定排序存活列表，再通过本槽命令缓冲执行图，按存活访问自动生成转换及同状态写屏障。
-`RecordPass` 只设置 viewport/scissor，将本槽 Pass 参数组和实例流通过 `MeshPassSubmitArgs` 交给列表的 `Submit(encoder, submitArgs)`，无需回查 Scene。
+`RecordPass` 只设置 viewport/scissor，将本槽 Pass 参数组和实例流通过 `MeshPassSubmitArgs` 交给列表的 `Submit(encoder, submitArgs)`，在帧内 Scene 借用有效期内直接解析缓存命令。
 Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数组；runtime 先绑定 PSO，再在首次绑定或切换 PSO 后重绑 Pass 参数组，
 最后完成几何、模板、命令参数和 DrawIndexed。相机、局部缩放或变换变化不需要重新调用 Processor，材质变化则重建关联命令的颜色副本。
 

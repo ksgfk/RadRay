@@ -164,34 +164,10 @@ TEST_F(MeshDrawCommandTest, RejectsInstanceStreamForUndeclaredSlot) {
     EXPECT_FALSE(ValidateMeshDrawCommand(MakeInstancedCommand(), {}, args));
 }
 
-TEST_F(MeshDrawCommandTest, ResolvesCachedCommandByHandle) {
-    CachedPassMeshDrawList list;
-    const auto handle = list.Commands.Emplace(MakeCommand());
-    const auto resolved = ResolveVisibleMeshDrawCommand({.CommandHandle = handle}, &list);
-    EXPECT_EQ(resolved.Get(), &list.Commands.Get(handle));
-}
-
-TEST_F(MeshDrawCommandTest, ResolvesSnapshotCachedCommandByIndex) {
-    const array<MeshDrawCommand, 2> cached{MakeCommand(), MakeCommand()};
-    const auto commands = std::span<const MeshDrawCommand>{cached};
-    EXPECT_EQ(ResolveVisibleMeshDrawCommand({.CommandHandle = {1, 0}}, commands).Get(), &cached[1]);
-    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.CommandHandle = {2, 0}}, commands));
-    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.CommandHandle = {1, 1}}, commands));
-    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({}, commands));
-}
-
-TEST_F(MeshDrawCommandTest, ResolvesDynamicCommandByIndex) {
-    const array<MeshDrawCommand, 2> dynamic{MakeCommand(), MakeCommand()};
-    const auto source = MeshDrawCommandSource::Dynamic;
-    EXPECT_EQ(ResolveVisibleMeshDrawCommand({.Source = source, .CommandHandle = {1, 0}}, nullptr, dynamic).Get(), &dynamic[1]);
-    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.Source = source, .CommandHandle = {2, 0}}, nullptr, dynamic));
-    EXPECT_FALSE(ResolveVisibleMeshDrawCommand({.Source = source, .CommandHandle = {1, 1}}, nullptr, dynamic));
-}
-
 class SubmitMeshDrawCommandsTest : public MeshDrawCommandTest {
 protected:
-    VisibleMeshDrawCommand Dynamic(uint32_t index) const {
-        return {.Source = MeshDrawCommandSource::Dynamic, .CommandHandle = {index, 0}};
+    VisibleMeshDrawCommand Dynamic(const MeshDrawCommand& command) const {
+        return {.Source = MeshDrawCommandSource::Dynamic, .CachedCommand = &command};
     }
 
     RecordingEncoder Encoder;
@@ -202,10 +178,10 @@ TEST_F(SubmitMeshDrawCommandsTest, DrawsWithCommandGeometryAndVisibleInstances) 
     command.FirstIndex = 6;
     command.VertexOffset = -2;
     const array commands{command};
-    auto visible = Dynamic(0);
+    auto visible = Dynamic(commands[0]);
     visible.FirstInstance = 5;
     visible.InstanceCount = 3;
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, nullptr, commands));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}));
     ASSERT_EQ(Encoder.Draws.size(), 1u);
     const auto& draw = Encoder.Draws[0];
     EXPECT_EQ(draw.IndexCount, 3u);
@@ -220,10 +196,10 @@ TEST_F(SubmitMeshDrawCommandsTest, BindsStateInDocumentedOrder) {
     command.ParameterSets.push_back({1, &Parameters, {}});
     command.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{}, byte{}, byte{}, byte{}}};
     const array commands{command};
-    const auto visible = Dynamic(0);
+    const auto visible = Dynamic(commands[0]);
     FakeParameterSet passParameters;
     const MeshShaderParameterBinding pass{0, &passParameters, {}};
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, nullptr, commands, {.ParameterSets = std::span{&pass, 1}}));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, {.ParameterSets = std::span{&pass, 1}}));
     const vector<std::string_view> expected{"pipeline", "parameters", "vertex", "index", "stencil", "parameters", "push", "draw"};
     EXPECT_EQ(Encoder.Order, expected);
     ASSERT_EQ(Encoder.ParameterBinds.size(), 2u);
@@ -236,8 +212,8 @@ TEST_F(SubmitMeshDrawCommandsTest, BindsUnchangedStateOncePerCall) {
     command.ParameterSets.push_back({1, &Parameters, {}});
     command.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{}, byte{}, byte{}, byte{}}};
     const array commands{command, command};
-    const array visible{Dynamic(0), Dynamic(1)};
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands));
+    const array visible{Dynamic(commands[0]), Dynamic(commands[1])};
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible));
     EXPECT_EQ(Encoder.Pipelines.size(), 1u);
     EXPECT_EQ(Encoder.VertexCalls.size(), 1u);
     EXPECT_EQ(Encoder.IndexBuffers.size(), 1u);
@@ -252,10 +228,10 @@ TEST_F(SubmitMeshDrawCommandsTest, PipelineChangeRebindsPassParametersAndVertexB
     auto second = MakeCommand();
     second.Pipeline = &other;
     const array commands{MakeCommand(), second};
-    const array visible{Dynamic(0), Dynamic(1)};
+    const array visible{Dynamic(commands[0]), Dynamic(commands[1])};
     FakeParameterSet passParameters;
     const MeshShaderParameterBinding pass{0, &passParameters, {}};
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands, {.ParameterSets = std::span{&pass, 1}}));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, {.ParameterSets = std::span{&pass, 1}}));
     EXPECT_EQ(Encoder.Pipelines, (vector<render::GraphicsPipelineState*>{&Pipeline, &other}));
     EXPECT_EQ(Encoder.ParameterBinds.size(), 2u);
     EXPECT_EQ(Encoder.VertexCalls.size(), 2u);
@@ -269,8 +245,8 @@ TEST_F(SubmitMeshDrawCommandsTest, VertexSlotsBindAsContiguousRanges) {
     second.VertexBuffers[0].View.Offset = 16;
     second.VertexBuffers[1].View.Offset = 48;
     const array commands{first, second};
-    const array visible{Dynamic(0), Dynamic(1)};
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands));
+    const array visible{Dynamic(commands[0]), Dynamic(commands[1])};
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible));
     ASSERT_EQ(Encoder.VertexCalls.size(), 3u);
     ASSERT_EQ(Encoder.VertexCalls[0].size(), 3u);
     for (uint32_t slot = 0; slot < 3; ++slot) EXPECT_EQ(Encoder.VertexCalls[0][slot].Binding, slot);
@@ -282,9 +258,9 @@ TEST_F(SubmitMeshDrawCommandsTest, VertexSlotsBindAsContiguousRanges) {
 
 TEST_F(SubmitMeshDrawCommandsTest, SubmitInstanceStreamReplacesDeclaredSlot) {
     const array commands{MakeInstancedCommand()};
-    const auto visible = Dynamic(0);
+    const auto visible = Dynamic(commands[0]);
     const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{1, {&Instances, 16, 48}}};
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, nullptr, commands, args));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, args));
     ASSERT_EQ(Encoder.VertexCalls.size(), 1u);
     ASSERT_EQ(Encoder.VertexCalls[0].size(), 2u);
     EXPECT_EQ(Encoder.VertexCalls[0][1].Binding, 1u);
@@ -296,26 +272,26 @@ TEST_F(SubmitMeshDrawCommandsTest, SkipsZeroInstanceCommands) {
     auto skipped = MakeCommand();
     skipped.Pipeline = &other;
     const array commands{MakeCommand(), skipped, MakeCommand()};
-    array visible{Dynamic(0), Dynamic(1), Dynamic(2)};
+    array visible{Dynamic(commands[0]), Dynamic(commands[1]), Dynamic(commands[2])};
     visible[1].InstanceCount = 0;
-    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible));
     EXPECT_EQ(Encoder.Draws.size(), 2u);
     EXPECT_EQ(Encoder.Pipelines.size(), 1u);
 }
 
-TEST_F(SubmitMeshDrawCommandsTest, ReturnsFalseForUnresolvableCommand) {
+TEST_F(SubmitMeshDrawCommandsTest, ReturnsFalseForNullCommandPointer) {
     const array commands{MakeCommand()};
-    const array visible{Dynamic(0), Dynamic(5)};
-    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands));
+    const array visible{Dynamic(commands[0]), VisibleMeshDrawCommand{}};
+    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, visible));
 }
 
 TEST_F(SubmitMeshDrawCommandsTest, ReturnsFalseWhenPushConstantsFail) {
     auto command = MakeCommand();
     command.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{}, byte{}, byte{}, byte{}}};
     const array commands{command};
-    const auto visible = Dynamic(0);
+    const auto visible = Dynamic(commands[0]);
     Encoder.FailPushConstants = true;
-    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, nullptr, commands));
+    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}));
     EXPECT_TRUE(Encoder.Draws.empty());
 }
 
@@ -324,8 +300,8 @@ TEST_F(SubmitMeshDrawCommandsTest, DebugPreflightRejectsInvalidListBeforeRecordi
     auto invalid = MakeCommand();
     invalid.IndexBuffer.Stride = 3;
     const array commands{MakeCommand(), invalid};
-    const array visible{Dynamic(0), Dynamic(1)};
-    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, visible, nullptr, commands));
+    const array visible{Dynamic(commands[0]), Dynamic(commands[1])};
+    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, visible));
     EXPECT_TRUE(Encoder.Order.empty());
 #else
     GTEST_SKIP() << "Release submission trusts validated commands";

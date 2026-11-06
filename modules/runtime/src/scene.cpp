@@ -3,30 +3,10 @@
 #include <algorithm>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/frame_slot.h>
 
 namespace radray {
-namespace {
-
-bool SnapshotVisibleMeshDrawCommands(Nullable<const CachedPassMeshDrawList*> cachedDrawList, size_t firstVisible,
-                                     MeshPassFrameDrawList& outDrawList) {
-    const auto initialCachedSize = outDrawList.CachedCommands.size();
-    for (size_t index = firstVisible; index < outDrawList.VisibleCommands.size(); ++index) {
-        auto& visible = outDrawList.VisibleCommands[index];
-        const auto command = ResolveVisibleMeshDrawCommand(visible, cachedDrawList);
-        if (!command || outDrawList.CachedCommands.size() >= std::numeric_limits<uint32_t>::max()) {
-            outDrawList.CachedCommands.resize(initialCachedSize);
-            outDrawList.VisibleCommands.resize(firstVisible);
-            return false;
-        }
-        const auto commandIndex = static_cast<uint32_t>(outDrawList.CachedCommands.size());
-        outDrawList.CachedCommands.push_back(*command);
-        visible.CommandHandle = {commandIndex, 0};
-    }
-    return true;
-}
-
-}  // namespace
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
     if (!Materials.IsAlive(batch.Material) || batch.Elements.size() > std::numeric_limits<uint32_t>::max()) return false;
@@ -187,6 +167,7 @@ Nullable<const CachedPassMeshDrawList*> Scene::GetCachedDrawList(MeshPassId pass
 }
 
 void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> passes) {
+    RADRAY_PROFILE_SCOPE_N("RadRay.Scene.SyncCachedCommands");
     for (size_t index = 0; index < passes.size(); ++index) {
         if (passes[index].Pass.Value == std::numeric_limits<uint32_t>::max()) {
             RADRAY_ERR_LOG("Scene: mesh pass ID must be a compact index");
@@ -229,6 +210,7 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
     }
     auto dirty = std::move(_dirtyBatches);
     _dirtyBatches.clear();
+    RADRAY_PROFILE_PLOT("RadRay.Scene.DirtyBatches", static_cast<int64_t>(dirty.size()));
     for (const auto handle : dirty) {
         if (!Meshes.IsAlive(handle)) continue;
         auto& batch = Meshes.Get(handle);
@@ -253,26 +235,34 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
 
 bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
                                           vector<VisibleMeshDrawCommand>& outCommands) const {
+    RADRAY_PROFILE_SCOPE_N("RadRay.Scene.GatherVisibleHandles");
+    RADRAY_PROFILE_PLOT("RadRay.Scene.VisibleBatches", static_cast<int64_t>(visibleBatches.size()));
     const auto initialSize = outCommands.size();
+    const auto requiredCapacity = initialSize + visibleBatches.size();
+    if (outCommands.capacity() < requiredCapacity) {
+        outCommands.reserve(std::max(requiredCapacity, outCommands.capacity() + outCommands.capacity() / 2));
+    }
     const auto drawList = GetCachedDrawList(pass);
     for (const auto& visible : visibleBatches) {
-        if (!Meshes.IsAlive(visible.Batch)) {
+        const auto batchPtr = Meshes.TryGet(visible.Batch);
+        if (!batchPtr) {
             outCommands.resize(initialSize);
             return false;
         }
-        const auto& batch = Meshes.Get(visible.Batch);
+        const auto& batch = *batchPtr;
         if (batch.Dirty || (visible.ElementIndex != std::numeric_limits<uint32_t>::max() && visible.ElementIndex >= batch.Elements.size())) {
             outCommands.resize(initialSize);
             return false;
         }
         for (const auto& info : batch.CachedCommands) {
             if (info.Pass != pass || (visible.ElementIndex != std::numeric_limits<uint32_t>::max() && info.ElementIndex != visible.ElementIndex)) continue;
-            if (!drawList || !drawList->Commands.IsAlive(info.CommandHandle)) {
+            const auto command = drawList ? drawList->Commands.TryGet(info.CommandHandle) : nullptr;
+            if (!command) {
                 outCommands.resize(initialSize);
                 return false;
             }
             outCommands.push_back({.Source = MeshDrawCommandSource::Cached,
-                                   .CommandHandle = info.CommandHandle,
+                                   .CachedCommand = command,
                                    .SortKey = info.BaseSortKey | visible.VisibilitySortKey,
                                    .FirstInstance = visible.FirstInstanceOverride.value_or(info.FirstInstance),
                                    .InstanceCount = visible.InstanceCountOverride.value_or(info.InstanceCount)});
@@ -302,16 +292,12 @@ bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHa
 
 bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches,
                                           MeshPassFrameDrawList& outDrawList) const {
-    const auto firstVisible = outDrawList.VisibleCommands.size();
-    if (!GatherVisibleMeshDrawCommands(pass, visibleBatches, outDrawList.VisibleCommands)) return false;
-    return SnapshotVisibleMeshDrawCommands(GetCachedDrawList(pass), firstVisible, outDrawList);
+    return GatherVisibleMeshDrawCommands(pass, visibleBatches, outDrawList.VisibleCommands);
 }
 
 bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
                                     MeshPassFrameDrawList& outDrawList) const {
-    const auto firstVisible = outDrawList.VisibleCommands.size();
-    if (!GatherVisiblePrimitives(pass, visiblePrimitives, outDrawList.VisibleCommands)) return false;
-    return SnapshotVisibleMeshDrawCommands(GetCachedDrawList(pass), firstVisible, outDrawList);
+    return GatherVisiblePrimitives(pass, visiblePrimitives, outDrawList.VisibleCommands);
 }
 
 void Scene::Clear() noexcept {

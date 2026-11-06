@@ -11,6 +11,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 记录范围 |
 |---|---|
+| [Runtime Scene 帧内借用对齐与 MeshDrawCommand 寻址/布局优化计划](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md) | 2026-11-06 基于配对 Tracy 采样定位每帧命令快照净倒退根因，对齐 UE5 `FScene` 渲染线程模型放开 `RunFrame` 内 `Scene` 只读借用、移除快照拷贝、改为直达命令寻址并重排 `MeshDrawCommand` 热冷缓存行的阶段性计划 |
 | [Runtime RDG Pass 重排与合并实现计划](2026-11-06-runtime-rdg-pass-reorder-merge-plan.md) | `6050639` 基线下补齐 RDG WAR 依赖、确定性贪心拓扑重排、Raster/Compute Pass 合并折叠与批量 Barrier 下发的已确认实现计划 |
 | [Runtime RDG 接入与 FramePipeline 跨线程接口拆分计划](2026-11-05-runtime-rdg-pipeline-interface-plan.md) | `e443cef` 基线下针对 RDG 剔除避免 MeshPass 无效收集/排序、切断 `Record` 对 `Scene` 借用以支持跨线程分离的分阶段接口演进计划 |
 | [Runtime MDC 性能优化计划](2026-11-04-runtime-mdc-performance-plan.md) | `c8bc3bd` 基线下針對 `SubmitMeshDrawCommands` 预检/状态去重、`Scene` $O(1)$ 脏追踪及 `GatherVisible`/`VertexBuffers` 内联的已确认设计方案 |

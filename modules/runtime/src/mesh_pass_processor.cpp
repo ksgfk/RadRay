@@ -51,23 +51,37 @@ void DynamicMeshPassDrawListContext::BindVisibleCommands(vector<VisibleMeshDrawC
 }
 
 MeshDrawCommand& DynamicMeshPassDrawListContext::AddCommand(const MeshDrawCommand& initializer) {
+    RADRAY_ASSERT(!_finalized);
     return Commands.emplace_back(initializer);
 }
 
 void DynamicMeshPassDrawListContext::FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) {
-    RADRAY_ASSERT(!Commands.empty() && &Commands.back() == &command);
+    RADRAY_ASSERT(!_finalized && !Commands.empty() && &Commands.back() == &command);
     MeshPassDrawListContext::FinalizeCommand(context, elementIndex, command);
     if (_visibleCommands) {
-        RADRAY_ASSERT(Commands.size() <= std::numeric_limits<uint32_t>::max());
+        _pendingVisibleCommands.push_back({Commands.size() - 1, _visibleCommands->size()});
         _visibleCommands->push_back({.Source = MeshDrawCommandSource::Dynamic,
-                                     .CommandHandle = {static_cast<uint32_t>(Commands.size() - 1), 0},
                                      .SortKey = command.BaseSortKey,
                                      .FirstInstance = command.FirstInstance,
                                      .InstanceCount = command.InstanceCount});
     }
 }
 
-void DynamicMeshPassDrawListContext::Clear() noexcept { Commands.clear(); }
+void DynamicMeshPassDrawListContext::FinalizeVisibleCommands() noexcept {
+    if (_finalized) return;
+    for (const auto& pending : _pendingVisibleCommands) {
+        RADRAY_ASSERT(_visibleCommands && pending.VisibleIndex < _visibleCommands->size() && pending.CommandIndex < Commands.size());
+        (*_visibleCommands)[pending.VisibleIndex].CachedCommand = &Commands[pending.CommandIndex];
+    }
+    _pendingVisibleCommands.clear();
+    _finalized = true;
+}
+
+void DynamicMeshPassDrawListContext::Clear() noexcept {
+    Commands.clear();
+    _pendingVisibleCommands.clear();
+    _finalized = false;
+}
 
 MeshPassProcessor::MeshPassProcessor(MeshPassDrawListContext& drawListContext) noexcept : _drawListContext(&drawListContext) {}
 

@@ -107,7 +107,7 @@ public:
 
 private:
     void ExtractFrameData(const Scene& source, FrameSlot& slot) noexcept override;
-    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override;
+    void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override;
     void ExtractMeshPass(MeshPassId pass, const Scene& source, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept override;
     void SubmitFrame(FrameSlot& slot, render::CommandBuffer& commandBuffer) noexcept override;
     bool RecordPass(render::GraphicsCommandEncoder& encoder, FrameSlot& slot, MeshPassId passId, const GpuFrameResources& resources);

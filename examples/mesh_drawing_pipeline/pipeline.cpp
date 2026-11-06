@@ -305,7 +305,7 @@ void MeshDrawingFramePipeline::ExtractFrameData(const Scene& source, FrameSlot& 
     }
 }
 
-void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept {
+void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, const Scene&, FrameSlot& slot) noexcept {
     const auto slotIndex = slot.GetIndex();
     auto& resources = *_frames[slotIndex];
     const auto& payload = *_payloads[slotIndex];

@@ -54,8 +54,7 @@ protected:
 };
 
 TEST_F(MeshPassProcessorTest, FinalizeCopiesSelectedElementDrawArguments) {
-    Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexBufferOffset = 8, .IndexStride = 2, .FirstIndex = 4,
-                              .IndexCount = 6, .VertexOffset = -1, .FirstInstance = 2, .InstanceCount = 5});
+    Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexBufferOffset = 8, .IndexStride = 2, .FirstIndex = 4, .IndexCount = 6, .VertexOffset = -1, .FirstInstance = 2, .InstanceCount = 5});
     MeshDrawCommand initializer;
     initializer.Pipeline = &Pipeline;
     auto& command = Output.AddCommand(initializer);
@@ -79,7 +78,9 @@ TEST_F(MeshPassProcessorTest, DynamicFinalizeAppendsVisibleCommand) {
     Output.FinalizeCommand(Context(), 0, command);
     ASSERT_EQ(Visible.size(), 1u);
     EXPECT_EQ(Visible[0].Source, MeshDrawCommandSource::Dynamic);
-    EXPECT_EQ(ResolveVisibleMeshDrawCommand(Visible[0], nullptr, Output.Commands).Get(), &Output.Commands[0]);
+    EXPECT_FALSE(Visible[0].CachedCommand);
+    Output.FinalizeVisibleCommands();
+    EXPECT_EQ(Visible[0].CachedCommand.Get(), &Output.Commands[0]);
     EXPECT_EQ(Visible[0].SortKey, 42u);
     EXPECT_EQ(Visible[0].FirstInstance, 3u);
     EXPECT_EQ(Visible[0].InstanceCount, 1u);

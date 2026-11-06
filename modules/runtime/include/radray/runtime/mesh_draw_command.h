@@ -44,18 +44,18 @@ struct MeshPushConstantCommandBinding {
 // Binding descriptions are owned; RHI objects are borrowed through command allocator reset.
 struct MeshDrawCommand {
     Nullable<render::GraphicsPipelineState*> Pipeline{nullptr};
-    InlineVector<render::VertexBufferBinding, 4> VertexBuffers;
-    std::optional<uint32_t> InstanceStreamBinding{};
     render::IndexBufferView IndexBuffer{};
-    InlineVector<MeshShaderParameterBinding, 2> ParameterSets;
-    std::optional<MeshPushConstantCommandBinding> PushConstants{};
-    uint64_t BaseSortKey{0};
+    std::optional<uint32_t> InstanceStreamBinding{};
     uint32_t IndexCount{0};
     uint32_t FirstIndex{0};
     int32_t VertexOffset{0};
     uint32_t FirstInstance{0};
     uint32_t InstanceCount{1};
     uint8_t StencilReference{0};
+    InlineVector<render::VertexBufferBinding, 4> VertexBuffers;
+    InlineVector<MeshShaderParameterBinding, 2> ParameterSets;
+    uint64_t BaseSortKey{0};
+    std::optional<MeshPushConstantCommandBinding> PushConstants{};
 };
 
 struct CachedMeshDrawCommandInfo {
@@ -73,7 +73,8 @@ struct CachedPassMeshDrawList {
 
 struct VisibleMeshDrawCommand {
     MeshDrawCommandSource Source{MeshDrawCommandSource::Cached};
-    SparseSetHandle CommandHandle{};
+    // Borrows either cached or finalized dynamic storage through recording; its address must stay stable.
+    Nullable<const MeshDrawCommand*> CachedCommand{nullptr};
     uint64_t SortKey{0};
     uint32_t FirstInstance{0};
     uint32_t InstanceCount{1};
@@ -91,29 +92,11 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const VisibleMeshDrawCommand& visibleCommand = {},
                              const MeshPassSubmitArgs& submitArgs = {}) noexcept;
 
-// Dynamic handles use their frame-local array index and generation zero.
-Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
-    const VisibleMeshDrawCommand& visibleCommand, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
-    std::span<const MeshDrawCommand> dynamicCommands = {}) noexcept;
-
-// Snapshot cached handles, like dynamic handles, use frame-local indices and generation zero.
-Nullable<const MeshDrawCommand*> ResolveVisibleMeshDrawCommand(
-    const VisibleMeshDrawCommand& visibleCommand, std::span<const MeshDrawCommand> cachedCommands,
-    std::span<const MeshDrawCommand> dynamicCommands = {}) noexcept;
-
 // Debug preflights the whole list; Release trusts validated commands and submit arguments.
 // State is deduplicated within this call. On failure, discard the recording (it may be partial).
 // Pass boundaries, viewport/scissor and submission belong to the caller.
 bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
                             std::span<const VisibleMeshDrawCommand> visibleCommands,
-                            Nullable<const CachedPassMeshDrawList*> cachedDrawList,
-                            std::span<const MeshDrawCommand> dynamicCommands = {},
-                            const MeshPassSubmitArgs& submitArgs = {}) noexcept;
-
-bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
-                            std::span<const VisibleMeshDrawCommand> visibleCommands,
-                            std::span<const MeshDrawCommand> cachedCommands,
-                            std::span<const MeshDrawCommand> dynamicCommands = {},
                             const MeshPassSubmitArgs& submitArgs = {}) noexcept;
 
 }  // namespace radray

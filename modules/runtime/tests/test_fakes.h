@@ -197,8 +197,8 @@ public:
     void Extract(const Scene& source, FrameSlot& slot) noexcept override {
         if (OnExtract) OnExtract(source, slot);
     }
-    void Record(FrameSlot& slot) noexcept override {
-        if (OnRecord) OnRecord(slot);
+    void Record(const Scene& source, FrameSlot& slot) noexcept override {
+        if (OnRecord) OnRecord(source, slot);
     }
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
@@ -206,7 +206,7 @@ public:
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
     std::function<void(const Scene&, FrameSlot&)> OnExtract;
-    std::function<void(FrameSlot&)> OnRecord;
+    std::function<void(const Scene&, FrameSlot&)> OnRecord;
     std::function<void(FrameSlot&)> OnWait;
     vector<MeshPassRegistration> Passes;
 };

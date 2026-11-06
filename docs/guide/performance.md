@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
 
 # 性能测量
 
@@ -84,6 +84,44 @@ CPU 与 GPU 可以重叠，不把二者相加得到 FPS。短测的百分比、�
 viewer 版本应与 project_manifest.json 的 Tracy tag 匹配；client 只监听 localhost、按需连接。
 业务插桩只用 radray/profiler.h 宏，详见 [Core](../architecture/core-facilities.md#性能采样宏)。
 CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_ENABLE_PROFILER=OFF`。
+
+### Runtime 分段
+
+Runtime 通过相同开关输出以下 CPU zone。父区间包含子区间，不能把它们直接相加；
+`RDG.Execute` 和各 `Record*` 区间测量主机上的命令录制，不是 GPU 执行时长。
+阶段之间的临时容器初始化/析构仍计入父区间，不保证子区间覆盖父区间的全部耗时。
+
+| 区间前缀 | 计时边界 |
+|---|---|
+| `RadRay.FrameScheduler` | RunFrame、在途槽等待、WaitIdle |
+| `RadRay.FrameSlot` | 命令存储重置、延迟资源回收、帧数据与 arena 回收、命令缓冲获取及首次创建 |
+| `RadRay.FramePipeline` | Extract/Record、应用帧数据提取、SetupGraph、逐 MeshPass 提取、命令 Begin/End 与 SubmitFrame 回调 |
+| `RadRay.Scene` | 持久缓存同步、可见命令收集与缓存直达指针解析（GatherVisibleHandles） |
+| `RadRay.DrawList` | 可见命令稳定排序、可见列表和动态命令清理 |
+| `RadRay.MeshDraw` | 整批命令提交；Debug 另有 Validate 子区间 |
+| `RadRay.RDG.Compile` | 资源检查、访问检查与依赖构造、裁剪、调度与合并 |
+| `RadRay.RDG` | Execute、物理资源获取、逐组屏障、Copy/Upload、Compute、Raster 录制、附件解析、末尾状态提交与屏障 |
+| `RadRay.RDG.Pool` | 每槽池复用标记重置、资源/视图查找；未命中时的 Create 子区间包含创建与池登记 |
+
+RDG 在逻辑 Pass 录制区间使用 Pass 名称作为动态 CPU zone 名称。相同名称的 Pass 在统计中合并，
+实例归属看时间线父区间。`CreateImportedView` 只在导入纹理需要创建当帧视图时出现。
+采样粒度为阶段、Pass、资源获取或整批命令；收集和绘制循环内没有逐 Draw 事件。
+
+Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone 的时间和
+`FrameScheduler.Slot`、`FramePipeline.MeshPassId` 关联，不能把每个样本当作整帧总量：
+
+- `Scene.VisibleBatches`、`DrawList.SortCommands`、`MeshDraw.SubmitCommands`
+  分别表示本次 Gather 的输入 Batch 数、待排序命令数、提交列表长度；最后一项包含零实例而被跳过的项。
+  GatherPrimitives 按 Batch 调用 Gather，不能把单个 VisibleBatches 样本当成该 Primitive 入口的合计。
+- 当前没有 SnapshotCommands、SnapshotCapacityBefore/After 或 ClearSnapshots；缓存命令不再复制到帧槽。
+- `Scene.DirtyBatches` 是缓存同步本次取出的脏 Batch 数，包括随后因失效而跳过的项。
+- `RDG.DeclaredPasses/Textures/Buffers` 是声明数量，`AlivePasses`、`AliveMeshPasses` 和 `ExecutionGroups`
+  是成功编译后的存活数量与合并组数。`Pool.Textures/Buffers/Views` 是槽开始复用时池中保留的条目数量。
+- `RDG.UploadBytes` 是每次 MapUpload 的主机复制量，不含应用自管的上传路径。
+  `GroupBarriers`、`FinalBarriers` 是相应屏障批次的描述符数，不含 Upload 内部额外屏障。
+
+插桩关闭时宏及其参数表达式不参与运行。这些测点没有新增跨帧统计状态；开启时仍会增加采样成本，
+性能比较需固定插桩版本、开关和负载，并将首次扩容/资源创建与稳态分开。
 
 ## OBJ 解析
 

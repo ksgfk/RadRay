@@ -58,20 +58,32 @@ private:
     SparseSetHandle _pendingHandle{};
 };
 
-// Commands and their handles are frame-local; Clear invalidates all prior output.
+// Commands and their visible pointers are frame-local; Clear invalidates all prior output.
 class DynamicMeshPassDrawListContext final : public MeshPassDrawListContext {
 public:
     DynamicMeshPassDrawListContext() noexcept = default;
     explicit DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
+    // Rebinding must preserve the emitted entries at their original positions (e.g. after a list move).
     void BindVisibleCommands(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
     MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) override;
     void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) override;
+    // Call after all commands are finalized, before sorting, copying or submitting visible entries.
+    // Publishes stable pointers once; further command additions require Clear and a fresh visible list.
+    void FinalizeVisibleCommands() noexcept;
     void Clear() noexcept;
 
+    // Do not resize, reserve, erase or replace storage after FinalizeVisibleCommands until Clear.
     vector<MeshDrawCommand> Commands;
 
 private:
+    struct PendingVisibleCommand {
+        size_t CommandIndex;
+        size_t VisibleIndex;
+    };
+
     Nullable<vector<VisibleMeshDrawCommand>*> _visibleCommands{nullptr};
+    vector<PendingVisibleCommand> _pendingVisibleCommands;
+    bool _finalized{false};
 };
 
 class MeshPassProcessor {

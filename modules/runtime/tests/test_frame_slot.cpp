@@ -23,7 +23,7 @@ protected:
 TEST_F(FrameSlotTest, AcquireReturnsDistinctBuffersWithinFrame) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnRecord = [](FrameSlot& slot) {
+    Pipeline->OnRecord = [](const Scene&, FrameSlot& slot) {
         const auto first = slot.AcquireCommandBuffer();
         const auto second = slot.AcquireCommandBuffer();
         ASSERT_TRUE(first && second);
@@ -37,7 +37,7 @@ TEST_F(FrameSlotTest, AcquireReusesBuffersAfterSlotReset) {
     ASSERT_TRUE(scheduler);
     const array<size_t, 3> counts{2, 1, 2};
     vector<vector<render::CommandBuffer*>> frames;
-    Pipeline->OnRecord = [&](FrameSlot& slot) {
+    Pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
         auto& acquired = frames.emplace_back();
         for (size_t index = 0; index < counts[frames.size() - 1]; ++index) acquired.push_back(slot.AcquireCommandBuffer().Get());
     };
@@ -50,7 +50,7 @@ TEST_F(FrameSlotTest, AcquireReturnsNullWhenBufferCreationFails) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
     Gpu.Device->FailCommandBuffers = true;
-    Pipeline->OnRecord = [](FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
+    Pipeline->OnRecord = [](const Scene&, FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
     scheduler->RunFrame(Source);
 }
 
@@ -67,49 +67,81 @@ TEST(MeshPassFrameDrawListTest, SortOrdersBySortKeyAndKeepsTies) {
     EXPECT_EQ(order, (vector<uint32_t>{1, 3, 0, 2}));
 }
 
-TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
-    vector<MeshPassFrameDrawList> lists(1);
-    lists[0].CachedCommands.emplace_back().BaseSortKey = 42;
-    lists.resize(16);
+TEST(MeshPassFrameDrawListTest, SortPublishesDynamicPointersAfterCommandStorageGrows) {
+    MeshPassFrameDrawList list;
+    list.DynamicContext.Commands.reserve(1);
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.emplace_back();
+    const MeshDrawCommand cached{};
+    for (uint32_t index = 0; index < 64; ++index) {
+        MeshDrawCommand initializer;
+        initializer.BaseSortKey = 63 - index;
+        auto& command = list.DynamicContext.AddCommand(initializer);
+        list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+        if (index == 31) list.VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 32});
+    }
+
+    list.SortVisibleCommands();
+    list.SortVisibleCommands();
+    ASSERT_EQ(list.VisibleCommands.size(), 65u);
+    EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &list.DynamicContext.Commands[63]);
+    EXPECT_EQ(list.VisibleCommands[32].CachedCommand.Get(), &list.DynamicContext.Commands[31]);
+    EXPECT_EQ(list.VisibleCommands[33].CachedCommand.Get(), &cached);
+    EXPECT_EQ(list.VisibleCommands[64].CachedCommand.Get(), &list.DynamicContext.Commands[0]);
+}
+
+TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
+    vector<MeshPassFrameDrawList> lists(1);
+    const MeshDrawCommand cached{};
+    lists[0].VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 42});
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.emplace_back();
+    auto& first = lists[0].DynamicContext.AddCommand({});
+    lists[0].DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
+    lists.resize(16);
     auto& list = lists[0];
     auto& command = list.DynamicContext.AddCommand({});
     list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
-    EXPECT_EQ(list.VisibleCommands.size(), 1u);
-    ASSERT_EQ(list.CachedCommands.size(), 1u);
-    EXPECT_EQ(list.CachedCommands[0].BaseSortKey, 42u);
+    ASSERT_EQ(list.VisibleCommands.size(), 3u);
+    EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &cached);
+    EXPECT_EQ(list.VisibleCommands[0].SortKey, 42u);
+    list.DynamicContext.FinalizeVisibleCommands();
+    EXPECT_EQ(list.VisibleCommands[1].CachedCommand.Get(), &list.DynamicContext.Commands[0]);
+    EXPECT_EQ(list.VisibleCommands[2].CachedCommand.Get(), &command);
 }
 
-TEST(MeshPassFrameDrawListTest, MoveAssignmentKeepsSnapshotsAndRebindsDynamicContext) {
+TEST(MeshPassFrameDrawListTest, MoveAssignmentKeepsBorrowingAndRebindsDynamicContext) {
     MeshPassFrameDrawList source;
-    source.CachedCommands.emplace_back().BaseSortKey = 42;
-    MeshPassFrameDrawList target;
-    target = std::move(source);
+    const MeshDrawCommand cached{};
+    source.VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 42});
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.emplace_back();
+    auto& first = source.DynamicContext.AddCommand({});
+    source.DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
+    MeshPassFrameDrawList target;
+    target = std::move(source);
     auto& command = target.DynamicContext.AddCommand({});
     target.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
-    EXPECT_EQ(target.VisibleCommands.size(), 1u);
-    ASSERT_EQ(target.CachedCommands.size(), 1u);
-    EXPECT_EQ(target.CachedCommands[0].BaseSortKey, 42u);
+    ASSERT_EQ(target.VisibleCommands.size(), 3u);
+    EXPECT_EQ(target.VisibleCommands[0].CachedCommand.Get(), &cached);
+    EXPECT_EQ(target.VisibleCommands[0].SortKey, 42u);
+    target.DynamicContext.FinalizeVisibleCommands();
+    EXPECT_EQ(target.VisibleCommands[1].CachedCommand.Get(), &target.DynamicContext.Commands[0]);
+    EXPECT_EQ(target.VisibleCommands[2].CachedCommand.Get(), &command);
 }
 
 TEST(MeshPassFrameDrawListTest, ClearEmptiesAllCommandsAndKeepsCapacity) {
     MeshPassFrameDrawList list;
-    list.CachedCommands.emplace_back();
     list.VisibleCommands.emplace_back();
     list.DynamicContext.Commands.emplace_back();
-    const auto cachedCapacity = list.CachedCommands.capacity();
     const auto visibleCapacity = list.VisibleCommands.capacity();
     const auto dynamicCapacity = list.DynamicContext.Commands.capacity();
     list.Clear();
-    EXPECT_TRUE(list.CachedCommands.empty());
     EXPECT_TRUE(list.VisibleCommands.empty());
     EXPECT_TRUE(list.DynamicContext.Commands.empty());
-    EXPECT_EQ(list.CachedCommands.capacity(), cachedCapacity);
     EXPECT_EQ(list.VisibleCommands.capacity(), visibleCapacity);
     EXPECT_EQ(list.DynamicContext.Commands.capacity(), dynamicCapacity);
 }
@@ -126,18 +158,18 @@ TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
     CachedPassMeshDrawList cached;
     const auto handle = cached.Commands.Emplace(command);
     MeshPassFrameDrawList list;
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CommandHandle = handle});
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CachedCommand = &cached.Commands.Get(handle)});
     command.FirstIndex = 3;
     list.DynamicContext.Commands.push_back(command);
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CommandHandle = {0, 0}});
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CachedCommand = &list.DynamicContext.Commands[0]});
     RecordingEncoder encoder;
-    ASSERT_TRUE(list.Submit(encoder, &cached));
+    ASSERT_TRUE(list.Submit(encoder));
     ASSERT_EQ(encoder.Draws.size(), 2u);
     EXPECT_EQ(encoder.Draws[0].FirstIndex, 0u);
     EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
 }
 
-TEST(MeshPassFrameDrawListTest, SubmitSnapshotsAndDynamicCommandsWithPassBindings) {
+TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings) {
     FakePipeline pipeline;
     FakeBuffer vertices{128, render::BufferUse::Vertex};
     FakeBuffer instances{128, render::BufferUse::Vertex};
@@ -150,11 +182,11 @@ TEST(MeshPassFrameDrawListTest, SubmitSnapshotsAndDynamicCommandsWithPassBinding
     command.IndexBuffer = {&indices, 0, 4};
     command.IndexCount = 3;
     MeshPassFrameDrawList list;
-    list.CachedCommands.push_back(command);
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CommandHandle = {0, 0}, .FirstInstance = 7, .InstanceCount = 2});
+    const auto cached = command;
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CachedCommand = &cached, .FirstInstance = 7, .InstanceCount = 2});
     command.FirstIndex = 3;
     list.DynamicContext.Commands.push_back(command);
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CommandHandle = {0, 0}, .FirstInstance = 9});
+    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CachedCommand = &list.DynamicContext.Commands[0], .FirstInstance = 9});
     const MeshShaderParameterBinding passBinding{0, &parameters, {}};
     const MeshPassSubmitArgs args{
         .ParameterSets = std::span{&passBinding, 1},
@@ -172,6 +204,36 @@ TEST(MeshPassFrameDrawListTest, SubmitSnapshotsAndDynamicCommandsWithPassBinding
     ASSERT_EQ(encoder.VertexCalls.size(), 1u);
     ASSERT_EQ(encoder.VertexCalls[0].size(), 2u);
     EXPECT_EQ(encoder.VertexCalls[0][1].View.Target, &instances);
+}
+
+TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndClearAllowsNextFrame) {
+    FakePipeline pipeline;
+    FakeBuffer indices{1024, render::BufferUse::Index};
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
+    MeshDrawCommand initializer;
+    initializer.Pipeline = &pipeline;
+    MeshPassFrameDrawList list;
+    list.DynamicContext.Commands.reserve(1);
+    for (uint32_t frame = 0; frame < 2; ++frame) {
+        for (uint32_t index = 0; index < 64; ++index) {
+            batch.Elements[0].FirstIndex = index;
+            auto& command = list.DynamicContext.AddCommand(initializer);
+            list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+            list.VisibleCommands.back().FirstInstance = frame + index;
+            list.VisibleCommands.back().InstanceCount = 2;
+        }
+        RecordingEncoder encoder;
+        ASSERT_TRUE(list.Submit(encoder));
+        ASSERT_EQ(encoder.Draws.size(), 64u);
+        for (uint32_t index = 0; index < encoder.Draws.size(); ++index) {
+            EXPECT_EQ(encoder.Draws[index].FirstIndex, index);
+            EXPECT_EQ(encoder.Draws[index].FirstInstance, frame + index);
+            EXPECT_EQ(encoder.Draws[index].InstanceCount, 2u);
+        }
+        list.Clear();
+    }
 }
 
 }  // namespace
