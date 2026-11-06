@@ -11,6 +11,8 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 记录范围 |
 |---|---|
+| [Runtime Batch 级命令收敛与热路径直达优化计划（A + B 通用方案）](2026-11-06-runtime-batch-command-and-fast-submit-plan.md) | `7e465fe` 基线下定位前两轮优化暴露的三大结构性缺陷（Element 过早拍扁导致 5.4 倍膨胀与 `InlineVector` 溢堆、`VisibleMeshDrawCommand` 7B 空洞膨胀至 `40 B`、`Submit` 内层动态构造/排序开销），排除单流内联特化，制定回归 Batch 级缓存 + `ElementMask` 连发 Draw（方向 A）与预排序连续顶点流 + 定长槽位直查 + `32 B` 可见项（方向 B）的通用重构计划 |
+| [Runtime MeshDrawCommand SoA 绑定池拆分优化计划](2026-11-06-runtime-mdc-soa-pools-plan.md) | 2026-11-06 基于移除命令快照后的 Tracy 实测（`MeshDraw.Submit` 因 `472 B` 胖命令冷读取回升至 `0.261 ms`），将 `VertexBuffers`、`ParameterSets`、`PushConstants` 拆入独立 SoA 池、将 `MeshDrawCommand` 收敛为平凡热结构并支持同 Batch 句柄共享与提交短路去重的实施计划 |
 | [Runtime Scene 帧内借用对齐与 MeshDrawCommand 寻址/布局优化计划](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md) | 2026-11-06 基于配对 Tracy 采样定位每帧命令快照净倒退根因，对齐 UE5 `FScene` 渲染线程模型放开 `RunFrame` 内 `Scene` 只读借用、移除快照拷贝、改为直达命令寻址并重排 `MeshDrawCommand` 热冷缓存行的阶段性计划 |
 | [Runtime RDG Pass 重排与合并实现计划](2026-11-06-runtime-rdg-pass-reorder-merge-plan.md) | `6050639` 基线下补齐 RDG WAR 依赖、确定性贪心拓扑重排、Raster/Compute Pass 合并折叠与批量 Barrier 下发的已确认实现计划 |
 | [Runtime RDG 接入与 FramePipeline 跨线程接口拆分计划](2026-11-05-runtime-rdg-pipeline-interface-plan.md) | `e443cef` 基线下针对 RDG 剔除避免 MeshPass 无效收集/排序、切断 `Record` 对 `Scene` 借用以支持跨线程分离的分阶段接口演进计划 |

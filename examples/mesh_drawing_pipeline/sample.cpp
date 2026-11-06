@@ -171,7 +171,9 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
         if (batch.Material != materials[2]) continue;
         for (const auto& info : batch.CachedCommands) {
             if (info.Pass != MeshPassId{1}) continue;
-            const auto& push = scene.GetCachedDrawList(info.Pass)->Commands.Get(info.CommandHandle).PushConstants;
+            const auto drawList = scene.GetCachedDrawList(info.Pass);
+            const auto payload = drawList->Bindings.GetPayload(drawList->Commands.Get(info.CommandHandle).PayloadHandle);
+            const Nullable<const MeshPushConstantCommandBinding*> push = payload && payload->PushConstants ? &*payload->PushConstants : nullptr;
             if (!push || push->Data.size() != sizeof(originalGreen)) return 4;
             std::memcpy(&originalGreen, push->Data.data(), sizeof(originalGreen));
         }
@@ -202,7 +204,9 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
             changed |= !sameHandle;
             const auto& info = batch.CachedCommands[commandIndex];
             if (edited && info.Pass == MeshPassId{1}) {
-                const auto& push = scene.GetCachedDrawList(info.Pass)->Commands.Get(info.CommandHandle).PushConstants;
+                const auto drawList = scene.GetCachedDrawList(info.Pass);
+                const auto payload = drawList->Bindings.GetPayload(drawList->Commands.Get(info.CommandHandle).PayloadHandle);
+                const Nullable<const MeshPushConstantCommandBinding*> push = payload && payload->PushConstants ? &*payload->PushConstants : nullptr;
                 MaterialConstants updated;
                 if (!push || push->Data.size() != sizeof(updated)) return 4;
                 std::memcpy(&updated, push->Data.data(), sizeof(updated));

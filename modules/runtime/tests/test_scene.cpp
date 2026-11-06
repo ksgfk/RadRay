@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/scene.h>
 
@@ -272,7 +274,6 @@ TEST_F(SceneTest, GatherCombinesBaseAndVisibilitySortKeys) {
     vector<VisibleMeshDrawCommand> visible;
     ASSERT_TRUE(Gather(std::span{&request, 1}, visible));
     ASSERT_EQ(visible.size(), 1u);
-    EXPECT_EQ(visible[0].Source, MeshDrawCommandSource::Cached);
     EXPECT_EQ(visible[0].CachedCommand.Get(), &CachedCommand(batch));
     EXPECT_EQ(visible[0].SortKey, (uint64_t{3} << 32) | 7);
 }
@@ -300,11 +301,11 @@ TEST_F(SceneTest, GatherUsesElementInstanceRangeUnlessOverridden) {
 TEST_F(SceneTest, GatherSelectsSingleElement) {
     const auto batch = AddBatch(2);
     Sync();
-    const VisibleMeshBatch request{.Batch = batch, .ElementIndex = 1};
+    const VisibleMeshBatch request{.Batch = batch, .ElementMask = VisibleMeshBatch::MaskForElement(1)};
     vector<VisibleMeshDrawCommand> visible;
     ASSERT_TRUE(Gather(std::span{&request, 1}, visible));
     ASSERT_EQ(visible.size(), 1u);
-    EXPECT_EQ(visible[0].CachedCommand.Get(), World.GetCachedDrawList(Pass)->Commands.TryGet(World.Meshes.Get(batch).CachedCommands[1].CommandHandle));
+    EXPECT_EQ(visible[0].CachedCommand.Get(), &CachedCommand(batch));
 }
 
 TEST_F(SceneTest, GatherRejectsDirtyBatchAndKeepsEarlierOutput) {
@@ -324,7 +325,7 @@ TEST_F(SceneTest, GatherVisiblePrimitivesCollectsEveryBatch) {
     Sync();
     vector<VisibleMeshDrawCommand> visible;
     ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, visible));
-    EXPECT_EQ(visible.size(), 3u);
+    EXPECT_EQ(visible.size(), 2u);
 }
 
 TEST_F(SceneTest, GatheredCommandsSubmitWithoutCachedListLookup) {
@@ -359,14 +360,12 @@ TEST_F(SceneTest, FrameDrawListSubmitsSortedBorrowedCommands) {
     const auto batch = AddBatch(2);
     Sync();
     auto& command = World.CachedDrawLists[Pass.Value].Commands.Get(CommandHandle(batch));
-    command.PushConstants = MeshPushConstantCommandBinding{0, 0, {}};
-    for (size_t index = 0; index < 80; ++index) command.PushConstants->Data.push_back(byte{0x17});
-    const array<VisibleMeshBatch, 2> requests{{{.Batch = batch, .ElementIndex = 1, .VisibilitySortKey = 7, .FirstInstanceOverride = 20, .InstanceCountOverride = 2},
-                                               {.Batch = batch, .ElementIndex = 0, .VisibilitySortKey = 3}}};
+    const array<VisibleMeshBatch, 2> requests{{{.Batch = batch, .ElementMask = VisibleMeshBatch::MaskForElement(1), .VisibilitySortKey = 7, .FirstInstanceOverride = 20, .InstanceCountOverride = 2},
+                                               {.Batch = batch, .ElementMask = VisibleMeshBatch::MaskForElement(0), .VisibilitySortKey = 3}}};
     MeshPassFrameDrawList list;
     ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, requests, list));
     ASSERT_EQ(list.VisibleCommands.size(), 2u);
-    EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), World.GetCachedDrawList(Pass)->Commands.TryGet(World.Meshes.Get(batch).CachedCommands[1].CommandHandle));
+    EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &CachedCommand(batch));
     EXPECT_EQ(list.VisibleCommands[1].CachedCommand.Get(), &command);
     EXPECT_EQ(list.VisibleCommands[0].SortKey, (uint64_t{3} << 32) | 7);
 
@@ -379,8 +378,6 @@ TEST_F(SceneTest, FrameDrawListSubmitsSortedBorrowedCommands) {
     EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
     EXPECT_EQ(encoder.Draws[1].FirstInstance, 20u);
     EXPECT_EQ(encoder.Draws[1].InstanceCount, 2u);
-    ASSERT_EQ(encoder.Pushes.size(), 1u);
-    EXPECT_EQ(encoder.Pushes[0], (vector<byte>(80, byte{0x17})));
 }
 
 TEST_F(SceneTest, FrameGatherAppendsOnlyRequestedPassAndKeepsPreviousBorrowing) {
@@ -420,7 +417,7 @@ TEST_F(SceneTest, FrameGatherRejectsStaleCachedCommandWithoutChangingEarlierOutp
     const auto validBatch = AddBatch();
     const auto staleBatch = AddBatch();
     Sync();
-    World.CachedDrawLists[Pass.Value].Commands.Destroy(CommandHandle(staleBatch));
+    World.CachedDrawLists[Pass.Value].DestroyCommand(CommandHandle(staleBatch));
     const VisibleMeshBatch valid{.Batch = validBatch};
     MeshPassFrameDrawList list;
     ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, std::span{&valid, 1}, list));
@@ -437,7 +434,7 @@ TEST_F(SceneTest, FramePrimitiveGatherRollsBackOnInvalidPrimitive) {
     ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, list));
     const array<SparseSetHandle, 2> invalid{Primitive, {}};
     EXPECT_FALSE(World.GatherVisiblePrimitives(Pass, invalid, list));
-    EXPECT_EQ(list.VisibleCommands.size(), 3u);
+    EXPECT_EQ(list.VisibleCommands.size(), 2u);
     test::RecordingEncoder encoder;
     ASSERT_TRUE(list.Submit(encoder));
     EXPECT_EQ(encoder.Draws.size(), 3u);
@@ -475,6 +472,28 @@ TEST_F(SceneTest, RecordBorrowsCommandsAndNextFrameReflectsMeshRemoval) {
     scheduler->WaitIdle();
 }
 
+TEST_F(SceneTest, DirtyBatchRebuildReleasesBindingsAndKeepsOtherBatchAlive) {
+    const auto changed = AddBatch(3);
+    const auto kept = AddBatch(2);
+    Sync();
+    const auto oldBindings = CachedCommand(changed).VertexBuffersHandle;
+    const auto keptBindings = CachedCommand(kept).VertexBuffersHandle;
+    const auto keptCommand = CommandHandle(kept);
+    ASSERT_EQ(World.GetCachedDrawList(Pass)->Bindings.VertexBuffersPool.Count(), 2u);
+    World.MarkBatchDirty(changed);
+    Sync();
+    const auto& storage = World.GetCachedDrawList(Pass)->Bindings;
+    EXPECT_FALSE(storage.GetVertexBuffers(oldBindings));
+    EXPECT_TRUE(storage.GetVertexBuffers(keptBindings));
+    EXPECT_EQ(CommandHandle(kept), keptCommand);
+    EXPECT_EQ(storage.VertexBuffersPool.Count(), 2u);
+    EXPECT_TRUE(World.RemoveMeshBatch(Primitive, changed));
+    EXPECT_EQ(storage.VertexBuffersPool.Count(), 1u);
+    EXPECT_TRUE(storage.GetVertexBuffers(keptBindings));
+    World.SyncCachedMeshDrawCommands({});
+    EXPECT_TRUE(storage.VertexBuffersPool.Empty());
+}
+
 TEST_F(SceneTest, ClearRemovesRecordsAndCommands) {
     const auto batch = AddBatch();
     Sync();
@@ -484,6 +503,77 @@ TEST_F(SceneTest, ClearRemovesRecordsAndCommands) {
     EXPECT_EQ(World.Meshes.Count(), 0u);
     EXPECT_EQ(World.Materials.Count(), 0u);
     EXPECT_FALSE(World.GetCachedDrawList(Pass)->Commands.IsAlive(handle));
+    EXPECT_TRUE(World.GetCachedDrawList(Pass)->Bindings.Payloads.Empty());
+}
+
+TEST_F(SceneTest, GatherFiltersEmptyAndUnknownBitsWithoutExpandingBatch) {
+    auto source = MakeBatch(4);
+    source.Elements[1].IndexCount = 0;
+    source.Elements[3].InstanceCount = 0;
+    const auto batch = World.AddMeshBatch(Primitive, std::move(source));
+    Sync();
+    const array<VisibleMeshBatch, 3> requests{{{.Batch = batch, .ElementMask = 0},
+                                               {.Batch = batch, .ElementMask = 0x8000000a},
+                                               {.Batch = batch}}};
+    vector<VisibleMeshDrawCommand> visible;
+    ASSERT_TRUE(Gather(requests, visible));
+    ASSERT_EQ(visible.size(), 1u);
+    EXPECT_EQ(visible[0].ElementMask, 5u);
+    EXPECT_EQ(World.Meshes.Get(batch).CachedCommands.size(), 1u);
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, visible));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[1].FirstIndex, 6u);
+    EXPECT_EQ(VisibleMeshBatch::MaskForElement(32), 0u);
+}
+
+TEST_F(SceneTest, DifferentElementInstancesAndIndependentOverridesSurviveBatching) {
+    auto source = MakeBatch(2);
+    source.Elements[0].FirstInstance = 3;
+    source.Elements[0].InstanceCount = 2;
+    source.Elements[1].FirstInstance = 8;
+    source.Elements[1].InstanceCount = 5;
+    const auto batch = World.AddMeshBatch(Primitive, std::move(source));
+    Sync();
+    const array<VisibleMeshBatch, 4> requests{{{.Batch = batch},
+                                               {.Batch = batch, .FirstInstanceOverride = 20},
+                                               {.Batch = batch, .InstanceCountOverride = 4},
+                                               {.Batch = batch, .InstanceCountOverride = 0}}};
+    vector<VisibleMeshDrawCommand> visible;
+    ASSERT_TRUE(Gather(requests, visible));
+    ASSERT_EQ(visible.size(), 4u);
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, visible));
+    ASSERT_EQ(encoder.Draws.size(), 6u);
+    const array<uint32_t, 6> first{3, 8, 20, 20, 3, 8};
+    const array<uint32_t, 6> count{2, 5, 2, 5, 4, 4};
+    for (size_t index = 0; index < first.size(); ++index) {
+        EXPECT_EQ(encoder.Draws[index].FirstInstance, first[index]);
+        EXPECT_EQ(encoder.Draws[index].InstanceCount, count[index]);
+    }
+}
+
+TEST_F(SceneTest, RejectsMoreThan32EntriesBeforeLinkingBatch) {
+    auto source = MakeBatch();
+    source.Elements.resize(33);
+    EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(source)).IsValid());
+    EXPECT_TRUE(World.Primitives.Get(Primitive).Meshes.empty());
+}
+
+TEST_F(SceneTest, InstanceOverrideValidationOnlyChecksSelectedElements) {
+    auto source = MakeBatch(2);
+    source.Elements[0].FirstInstance = std::numeric_limits<uint32_t>::max();
+    source.Elements[1].FirstInstance = 3;
+    const auto batch = World.AddMeshBatch(Primitive, std::move(source));
+    Sync();
+    const VisibleMeshBatch request{.Batch = batch, .ElementMask = 2, .InstanceCountOverride = 2};
+    vector<VisibleMeshDrawCommand> visible;
+    ASSERT_TRUE(Gather(std::span{&request, 1}, visible));
+    ASSERT_EQ(visible.size(), 1u);
+    const auto& storage = World.GetCachedDrawList(Pass)->Bindings;
+    EXPECT_TRUE(ValidateMeshDrawCommand(*visible[0].CachedCommand, storage, visible[0]));
+    visible[0].ElementMask = 1;
+    EXPECT_FALSE(ValidateMeshDrawCommand(*visible[0].CachedCommand, storage, visible[0]));
 }
 
 }  // namespace

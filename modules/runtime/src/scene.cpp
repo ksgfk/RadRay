@@ -9,7 +9,7 @@
 namespace radray {
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
-    if (!Materials.IsAlive(batch.Material) || batch.Elements.size() > std::numeric_limits<uint32_t>::max()) return false;
+    if (!Materials.IsAlive(batch.Material) || batch.Elements.size() > 32) return false;
     const bool draws = std::any_of(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0 && element.InstanceCount != 0; });
     if (draws && (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, true))) return false;
     for (const auto& element : batch.Elements) {
@@ -155,8 +155,8 @@ SparseSetHandle Scene::ResolveOwningPrimitive(SparseSetHandle batchHandle) noexc
 void Scene::InvalidateBatchCachedCommands(MeshBatch& batch) noexcept {
     for (const auto& info : batch.CachedCommands) {
         if (info.Pass.Value < CachedDrawLists.size()) {
-            auto& commands = CachedDrawLists[info.Pass.Value].Commands;
-            if (commands.IsAlive(info.CommandHandle)) commands.Destroy(info.CommandHandle);
+            auto& list = CachedDrawLists[info.Pass.Value];
+            if (list.Commands.IsAlive(info.CommandHandle)) list.DestroyCommand(info.CommandHandle);
         }
     }
     batch.CachedCommands.clear();
@@ -250,22 +250,27 @@ bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const Visib
             return false;
         }
         const auto& batch = *batchPtr;
-        if (batch.Dirty || (visible.ElementIndex != std::numeric_limits<uint32_t>::max() && visible.ElementIndex >= batch.Elements.size())) {
+        if (batch.Dirty) {
             outCommands.resize(initialSize);
             return false;
         }
         for (const auto& info : batch.CachedCommands) {
-            if (info.Pass != pass || (visible.ElementIndex != std::numeric_limits<uint32_t>::max() && info.ElementIndex != visible.ElementIndex)) continue;
+            if (info.Pass != pass) continue;
             const auto command = drawList ? drawList->Commands.TryGet(info.CommandHandle) : nullptr;
             if (!command) {
                 outCommands.resize(initialSize);
                 return false;
             }
-            outCommands.push_back({.Source = MeshDrawCommandSource::Cached,
+            const auto mask = visible.ElementMask & command->ValidElementMask;
+            if (mask == 0) break;
+            outCommands.push_back({.SortKey = info.BaseSortKey | visible.VisibilitySortKey,
                                    .CachedCommand = command,
-                                   .SortKey = info.BaseSortKey | visible.VisibilitySortKey,
                                    .FirstInstance = visible.FirstInstanceOverride.value_or(info.FirstInstance),
-                                   .InstanceCount = visible.InstanceCountOverride.value_or(info.InstanceCount)});
+                                   .InstanceCount = visible.InstanceCountOverride.value_or(info.InstanceCount),
+                                   .ElementMask = mask,
+                                   .UseElementFirstInstance = !visible.FirstInstanceOverride.has_value(),
+                                   .UseElementInstanceCount = !visible.InstanceCountOverride.has_value()});
+            break;
         }
     }
     return true;
@@ -301,7 +306,7 @@ bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHa
 }
 
 void Scene::Clear() noexcept {
-    for (auto& drawList : CachedDrawLists) drawList.Commands.Clear();
+    for (auto& drawList : CachedDrawLists) drawList.Clear();
     Meshes.Clear();
     Primitives.Clear();
     Materials.Clear();

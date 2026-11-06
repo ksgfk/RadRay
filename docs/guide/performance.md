@@ -112,6 +112,7 @@ Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone
 
 - `Scene.VisibleBatches`、`DrawList.SortCommands`、`MeshDraw.SubmitCommands`
   分别表示本次 Gather 的输入 Batch 数、待排序命令数、提交列表长度；最后一项包含零实例而被跳过的项。
+  命令数以 Batch/Pass 为单位；一条命令可按 ElementMask 发出多次 DrawIndexed，不能将列表长度当作 Draw 次数。
   GatherPrimitives 按 Batch 调用 Gather，不能把单个 VisibleBatches 样本当成该 Primitive 入口的合计。
 - 当前没有 SnapshotCommands、SnapshotCapacityBefore/After 或 ClearSnapshots；缓存命令不再复制到帧槽。
 - `Scene.DirtyBatches` 是缓存同步本次取出的脏 Batch 数，包括随后因失效而跳过的项。

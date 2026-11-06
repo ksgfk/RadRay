@@ -76,10 +76,9 @@ TEST(MeshPassFrameDrawListTest, SortPublishesDynamicPointersAfterCommandStorageG
     const MeshDrawCommand cached{};
     for (uint32_t index = 0; index < 64; ++index) {
         MeshDrawCommand initializer;
-        initializer.BaseSortKey = 63 - index;
-        auto& command = list.DynamicContext.AddCommand(initializer);
+        auto& command = list.DynamicContext.AddCommand(initializer, 63 - index);
         list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
-        if (index == 31) list.VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 32});
+        if (index == 31) list.VisibleCommands.push_back({.SortKey = 32, .CachedCommand = &cached});
     }
 
     list.SortVisibleCommands();
@@ -94,15 +93,16 @@ TEST(MeshPassFrameDrawListTest, SortPublishesDynamicPointersAfterCommandStorageG
 TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
     vector<MeshPassFrameDrawList> lists(1);
     const MeshDrawCommand cached{};
-    lists[0].VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 42});
+    lists[0].VisibleCommands.push_back({.SortKey = 42, .CachedCommand = &cached});
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.emplace_back();
-    auto& first = lists[0].DynamicContext.AddCommand({});
+    MeshDrawCommand initializer;
+    auto& first = lists[0].DynamicContext.AddCommand(initializer);
     lists[0].DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
     lists.resize(16);
     auto& list = lists[0];
-    auto& command = list.DynamicContext.AddCommand({});
+    auto& command = list.DynamicContext.AddCommand(initializer);
     list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
     ASSERT_EQ(list.VisibleCommands.size(), 3u);
     EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &cached);
@@ -115,15 +115,16 @@ TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
 TEST(MeshPassFrameDrawListTest, MoveAssignmentKeepsBorrowingAndRebindsDynamicContext) {
     MeshPassFrameDrawList source;
     const MeshDrawCommand cached{};
-    source.VisibleCommands.push_back({.CachedCommand = &cached, .SortKey = 42});
+    source.VisibleCommands.push_back({.SortKey = 42, .CachedCommand = &cached});
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.emplace_back();
-    auto& first = source.DynamicContext.AddCommand({});
+    MeshDrawCommand initializer;
+    auto& first = source.DynamicContext.AddCommand(initializer);
     source.DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
     MeshPassFrameDrawList target;
     target = std::move(source);
-    auto& command = target.DynamicContext.AddCommand({});
+    auto& command = target.DynamicContext.AddCommand(initializer);
     target.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
     ASSERT_EQ(target.VisibleCommands.size(), 3u);
     EXPECT_EQ(target.VisibleCommands[0].CachedCommand.Get(), &cached);
@@ -152,16 +153,19 @@ TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
     FakeBuffer indices{128, render::BufferUse::Index};
     MeshDrawCommand command;
     command.Pipeline = &pipeline;
-    command.VertexBuffers.push_back({0, {&vertices, 0, 48}});
+    MeshDrawCommandBindingStorage storage;
+    MeshDrawCommandBindings bindings;
+    bindings.VertexBuffers.push_back({0, {&vertices, 0, 48}});
     command.IndexBuffer = {&indices, 0, 4};
     command.IndexCount = 3;
+    storage.Store(command, bindings);
     CachedPassMeshDrawList cached;
     const auto handle = cached.Commands.Emplace(command);
     MeshPassFrameDrawList list;
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CachedCommand = &cached.Commands.Get(handle)});
+    list.VisibleCommands.push_back({.CachedCommand = &cached.Commands.Get(handle)});
     command.FirstIndex = 3;
     list.DynamicContext.Commands.push_back(command);
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CachedCommand = &list.DynamicContext.Commands[0]});
+    list.VisibleCommands.push_back({.CachedCommand = &list.DynamicContext.Commands[0]});
     RecordingEncoder encoder;
     ASSERT_TRUE(list.Submit(encoder));
     ASSERT_EQ(encoder.Draws.size(), 2u);
@@ -177,16 +181,19 @@ TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings
     test::FakeParameterSet parameters;
     MeshDrawCommand command;
     command.Pipeline = &pipeline;
-    command.VertexBuffers.push_back({0, {&vertices, 0, 48}});
-    command.InstanceStreamBinding = 1;
+    MeshDrawCommandBindingStorage storage;
+    MeshDrawCommandBindings bindings;
+    bindings.VertexBuffers.push_back({0, {&vertices, 0, 48}});
+    bindings.InstanceStreamBinding = 1;
     command.IndexBuffer = {&indices, 0, 4};
     command.IndexCount = 3;
+    storage.Store(command, bindings);
     MeshPassFrameDrawList list;
     const auto cached = command;
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Cached, .CachedCommand = &cached, .FirstInstance = 7, .InstanceCount = 2});
+    list.VisibleCommands.push_back({.CachedCommand = &cached, .FirstInstance = 7, .InstanceCount = 2});
     command.FirstIndex = 3;
     list.DynamicContext.Commands.push_back(command);
-    list.VisibleCommands.push_back({.Source = MeshDrawCommandSource::Dynamic, .CachedCommand = &list.DynamicContext.Commands[0], .FirstInstance = 9});
+    list.VisibleCommands.push_back({.CachedCommand = &list.DynamicContext.Commands[0], .FirstInstance = 9});
     const MeshShaderParameterBinding passBinding{0, &parameters, {}};
     const MeshPassSubmitArgs args{
         .ParameterSets = std::span{&passBinding, 1},
@@ -201,9 +208,9 @@ TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings
     EXPECT_EQ(encoder.Draws[1].FirstInstance, 9u);
     ASSERT_EQ(encoder.ParameterBinds.size(), 1u);
     EXPECT_EQ(encoder.ParameterBinds[0].Set, &parameters);
-    ASSERT_EQ(encoder.VertexCalls.size(), 1u);
-    ASSERT_EQ(encoder.VertexCalls[0].size(), 2u);
-    EXPECT_EQ(encoder.VertexCalls[0][1].View.Target, &instances);
+    ASSERT_EQ(encoder.VertexCalls.size(), 2u);
+    ASSERT_EQ(encoder.VertexCalls[0].size(), 1u);
+    EXPECT_EQ(encoder.VertexCalls[0][0].View.Target, &instances);
 }
 
 TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndClearAllowsNextFrame) {
@@ -234,6 +241,34 @@ TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndC
         }
         list.Clear();
     }
+}
+
+TEST(MeshPassFrameDrawListTest, FinalizedDynamicBindingsSurviveListMoveAndGrowth) {
+    FakePipeline pipeline;
+    FakeBuffer indices{128, render::BufferUse::Index};
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
+    vector<MeshPassFrameDrawList> lists(1);
+    auto& context = lists[0].DynamicContext;
+    MeshDrawCommand initializer;
+    initializer.Pipeline = &pipeline;
+    MeshDrawCommandBindings bindings;
+    bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{1}, byte{2}, byte{3}, byte{4}}};
+    context.GetBindingStorage().Store(initializer, bindings);
+    auto& command = context.AddCommand(initializer);
+    context.FinalizeCommand({primitive, batch}, 0, command);
+    lists[0].SortVisibleCommands();
+    const auto storage = lists[0].VisibleCommands[0].CachedCommand->BindingStorage;
+    lists.resize(16);
+    MeshPassFrameDrawList moved;
+    moved = std::move(lists[0]);
+    lists[0].Clear();
+    EXPECT_EQ(moved.VisibleCommands[0].CachedCommand->BindingStorage, storage);
+    RecordingEncoder encoder;
+    ASSERT_TRUE(moved.Submit(encoder));
+    ASSERT_EQ(encoder.Pushes.size(), 1u);
+    EXPECT_EQ(encoder.Pushes[0], (vector<byte>{byte{1}, byte{2}, byte{3}, byte{4}}));
 }
 
 }  // namespace

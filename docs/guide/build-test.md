@@ -608,7 +608,7 @@ A/B/C 使用背面剔除不透明材质，D 使用关闭剔除并写模板的不
 缺少或不匹配的标签会跳过；表身份不同则报错，避免将两个表的相同编号误当作相同语义。
 样例还先把绿色实例的 Brightness 同步为 0.5，再改为 1.0：日志先显示实例为 1、Proxy 仍为 0.5，
 显式 Update 后 Proxy 才变为 1。Frame 0 提交后执行 Scene::UpdateMaterial，Frame 1 的 `RunFrame(Scene&)` 自动同步，日志验证仅绿色材质关联的一个 Batch 重建，其余九个 Batch 的 CommandHandle 不变，
-且该命令自持有的颜色常量 RGB 从 0.5 倍更新为 1.0 倍、alpha 不变。
+且该命令对应绑定池载荷的颜色常量 RGB 从 0.5 倍更新为 1.0 倍、alpha 不变。
 可调整参数覆盖观察颜色；调整 Tags / RenderState 需要在 Resource 发布和 PSO 创建之前进行。
 四个 Pass 按以下顺序执行；每个 Pass 仍自行决定采用或覆盖材质状态：
 
@@ -632,8 +632,8 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 | [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，连续 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
 | [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
 | [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 命令借用与提交/等待 |
-| [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、可切换输出 Context、共享状态和 Element 构建 helper；AddMeshBatch 返回 void。静态 Context 存入 SparseSet 并回写缓存句柄；动态 Context 自动追加当帧可见命令 |
-| [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 两级命令、自持有 PushConstants、Pass 提交参数与延迟实例流，可见命令指针与 SubmitMeshDrawCommands |
+| [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、可切换输出 Context、共享状态和 Batch 构建 helper；AddMeshBatch 返回 void。静态 Context 存入 SparseSet 并回写缓存句柄；动态 Context 自动追加当帧可见命令 |
+| [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | Batch 命令、独占扩展载荷池与自持有 PushConstants、Pass 提交参数与延迟实例流，可见命令指针与 SubmitMeshDrawCommands |
 | [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
 
@@ -645,13 +645,13 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 候选收集不按 Pass 预先分组，Processor 内的条件才决定是否生成命令。
 `MeshDrawingFramePipeline::GetMeshPassRegistrations` 登记四个 Processor，Scheduler 在每次 `RunFrame(Scene&)` 的 Extract 前调用 `Scene::SyncCachedMeshDrawCommands`。
 Scene 为脏 Batch 创建静态 Context，Processor 完成 Pass 筛选后调用 runtime 的 `BuildMeshDrawCommands`，
-先检查共享输入和全部 Element，再通过 `AddCommand → FinalizeCommand` 输出持久命令并记录句柄。
+先检查共享输入和全部 Element，再通过一次 `AddCommand → FinalizeCommand` 输出 Batch 持久命令并记录句柄。
 绿色材质变化后用 `Scene::UpdateMaterial` 标脏，再同步时仅引用它的 Batch 重新进入四个 Processor。
 样例显式检查未修改 Batch 的句柄保持不变，修改 Batch 的旧句柄已被新代次替换。
 
 Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Brightness，将 RGB 相乘并保留 alpha，
-经 runtime 构建 helper 复制为命令自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
-命令自持有颜色字节，源栈数据在构建后即可失效。
+经 runtime 构建 helper 复制为绑定池自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
+绑定池自持有颜色字节，源栈数据在构建后即可失效。
 `GpuResources::PrepareGeometry` 创建共享的 Device VB / IB 空壳并保存 CPU 字节，Scene 可在上传前引用这些合法缓冲。
 每个 `GpuFrameResources` 独立创建 Binding 1 的实例缓冲、Group 0 / Binding 0 的两份 Pass UBO、参数组、读回缓冲和 completion fence。
 初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符；颜色/深度附件及其 View 由基类每槽的 RDG 瞬态池拥有。
@@ -720,9 +720,9 @@ Windows 默认 D3D12，其他平台默认 Vulkan；未指定目录时从编译�
 所有默认产物都在 Git 忽略的 `build/` 内；样例不进入安装导出。
 
 每次运行请求开启后端验证（Vulkan 同时请求同步验证），实际启用情况和诊断见后端启动日志。
-日志应打印五个 Primitive、十个 Batch，以及每帧各 Pass 的 `对象 / Primitive / Batch / Element → Draw`
-对应关系；Draw 编号为当前 Pass 输出列表中的序号。跳过日志按 Batch 输出一次，
-不分配 Draw 编号，并打印原因。每帧逐 Pass 打印 `Frame=<编号> Slot=<槽下标> MeshPass=<0～3>`，
+日志应打印五个 Primitive、十个 Batch，以及每帧各 Pass 的 `对象 / Primitive / Batch / ElementMask → BatchCommand`
+对应关系；BatchCommand 编号为当前 Pass 输出列表中的序号。本例每 Batch 只有一个 Element，每条命令对应一次 Draw。跳过日志按 Batch 输出一次，
+不分配命令编号，并打印原因。每帧逐 Pass 打印 `Frame=<编号> Slot=<槽下标> MeshPass=<0～3>`，
 四个 Pass 的 Draw 数分别为 5、6、2、2（总计 15），并打印 fence 提交/等待日志；默认槽次序为 0、1、0、1、0、1。
 最后打印 PNG 路径及六帧完成日志。同一槽的四个 Pass 使用一份 D32_FLOAT_S8_UINT 附件；Depth Pass 清深度为 1、模板为 0 并保存，
 Color Pass `Load` 深度和模板，以材质默认的 `LessEqual` 测试并写深度。
@@ -731,7 +731,7 @@ Color Pass `Load` 深度和模板，以材质默认的 `LessEqual` 测试并写�
 RDG 将 Color、Outline、Transparent 合并到同一 RenderPass，组内省略重复的附件写屏障，每个逻辑 Pass 入口重置模板参考值。
 Depth 与 Color 之间仍保留跨组 `DepthWrite → DepthWrite` barrier；组入口批量转换实例流为 Vertex、两份 Pass UBO 为 CBuffer，
 其中 Outline 才首次使用的 UBO 屏障前移到合并组入口。合并条件与重排契约见 [RDG](../architecture/runtime.md#确定性重排与合并)。
-录制顺序为 PSO → Pass 参数组 → 顶点/索引缓冲 → 模板参考值 → 命令参数/颜色常量 → DrawIndexed。
+录制顺序为 PSO → Pass 参数组/实例流 → 顶点缓冲 → 模板参考值 → 命令参数/颜色常量 → 索引缓冲/DrawIndexed。
 检查 800×600 图片中的三个不透明物体、左侧背景色缺口、右侧物体金色轮廓，以及前方青色物体透出的绿色和背景。
 读回逐行去除 padding，日志打印实际 GPU row pitch；Vulkan 使用负 viewport 高度统一输出方向。
 

@@ -240,8 +240,8 @@ bool PreparePassDrawCommands(MeshPassId passId, const Scene& scene,
             size_t drawIndex = firstCommand;
             for (const auto& info : batch.CachedCommands) {
                 if (info.Pass != passId) continue;
-                RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} Element={} → Draw={}，CommandHandle={}",
-                                passNames[passId.Value], policy->ObjectName, primitiveHandle, batchHandle, info.ElementIndex, drawIndex++, info.CommandHandle);
+                RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} ElementMask={} → BatchCommand={}，CommandHandle={}",
+                                passNames[passId.Value], policy->ObjectName, primitiveHandle, batchHandle, output.VisibleCommands[firstCommand].ElementMask, drawIndex++, info.CommandHandle);
             }
         }
     }

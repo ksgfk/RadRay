@@ -17,11 +17,15 @@ struct MeshPassFrameDrawList;
 
 struct VisibleMeshBatch {
     SparseSetHandle Batch{};
-    // The maximum value selects all elements in this pass.
-    uint32_t ElementIndex{std::numeric_limits<uint32_t>::max()};
+    // Bit i selects Batch.Elements[i]; nonexistent/empty elements are filtered out.
+    uint32_t ElementMask{std::numeric_limits<uint32_t>::max()};
     uint32_t VisibilitySortKey{0};
     std::optional<uint32_t> FirstInstanceOverride{};
     std::optional<uint32_t> InstanceCountOverride{};
+
+    static constexpr uint32_t MaskForElement(uint32_t index) noexcept {
+        return index < 32 ? (uint32_t{1} << index) : 0;
+    }
 };
 
 // See docs/architecture/runtime.md for the scene storage contract.

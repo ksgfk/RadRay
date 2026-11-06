@@ -36,19 +36,23 @@ class MeshPassDrawListContext {
 public:
     virtual ~MeshPassDrawListContext() noexcept = default;
 
-    // Copies the shared initializer into output storage. The reference must survive until FinalizeCommand returns.
-    // The caller must finalize each command before adding another; references need not survive later additions.
-    virtual MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) = 0;
+    virtual MeshDrawCommandBindingStorage& GetBindingStorage() noexcept = 0;
 
-    // Fills the selected Element's indexed draw arguments. Overrides call this before adding their own output data.
-    // context is borrowed for this call; elementIndex must identify an existing Element.
+    // Transfers exclusive payload ownership from the initializer; the context publishes baseSortKey at Finalize.
+    // The reference must survive until FinalizeCommand returns.
+    // The caller must finalize each command before adding another; references need not survive later additions.
+    virtual MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint64_t baseSortKey = 0) = 0;
+
+    // Fills the inline primary element. Overrides call this before publishing output.
+    // elementIndex must be the lowest valid bit; the initializer already contains the mask and extra elements.
     virtual void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command);
 };
 
 class CachedPassMeshDrawListContext final : public MeshPassDrawListContext {
 public:
     CachedPassMeshDrawListContext(MeshPassId passId, CachedPassMeshDrawList& passDrawList, MeshBatch& targetBatch) noexcept;
-    MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) override;
+    MeshDrawCommandBindingStorage& GetBindingStorage() noexcept override;
+    MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint64_t baseSortKey = 0) override;
     void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) override;
 
 private:
@@ -56,6 +60,7 @@ private:
     CachedPassMeshDrawList* _passDrawList;
     MeshBatch* _targetBatch;
     SparseSetHandle _pendingHandle{};
+    uint64_t _pendingSortKey{0};
 };
 
 // Commands and their visible pointers are frame-local; Clear invalidates all prior output.
@@ -63,9 +68,10 @@ class DynamicMeshPassDrawListContext final : public MeshPassDrawListContext {
 public:
     DynamicMeshPassDrawListContext() noexcept = default;
     explicit DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
+    MeshDrawCommandBindingStorage& GetBindingStorage() noexcept override;
     // Rebinding must preserve the emitted entries at their original positions (e.g. after a list move).
     void BindVisibleCommands(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
-    MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) override;
+    MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint64_t baseSortKey = 0) override;
     void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) override;
     // Call after all commands are finalized, before sorting, copying or submitting visible entries.
     // Publishes stable pointers once; further command additions require Clear and a fresh visible list.
@@ -76,6 +82,9 @@ public:
     vector<MeshDrawCommand> Commands;
 
 private:
+    // Stable identity across moves of the owning frame draw list.
+    unique_ptr<MeshDrawCommandBindingStorage> _bindings;
+
     struct PendingVisibleCommand {
         size_t CommandIndex;
         size_t VisibleIndex;
@@ -83,6 +92,7 @@ private:
 
     Nullable<vector<VisibleMeshDrawCommand>*> _visibleCommands{nullptr};
     vector<PendingVisibleCommand> _pendingVisibleCommands;
+    uint64_t _pendingSortKey{0};
     bool _finalized{false};
 };
 
@@ -93,7 +103,7 @@ public:
     virtual ~MeshPassProcessor() noexcept = default;
     void SetDrawListContext(MeshPassDrawListContext& drawListContext) noexcept;
     MeshPassDrawListContext& DrawListContext() noexcept { return *_drawListContext; }
-    // Emits zero or more commands into the output context. Returning without emitting skips the batch.
+    // Emits at most one batch command into the output context. Returning without emitting skips the batch.
     virtual void AddMeshBatch(const MeshBatchContext& context) = 0;
 
 protected:

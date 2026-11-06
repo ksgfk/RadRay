@@ -37,6 +37,7 @@ struct MeshBatch {
     SparseSetHandle Material{};
     // Borrowed; must remain at a stable address for all referencing batches.
     Nullable<const radray::VertexInput*> VertexInput{nullptr};
+    // At most 32 entries; mask bit i retains the source index even when earlier entries are empty.
     vector<MeshBatchElement> Elements;
     render::PrimitiveTopology Topology{render::PrimitiveTopology::TriangleList};
     // Managed by Scene; callers must not copy scene links or cache entries into another batch.

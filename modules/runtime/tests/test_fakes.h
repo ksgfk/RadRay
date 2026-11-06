@@ -48,6 +48,7 @@ public:
 struct RecordedParameterBind {
     uint32_t Group;
     render::ShaderParameterSet* Set;
+    vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
 };
 
 class RecordingEncoder final : public render::GraphicsCommandEncoder {
@@ -73,9 +74,9 @@ public:
         Order.emplace_back("index");
         IndexBuffers.push_back(value);
     }
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset>) noexcept override {
+    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets) noexcept override {
         Order.emplace_back("parameters");
-        ParameterBinds.push_back({group, set});
+        ParameterBinds.push_back({group, set, {offsets.begin(), offsets.end()}});
     }
     bool SetPushConstants(uint32_t, uint32_t, std::span<const byte> bytes) noexcept override {
         Order.emplace_back("push");

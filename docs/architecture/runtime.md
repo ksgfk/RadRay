@@ -172,7 +172,7 @@ Record 中的 `SortVisibleCommands()` 与非 const 的 `Submit(encoder, submitAr
 完成动态命令指针填充并冻结命令存储；两者执行前必须完成全部动态命令生成。
 排序按 SortKey 稳定升序进行；Submit 统一使用可见项的命令指针，并转发 Pass 级参数组与实例流。
 不需要这些绑定时可省略 `submitArgs`；提交入口不再接收缓存列表或动态命令数组。
-槽清理只清空可见列表与动态命令并保留容量，不解引用缓存指针；没有缓存命令复制和快照析构。
+槽清理只清空可见列表、动态命令与动态绑定池并保留容量，不解引用缓存指针；没有缓存命令复制和快照析构。
 
 当前仍串行执行 Extract / Record，没有独立渲染线程或额外的业务 RenderPass 抽象。
 
@@ -330,7 +330,7 @@ Batch 入口验证 Primitive/Material 句柄、顶点布局/流、缓冲 usage/�
 
 当前表达直接索引实例绘制：`IndexCount` 是索引数量，三角形列表的一个三角形对应三个索引。
 `IndexBufferOffset` 是字节偏移，`IndexStride` 为 2 或 4；`FirstIndex` 相对此偏移，单位是索引。
-`VertexOffset` 是有符号的基础顶点偏移。Element 与 DrawCommand 的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；
+`VertexOffset` 是有符号的基础顶点偏移。每个 Batch 最多包含 32 个 Element 条目（包含空条目）；超过上限的输入被拒绝。Element 与可见命令的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；
 可见命令可覆盖该实例范围。逐实例数据由应用通过实例流提供；非索引绘制、间接绘制和 LOD 选择尚未实现。
 
 `VertexInput` 表达普通顶点与实例缓冲输入，不实现 shader permutation、蒙皮或自定义取数机制。
@@ -340,7 +340,7 @@ Batch 入口验证 Primitive/Material 句柄、顶点布局/流、缓冲 usage/�
 `ValidateVertexInput(input, true)` 允许唯一的 Instance 布局暂缺流；存在缺失流且 Instance 布局不止一个时拒绝输入，
 避免单个 Pass 级实例流槽位的歧义。所有流均已绑定时仍可使用多个 Instance 布局。
 Processor 开启 `AllowDeferredInstanceStream` 后，若恰有一个 Instance 布局，helper 将其 Binding 记录为
-`MeshDrawCommand::InstanceStreamBinding`。提交时通过 `MeshPassSubmitArgs::InstanceStream` 补齐或覆盖该槽位；
+`MeshVertexBufferBindings::InstanceStreamBinding`。提交时通过 `MeshPassSubmitArgs::InstanceStream` 补齐或覆盖该槽位；
 已有默认流时可以不传，缺失默认流时必须传入。校验函数及 Debug 提交拒绝未声明槽位或传错 Binding；
 Release 提交要求调用方遵守相同契约，不允许覆盖普通 Vertex 流。
 
@@ -477,7 +477,7 @@ Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且�
 
 PSO 还需要顶点输入、附件格式和经 Pass 确定的最终状态。runtime 材质不持有 PSO，不安排 Pass，
 也不定义参数在 uniform buffer、descriptor 或 push constant 中的 GPU 布局。
-`MeshDrawCommand` 保存 PSO、几何、静态参数组、自持有的命令级 push constants 与模板参考值。
+`MeshDrawCommand` 保存 PSO、索引几何、模板参考值与绑定池句柄；顶点流、静态参数组和命令级 push constants 由列表的绑定池持有。
 修改材质参数不要求重新创建 Resource/PSO；样例通过 `Scene::UpdateMaterial` 标脏关联缓存，
 Processor 重建时读取新 Proxy，将 `BaseColor * Brightness` 的 RGB 和原 alpha 复制进命令的 16 字节颜色常量。
 相机与局部缩放使用 Pass 级参数组，物体变换使用 Pass 级延迟实例流，均在提交时提供。
@@ -521,7 +521,7 @@ shader 程序名和参数名维持已有准备阶段解析方式，不使用标�
 | 文件对 | 接口与职责 |
 |---|---|
 | `mesh_draw_command.h/.cpp` | 两级命令、自持有命令常量、Pass 提交参数、命令解析、校验与统一录制 |
-| `mesh_pass_processor.h/.cpp` | `MeshBatchContext`、Pass 筛选接口、共享状态与 Element 构建 helper、Pass 登记；持久缓存与当帧动态两条输出路径的 Context |
+| `mesh_pass_processor.h/.cpp` | `MeshBatchContext`、Pass 筛选接口、共享状态与 Batch 构建 helper、Pass 登记；持久缓存与当帧动态两条输出路径的 Context |
 | `scene.h/.cpp` | 脏追踪、增量同步、可见命令收集 |
 
 ### 增量持久缓存
@@ -537,74 +537,113 @@ Pass 被撤销时删除其缓存；登记身份不变、且 Batch/Material 未�
 每次同步暂时将 Processor 切换到 `CachedPassMeshDrawListContext`，结束后恢复原 Context。
 `MeshBatchContext` 借用匹配的 Primitive/Batch、句柄和已解析 Material，仅在本次调用有效；Processor 不得修改输入或 Scene。
 `AddMeshBatch` 保持 void：按 Pass 策略筛选，接受后调用受保护的 `BuildMeshDrawCommands(context, sharedState)`。
-helper 构造一次共享 initializer，校验 PSO、VB、静态 ParameterSets 和 PushConstants，并复制 BaseSortKey 与 StencilReference。
-用首个有效 Element 就地校验共享绑定与几何，其余有效 Element 仅校验 IB 和索引/实例范围，不复制命令来预检。
-校验整个 Batch 后，为每个非零索引/实例 Element 调用 `AddCommand → FinalizeCommand`；无效输入返回 false，不输出部分 Element。
-`MeshDrawCommandSharedState::PushConstants` 是仅在构建调用期间借用的 `MeshPushConstantBinding`；helper 将字节复制为
-`MeshPushConstantCommandBinding::Data`（`InlineVector<byte, 64>`），命令跨帧保存独立副本，不依赖 FrameSlot 的 ObjectArena。
-helper 在提交参数尚不可用时预检已有绑定，再记录唯一 Instance 布局的槽位；Debug 提交完整校验缺失流的补齐参数。
-应用负责处理 helper 的失败；Scene 不定义 Processor 失败回滚。空输出可表示合法的 Pass 筛选跳过。
+helper 校验共享 PSO、VB、ParameterSets、PushConstants 和全部非零索引/实例 Element；
+无效输入返回 false，不分配池条目、不输出部分命令。空 Batch 不输出命令。
+每个 Batch/Pass 最多输出一条命令，`ValidElementMask` 的 bit i 对应源 `Batch.Elements[i]`，
+空 Element 不占有效位，也不压缩后续位编号。最多 32 个源条目，第 31 位合法。
+每条 `MeshDrawElement` 为 32 字节平凡结构，包含 IB 视图、索引数量/起点、顶点偏移与源 ElementIndex。
+最低有效位的几何内联在命令中，其余按源下标递增放入 `ExtraElementsPool`，提交通过有效位排名索引紧凑数组。
+同 Batch 的 Element 共用材质、顶点输入、PSO、参数组、PushConstants、模板参考值和排序键；实例范围仍可不同。
+存在不同实例范围时，元素池条目保存与有效位一一对应的 `ElementInstances`；共享范围不分配此数组内容。
 
-`AddCommand` 返回的引用只保证存活到本条 Finalize，必须完成后才能再次 Add。
-Finalize 填写 Element 的 IB 与索引/实例范围；静态 Context 把命令放入 `SparseSet<MeshDrawCommand>`，
-并把 `(Pass, ElementIndex, CommandHandle, BaseSortKey, FirstInstance, InstanceCount)` 记录到 Batch 的 `CachedCommands`。
-`MeshDrawCommand` 拥有绑定描述与可选 PushConstants，并以可选 `InstanceStreamBinding` 声明提交时可补齐或覆盖的实例流槽位；
-不借用 Primitive、Batch、VertexInput 或构建时的常量源。PSO、Buffer 和 ShaderParameterSet 仍由外部 owner 保活。
-`VertexBuffers` 使用 `InlineVector<render::VertexBufferBinding, 4>`，前四个流内联存储，更多流可扩容。
-缓存只保存跨视角稳定的数据，相机矩阵、物体变换与 Pass 常量不进入持久命令。
+`MeshDrawCommandSharedState::PushConstants` 仅在构建期间借用源字节；helper 复制成
+`MeshPushConstantCommandBinding::Data`（`InlineVector<byte, 64>`），不依赖 FrameSlot arena。
+helper 在提交参数尚不可用时预检已有绑定，再记录唯一 Instance 布局槽位；Debug 提交检查延迟流的补齐。
+应用负责处理 helper 的失败；Scene 不定义 Processor 失败回滚。空输出也可表示合法的 Pass 筛选跳过。
 
-成员顺序将 `Pipeline`、`IndexBuffer`、`InstanceStreamBinding`、索引/实例绘制标量和 `StencilReference` 放在开头，
-随后是 `VertexBuffers`、`ParameterSets`，末尾为构建期的 `BaseSortKey` 与可选 `PushConstants`。
-内联容器类型和容量不变；动态 offsets 仍由各参数绑定拥有。该顺序聚拢固定字段，但对象没有额外的缓存行对齐要求；
-实际字节布局依赖 ABI。Submit 仍需读取 PushConstants 的 optional 标志，不能仅凭成员重排推断缓存行访问次数或耗时。
+校验后 `Store → AddCommand → FinalizeCommand` 只执行一次。`AddCommand(initializer, baseSortKey = 0)` 接收可写 initializer 和独立排序键，
+把其扩展载荷的独占所有权移交列表，并清空 initializer 的池指针和句柄；返回引用只保证存活到 Finalize，完成前不能再次 Add。
+`FinalizeCommand(context, primaryElementIndex, command)` 填写最低有效位的内联几何；默认实例范围从该源 Element 写入缓存记录或动态可见项，持久命令不再重复保存；
+initializer 必须已包含有效掩码和扩展元素。自定义 Context 的 override 应先调用基类再发布输出。
+静态 Context 把命令放入 `SparseSet<MeshDrawCommand>`，并向 Batch 的 `CachedCommands` 记录
+`(Pass, CommandHandle, BaseSortKey, FirstInstance, InstanceCount)`；不再按 Element 存缓存记录。
+同一 Batch 在同一 Pass 只能 Finalize 一次；不超过四个 Pass 时 CachedCommands 保持内联。
+
+`MeshDrawCommand` 是平凡可拷贝/析构的 80 字节结构，`VisibleMeshDrawCommand` 为 32 字节，均有编译期断言。
+命令前 64 字节保存 PSO、首元素 IB、三个带代次的池句柄、索引绘制标量与有效掩码；
+后 16 字节保存绑定池指针与模板参考值。排序键和默认实例范围保存在 CachedMeshDrawCommandInfo / VisibleMeshDrawCommand。
+池指针用于缓存/动态命令混排，完整句柄代次用于失效校验；没有额外缓存行对齐要求，不能据布局推断耗时。
+
+`MeshDrawCommandBindingStorage` 拥有三个无引用计数的池，每条命令独占各非空条目：
+
+| 池 | 内容与分配条件 |
+|---|---|
+| `VertexBuffersPool` | `MeshVertexBufferBindings` 保存全部连续顶点绑定及可选实例槽位；存在流或延迟实例槽位时分配 |
+| `Payloads` | `MeshDrawCommandPayload` 保存参数组及自持有 PushConstants；至少一项非空时分配 |
+| `ExtraElementsPool` | `MeshDrawCommandElements` 保存额外 Element 与可选逐元素实例范围；两者均为空时不分配 |
+
+参数组和 PushConstants 共用一个可选载荷句柄，为命令中的池身份指针保留空间，并保持 80 字节布局。
+没有 PrimaryVertexBuffer 或首流/其余流拆分。BuildMeshDrawCommands 将全部流按 Binding 升序排序后存储；
+直接调用 Store 的路径也会将未排序输入正规化，已排序输入不重复排序。池内四个 VB 和六个额外 Element 可内联保存，更多时容器扩容。
+VertexBufferView 保留 64 位 Offset/Size，槽位与可选实例槽位保留 32 位编号；不使用截断或 255 哨兵编码。
+单流与多流都通过完整组句柄访问，单 Element 无需额外几何条目。
+不同 Batch 的 Store 仍分配独占条目，不按 VertexInput 身份做跨 Batch 驻留；借用同一条目的命令副本可使用整组身份短路。
+载荷不借用 Primitive、Batch、VertexInput 或构建时常量源；PSO、Buffer、ShaderParameterSet 仍由外部 owner 保活。
+缓存只保存跨视角稳定数据，相机、物体变换和 Pass 常量不进入持久命令。
+
+`Store` 要求 initializer 没有已有载荷；未移交列表的载荷由调用方 `Destroy` 或整体 `Clear`。
+缓存删除必须经 `CachedPassMeshDrawList::DestroyCommand`，不能直接 `Commands.Destroy`；
+Scene 脏重建、删除 Batch 和移除 Pass 均走此路径。列表 Clear 同时清空命令与载荷，动态列表按帧整体清理。
+命令普通复制只借用原载荷，不产生第二份所有权；不能把借用副本作为另一个独占条目。
+载荷在借用期间不可修改。`GetVertexBuffers`、`GetPayload`、`GetExtraElements` 拒绝失效代次，所得地址不能跨池修改保留。
+缓存列表不可复制；搬移时更新其中命令的池指针，搬移后的源列表可重新使用。
+直接构建时先用 `MeshDrawCommandBindings` 预检，再 Store；存储重载同时检查池身份、句柄与完整载荷。
 
 ### 当帧可见与动态路径
 
-`GatherVisibleMeshDrawCommands(..., vector<VisibleMeshDrawCommand>&)` 从指定 Batch/Element 的缓存索引追加 `VisibleMeshDrawCommand`；
-`GatherVisiblePrimitives` 收集各可见 Primitive 下全部 Batch。可见性和 LOD 选择由应用完成。
-无效 Batch/缓存句柄、未同步脏 Batch 或越界 Element 使调用失败并回滚本次追加，调用前已有输出保留。
-Pass 筛选未生成命令时输出为空。入口至少按已有输出加候选 Batch 数预留容量，并保留几何增长以支持逐 Batch 追加；多 Element 可继续扩容。
-每个 Batch 通过一次 `Meshes.TryGet` 访问，每条命令通过一次 `Commands.TryGet` 校验并取得地址。
-排序键和默认实例范围直接读取 `CachedMeshDrawCommandInfo`，无需解引用命令本体；
-`FirstInstanceOverride` 与 `InstanceCountOverride` 各自独立覆盖默认值。
-`SortKey = BaseSortKey | VisibilitySortKey`，应用应为当帧排序预留不重叠的低 32 位；同键维持输入顺序。
+`VisibleMeshBatch::ElementMask` 的 bit i 选择 `Batch.Elements[i]`，默认全 1；
+单元素调用使用 `VisibleMeshBatch::MaskForElement(i)`，i >= 32 返回 0。
+`GatherVisibleMeshDrawCommands` 每个输入 Batch 查一次 Meshes、匹配指定 Pass 的缓存记录并查一次 Commands，
+取 `ElementMask & ValidElementMask`。交集非零仅追加一条可见命令；零掩码、空元素位或不存在的位不输出。
+无效 Batch/缓存句柄或未同步脏 Batch 使调用失败，并回滚本次追加；原有输出保留。
+Pass 筛选未生成命令时输出为空。入口按已有输出加候选 Batch 数预留容量，并保留几何增长。
+`GatherVisiblePrimitives` 收集各可见 Primitive 下全部 Batch；剔除和 LOD 由应用完成。
 
-两种收集入口的 `MeshPassFrameDrawList&` 重载直接追加到其 `VisibleCommands`，沿用相同的校验、回滚与借用规则。
-不复制 MeshDrawCommand，不把句柄转换为快照下标。借用期间不能修改 Scene 或缓存；每次帧间变更后必须重新收集指针，
-不能依靠旧句柄仍存活来保证旧指针有效。删除其他元素或扩容也可能移动命令。
+`SortKey = BaseSortKey | VisibilitySortKey`，应用应为当帧排序预留不重叠的低 32 位。
+稳定排序按 Batch 进行，同键保持输入顺序；同一 Batch 内按源 Element 下标递增绘制。
+若 Element 需要独立材质或排序位置，应由调用方拆成不同 Batch。
+`FirstInstanceOverride` 与 `InstanceCountOverride` 独立作用于选中的全部元素；未覆盖的一项保留各 Element 的默认范围。
 
-`VisibleMeshDrawCommand` 保存 `Source`、`CachedCommand`、`SortKey`、`FirstInstance` 与 `InstanceCount`，
-当前大小为 32 字节，可平凡复制/析构。`CachedCommand` 是 `Nullable<const MeshDrawCommand*>`，统一只读借用缓存或已冻结的动态命令，不携带 RHI 绑定副本。
-`Source` 仅标识来源；可见项不保存句柄，提交不执行 SparseSet 查找。Scene 内部的 `CachedMeshDrawCommandInfo::CommandHandle` 仍用于缓存增删和 Gather。
-`VisibleMeshBatch` 仅描述 Batch/Element、VisibilitySortKey 与可选实例范围覆盖；改变这些值或 Primitive 变换无需重建缓存。
+可见项布局依次为 SortKey、只读命令指针、FirstInstance、InstanceCount、ElementMask 和两个实例来源布尔值，大小 32 字节。
+不保存 Source 或逐项池指针。`UseElementFirstInstance` / `UseElementInstanceCount` 为 true 且存在逐元素范围时，
+对应值读取载荷；否则使用可见项标量。Gather 和动态 Context 自动设置；手写可见项默认使用其标量，
+修改已生成动态项的实例覆盖时也要清除对应来源布尔值。
 
-动态 Batch 可通过同一 Processor 写入 `DynamicMeshPassDrawListContext`。
-它拥有本帧 `Commands`；`FinalizeCommand` 立即向绑定的可见列表追加 `Source == Dynamic` 的条目，暂时保持 `CachedCommand` 为空，
-并在 Context 内部保存命令与可见项的下标。此时命令数组和可见列表都可以扩容，已有可见项不得重排或删除；
-调用方仍可修改排序键、实例范围，或在列表末尾穿插缓存命令。
+两种收集入口的 `MeshPassFrameDrawList&` 重载直接追加到 VisibleCommands，不复制命令。
+缓存指针只在帧内 Scene 只读借用期间有效；借用期间不能增删、扩容或修改 Scene/缓存。
+每次帧间变化后重新收集，旧句柄存活不保证旧地址仍有效。
+`MeshPassFrameDrawList::SortVisibleCommands` 稳定排序；它和 Submit 都先完成动态指针发布。
 
-全部命令生成完成后，`FinalizeVisibleCommands()` 按内部下标填入最终地址并冻结存储，重复调用无副作用，保留可见项顺序及覆盖值。
-直接使用 Context 的调用方必须在排序、复制可见项或调用 `SubmitMeshDrawCommands` 之前执行此步；FrameDrawList 的排序和提交会自动执行。
-冻结后不能继续生成命令，也不能对 Commands 执行 reserve、resize、erase 或替换存储；下一帧须清空可见列表并调用 Context 的 `Clear()`。
-Clear 清空命令与待填充索引、解除冻结，并保留容量。列表搬移时，绑定必须指向包含原有条目且位置不变的新列表。
-动态输入由调用方提供匹配的上下文；临时更换 Processor Context 后须在返回前恢复默认 Context。
+`DynamicMeshPassDrawListContext` 拥有本帧命令与独立载荷池；Finalize 先追加可见元数据，
+`FinalizeVisibleCommands` 在全部命令生成后一次性填充稳定指针并冻结列表。
+排序、复制可见项或提交前必须先 FinalizeVisibleCommands；冻结后不能追加、resize、reserve 或替换命令存储。
+下一帧须清空可见列表并调用 Context 的 Clear；Clear 清空命令、载荷和待填充索引并解除冻结，保留容量。
+动态池按需分配，由 unique_ptr 保持列表搬移时身份稳定。列表搬移后 Context 必须绑定到含原位置条目的新可见列表；
+已发布的命令和池指针仍有效。动态输入由调用方提供匹配上下文，临时更换 Processor Context 后须恢复默认 Context。
 
 ### 校验与录制
 
-`SubmitMeshDrawCommands` 首先检查 encoder 有效性。`RADRAY_IS_DEBUG` 下，先单次预检 Pass 参数组与实例流，
-再在首次绑定前检查全部命令指针并预检条目，预检失败不会留下部分 Draw。
-Release 跳过提交期预检，信任构建期命令和调用方提供的提交参数；录制循环先跳过零实例项，再通过命令指针逐条录制，
-不调用 `Buffer::GetDesc`。直接构造或修改命令的调用方可显式调用 `ValidateMeshDrawCommand`，该函数在两种配置下均完整校验。
-末尾可选参数 `MeshPassSubmitArgs` 借用本次提交共用的 `ParameterSets`，并保存可选 `InstanceStream` 绑定描述。
-Pass 级和命令级参数组各自不得重复 GroupIndex，两者也不得占用相同组；两级动态 offset 各自不得重复 `(BindingId, ArrayIndex)`。
-校验 PSO/Buffer/参数组有效性、Vertex/Index usage、范围、索引宽度/对齐、重复 VB/参数组槽位、
-重复动态 offset、实例整数范围、声明的实例槽位与命令级 push constants 的非空及 4 字节对齐/范围。零实例可见项不绘制。
-随后依次绑定 PSO、Pass 级 ParameterSets、有效 VB（含 Pass 实例流）、IB、StencilReference、命令级 ParameterSets、命令级 PushConstants，再 DrawIndexed。
-本次调用内的局部状态缓存对 PSO、按槽位的 VB、IB、StencilReference 和按 GroupIndex 的命令级参数组去重，跨调用重新绑定。
-VB 比较 Buffer/Offset/Size，IB 比较 Buffer/Offset/Stride；参数组比较对象指针及全部动态 offset 的数量、顺序和内容。
-PSO 切换后重绑 Pass 参数组并清空 VB 与命令级参数组缓存，保留 IB 与 StencilReference；PushConstants 仍逐命令写入。
-被实例流覆盖的命令级绑定不下发。变化的 VB 按槽位排序后拆为连续区间绑定，避免后端覆盖区间中未提供的槽位。
-命令指针为空或 `SetPushConstants` 失败时返回 false，调用方须放弃此份录制，不能提交已有的部分 Draw。
+`SubmitMeshDrawCommands` 首先检查 encoder；Debug 单次预检 Pass 参数和实例流，再在首次绑定前检查全部命令、
+池身份/代次、完整几何与绑定。实例覆盖的溢出检查只针对掩码实际选中的元素；失败不会留下部分 Draw。
+Release 信任构建校验和调用方参数，不调用 Buffer::GetDesc。显式 ValidateMeshDrawCommand 在两种配置下都完整校验。
+检查范围包括 PSO/Buffer/参数组有效性、Vertex/Index usage、缓冲范围、索引宽度/对齐、重复槽位、
+重复参数组/动态 offset、实例整数范围、延迟实例槽位、PushConstants 非空与 4 字节对齐/范围，以及顶点组严格升序、掩码与扩展元素对应关系。
+Pass 参数组和命令参数组不能占同一 GroupIndex；各组动态 offset 不得重复 `(BindingId, ArrayIndex)`。
+
+外层每条 Batch 绑定 PSO、Pass 参数组与实例流、命令 VB、模板参考值、命令参数与 PushConstants；
+内层对可见掩码按最低位扫描，仅切换 IB 并 DrawIndexed。零实例绘制跳过，零掩码项不绑定状态。
+同一 Batch 内不重复执行 PSO/VB/参数组/PushConstants 比较；不同 Element 可使用不同 IB。
+局部状态缓存在本次调用内去重 PSO、VB、IB、StencilReference 和命令参数组，跨调用重新绑定。
+VB 先比较“绑定池地址 + VertexBuffersHandle（索引与代次）”，相同则跳过组解析和逐槽比较。
+组变化时，槽位 0～31 使用 BoundVertexSlots 定长数组及位掩码 O(1) 直查；更高槽位直接视为需要绑定，
+不引入线性查表或可变大小缓存。具体设备允许的槽位上限仍由 RHI 检查。
+在已预排序的数组中扫描连续脏槽位，以原数组的 subspan 直接下发，不构造临时脏数组、不拷贝绑定、不在提交期排序。
+遇到未改变槽位、槽位间隙或被 Pass 实例流覆盖的槽位就结束当前区间，避免覆盖未提供的槽位。
+例如三个连续变化槽位一次下发；只有 0、2 槽位变化时分两次绑定。
+PSO 切换后重绑 Pass 参数组与实例流，清空 VB 和命令参数组缓存，保留 IB 与 StencilReference。
+Pass 实例流覆盖的命令级槽位不下发。VB 比较 Buffer/Offset/Size，IB 比较 Buffer/Offset/Stride，
+参数组比较对象与全部动态 offset。PushConstants 每条可见 Batch 写入一次。
+空命令指针或 SetPushConstants 失败返回 false，调用方必须放弃录制，不能提交部分 Draw。
 
 RHI 的 PSO/ShaderParameterSet 公共接口不暴露布局和已写资源，因此 runtime 无法预检布局兼容、必需参数是否齐全、
 动态 offset 的设备对齐或最终缓冲范围，也不读取索引内容。上述检查交给 RHI 校验层；shader/PSO、拓扑、顶点输入与参数语义由应用保证匹配。
