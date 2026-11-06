@@ -4,7 +4,7 @@
 AGENTS.md and README.md are entry documents; project skills are also checked.
 Only docs/architecture and docs/guide hold long-lived subsystem documentation.
 User-authorized development history belongs in docs/history, with dated filenames.
-History references describe their recorded baseline, not the current worktree.
+History records describe their baseline; history/README.md is a current index.
 Code may carry at most one owning-document banner. Web links and Markdown
 section fragments are not validated. Run: python tools/check_docs.py
 """
@@ -54,14 +54,14 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="strict")
 
 
-def is_history(path: Path) -> bool:
-    return path.is_relative_to(DOCS_ROOT / "history")
+def is_history_record(path: Path) -> bool:
+    return path.is_relative_to(DOCS_ROOT / "history") and path != DOCS_ROOT / "history" / "README.md"
 
 
 def check_doc_references(files: list[Path], errors: list[str]) -> int:
     count = 0
     for path in files:
-        if is_history(path):
+        if is_history_record(path):
             continue
         for match in DOC_PATH_RE.finditer(read(path)):
             count += 1
@@ -111,7 +111,7 @@ def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
         for key in HEADER_KEYS:
             if not re.search(rf"^>\s*-\s*{re.escape(key)}", head, re.MULTILINE):
                 errors.append(f"{rel}: header block is missing '{key}'")
-        if is_history(doc):
+        if is_history_record(doc):
             continue
         for anchors in ANCHOR_LINE_RE.findall(head):
             if anchors.strip() in NO_ANCHOR_TOKENS:
@@ -128,7 +128,7 @@ def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
 
 def check_history_filenames(errors: list[str]) -> None:
     for path in sorted((DOCS_ROOT / "history").rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or not is_history_record(path):
             continue
         match = re.fullmatch(r"([0-9]{4})-([0-9]{2})-([0-9]{2})-[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+", path.name)
         if match is None:
@@ -142,7 +142,7 @@ def check_history_filenames(errors: list[str]) -> None:
 def check_internal_links(files: list[Path], errors: list[str]) -> int:
     count = 0
     for doc in files:
-        if doc.suffix.lower() != ".md" or is_history(doc):
+        if doc.suffix.lower() != ".md" or is_history_record(doc):
             continue
         for raw in MD_LINK_RE.findall(read(doc)):
             target = raw.strip()

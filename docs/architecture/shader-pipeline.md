@@ -11,15 +11,15 @@ HLSL 是 compiler 的 pass source authoring 输入。shader 模块定义 wire co
 和调用方显式定义的绑定布局。shader metadata 描述编译结果，可供上层工具使用，不再决定 RHI 布局。
 布局与参数 ABI、变体之间的稳定槽位、原生兼容性及共享策略由调用方负责，见 [RHI 绑定模型](render-rhi.md#绑定模型)。
 
-以下章节既是接受的 schema 8 契约，也是当前实现。cutover 是原子的：schema 8 decoder 拒绝 4/5/6/7，
+当前 metadata schema 为 8，decoder 拒绝其他 schema 版本。
 RadRay DXC package 为 `1.9.2609.radray.1`（基于 upstream `v1.9.2609`），extension ABI 为 5，
-toolchain identity 为 `0x0000000001090214`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
+wire 的 `kShaderToolchainIdentity` 为 `0x0000000001090214`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
 
 正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
 `RadRayDXC::Headers` 编译、以 canonical library name 加载 `RadRayDXC::Compiler` 的 runtime，
 再通过 `dxcapi_radrayext.h` 的 CLSID、ABI/schema 和 toolchain identity handshake 创建 fork
-extension。`RadRayShaderCompilerClient` 测试覆盖 fork ABI/package handshake；非 fork development
-mode 没有 upstream fallback，只会在 extension 能力上 fail closed。
+extension。`RadRayShaderCompilerClient` 测试覆盖 fork ABI/package handshake；不提供 stock DXC fallback。
+client 的实际编译实现仅在 Windows 启用；其他平台的 `IsAvailable()` 返回 false，discovery/compile 返回失败诊断。
 
 ## 诊断结果
 
@@ -35,8 +35,7 @@ mode 没有 upstream fallback，只会在 extension 能力上 fail closed。
 和 artifact wire 不变。多个诊断按原顺序换行拼接，保留 SDK 提供的正文、文件名和行号；client
 补充操作/source 上下文。SDK 未发布的 warning 不由客户端补造，读取 SDK 诊断失败也视为操作失败。
 
-解码器在首次失败处返回检查项及安全可读的记录索引或布局数值。typed decoder 和 render artifact
-包装层传递原始诊断，不以空值或笼统错误覆盖；底层 native 创建的详细日志仍遵循 RHI 的诊断规则。
+解码器在首次失败处返回检查项及安全可读的记录索引或布局数值；compiler client 保留 decoder 诊断并补充调用上下文。
 这些构造诊断、分配产物的接口不声明 `noexcept`，不捕获分配异常来伪装业务错误。
 
 ## Source contract
@@ -113,13 +112,11 @@ descriptor/push stage flags 取 actual active stages。parameter order、table g
 IA/deny flags 等 D3-only topology 不生成 Vulkan 伪字段。ordinary graphics/compute global RS 1.0/1.1
 是支持范围；Local RS、directly-indexed heaps与多个 active Vulkan push blocks fail closed。
 
-相关 entries 全部未声明时，DXIL artifact 的 serialized Root Signature range 为空，D3D12 按 active
-metadata 生成 implicit descriptor tables；SPIR-V 使用 ordinary descriptors。compiler 不生成公共
-默认 policy，也不因 SPIR-V-only request 发布隐藏 DXIL result。无 RS 不禁止后续 Vulkan dynamic
-descriptor 或 D3 implicit root descriptor modifier。
-Implicit D3 table 拓扑由 resolved bindings 的 heap 类型和原生 visibility 确定性派生；显式 carrier
-仍是原生 Root Signature 的唯一权威。分组、CPU mirror 与发布规则见 [RHI 与后端](render-rhi.md#描述符分配)，
-不新增 artifact wire 字段或另一套 resolved layout hash。
+相关 entries 全部未声明时，DXIL artifact 的 serialized Root Signature range 为空，metadata 记录普通
+descriptor placement；SPIR-V 同样使用 ordinary descriptors。compiler 不生成公共默认 policy，
+也不因 SPIR-V-only request 发布隐藏 DXIL result。
+RHI 不消费 metadata 或 serialized carrier；D3D12 Root Signature 与 Vulkan pipeline layout 都由调用方的显式描述创建。
+组存储、CPU mirror 与发布规则见 [RHI 与后端](render-rhi.md#绑定模型)。
 
 ## Artifact wire
 
@@ -152,8 +149,8 @@ RHI 不接收这个 envelope，不进行 artifact hash、名称或 carrier 校�
 编译返回的 `CompileTargetLane::Stages` 包含各 stage 的独立 bytecode 与 entry name；调用方把匹配后端的
 原始 bytes 交给 `Device::CreateShader(ShaderDescriptor)`，在 PSO 的 `ShaderEntry` 中选择 entry。
 创建 shader 不生成布局。`BindingGroupLayoutDescriptor` 和 `PipelineLayoutDescriptor` 由调用方另外提供，
-即使某变体裁掉资源也不会缩减这些描述。原先 render artifact bridge、target layout resolver/modifier、
-`FindBinding(name)` 与布局身份 handle 已移除。
+即使某变体裁掉资源也不会缩减这些描述。render 不提供 artifact bridge、target layout resolver/modifier、
+按名称的绑定查询或布局身份 handle；shader decoder 的 `FindBinding(name)` 仅查询 metadata。
 
 type tree 属于所属 artifact 的 CPU upload schema。`WireTypeRecord` 保留 scalar/vector/matrix 的
 kind，并为 struct/struct-array member 携带 compiler-owned underlying `TypeIndex`；decoder 检查
@@ -179,8 +176,8 @@ matrix 保持严格校验；合法 float4x4 形状增加 16 字节占位的负�
 
 schema 8 起每条 record 还携带 `ShaderScalarKind`（float/sint/uint/bool）与 `RowCount`/`ColumnCount`，
 `Flags` bit 0 表示 HLSL `row_major`，其余位保留为零。非 struct 元素的数组同样带上元素的标量种类
-与分量数，所以 `float4 Foo[4]` 在 wire 上是完整类型而不是不透明字节区间。这些事实存在的唯一原因
-是让 AOT 生成器能离线复现 GPU 布局；运行时不用它们做类型门闩。
+与分量数，所以 `float4 Foo[4]` 在 wire 上保留类型、尺寸和布局信息。decoder 校验这些记录，
+render 不消费它们；当前仓库没有根据这些记录生成上传 POD 的 AOT 生成器。
 
 同一 shared struct 在 DXIL 与 SPIR-V lane 上发布的 offset/size/stride/标量种类/矩阵形状必须逐项
 相等，否则整个 batch 返回无 `Value` 的失败结果，并在诊断里点名该 struct，而不是发布
@@ -191,7 +188,8 @@ cbuffer 里的 `bool`（DXIL 报 Bool 且 size 补到寄存器边界，SPIR-V �
 `RadRayDxcMetadata.CBufferTypePayloadPinsScalarKindShapeAndOffsets` 钉住两 lane 一致的部分，
 `RadRayDxcMetadata.CrossLaneTypePayloadDisagreementFailsClosed` 钉住分歧必须 fail closed。
 
-运行时不再构建按名参数布局或提供参数存储与 setter；调用方负责按实际 GPU 布局准备常量数据。
+shader/render 不通过 metadata 构建按名 GPU 参数布局或上传存储；调用方负责按实际 GPU 布局准备常量数据。
+runtime 的材质参数是独立的 CPU 快照，不提供自动 GPU 布局与上传，见 [材质核心](runtime.md#材质核心)。
 
 ## 显式 RHI 布局边界
 
@@ -219,8 +217,8 @@ render 测试覆盖手写显式布局和双后端真实 compute PSO、dispatch/�
 `-DRADRAY_BUILD_SHADER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF`
 验证完全独立的 render，不查找 DXC 包。只关闭 compiler 时 shader decoder 仍可保留；已开启的 tools 必须显式关闭。
 compiler 要求 shader，tools 要求 compiler，非法开关组合配置失败。
-仅构建工具可关闭 tests/window/render/benchmarks，再构建 `radray_shader_compile` target。
-runtime/JIT/examples 已退出当前构建，不再提供相关选项。
+仅构建工具可关闭 tests/window/render/benchmarks/examples，再构建 `radray_shader_compile` target。
+runtime 与 examples 均有独立构建开关，当前不提供 runtime shader JIT 选项。
 
 compiler 配置通过 `find_package(RadRayDXC CONFIG REQUIRED GLOBAL COMPONENTS Headers Compiler)`
 查找 fork 包，核对完整版本标识 `1.9.2609.radray.1` 和 Compiler/Validator 运行库。仓库 preset 设置依赖三元组后，
@@ -231,7 +229,9 @@ client 默认用裸名 `dxcompiler` 动态加载，先尝试 exe 同目录，再
 开发时，CLI、测试与 fixture generator 通过启动环境查找 SDK，不复制 DXC DLL；Windows preset
 负责构建与测试的 `PATH`，IDE 和手动运行入口见[开发时加载运行库](../guide/build-test.md#开发时加载运行库)。
 
-client handshake 校验 RadRay extension 的 ABI、schema、toolchain identity；stock DXC
+client handshake 校验 RadRay extension 的 ABI、schema、工具链主次版本 1.9 及非零工具链身份；
+它不将整个 128 位身份与固定值比较。artifact decoder 只在调用方传入非零 `ExpectedToolchainIdentity` 时
+比较 wire 的 64 位工具链身份，该选项默认 0。stock DXC
 不会被当作兼容 compiler，`RADRAY_SHADER_COMPILER_FORK` 在 compiler 构建中恒定义。
 子工程默认开启 compiler、关闭 shader CLI；功能开关和宿主示例见
 [作为子工程引用](../guide/build-test.md#作为子工程引用)。
@@ -241,9 +241,6 @@ client handshake 校验 RadRay extension 的 ABI、schema、toolchain identity�
 bytecode 与 metadata envelope；它不生成正式 manifest、
 artifact index 或 publisher 输出，也不代表 stock DXC 已提供 RadRay extension ABI。工具目标
 只链接 `radrayshadercompiler`，可用 map/import 检查确认没有反向引入 render/backend。
-
-旧 Forward cbuffer 与 ImGui/blit artifact 的专用生成器和 custom targets 已随渲染框架移除；
-历史方案见[设计快照](../history/2026-09-14-render-framework-design.md)。raw shader compile CLI 继续保留。
 
 RadRay 安装包导出 `RadRay::shadercompiler` 与可选 `RadRay::shader_compile`，不加载优化探测。
 普通安装不复制 SDK；安装后的 CLI 通过外部运行库搜索路径加载 compiler。

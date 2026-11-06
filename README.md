@@ -12,6 +12,7 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 | 配置 IDE / clangd / 调试器 | [docs/guide/dev-env.md](docs/guide/dev-env.md) |
 | 当前设计、术语与取舍 | 从[架构地图](docs/architecture/overview.md)进入所属子系统文档 |
 | 整理文档、使用项目 doc / grill 技能 | [文档维护](docs/guide/documentation.md) |
+| 查阅开发历史、计划与验收记录 | [历史目录](docs/history/README.md) |
 
 [AGENTS.md](AGENTS.md) 也是长期文档，记录仓库级约束与阅读入口。
 长期知识集中在它与 `docs/architecture/`、`docs/guide/`，历史版本由 Git 保存。
@@ -25,6 +26,7 @@ python tools/fetch_third_party.py restore
 python tools/fetch_sdks.py restore
 python tools/build_third_party.py build --triplet windows-x64-msvc --config Debug --parallel 8
 cmake --preset win-x64-debug
+python tools/compile_test_shaders.py --build-dir build/windows-x64-msvc/Debug --config Debug
 cmake --build --preset win-x64-debug --parallel 24
 ctest --preset win-x64-debug
 ```

@@ -19,7 +19,8 @@
 
 `bench_object_arena` 使用 Google Benchmark，通过 main 显式注册用例，没有全局 fixture 或分配钩子。
 契约见 [Core / ObjectArena](../architecture/core-facilities.md#objectarena-与-arenaallocator)。每批为 256 或
-4096 个对象，Trivial 与 Nontrivial 在本机 64 位构建中均为 64 B；后者析构更新测试侧计数，验证恰好析构一次。
+4096 个对象；Trivial 保存八个 uint64，Nontrivial 保存七个 uint64 和一个计数器指针，在 64 位指针布局下均为 64 B。
+后者析构更新测试侧计数，验证恰好析构一次。
 
 | Family | 计时边界 |
 |---|---|
@@ -38,6 +39,7 @@
 cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
 cmake --build --preset win-x64-release-clangcl --target test_radray_core bench_object_arena --parallel 8
 ctest --preset win-x64-release-clangcl -R '^(ObjectArenaTest|ArenaAllocatorTest)\.' --output-on-failure --timeout 30
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
 $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_object_arena.exe'
 & $bench --benchmark_min_time=1x
 & $bench '--benchmark_filter=ObjectArena/(Cold|Reuse|Heap|Vector)' --benchmark_min_time=0.1s --benchmark_repetitions=5 --benchmark_out=build/object-arena.json --benchmark_out_format=json
@@ -54,9 +56,9 @@ Reset 用例在计时外构造对象，使用固定迭代数限制总运行时�
 不能用纯净提交代替。前后固定机器、编译器、allocator、profiler/validation、flight、视图、材质分布和脏比例；
 交替运行独立进程，区分一次覆盖扫描与多轮配对比较。脚本选项不等于结果已经可比，仍需核对实际匹配的 case。
 
-初始化、JIT、PSO、首次 buffer 扩容与稳态分开；Tracy 用对应 workload 的 warmup complete message 切掉冷区间。
-持续更新必须实际改变值，不能让 setter 的同值短路悄悄降低脏比例。重点同时覆盖静止、单次修改后静止、
-稀疏/密集、随机/顺序、父节点传播、增删和多 flight；仅凭 dirty 百分比不能预测局部性或 GT/RT 重叠收益。
+初始化、首次分配与稳态分开，使用 benchmark 的计时边界和预热配置区分。
+当前三个基准不提供 runtime JIT、父节点传播或 GT/RT 并发测量；不能据它们推断渲染帧率或多线程收益。
+比较修改负载时核对每轮实际执行的操作及数据变化，不把准备阶段算作被测操作。
 
 | 指标 | 可以说明什么 | 不能代替什么 |
 |---|---|---|
@@ -73,7 +75,7 @@ CPU 与 GPU 可以重叠，不把二者相加得到 FPS。短测的百分比、�
 分别检查 CPU、GPU 和尾部延迟，对疑似退化做独立长采样。预算拒绝、skip、error 与成功运行分列，
 不把未运行 case 算作通过。drain 后缓存仍可能保留物理存储，回收正确性应检查使用引用和 owner 时点。
 
-历史设计与实测数据见[架构地图的历史资料](../architecture/overview.md#历史资料)。其中未入库的
+历史设计与实测数据见[历史目录](../history/README.md)。其中未入库的
 `build*/` 日志、trace、源码归档仅是采样时的本机证据；文件缺失时需要重新测量，不能从报告重新生成原始样本。
 
 ## 性能采样（Tracy）
@@ -100,6 +102,7 @@ swap-and-pop 删除、空闲链和 generation 检查设计；数据准备、校�
 cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
 cmake --build --preset win-x64-release-clangcl --target bench_sparse_set test_radray_core --parallel 8
 ctest --preset win-x64-release-clangcl -R SparseSetTest --output-on-failure
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
 $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_sparse_set.exe'
 & $bench --benchmark_list_tests=true
 # 全矩阵只跑一轮，用于确认所有 fixture 与操作合法；不能用其时间做性能结论。

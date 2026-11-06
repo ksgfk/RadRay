@@ -38,8 +38,7 @@
 `ValidateVertexInput` 与命令校验共用缓冲视图检查，因此和命令校验一起放在 `mesh_draw_command.h`；
 `MeshBatch` 保存 `CachedMeshDrawCommandInfo`，所以 `mesh_batch.h` 位于 `mesh_draw_command.h` 之上。
 Scene 管理关联与缓存同步，runtime 提供通用命令构建、校验和录制；可见性、具体 Pass 筛选、shader 参数的 GPU 布局、PSO 选择、Pass 边界和提交由调用方实现。
-当前 RDG 是基于现有 RHI 的整资源、单队列实现；旧 Renderer、几何池和 PSO 缓存仍未恢复。
-删除前的设计、源码基线和旧测试入口见[设计归档](../history/2026-10-31-runtime-design-archive.md)，不作为当前接口契约。
+当前 RDG 是基于现有 RHI 的整资源、单队列实现；模块不提供完整 Renderer、几何池或 PSO 缓存。
 
 ## 多槽帧循环
 
@@ -74,9 +73,9 @@ DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`G
 
 `RunFrame` 返回 `void`，正常返回只表示 Pipeline 已完成本帧录制与提交，不保证异步工作已完成。新槽和已回收的槽不调用 Wait；
 在途标记表示存在尚未由 Scheduler 回收的 Record；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
-`WaitIdle()` 先等待所有在途槽，再分两阶段清理：先对**全部槽**调用 `ResetCommandStorage()`，
+`WaitIdle()` 先等待所有在途槽，再按三个全槽循环清理：先对**全部槽**调用 `ResetCommandStorage()`，
 解除 command allocator 所有 epoch 引用，然后对全部槽调用 `ResetRetiredResources()`，最后对全部槽调用 `ResetFrameData()`，清空 CPU 数据和帧内 ObjectArena。
-不能逐槽完成这两个阶段，否则 Slot 0 的 arena 可能释放仍被 Slot 1 旧录制引用的 Buffer；
+不能逐槽完成全部清理，否则 Slot 0 的 arena 可能释放仍被 Slot 1 旧录制引用的 Buffer；
 它保留当前索引，重复调用不会重复等待已回收提交。Scheduler 析构先执行 WaitIdle，
 再销毁全部 Slot，最后销毁 Pipeline，确保 Pipeline 拥有的资源晚于命令存储释放。
 Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
@@ -99,7 +98,7 @@ auto* borrowedBuffer = owner->get();
 ```
 
 后续录制可借用 `borrowedBuffer`，资源 owner 在槽回收时析构。槽内 owner 默认只供该槽使用；
-若其他槽也引用它，必须在 owner 槽再次复用前调用两阶段 `WaitIdle()`，或将共享 owner 交给下述 `RetireResource`。`shared_ptr` 可同样保活共享资源；
+若其他槽也引用它，必须在 owner 槽再次复用前调用上述 `WaitIdle()`，或将共享 owner 交给下述 `RetireResource`。`shared_ptr` 可同样保活共享资源；
 自定义清理通过 `MakeScopeGuard` 创建回调，再以 `Emplace<decltype(cleanup)>(std::move(cleanup))` 登记。
 非平凡对象按构造完成的逆序析构，因此有依赖的资源应先登记被依赖者、后登记引用者。
 arena 的底层分配、保留预算和 allocator 契约见 [ObjectArena 与 ArenaAllocator](core-facilities.md#objectarena-与-arenaallocator)。
@@ -172,7 +171,6 @@ Record 中的 `SortVisibleCommands()` 按 SortKey 稳定升序排序，`Submit(e
 兼容的 `Submit(encoder, cachedDrawList, submitArgs)` 供使用原始 SparseSet 句柄的底层调用方使用，仍要求缓存存活；
 同一列表不得混用原始缓存句柄与快照下标。槽清理保留三类命令容器容量，清空全部命令后才重置 arena。
 
-上述 Scene 借用边界与下文 RDG 落实了 [RDG 接口拆分计划](../history/2026-11-05-runtime-rdg-pipeline-interface-plan.md) 的阶段一、二。
 当前仍串行执行 Extract / Record，没有独立渲染线程或额外的业务 RenderPass 抽象。
 
 ## RDG 与 RenderGraphFramePipeline
@@ -208,7 +206,7 @@ Setup 回调立即执行，Execute 回调直到 Record 才执行，支持持有 
 Context 只允许 Resolve 当前 Pass 已声明的资源；`ResolveView` 在状态与 View 用途不匹配时返回空。
 Raster 通过 `WriteColor` / `SetDepthStencil` 声明附件，颜色槽从 0 连续排列，至少有一个附件，各附件有效尺寸、层数和采样数一致。
 自动 View 使用首个 mip；显式 View 可选择附件子资源，但状态仍按整个资源同步。
-只读深度/模板 aspect 必须 Load / Store；丢弃 Store 使用 RHI 已有的 `StoreAction::Discard`（历史草案中的 `DontCare` 并非 StoreAction 成员）。
+只读深度/模板 aspect 必须 Load / Store；丢弃 Store 使用 `StoreAction::Discard`。
 同一 Pass 对同一资源声明不同状态、无效句柄、不匹配的 Usage / Pass 类型、未初始化读取以及无 Writer 的瞬态输出都会使编译失败。
 
 编译按声明顺序维护每个资源当前版本的最后 Writer 与 Readers，依赖只指向较早声明的 Pass：
@@ -267,10 +265,10 @@ Device Upload 内部借用的 Staging Buffer 仍单独处理 Map 前与 Copy 前
 瞬态 View 缓存在池内；导入资源的自动 View 由本帧 arena 持有，避免池把外部资源借用延长到后续帧。
 直接使用池的 `AcquireTextureView` 时，目标资源必须活到该缓存 View 释放。
 
-当前不提供子资源状态拆分、异步队列、资源内存别名、跨槽共享池、显式资源版本节点或自动 PSO/参数组构建。重排与合并的设计基线见 [RDG Pass 重排与合并实现计划](../history/2026-11-06-runtime-rdg-pass-reorder-merge-plan.md)。
+当前不提供子资源状态拆分、异步队列、资源内存别名、跨槽共享池、显式资源版本节点或自动 PSO/参数组构建。
 
 教学样例的 `MeshDrawingFramePipeline` 使用同一流程，默认双槽连续六帧。
-Pipeline 按槽持有实例缓冲、两份 Pass UBO/参数组、颜色/深度附件、读回缓冲和独立 fence；几何、shader、布局与 PSO 由外部共享。
+Pipeline 按槽持有实例缓冲、两份 Pass UBO/参数组、读回缓冲和独立 fence，颜色/深度附件由基类的每槽瞬态池持有；几何、shader、布局与 PSO 由外部共享。
 Extract 更新当前槽的数据并固化各激活 Pass 的命令；Record 排序槽内列表、申请命令缓冲、完成四个 Pass 和读回拷贝，提交时递增该槽的 fence 值。
 Wait 只等待该槽的 fence；主循环不逐帧等待整个队列，结束时 `WaitIdle()` 等待并重置全部槽，再保存最后一帧的图片。
 Frame 0 后更新绿色材质，Frame 1 的 `RunFrame(Scene&)` 自动增量同步命令，已有在途帧的参数与附件保持独立。
@@ -287,8 +285,7 @@ Frame 0 后更新绿色材质，Frame 1 的 `RunFrame(Scene&)` 自动增量同�
 | `MeshSection` | `mesh_batch.h` | 几何资源的 submesh 分段：材质槽和索引范围；Scene 不存储它 |
 | `MaterialRenderProxy` | `material.h` | 借用 MaterialResource，拥有已解析的 CPU 参数快照；见下文材质核心 |
 
-这些类型参考 UE 传统 Mesh Drawing Pipeline 的分工，当前是可修改的基础数据版本，
-不要求与 UE 的类层次或生命周期完全一致。Scene 不存储用户侧网格和材质资产。
+这些类型是可修改的 CPU 绘制记录。Scene 不存储用户侧网格和材质资产。
 Scene 直接持有 `SparseSet<PrimitiveSceneInfo>`、`SparseSet<MeshBatch>` 和 `SparseSet<MaterialRenderProxy>`，
 通过公开成员使用容器的增删查与遍历接口。它不创建或依赖 GPU Device。
 
@@ -332,8 +329,7 @@ Batch 入口验证 Primitive/Material 句柄、顶点布局/流、缓冲 usage/�
 `VertexOffset` 是有符号的基础顶点偏移。Element 与 DrawCommand 的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；
 可见命令可覆盖该实例范围。逐实例数据由应用通过实例流提供；非索引绘制、间接绘制和 LOD 选择尚未实现。
 
-`VertexInput` 命名对应其顶点输入描述职责，表达普通顶点与实例缓冲输入；
-UE VertexFactory 的 shader permutation、蒙皮或自定义取数机制不在当前实现范围内。
+`VertexInput` 表达普通顶点与实例缓冲输入，不实现 shader permutation、蒙皮或自定义取数机制。
 `Layouts` 使用 RHI 的 `VertexBufferLayout`，通过 Binding 对应 `Streams`；
 `Attributes` 使用拥有 `Semantic` 字符串的 `VertexInputAttribute`，避免长期保存 RHI `VertexAttribute` 的临时 string_view。
 属性的 `BufferBinding` 必须对应布局和已绑定的流，Offset/Size 使用字节单位。
@@ -403,12 +399,12 @@ void AddCube(Scene& scene, const VertexInput& cubeVertices, render::Buffer& cube
 材质描述表面使用的 shader、固定性质和可变参数；具体 Pass 结合这些信息、几何与本次渲染状态决定如何绘制。
 runtime 当前保留四个角色，均声明在 `material.h`，实现在 `material.cpp`：
 
-| 类型 | 职责 | UE 5.8.4 对照（职责近似，不是完整复刻） |
-|---|---|---|
-| `MaterialResource` | 材质性质，以及已加载 shader/布局的具名程序列表 | `FMaterial` / `FMaterialResource` 的渲染性质与 shader 资源职责 |
-| `Material` | 借用一份 Resource，拥有参数名称、类型、顺序和默认值 | `UMaterial` 的用户侧定义职责；本例没有材质图 |
-| `MaterialInstance` | 借用一个 Material，按声明索引保存可选参数覆盖；未覆盖时使用默认值 | `UMaterialInstance` / `UMaterialInstanceDynamic` 的动态参数职责 |
-| `MaterialRenderProxy` | 借用 Resource，拥有同步时解析后的完整参数副本 | `FMaterialRenderProxy` / `FMaterialInstanceRenderProxy` 的渲染侧访问职责 |
+| 类型 | 职责 |
+|---|---|
+| `MaterialResource` | 材质性质，以及已加载 shader/布局的具名程序列表 |
+| `Material` | 借用一份 Resource，拥有参数名称、类型、顺序和默认值 |
+| `MaterialInstance` | 借用一个 Material，按声明索引保存可选参数覆盖；未覆盖时使用默认值 |
+| `MaterialRenderProxy` | 借用 Resource，拥有同步时解析后的完整参数副本 |
 
 ```text
 应用持有 MaterialResource（性质、可用 shader 程序）
@@ -453,7 +449,7 @@ Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且�
 `MaterialProperties` 包含 `MaterialTagSet Tags` 和 `MaterialRenderState RenderState`。
 标签表达材质语义，状态提供具体 Pass 可沿用或覆盖的默认值。runtime 不内置标签词汇、
 从标签推导状态的规则或自动状态组合 helper；标签不会自动生成 shader 功能。
-旧 `MaterialBlendMode` 已移除，样例改用 `Surface=Opaque/Transparent` 等应用标签；旧 `TwoSided` 改为 `CullMode::None`。
+样例使用 `Surface=Opaque/Transparent` 等应用标签，以 `CullMode::None` 表达关闭剔除。
 关闭剔除只改变光栅化，不隐含 shader 的双面法线处理。
 
 `MaterialRenderState` 直接使用 RHI 枚举/结构：
@@ -473,7 +469,7 @@ Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且�
 这些属性与 Resource 一样在被引用期间不可修改；MaterialInstance 目前只覆盖参数。
 
 `MaterialShaderProgram` 保存程序名称、借用的 Layout、VS/PS 和拥有的入口名称，PS 为空可表达纯顶点程序。
-具名程序列表只是当前可用程序的集合；它不是 UE 的完整 shader map，也不表示材质自动参加同名 Pass。
+具名程序列表只保存当前可用程序，不表示材质自动参加同名 Pass。
 
 PSO 还需要顶点输入、附件格式和经 Pass 确定的最终状态。runtime 材质不持有 PSO，不安排 Pass，
 也不定义参数在 uniform buffer、descriptor 或 push constant 中的 GPU 布局。
@@ -515,16 +511,6 @@ uniform expression 求值、GPU 参数缓存或热重载。
 复制集合拥有独立的标签对但仍借用同一张表。绘制期间查找只比较 ID，不访问字符串或分配内存。
 表及集合的读写由调用方串行组织；Resource 发布后不修改标签。
 shader 程序名和参数名维持已有准备阶段解析方式，不使用标签表。
-
-本地 UE 5.8.4 源码路径相对 `Engine/Source/Runtime/`：
-
-- `Engine/Public/Materials/Material.h`、`MaterialInstance.h`、`MaterialInstanceDynamic.h`：用户定义和实例。
-- `Engine/Public/MaterialShared.h`：`FMaterial`、`FMaterialResource`、`FMaterialShaderMap`。
-- `Engine/Public/Materials/MaterialRenderProxy.h` 与 `Engine/Private/Materials/MaterialInstanceSupport.h`：
-  `FMaterialRenderProxy`、`FMaterialInstanceRenderProxy`；UE 同时维护 UniformExpressionCache。
-- `Engine/Private/Materials/MaterialInstance.cpp`：`GetParameterValue` 的父级回退和 `SetMIParameterValue` 渲染命令。
-- `Renderer/Private/ShaderBaseClasses.cpp`：`FMaterialShader::GetShaderBindings` 绑定材质 uniform buffer；
-  `Renderer/Private/DepthRendering.cpp`：Processor 结合材质性质选择 shader 和绘制状态。
 
 ## Mesh Drawing Pipeline 基础接口
 

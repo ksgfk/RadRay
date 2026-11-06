@@ -239,7 +239,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 | `RADRAY_PROFILE_SCOPE()` | 以所在函数名命名的作用域 zone |
 | `RADRAY_PROFILE_SCOPE_N("name")` | 字符串字面量命名；同一花括号作用域内只能出现一个 `SCOPE*` 宏，需要嵌套时用 `{}` 分隔 |
 | `RADRAY_PROFILE_SCOPE_DYN(sv)` | 运行时 `string_view` 作为 **zone 名**（Tracy transient，导出与 GUI 都用该名字，而不是函数名）；与 `SCOPE*` 同样受单作用域限制 |
-| `RADRAY_PROFILE_FRAME()` | 当前线程一帧结束；单线程 runner 在 `TickFrame` 尾部，多线程 runner 在渲染线程 |
+| `RADRAY_PROFILE_FRAME()` | 标记调用线程的一帧结束；由调用方显式插入，宏不调度帧循环或线程 |
 | `RADRAY_PROFILE_PLOT("name", v)` | 数值曲线 |
 | `RADRAY_PROFILE_THREAD("name")` | 命名当前线程 |
 | `RADRAY_PROFILE_MESSAGE(sv)` | 时间线文本消息 |
@@ -312,7 +312,7 @@ return h.ToHashCode();
 3. **缓存散列值的 key 在移动后也须保持内容与散列一致。** 默认移动成员可能保留旧散列而改变源内容；
    若移后对象仍可参与比较或查表，就显式恢复它的有效状态，不假定所有容器移后必为空。
 
-当前 native layout key 及完整判等见 [RHI 布局缓存](render-rhi.md#native-pipelinelayout-缓存)。
+RHI 布局直接拥有原生对象，不维护布局 key 或去重缓存，见 [RHI 布局所有权](render-rhi.md#原生布局直接所有权与显式共享)。
 附件顺序有渲染语义，`AttachmentSignature` 与 `RenderPassExecutionKeyVulkan` 不得为了复用而重排 color slots；
 允许忽略的字段见[直接附件与 Vulkan 原生缓存](render-rhi.md#直接附件与-vulkan-原生缓存)。
 
@@ -360,7 +360,7 @@ RadRay 通用内存接口的后续实现变化产生不一致。该路径不依�
 `DecomposeTransform`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
 可以直接 `fmt::format("{}", mat)`。
 
-`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 不必包含本头。
+`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 只需包含 `viewport.h`，无需包含 `basic_math.h`。
 `basic_math.h` 会包含 `viewport.h`，已有数学调用方仍能看见这两个类型。
 
 `AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；
@@ -404,8 +404,8 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
   `IntrusivePtrAddRef` / `IntrusivePtrRelease`。
 - **`structured_buffer.h`** — CPU 侧反射式结构化缓冲。新代码用 `TrySetValue`（fail-fast），
   `SetValue` 是旧接口。
-- **`text_encoding.h`** — UTF-8 ⇄ wchar。Windows 走 `MultiByteToWideChar`，
-  其他平台走 `mbsrtowcs`（依赖 locale，行为可能不一致，有 TODO）。
+- **`text_encoding.h`** — Windows 使用 `MultiByteToWideChar` / `WideCharToMultiByte` 的 `CP_UTF8` 模式转换。
+  其他平台使用 `mbsrtowcs` / `wcstombs`，编码由当前 C locale 决定，不保证 UTF-8。
 - **`image_data.h`** — `ImageData` + PNG/JPEG 读写，底层 **libpng / IJG libjpeg**（不是 stb），
   由 `RADRAY_ENABLE_LIBPNG` / `RADRAY_ENABLE_LIBJPEG` 门控。另有
   `CompareImageRGBA8` / `ImageDiffRGBA8` 供测试对比。

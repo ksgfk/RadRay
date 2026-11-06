@@ -1,6 +1,6 @@
 > - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
 > - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
-> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/RuntimeLibrary.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/dev_env.ps1`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`, `modules/core/tests/test_memory_override.cpp`, `tools/compile_test_shaders.py`, `tools/compile_render_fixtures.py`, `cmake/TestShaders.cmake`
+> - 锚点: `CMakeLists.txt`, `cmake/Options.cmake`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/Dependencies.cmake`, `cmake/RuntimeLibrary.cmake`, `cmake/UpdateCompileCommands.cmake`, `cmake/dependencies/libjpeg.cmake`, `project_manifest.json`, `tools/dev_env.ps1`, `tools/build_third_party.py`, `cmake/Install.cmake`, `cmake/DependencyCatalog.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `tools/expand_unity_compile_commands.py`, `modules/*/tests/CMakeLists.txt`, `modules/core/tests/test_memory_override.cpp`, `tools/compile_test_shaders.py`, `tools/compile_render_fixtures.py`, `cmake/TestShaders.cmake`
 
 # 构建与测试
 
@@ -53,8 +53,8 @@ ctest --preset win-x64-debug-clangcl
 ```
 
 二进制经 `radray_set_build_path` 放在 `<RadRay-binary-dir>/_build/<Config>/`，可由
-`RADRAY_BUILD_PATH` 改写基础路径。macOS 是否可用还取决于 manifest 对应平台 SDK；当前 DXC
-manifest 只有 Windows 包，macOS 无匹配包时须关闭 compiler。不能将 Windows 验收结果当作 macOS 验证。
+`RADRAY_BUILD_PATH` 改写基础路径。当前 DXC manifest 只有 Windows 包，compiler client 的非 Windows
+实现返回不可用；macOS 构建须关闭 compiler 与 shader tools。不能将 Windows 验收结果当作 macOS 验证。
 
 ### 开发时加载运行库
 
@@ -234,9 +234,9 @@ core 公开传递 C++20 最低要求、`RADRAY_PLATFORM_*` 和 `RADRAY_IS_DEBUG`
 
 ### 预编译头与 Unity Build
 
-项目不主动设置全局 `CMAKE_UNITY_BUILD`。未指定时，只有 `radray_enable_unity_build` 的目标默认启用，
-core 与 `test_inline_vector` 都不参与。显式传入 `-DCMAKE_UNITY_BUILD=OFF` 会关闭这些目标的 unity build；
-传入 `ON` 时遵循 CMake 的全局初始化行为，其他目标也可能参与。删除缓存项（`-U CMAKE_UNITY_BUILD`）可恢复项目默认。
+项目不主动设置全局 `CMAKE_UNITY_BUILD`，当前自有 target 也没有调用 `radray_enable_unity_build`。
+未指定时不主动启用 unity build；显式传入 `-DCMAKE_UNITY_BUILD=ON` 或 `OFF` 时遵循 CMake 的 target 初始化行为。
+`cmake/Utility.cmake` 保留该 helper，但定义它本身不启用任何 target。删除缓存项（`-U CMAKE_UNITY_BUILD`）可恢复默认。
 
 需要原始 `.cpp` 的编译数据库时，可使用独立的非 unity Ninja 配置，无需构建：
 
@@ -252,6 +252,7 @@ cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
 |---|---|
 | `RADRAY_BUILD_TESTS` | 独立构建 ON；子工程 OFF |
 | `RADRAY_BUILD_BENCHMARKS` | 独立构建 ON（所有配置）；子工程 OFF |
+| `RADRAY_BUILD_EXAMPLES` | ON（含子工程）；要求 runtime、render、libpng |
 | `RADRAY_BUILD_COMPILE_COMMANDS` | 独立构建 ON；子工程 OFF；仅 Ninja/Makefile 提供辅助目标 |
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
 | `RADRAY_BUILD_RUNTIME` | ON；要求 render |
@@ -259,13 +260,14 @@ cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
 | `RADRAY_BUILD_SHADER` | ON；独立 shader contract/decoder |
 | `RADRAY_BUILD_SHADER_COMPILER` | ON；要求 shader |
-| `RADRAY_BUILD_SHADER_TOOLS` | 独立构建 ON；子工程 OFF；要求 shader compiler |
+| `RADRAY_BUILD_SHADER_TOOLS` | 独立构建且 compiler 开启时 ON；否则 OFF；要求 shader compiler |
 | `RADRAY_ENABLE_PROFILER` | 所有配置默认 ON；链接 Tracy client，见[性能采样](performance.md#性能采样tracy) |
 
 验证不带编译器的基础模块时使用独立目录。先按[本地测试 shader](#本地测试-shader)在 compiler 开启的配置中生成夹具；以下配置共享默认夹具目录，不查找或加载 DXC：
 
 ```powershell
 cmake --preset win-x64-debug -B build_base_no_compiler -DRADRAY_BUILD_SHADER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF
+. tools/dev_env.ps1 -Triplet windows-x64-msvc -Config Debug
 cmake --build build_base_no_compiler --config Debug --parallel 8
 ctest --test-dir build_base_no_compiler -C Debug --output-on-failure
 ```
@@ -291,6 +293,7 @@ project(MyApplication LANGUAGES CXX)
 set(RADRAY_BUILD_SHADER OFF)
 set(RADRAY_BUILD_SHADER_COMPILER OFF)
 set(RADRAY_BUILD_SHADER_TOOLS OFF)
+set(RADRAY_BUILD_EXAMPLES OFF)
 add_subdirectory(external/RadRay)
 add_executable(my_app main.cpp)
 target_link_libraries(my_app PRIVATE RadRay::render RadRay::window)
@@ -302,6 +305,7 @@ mimalloc、图像支持与 window/render/backend 维持功能默认。使用已�
 保留 mimalloc override 的 whole-archive，Windows 动态 CRT 路径使用 `mimalloc` 动态库 target。
 宿主不需要时应显式关闭 `RADRAY_ENABLE_MIMALLOC` / `RADRAY_ENABLE_PROFILER`；动态库运行环境
 由宿主管理，见[Windows 动态 CRT 与 mimalloc](#windows-动态-crt-与-mimalloc)。
+examples 默认仍开启，上面的宿主示例显式关闭它；关闭 render/runtime/libpng 时也必须关闭 examples。
 
 宿主的 `BUILD_SHARED_LIBS`、安装和包发现配置不会被 RadRay 强制覆盖；RadRay 自有库保持
 静态库。其产物默认在自己的 binary subtree，`RADRAY_BUILD_PATH` 可改写，宿主产物目录
@@ -364,7 +368,7 @@ compiler 消费者与安装后的 CLI 通过启动环境提供 DXC 运行库；�
 ## 性能测量
 
 Tracy、CPU/GPU 基准、配对测量与内存口径统一见[性能测量](performance.md)。
-先完成构建与正确性回归，再串行运行 benchmark；历史报告由[架构地图](../architecture/overview.md#历史资料)索引。
+先完成构建与正确性回归，再串行运行 benchmark；历史报告由[历史目录](../history/README.md)索引。
 
 ## 测试
 
@@ -429,9 +433,8 @@ $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
 ctest --preset win-x64-debug-clangcl -R 'Backends/|Routes/|Vulkan' --output-on-failure --timeout 60
 ```
 
-在本机 RTX 4080 上，Vulkan 不支持导出 `D3D12Resource` 句柄，`VulkanToD3D12` 两个用例跳过。
 后端专属代码的链接隔离用独立目录分别配置 `-DRADRAY_ENABLE_VULKAN=OFF`、`-DRADRAY_ENABLE_D3D12=OFF` 构建并运行
-`test_radray_render`；被关闭的后端参数与 route 跳过，Vulkan 专属 suite 不编译。
+`test_radray_render`；被关闭的后端参数与 route 跳过，Vulkan 专属测试源中的用例按编译宏启用。
 
 ### 本地测试 shader
 
@@ -569,8 +572,6 @@ ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitM
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
 后端回归入口见[测试](#测试)，模块接口见 [Rendering runtime](../architecture/runtime.md)。
-旧场景、绘制和 RDG 的测试命令及既有验证声明保存在[设计归档](../history/2026-10-31-runtime-design-archive.md)，
-只适用于该归档基线。
 
 ## Mesh Drawing Pipeline 教学样例
 
@@ -620,7 +621,7 @@ A/B/C 使用背面剔除不透明材质，D 使用关闭剔除并写模板的不
    E 的侧面 alpha 为 0.38，顶面为 0.48；alpha 变小本身不会自动开启混合。
 
 描边采用放大几何，粗细随投影变化，共享参考值表示选中物体的并集；不是屏幕空间等宽描边。
-透明示例只包含一个凸物体，剔除背面后只画可见表面；多透明物体需要从后往前组织，交叉表面还需要更完整的方案。
+透明示例只包含一个凸物体，剔除背面后只画可见表面；没有多透明物体排序或交叉透明表面的处理。
 完整字段和生命周期见 [材质与 Pass 的边界](../architecture/runtime.md#材质与-pass-的边界)。
 Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未实现。
 
@@ -636,21 +637,11 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 | [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
 
-源码对照基线为本地 `F:/cpp/UnrealEngine` 的 UE **5.8.4**（`Engine/Build/Build.version`），
-注释中的 UE 路径相对其 `Engine/Source/Runtime/`。对应关系用于解释传统 Mesh Drawing Pipeline 的职责：
 本例直接组装 Batch、假定全部候选可见，用 Scene 的持久缓存和脏追踪更新命令，按相同排序键稳定排序；
-省略 UE 的多线程代理同步、可见性剔除、LOD、自动实例化和完整材质；RDG 使用本项目的单队列整资源实现。Color Pass 只是纯色上色，不等价于 UE 完整 Base Pass。
-`BasePassRendering.cpp` 的 `FBasePassMeshProcessor::ShouldDraw` 区分不透明和透明类别，
-`TranslucentRendering.cpp` 的 `GetTranslucentBlendState` 选择混合状态；本例用应用标签表达类别，状态由材质显式提供。
-`CustomDepthRendering.cpp` 的 `FCustomDepthPassMeshProcessor::TryAddMeshBatch` 设置模板状态和参考值，
-但 UE 的参与标记/模板值通常来自 PrimitiveSceneProxy。本例使用材质标签和主深度/模板，
-几何描边并非对 UE CustomDepth/Stencil + 后处理效果的完整复刻。
-材质路径新增 M1～M5 注释，分别对照 UE 的渲染资源、用户定义/实例、渲染侧参数同步、PSO 组装与 shader bindings。
-材质职责与所有权见 [Runtime 材质核心](../architecture/runtime.md#材质核心)；本例同步的是 CPU 快照，
-没有实现 UE 的 UniformExpressionCache 或稳定 GPU uniform buffer 绑定。
-`BatchPassPolicy` 也仅属于样例，通过 Batch 句柄关联记录。其筛选职责对照 UE 的
-`FMeshBatch::bUseForDepthPass` / `bUseForMaterial`：`FDepthPassMeshProcessor::AddMeshBatch` 和
-`FBasePassMeshProcessor::AddMeshBatch` 分别读取这些标志；UE 还判断材质、遮挡体和其他条件。
+不实现多线程代理同步、可见性剔除、LOD 或自动实例化。RDG 使用本项目的单队列整资源实现，Color Pass 只做纯色上色。
+材质路径的 M1～M5 注释分别说明渲染资源、用户定义/实例、渲染侧参数同步、PSO 组装与 shader bindings。
+材质职责与所有权见 [Runtime 材质核心](../architecture/runtime.md#材质核心)；本例同步的是 CPU 快照，没有稳定 GPU uniform buffer 绑定。
+`BatchPassPolicy` 仅属于样例，通过 Batch 句柄关联记录。
 候选收集不按 Pass 预先分组，Processor 内的条件才决定是否生成命令。
 `MeshDrawingFramePipeline::GetMeshPassRegistrations` 登记四个 Processor，Scheduler 在每次 `RunFrame(Scene&)` 的 Extract 前调用 `Scene::SyncCachedMeshDrawCommands`。
 Scene 为脏 Batch 创建静态 Context，Processor 完成 Pass 筛选后调用 runtime 的 `BuildMeshDrawCommands`，
@@ -660,7 +651,7 @@ Scene 为脏 Batch 创建静态 Context，Processor 完成 Pass 筛选后调用 
 
 Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Brightness，将 RGB 相乘并保留 alpha，
 经 runtime 构建 helper 复制为命令自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
-命令颜色与 UE 的 `FMeshDrawShaderBindings::LooseData` 职责近似，源栈数据在构建后即可失效。
+命令自持有颜色字节，源栈数据在构建后即可失效。
 `GpuResources::PrepareGeometry` 创建共享的 Device VB / IB 空壳并保存 CPU 字节，Scene 可在上传前引用这些合法缓冲。
 每个 `GpuFrameResources` 独立创建 Binding 1 的实例缓冲、Group 0 / Binding 0 的两份 Pass UBO、参数组、读回缓冲和 completion fence。
 初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符；颜色/深度附件及其 View 由基类每槽的 RDG 瞬态池拥有。
@@ -686,7 +677,7 @@ Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才�
 
 ### 准备 shader 与构建
 
-在已准备好 Debug/Release 依赖包的环境中执行。`RADRAY_BUILD_EXAMPLES` 默认 **OFF**；开启时必须
+在已准备好 Debug/Release 依赖包的环境中执行。`RADRAY_BUILD_EXAMPLES` 默认 **ON**；开启时必须
 同时开启 `RADRAY_BUILD_RUNTIME`、`RADRAY_BUILD_RENDER` 和 `RADRAY_ENABLE_LIBPNG`（后者依赖 zlib）。
 双后端需要 `RADRAY_ENABLE_D3D12=ON`、`RADRAY_ENABLE_VULKAN=ON`，Windows 默认均开启。
 样例只链接 `RadRay::runtime` 及其传递依赖，不需要运行时 shader compiler。
@@ -709,9 +700,13 @@ HLSL 修改后须手动重新执行脚本。脚本、构建和运行均不下载
 
 ### 运行与核对
 
+直接运行 exe 前，按其配置设置当前终端的 DLL 搜索路径；下面在 Debug/Release 两组命令之间显式切换。
+
 ```powershell
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Debug
 ./build/windows-x64-clangcl/Debug/_build/Debug/radray_mesh_drawing_sample.exe --backend d3d12 --output build/mesh_drawing_pipeline/d3d12-debug.png
 ./build/windows-x64-clangcl/Debug/_build/Debug/radray_mesh_drawing_sample.exe --backend vulkan --output build/mesh_drawing_pipeline/vulkan-debug.png
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
 ./build/windows-x64-clangcl/Release/_build/Release/radray_mesh_drawing_sample.exe --backend d3d12 --output build/mesh_drawing_pipeline/d3d12-release.png
 ./build/windows-x64-clangcl/Release/_build/Release/radray_mesh_drawing_sample.exe --backend vulkan --output build/mesh_drawing_pipeline/vulkan-release.png
 ```
