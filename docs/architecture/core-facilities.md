@@ -156,6 +156,10 @@ Get、Destroy 要求句柄存活，前置条件仅使用 Debug assert；可能�
 删除用交换末项保持值数组稠密，可能移动其他值；句柄不因此改变，但值的地址与遍历顺序不稳定。
 `GetHandleAt(denseIndex)` 将当前 `Values()` 的有效下标 O(1) 转为稳定句柄；稠密下标不能跨删除保存。
 
+`Reserve(capacity)` 同时预留稀疏槽位、稠密值与稠密反向索引，不创建元素。
+`ReserveGeometric(requiredCapacity)` 仅在容量不足时按 max(required, capacity + capacity / 2) 扩容，
+避免流式小幅增长时反复精确 reserve；增长保持现有值与句柄有效，但可能移动值地址。
+
 ## Nullable
 
 三个特化：裸指针类、`unique_ptr`、`shared_ptr`。API：

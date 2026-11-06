@@ -5,6 +5,7 @@
 #include <limits>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 
 namespace radray {
 namespace detail {
@@ -70,6 +71,7 @@ struct RDGTexture {
     std::optional<render::TextureState> FinalState{};
     std::optional<uint32_t> LastWriter{};
     vector<uint32_t> Readers{};
+    RDGExternalOwnership Ownership{};
     bool Output{false};
     bool Alive{false};
 };
@@ -81,6 +83,7 @@ struct RDGBuffer {
     std::optional<render::BufferState> FinalState{};
     std::optional<uint32_t> LastWriter{};
     vector<uint32_t> Readers{};
+    RDGExternalOwnership Ownership{};
     bool Output{false};
     bool Alive{false};
 };
@@ -106,6 +109,8 @@ struct RDGPhysicalResource {
     Nullable<T*> Resource{nullptr};
     State CurrentState;
     bool PendingWrite{false};
+    bool PendingExternalAcquire{false};
+    bool NeedsExternalRelease{false};
 };
 
 struct RDGExecution {
@@ -372,6 +377,7 @@ Nullable<render::TextureView*> ResolveTextureView(RDGExecution& execution, RDGTe
     for (const auto& entry : execution.ImportedViews) {
         if (entry.Texture == handle && entry.Usage == usage) return entry.View;
     }
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.CreateImportedView");
     auto view = execution.Slot.GetDevice().CreateTextureView(descriptor);
     if (!view) return nullptr;
     auto* owner = execution.Slot.GetArena().Emplace<unique_ptr<render::TextureView>>(view.Release());
@@ -424,6 +430,7 @@ bool CanMerge(const RDGData& data, const RDGPass& candidate, const vector<GroupA
 }
 
 bool SchedulePasses(RDGData& data) {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile.Schedule");
     const auto count = data.Passes.size();
     vector<vector<uint32_t>> dependents(count);
     vector<uint32_t> inDegree(count, 0);
@@ -483,7 +490,10 @@ bool SchedulePasses(RDGData& data) {
 void TransitionTexture(RDGExecution& execution, uint32_t index, render::TextureState next, bool write, vector<render::ResourceBarrierDescriptor>& barriers) noexcept {
     auto& current = execution.Textures[index];
     const auto before = current.CurrentState;
-    if (before == render::TextureState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
+    if (current.PendingExternalAcquire) {
+        barriers.emplace_back(render::BarrierTextureDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .ExternalTransfer = render::ExternalOwnershipTransfer::Acquire});
+        current.PendingExternalAcquire = false;
+    } else if (before == render::TextureState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
         barriers.emplace_back(render::BarrierUavDescriptor{current.Resource.Get()});
     } else if (before != next || current.PendingWrite) {
         barriers.emplace_back(render::BarrierTextureDescriptor{current.Resource.Get(), before, next});
@@ -495,7 +505,10 @@ void TransitionTexture(RDGExecution& execution, uint32_t index, render::TextureS
 void TransitionBuffer(RDGExecution& execution, uint32_t index, render::BufferState next, bool write, vector<render::ResourceBarrierDescriptor>& barriers) noexcept {
     auto& current = execution.Buffers[index];
     const auto before = current.CurrentState;
-    if (before == render::BufferState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
+    if (current.PendingExternalAcquire) {
+        barriers.emplace_back(render::BarrierBufferDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .ExternalTransfer = render::ExternalOwnershipTransfer::Acquire});
+        current.PendingExternalAcquire = false;
+    } else if (before == render::BufferState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
         barriers.emplace_back(render::BarrierUavDescriptor{current.Resource.Get()});
     } else if (before != next || current.PendingWrite) {
         barriers.emplace_back(render::BarrierBufferDescriptor{current.Resource.Get(), before, next});
@@ -505,6 +518,8 @@ void TransitionBuffer(RDGExecution& execution, uint32_t index, render::BufferSta
 }
 
 bool MapUpload(render::Buffer& buffer, uint64_t offset, std::span<const byte> bytes) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.MapUpload");
+    RADRAY_PROFILE_PLOT("RadRay.RDG.UploadBytes", static_cast<int64_t>(bytes.size()));
     Nullable<void*> mapped = buffer.Map(offset, bytes.size());
     if (!mapped) {
         RADRAY_ERR_LOG("RDG: cannot map upload buffer");
@@ -566,41 +581,54 @@ RDGTransientResourcePool::RDGTransientResourcePool(render::Device& device) noexc
 RDGTransientResourcePool::~RDGTransientResourcePool() noexcept = default;
 
 void RDGTransientResourcePool::BeginFrame() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.BeginFrame");
+    RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Textures", static_cast<int64_t>(_impl->Textures.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Buffers", static_cast<int64_t>(_impl->Buffers.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Views", static_cast<int64_t>(_impl->Views.size()));
     for (auto& entry : _impl->Textures) entry.Used = false;
     for (auto& entry : _impl->Buffers) entry.Used = false;
 }
 
 void RDGTransientResourcePool::Clear() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.Clear");
     _impl->Views.clear();
     _impl->Textures.clear();
     _impl->Buffers.clear();
 }
 
 RDGTransientTextureAllocation RDGTransientResourcePool::AcquireTexture(const render::TextureDescriptor& desc) {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.AcquireTexture");
     for (auto& entry : _impl->Textures) {
         if (!entry.Used && SameDescriptor(entry.Desc, desc)) {
             entry.Used = true;
             return {entry.Resource.get(), entry.State};
         }
     }
-    auto resource = _impl->Device.CreateTexture(desc);
-    if (!resource) return {};
-    auto& entry = _impl->Textures.emplace_back(Impl::TextureEntry{desc, resource.Release()});
-    return {entry.Resource.get(), entry.State};
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.CreateTexture");
+        auto resource = _impl->Device.CreateTexture(desc);
+        if (!resource) return {};
+        auto& entry = _impl->Textures.emplace_back(Impl::TextureEntry{desc, resource.Release()});
+        return {entry.Resource.get(), entry.State};
+    }
 }
 
 RDGTransientBufferAllocation RDGTransientResourcePool::AcquireBuffer(const render::BufferDescriptor& desc) {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.AcquireBuffer");
     for (auto& entry : _impl->Buffers) {
         if (!entry.Used && SameDescriptor(entry.Desc, desc)) {
             entry.Used = true;
             return {entry.Resource.get(), entry.State};
         }
     }
-    auto resource = _impl->Device.CreateBuffer(desc);
-    if (!resource) return {};
-    const auto state = desc.Memory == render::MemoryType::Upload ? render::BufferState::HostWrite : render::BufferState::Undefined;
-    auto& entry = _impl->Buffers.emplace_back(Impl::BufferEntry{desc, resource.Release(), state});
-    return {entry.Resource.get(), entry.State};
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.CreateBuffer");
+        auto resource = _impl->Device.CreateBuffer(desc);
+        if (!resource) return {};
+        const auto state = desc.Memory == render::MemoryType::Upload ? render::BufferState::HostWrite : render::BufferState::Undefined;
+        auto& entry = _impl->Buffers.emplace_back(Impl::BufferEntry{desc, resource.Release(), state});
+        return {entry.Resource.get(), entry.State};
+    }
 }
 
 void RDGTransientResourcePool::CommitTextureState(render::Texture* texture, render::TextureState state) noexcept {
@@ -624,41 +652,45 @@ void RDGTransientResourcePool::CommitBufferState(render::Buffer* buffer, render:
 }
 
 Nullable<render::TextureView*> RDGTransientResourcePool::AcquireTextureView(const render::TextureViewDescriptor& desc) {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.AcquireView");
     for (auto& entry : _impl->Views) {
         if (SameDescriptor(entry.Desc, desc)) return entry.View.get();
     }
-    auto view = _impl->Device.CreateTextureView(desc);
-    if (!view) return nullptr;
-    return _impl->Views.emplace_back(Impl::ViewEntry{desc, view.Release()}).View.get();
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.CreateView");
+        auto view = _impl->Device.CreateTextureView(desc);
+        if (!view) return nullptr;
+        return _impl->Views.emplace_back(Impl::ViewEntry{desc, view.Release()}).View.get();
+    }
 }
 
 RDGBuilder::RDGBuilder(ObjectArena& arena) noexcept : _arena(arena), _data(*arena.Emplace<detail::RDGData>()) {}
 
-RDGTextureHandle RDGBuilder::ImportTexture(render::Texture* texture, render::TextureState initialState, std::optional<render::TextureState> finalState) {
+RDGTextureHandle RDGBuilder::ImportTexture(render::Texture* texture, render::TextureState initialState, std::optional<render::TextureState> finalState, RDGExternalOwnership ownership) {
     RequireOpen(_data);
     for (uint32_t i = 0; i < _data.Textures.size(); ++i) {
         auto& previous = _data.Textures[i];
         if (previous.Imported.Get() != texture) continue;
-        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState)) Fail(_data, "inconsistent duplicate texture import");
+        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState) || previous.Ownership != ownership) Fail(_data, "inconsistent duplicate texture import");
         if (finalState) previous.FinalState = finalState;
         return {i};
     }
     const auto index = static_cast<uint32_t>(_data.Textures.size());
-    _data.Textures.push_back({.Desc = texture->GetDesc(), .Imported = texture, .InitialState = initialState, .FinalState = finalState});
+    _data.Textures.push_back({.Desc = texture->GetDesc(), .Imported = texture, .InitialState = initialState, .FinalState = finalState, .Ownership = ownership});
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::ImportBuffer(render::Buffer* buffer, render::BufferState initialState, std::optional<render::BufferState> finalState) {
+RDGBufferHandle RDGBuilder::ImportBuffer(render::Buffer* buffer, render::BufferState initialState, std::optional<render::BufferState> finalState, RDGExternalOwnership ownership) {
     RequireOpen(_data);
     for (uint32_t i = 0; i < _data.Buffers.size(); ++i) {
         auto& previous = _data.Buffers[i];
         if (previous.Imported.Get() != buffer) continue;
-        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState)) Fail(_data, "inconsistent duplicate buffer import");
+        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState) || previous.Ownership != ownership) Fail(_data, "inconsistent duplicate buffer import");
         if (finalState) previous.FinalState = finalState;
         return {i};
     }
     const auto index = static_cast<uint32_t>(_data.Buffers.size());
-    _data.Buffers.push_back({.Desc = buffer->GetDesc(), .Imported = buffer, .InitialState = initialState, .FinalState = finalState});
+    _data.Buffers.push_back({.Desc = buffer->GetDesc(), .Imported = buffer, .InitialState = initialState, .FinalState = finalState, .Ownership = ownership});
     return {index};
 }
 
@@ -783,54 +815,64 @@ RDGRasterPassBuilder& RDGRasterPassBuilder::SetDepthStencil(RDGTextureHandle tex
 }
 
 Nullable<CompiledRDG*> RDGBuilder::Compile() {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile");
+    RADRAY_PROFILE_PLOT("RadRay.RDG.DeclaredPasses", static_cast<int64_t>(_data.Passes.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.DeclaredTextures", static_cast<int64_t>(_data.Textures.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.DeclaredBuffers", static_cast<int64_t>(_data.Buffers.size()));
     RequireOpen(_data);
     _data.Sealed = true;
     if (_data.Failed) return nullptr;
-    for (const auto& resource : _data.Textures) {
-        const auto& d = resource.Desc;
-        if (!d.Width || !d.Height || !d.DepthOrArraySize || !d.MipLevels || !d.SampleCount || d.Dim == render::TextureDimension::UNKNOWN || d.Format == render::TextureFormat::UNKNOWN ||
-            (resource.Imported && (!ValidTextureState(d, resource.InitialState) || (resource.FinalState && !ValidTextureState(d, *resource.FinalState))))) Fail(_data, "invalid texture descriptor or boundary state");
-    }
-    for (const auto& resource : _data.Buffers) {
-        if (!resource.Desc.Size || (resource.Imported && (!ValidBufferState(resource.Desc, resource.InitialState) ||
-                                                          (resource.FinalState && !ValidBufferState(resource.Desc, *resource.FinalState))))) Fail(_data, "invalid buffer descriptor or boundary state");
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile.ValidateResources");
+        for (const auto& resource : _data.Textures) {
+            const auto& d = resource.Desc;
+            if (!d.Width || !d.Height || !d.DepthOrArraySize || !d.MipLevels || !d.SampleCount || d.Dim == render::TextureDimension::UNKNOWN || d.Format == render::TextureFormat::UNKNOWN ||
+                (resource.Imported && (!ValidTextureState(d, resource.InitialState) || (resource.FinalState && !ValidTextureState(d, *resource.FinalState))))) Fail(_data, "invalid texture descriptor or boundary state");
+        }
+        for (const auto& resource : _data.Buffers) {
+            if (!resource.Desc.Size || (resource.Imported && (!ValidBufferState(resource.Desc, resource.InitialState) ||
+                                                              (resource.FinalState && !ValidBufferState(resource.Desc, *resource.FinalState))))) Fail(_data, "invalid buffer descriptor or boundary state");
+        }
     }
     vector<uint32_t> seenData(_data.Passes.size(), std::numeric_limits<uint32_t>::max());
     vector<uint32_t> seenOrder(_data.Passes.size(), std::numeric_limits<uint32_t>::max());
-    for (uint32_t index = 0; index < _data.Passes.size(); ++index) {
-        auto& pass = _data.Passes[index];
-        const auto addEdge = [index](auto& dependencies, auto& seen, uint32_t predecessor) {
-            if (seen[predecessor] == index) return;
-            seen[predecessor] = index;
-            dependencies.push_back(predecessor);
-        };
-        std::sort(pass.Colors.begin(), pass.Colors.end(), [](const auto& a, const auto& b) { return a.Slot < b.Slot; });
-        ValidateAttachments(_data, pass);
-        for (const auto& access : pass.Accesses) {
-            if (!ValidAccess(_data, pass, access)) Fail(_data, fmt::format("pass '{}': {}#{} state {} is incompatible with usage, access mode or pass kind", pass.Name, access.Texture ? "texture" : "buffer", access.Index, access.State));
-            auto& lastWriter = access.Texture ? _data.Textures[access.Index].LastWriter : _data.Buffers[access.Index].LastWriter;
-            const bool imported = access.Texture ? bool(_data.Textures[access.Index].Imported) : bool(_data.Buffers[access.Index].Imported);
-            const bool undefined = access.Texture ? _data.Textures[access.Index].InitialState == render::TextureState::Undefined : _data.Buffers[access.Index].InitialState == render::BufferState::Undefined;
-            if (access.Read && !lastWriter && (!imported || undefined)) Fail(_data, "resource read before initialization");
-            auto& readers = access.Texture ? _data.Textures[access.Index].Readers : _data.Buffers[access.Index].Readers;
-            if ((access.Read || access.Preserve) && lastWriter) addEdge(pass.DataDependencies, seenData, *lastWriter);
-            if (access.Write) {
-                if (!access.Read && !access.Preserve && lastWriter) addEdge(pass.OrderDependencies, seenOrder, *lastWriter);
-                for (const auto reader : readers) addEdge(pass.OrderDependencies, seenOrder, reader);
-                lastWriter = index;
-                readers.clear();
-            } else if (access.Read) {
-                readers.push_back(index);
-            }
-            if (!access.Texture && _data.Buffers[access.Index].Desc.Memory == render::MemoryType::Upload && pass.Kind == RDGPassKind::Upload) {
-                for (uint32_t earlier = 0; earlier < index; ++earlier) {
-                    const auto& previous = _data.Passes[earlier];
-                    for (const auto& oldAccess : previous.Accesses) {
-                        if (oldAccess.Texture || oldAccess.Index != access.Index) continue;
-                        if (previous.Kind != RDGPassKind::Upload)
-                            Fail(_data, "direct upload must precede GPU access");
-                        else if (pass.UploadOffset < previous.UploadOffset + previous.UploadBytes.size() && previous.UploadOffset < pass.UploadOffset + pass.UploadBytes.size())
-                            Fail(_data, "overlapping direct upload ranges");
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile.Dependencies");
+        for (uint32_t index = 0; index < _data.Passes.size(); ++index) {
+            auto& pass = _data.Passes[index];
+            const auto addEdge = [index](auto& dependencies, auto& seen, uint32_t predecessor) {
+                if (seen[predecessor] == index) return;
+                seen[predecessor] = index;
+                dependencies.push_back(predecessor);
+            };
+            std::sort(pass.Colors.begin(), pass.Colors.end(), [](const auto& a, const auto& b) { return a.Slot < b.Slot; });
+            ValidateAttachments(_data, pass);
+            for (const auto& access : pass.Accesses) {
+                if (!ValidAccess(_data, pass, access)) Fail(_data, fmt::format("pass '{}': {}#{} state {} is incompatible with usage, access mode or pass kind", pass.Name, access.Texture ? "texture" : "buffer", access.Index, access.State));
+                auto& lastWriter = access.Texture ? _data.Textures[access.Index].LastWriter : _data.Buffers[access.Index].LastWriter;
+                const bool imported = access.Texture ? bool(_data.Textures[access.Index].Imported) : bool(_data.Buffers[access.Index].Imported);
+                const bool undefined = access.Texture ? _data.Textures[access.Index].InitialState == render::TextureState::Undefined : _data.Buffers[access.Index].InitialState == render::BufferState::Undefined;
+                if (access.Read && !lastWriter && (!imported || undefined)) Fail(_data, "resource read before initialization");
+                auto& readers = access.Texture ? _data.Textures[access.Index].Readers : _data.Buffers[access.Index].Readers;
+                if ((access.Read || access.Preserve) && lastWriter) addEdge(pass.DataDependencies, seenData, *lastWriter);
+                if (access.Write) {
+                    if (!access.Read && !access.Preserve && lastWriter) addEdge(pass.OrderDependencies, seenOrder, *lastWriter);
+                    for (const auto reader : readers) addEdge(pass.OrderDependencies, seenOrder, reader);
+                    lastWriter = index;
+                    readers.clear();
+                } else if (access.Read) {
+                    readers.push_back(index);
+                }
+                if (!access.Texture && _data.Buffers[access.Index].Desc.Memory == render::MemoryType::Upload && pass.Kind == RDGPassKind::Upload) {
+                    for (uint32_t earlier = 0; earlier < index; ++earlier) {
+                        const auto& previous = _data.Passes[earlier];
+                        for (const auto& oldAccess : previous.Accesses) {
+                            if (oldAccess.Texture || oldAccess.Index != access.Index) continue;
+                            if (previous.Kind != RDGPassKind::Upload)
+                                Fail(_data, "direct upload must precede GPU access");
+                            else if (pass.UploadOffset < previous.UploadOffset + previous.UploadBytes.size() && previous.UploadOffset < pass.UploadOffset + pass.UploadBytes.size())
+                                Fail(_data, "overlapping direct upload ranges");
+                        }
                     }
                 }
             }
@@ -838,43 +880,49 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
     }
     if (_data.Failed) return nullptr;
     vector<uint32_t> pending;
-    for (uint32_t i = 0; i < _data.Passes.size(); ++i) {
-        if (_data.Passes[i].NeverCull) pending.push_back(i);
-    }
-    const auto roots = [&](auto& resources) {
-        for (auto& resource : resources) {
-            if (!resource.Output) continue;
-            resource.Alive = true;
-            if (resource.LastWriter)
-                pending.push_back(*resource.LastWriter);
-            else if (!resource.Imported)
-                Fail(_data, "transient output has no writer");
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile.Cull");
+        for (uint32_t i = 0; i < _data.Passes.size(); ++i) {
+            if (_data.Passes[i].NeverCull) pending.push_back(i);
         }
-    };
-    roots(_data.Textures);
-    roots(_data.Buffers);
-    if (_data.Failed) return nullptr;
-    while (!pending.empty()) {
-        const auto index = pending.back();
-        pending.pop_back();
-        auto& pass = _data.Passes[index];
-        if (pass.Alive) continue;
-        pass.Alive = true;
-        pending.insert(pending.end(), pass.DataDependencies.begin(), pass.DataDependencies.end());
-    }
-    for (const auto& pass : _data.Passes) {
-        if (!pass.Alive) continue;
-        for (const auto& access : pass.Accesses) {
-            if (access.Texture)
-                _data.Textures[access.Index].Alive = true;
-            else
-                _data.Buffers[access.Index].Alive = true;
+        const auto roots = [&](auto& resources) {
+            for (auto& resource : resources) {
+                if (!resource.Output) continue;
+                resource.Alive = true;
+                if (resource.LastWriter)
+                    pending.push_back(*resource.LastWriter);
+                else if (!resource.Imported)
+                    Fail(_data, "transient output has no writer");
+            }
+        };
+        roots(_data.Textures);
+        roots(_data.Buffers);
+        if (_data.Failed) return nullptr;
+        while (!pending.empty()) {
+            const auto index = pending.back();
+            pending.pop_back();
+            auto& pass = _data.Passes[index];
+            if (pass.Alive) continue;
+            pass.Alive = true;
+            pending.insert(pending.end(), pass.DataDependencies.begin(), pass.DataDependencies.end());
         }
-        for (const auto meshPass : pass.MeshPasses) {
-            if (std::find(_data.AliveMeshPasses.begin(), _data.AliveMeshPasses.end(), meshPass) == _data.AliveMeshPasses.end()) _data.AliveMeshPasses.push_back(meshPass);
+        for (const auto& pass : _data.Passes) {
+            if (!pass.Alive) continue;
+            for (const auto& access : pass.Accesses) {
+                if (access.Texture)
+                    _data.Textures[access.Index].Alive = true;
+                else
+                    _data.Buffers[access.Index].Alive = true;
+            }
+            for (const auto meshPass : pass.MeshPasses) {
+                if (std::find(_data.AliveMeshPasses.begin(), _data.AliveMeshPasses.end(), meshPass) == _data.AliveMeshPasses.end()) _data.AliveMeshPasses.push_back(meshPass);
+            }
         }
     }
     if (!SchedulePasses(_data)) return nullptr;
+    RADRAY_PROFILE_PLOT("RadRay.RDG.AlivePasses", static_cast<int64_t>(_data.ScheduledPasses.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.ExecutionGroups", static_cast<int64_t>(_data.Groups.size()));
+    RADRAY_PROFILE_PLOT("RadRay.RDG.AliveMeshPasses", static_cast<int64_t>(_data.AliveMeshPasses.size()));
     return _arena.Emplace<CompiledRDG>(_data);
 }
 
@@ -882,72 +930,87 @@ CompiledRDG::CompiledRDG(detail::RDGData& data) noexcept : _data(data) {}
 std::span<const MeshPassId> CompiledRDG::GetAliveMeshPasses() const noexcept { return _data.AliveMeshPasses; }
 
 bool CompiledRDG::Execute(FrameSlot& slot, RDGTransientResourcePool& pool, render::CommandBuffer& command) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Execute");
     if (_executed) {
         RADRAY_ERR_LOG("RDG: graph already executed");
         return false;
     }
     _executed = true;
     RDGExecution execution{_data, slot, pool, command, {}, {}};
-    execution.Textures.resize(_data.Textures.size());
-    execution.Buffers.resize(_data.Buffers.size());
-    for (size_t i = 0; i < _data.Textures.size(); ++i) {
-        const auto& resource = _data.Textures[i];
-        if (!resource.Alive) continue;
-        const auto allocation = resource.Imported ? RDGTransientTextureAllocation{resource.Imported, resource.InitialState} : pool.AcquireTexture(resource.Desc);
-        if (!allocation.Texture) return false;
-        execution.Textures[i] = {allocation.Texture, allocation.LastState, IsWriteState(allocation.LastState)};
-    }
-    for (size_t i = 0; i < _data.Buffers.size(); ++i) {
-        const auto& resource = _data.Buffers[i];
-        if (!resource.Alive) continue;
-        const auto allocation = resource.Imported ? RDGTransientBufferAllocation{resource.Imported, resource.InitialState} : pool.AcquireBuffer(resource.Desc);
-        if (!allocation.Buffer) return false;
-        execution.Buffers[i] = {allocation.Buffer, allocation.LastState, IsWriteState(allocation.LastState)};
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.AcquireResources");
+        execution.Textures.resize(_data.Textures.size());
+        execution.Buffers.resize(_data.Buffers.size());
+        for (size_t i = 0; i < _data.Textures.size(); ++i) {
+            const auto& resource = _data.Textures[i];
+            if (!resource.Alive) continue;
+            const auto allocation = resource.Imported ? RDGTransientTextureAllocation{resource.Imported, resource.InitialState} : pool.AcquireTexture(resource.Desc);
+            if (!allocation.Texture) return false;
+            execution.Textures[i] = {allocation.Texture, allocation.LastState, IsWriteState(allocation.LastState), resource.Ownership.Acquire, resource.Ownership.Release};
+        }
+        for (size_t i = 0; i < _data.Buffers.size(); ++i) {
+            const auto& resource = _data.Buffers[i];
+            if (!resource.Alive) continue;
+            const auto allocation = resource.Imported ? RDGTransientBufferAllocation{resource.Imported, resource.InitialState} : pool.AcquireBuffer(resource.Desc);
+            if (!allocation.Buffer) return false;
+            execution.Buffers[i] = {allocation.Buffer, allocation.LastState, IsWriteState(allocation.LastState), resource.Ownership.Acquire, resource.Ownership.Release};
+        }
     }
     vector<render::ResourceBarrierDescriptor> barriers;
     vector<size_t> seen(_data.Textures.size() + _data.Buffers.size(), std::numeric_limits<size_t>::max());
     for (size_t groupIndex = 0; groupIndex < _data.Groups.size(); ++groupIndex) {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.ExecuteGroup");
         const auto& group = _data.Groups[groupIndex];
-        barriers.clear();
         bool uav = false;
-        for (const auto passIndex : group.Passes) {
-            for (const auto& access : _data.Passes[passIndex].Accesses) {
-                uav |= access.Write && access.State == (access.Texture ? static_cast<uint32_t>(render::TextureState::UnorderedAccess) : static_cast<uint32_t>(render::BufferState::UnorderedAccess));
-                auto& stamp = seen[AccessIndex(_data, access)];
-                if (stamp == groupIndex) {
+        {
+            RADRAY_PROFILE_SCOPE_N("RadRay.RDG.GroupBarriers");
+            barriers.clear();
+            for (const auto passIndex : group.Passes) {
+                for (const auto& access : _data.Passes[passIndex].Accesses) {
+                    uav |= access.Write && access.State == (access.Texture ? static_cast<uint32_t>(render::TextureState::UnorderedAccess) : static_cast<uint32_t>(render::BufferState::UnorderedAccess));
+                    auto& stamp = seen[AccessIndex(_data, access)];
+                    if (stamp == groupIndex) {
+                        if (access.Texture)
+                            execution.Textures[access.Index].PendingWrite |= access.Write;
+                        else
+                            execution.Buffers[access.Index].PendingWrite |= access.Write;
+                        continue;
+                    }
+                    stamp = groupIndex;
                     if (access.Texture)
-                        execution.Textures[access.Index].PendingWrite |= access.Write;
+                        TransitionTexture(execution, access.Index, static_cast<render::TextureState>(access.State), access.Write, barriers);
                     else
-                        execution.Buffers[access.Index].PendingWrite |= access.Write;
-                    continue;
+                        TransitionBuffer(execution, access.Index, static_cast<render::BufferState>(access.State), access.Write, barriers);
                 }
-                stamp = groupIndex;
-                if (access.Texture)
-                    TransitionTexture(execution, access.Index, static_cast<render::TextureState>(access.State), access.Write, barriers);
-                else
-                    TransitionBuffer(execution, access.Index, static_cast<render::BufferState>(access.State), access.Write, barriers);
             }
+            if (!barriers.empty()) command.ResourceBarrier(barriers);
+            RADRAY_PROFILE_PLOT("RadRay.RDG.GroupBarriers", static_cast<int64_t>(barriers.size()));
         }
-        if (!barriers.empty()) command.ResourceBarrier(barriers);
         const auto& first = _data.Passes[group.Passes.front()];
         const auto& last = _data.Passes[group.Passes.back()];
         execution.Pass = &first;
         bool result = false;
         if (group.Kind == RDGPassKind::Upload || group.Kind == RDGPassKind::Copy) {
-            command.PushDebugGroup(first.Name);
-            if (group.Kind == RDGPassKind::Upload)
-                result = ExecuteUpload(execution, first);
-            else {
-                RDGCopyPassContext ctx{execution};
-                result = first.CopyExecute.Get()(first.Callback.Get(), ctx);
+            RADRAY_PROFILE_SCOPE_N("RadRay.RDG.RecordCopyOrUpload");
+            {
+                RADRAY_PROFILE_SCOPE_DYN(first.Name);
+                command.PushDebugGroup(first.Name);
+                if (group.Kind == RDGPassKind::Upload)
+                    result = ExecuteUpload(execution, first);
+                else {
+                    RDGCopyPassContext ctx{execution};
+                    result = first.CopyExecute.Get()(first.Callback.Get(), ctx);
+                }
+                command.PopDebugGroup();
             }
-            command.PopDebugGroup();
         } else if (group.Kind == RDGPassKind::Compute) {
+            RADRAY_PROFILE_SCOPE_N("RadRay.RDG.RecordCompute");
             auto encoder = command.BeginComputePass();
             if (encoder) {
                 RDGComputePassContext ctx{execution, *encoder};
                 for (const auto passIndex : group.Passes) {
                     const auto& pass = _data.Passes[passIndex];
+                    RADRAY_PROFILE_SCOPE_DYN(pass.Name);
                     execution.Pass = &pass;
                     command.PushDebugGroup(pass.Name);
                     result = pass.ComputeExecute.Get()(pass.Callback.Get(), ctx);
@@ -957,25 +1020,29 @@ bool CompiledRDG::Execute(FrameSlot& slot, RDGTransientResourcePool& pool, rende
                 command.EndComputePass(encoder.Release());
             }
         } else {
+            RADRAY_PROFILE_SCOPE_N("RadRay.RDG.RecordRaster");
             vector<render::RenderPassColorAttachment> colors;
             std::optional<render::RenderPassDepthStencilAttachment> depth;
             bool valid = true;
-            for (size_t i = 0; i < first.Colors.size(); ++i) {
-                const auto& attachment = first.Colors[i];
-                const auto view = attachment.View ? attachment.View : ResolveTextureView(execution, attachment.Texture, render::TextureViewUsage::RenderTarget);
-                if (!view) {
-                    valid = false;
-                    break;
+            {
+                RADRAY_PROFILE_SCOPE_N("RadRay.RDG.ResolveAttachments");
+                for (size_t i = 0; i < first.Colors.size(); ++i) {
+                    const auto& attachment = first.Colors[i];
+                    const auto view = attachment.View ? attachment.View : ResolveTextureView(execution, attachment.Texture, render::TextureViewUsage::RenderTarget);
+                    if (!view) {
+                        valid = false;
+                        break;
+                    }
+                    colors.push_back({view.Get(), attachment.Load, last.Colors[i].Store, attachment.Clear});
                 }
-                colors.push_back({view.Get(), attachment.Load, last.Colors[i].Store, attachment.Clear});
-            }
-            if (first.Depth) {
-                const auto& attachment = *first.Depth;
-                const auto view = attachment.View ? attachment.View : ResolveTextureView(execution, attachment.Texture, DepthUsage(attachment.State));
-                if (!view)
-                    valid = false;
-                else
-                    depth = {view.Get(), attachment.DepthLoad, last.Depth->DepthStore, attachment.StencilLoad, last.Depth->StencilStore, attachment.Clear};
+                if (first.Depth) {
+                    const auto& attachment = *first.Depth;
+                    const auto view = attachment.View ? attachment.View : ResolveTextureView(execution, attachment.Texture, DepthUsage(attachment.State));
+                    if (!view)
+                        valid = false;
+                    else
+                        depth = {view.Get(), attachment.DepthLoad, last.Depth->DepthStore, attachment.StencilLoad, last.Depth->StencilStore, attachment.Clear};
+                }
             }
             if (valid) {
                 auto encoder = command.BeginRenderPass({.Colors = colors, .DepthStencil = depth, .Width = first.Width, .Height = first.Height, .Layers = first.Layers, .Name = first.Name, .AllowUavWrites = uav});
@@ -983,6 +1050,7 @@ bool CompiledRDG::Execute(FrameSlot& slot, RDGTransientResourcePool& pool, rende
                     RDGRasterPassContext ctx{execution, *encoder};
                     for (const auto passIndex : group.Passes) {
                         const auto& pass = _data.Passes[passIndex];
+                        RADRAY_PROFILE_SCOPE_DYN(pass.Name);
                         execution.Pass = &pass;
                         command.PushDebugGroup(pass.Name);
                         encoder->SetStencilReference(0);
@@ -999,20 +1067,36 @@ bool CompiledRDG::Execute(FrameSlot& slot, RDGTransientResourcePool& pool, rende
             return false;
         }
     }
-    barriers.clear();
-    for (uint32_t i = 0; i < _data.Textures.size(); ++i) {
-        const auto& resource = _data.Textures[i];
-        if (!resource.Alive) continue;
-        if (resource.FinalState) TransitionTexture(execution, i, *resource.FinalState, false, barriers);
-        if (!resource.Imported) pool.CommitTextureState(execution.Textures[i].Resource.Get(), execution.Textures[i].CurrentState);
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.RDG.FinalizeStates");
+        barriers.clear();
+        for (uint32_t i = 0; i < _data.Textures.size(); ++i) {
+            const auto& resource = _data.Textures[i];
+            if (!resource.Alive) continue;
+            if (resource.FinalState || execution.Textures[i].PendingExternalAcquire) TransitionTexture(execution, i, resource.FinalState.value_or(execution.Textures[i].CurrentState), false, barriers);
+            if (!resource.Imported) pool.CommitTextureState(execution.Textures[i].Resource.Get(), execution.Textures[i].CurrentState);
+        }
+        for (uint32_t i = 0; i < _data.Buffers.size(); ++i) {
+            const auto& resource = _data.Buffers[i];
+            if (!resource.Alive) continue;
+            if (resource.FinalState || execution.Buffers[i].PendingExternalAcquire) TransitionBuffer(execution, i, resource.FinalState.value_or(execution.Buffers[i].CurrentState), false, barriers);
+            if (!resource.Imported) pool.CommitBufferState(execution.Buffers[i].Resource.Get(), execution.Buffers[i].CurrentState);
+        }
+        if (!barriers.empty()) command.ResourceBarrier(barriers);
+        RADRAY_PROFILE_PLOT("RadRay.RDG.FinalBarriers", static_cast<int64_t>(barriers.size()));
+        barriers.clear();
+        for (auto& resource : execution.Textures) {
+            if (!resource.NeedsExternalRelease) continue;
+            barriers.emplace_back(render::BarrierTextureDescriptor{.Target = resource.Resource.Get(), .Before = resource.CurrentState, .After = resource.CurrentState, .ExternalTransfer = render::ExternalOwnershipTransfer::Release});
+            resource.NeedsExternalRelease = false;
+        }
+        for (auto& resource : execution.Buffers) {
+            if (!resource.NeedsExternalRelease) continue;
+            barriers.emplace_back(render::BarrierBufferDescriptor{.Target = resource.Resource.Get(), .Before = resource.CurrentState, .After = resource.CurrentState, .ExternalTransfer = render::ExternalOwnershipTransfer::Release});
+            resource.NeedsExternalRelease = false;
+        }
+        if (!barriers.empty()) command.ResourceBarrier(barriers);
     }
-    for (uint32_t i = 0; i < _data.Buffers.size(); ++i) {
-        const auto& resource = _data.Buffers[i];
-        if (!resource.Alive) continue;
-        if (resource.FinalState) TransitionBuffer(execution, i, *resource.FinalState, false, barriers);
-        if (!resource.Imported) pool.CommitBufferState(execution.Buffers[i].Resource.Get(), execution.Buffers[i].CurrentState);
-    }
-    if (!barriers.empty()) command.ResourceBarrier(barriers);
     return true;
 }
 

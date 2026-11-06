@@ -3,6 +3,7 @@
 #include <limits>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -37,6 +38,8 @@ void FrameScheduler::RunFrame(Scene& source) noexcept { RunFrameImpl(source, &so
 void FrameScheduler::RunFrame(const Scene& source) noexcept { RunFrameImpl(source, nullptr); }
 
 void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableSource) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.RunFrame");
+    RADRAY_PROFILE_PLOT("RadRay.FrameScheduler.Slot", static_cast<int64_t>(_currentSlotIndex));
     if (_nextFrameId == std::numeric_limits<uint64_t>::max()) {
         RADRAY_ABORT("FrameScheduler: frame IDs exhausted");
     }
@@ -46,12 +49,14 @@ void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableS
     slot.ResetRetiredResources();
     slot.ResetFrameData();
     slot._frameId = _nextFrameId;
-    if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(_pipeline->GetMeshPassRegistrations());
+    const auto passes = _pipeline->GetMeshPassRegistrations();
+    if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(passes);
+    for (const auto& pass : passes) slot.GetPassDrawList(pass.Pass).SetSortMode(pass.SortMode);
 #if RADRAY_IS_DEBUG
     slot._inFrameCallback = true;
 #endif
     _pipeline->Extract(source, slot);
-    _pipeline->Record(slot);
+    _pipeline->Record(source, slot);
 #if RADRAY_IS_DEBUG
     slot._inFrameCallback = false;
 #endif
@@ -61,6 +66,7 @@ void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableS
 }
 
 void FrameScheduler::WaitIdle() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitIdle");
     for (const auto& slot : _slots) WaitSlot(*slot);
     for (const auto& slot : _slots) slot->ResetCommandStorage();
     for (const auto& slot : _slots) slot->ResetRetiredResources();
@@ -69,6 +75,7 @@ void FrameScheduler::WaitIdle() noexcept {
 
 void FrameScheduler::WaitSlot(FrameSlot& slot) noexcept {
     if (!slot._inFlight) return;
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitSlot");
     _pipeline->Wait(slot);
     slot._inFlight = false;
 }

@@ -11,8 +11,8 @@ namespace {
 
 bool ExtractMaterialColor(const Scene& scene, SparseSetHandle materialHandle,
                           MaterialParameterIndices parameters, MaterialConstants& outConstants) {
-    if (!scene.Materials.IsAlive(materialHandle)) return false;
-    const auto& proxy = scene.Materials.Get(materialHandle);
+    if (!scene.GetMaterial(materialHandle)) return false;
+    const auto& proxy = (*scene.GetMaterial(materialHandle));
     const auto baseValue = proxy.GetParameter(parameters.BaseColor);
     const auto brightnessValue = proxy.GetParameter(parameters.Brightness);
     const Nullable<const array<float, 4>*> baseColor = baseValue ? std::get_if<array<float, 4>>(baseValue.Get()) : nullptr;
@@ -35,12 +35,12 @@ void LogSkipped(std::string_view passName, const MeshBatchContext& context, cons
 
 bool AcceptsMaterial(const Scene& scene, const MeshBatchContext& context, const BatchPassPolicy& policy,
                      MaterialTagFilter filter, std::string_view passName, bool& hasErrors) {
-    if (!scene.Materials.IsAlive(context.Batch.Material)) {
+    if (!scene.GetMaterial(context.Batch.Material)) {
         RADRAY_ERR_LOG("材质句柄失效：{}", context.Batch.Material);
         hasErrors = true;
         return false;
     }
-    const auto resource = scene.Materials.Get(context.Batch.Material).GetResource();
+    const auto resource = (*scene.GetMaterial(context.Batch.Material)).GetResource();
     if (!resource) {
         RADRAY_ERR_LOG("材质尚未同步到 Proxy");
         hasErrors = true;
@@ -65,11 +65,11 @@ bool AcceptsMaterial(const Scene& scene, const MeshBatchContext& context, const 
 
 Nullable<const MaterialPipelines*> FindMaterialPipelines(
     const Scene& scene, SparseSetHandle material, std::span<const MaterialPipelines> pipelines) {
-    if (!scene.Materials.IsAlive(material)) {
+    if (!scene.GetMaterial(material)) {
         RADRAY_ERR_LOG("材质句柄失效：{}", material);
         return nullptr;
     }
-    const auto resource = scene.Materials.Get(material).GetResource();
+    const auto resource = (*scene.GetMaterial(material)).GetResource();
     for (const auto& entry : pipelines) {
         if (entry.Resource == resource.Get()) return &entry;
     }
@@ -224,12 +224,12 @@ bool PreparePassDrawCommands(MeshPassId passId, const Scene& scene,
     if (passId.Value >= passNames.size() || primitives.size() > std::numeric_limits<uint32_t>::max()) return false;
     for (size_t primitiveIndex = 0; primitiveIndex < primitives.size(); ++primitiveIndex) {
         const auto primitiveHandle = primitives[primitiveIndex];
-        if (!scene.Primitives.IsAlive(primitiveHandle)) return false;
-        const auto& primitive = scene.Primitives.Get(primitiveHandle);
+        if (!scene.GetPrimitive(primitiveHandle)) return false;
+        const auto& primitive = (*scene.GetPrimitive(primitiveHandle));
         for (const auto batchHandle : primitive.Meshes) {
-            if (!scene.Meshes.IsAlive(batchHandle)) return false;
-            const auto& batch = scene.Meshes.Get(batchHandle);
-            if (std::none_of(batch.CachedCommands.begin(), batch.CachedCommands.end(), [&](const CachedMeshDrawCommandInfo& info) { return info.Pass == passId; })) continue;
+            if (!scene.GetMeshBatch(batchHandle)) return false;
+            const auto cache = scene.GetPassCache(passId);
+            if (!cache || !cache->GetCommand(batchHandle.Index)) continue;
             const VisibleMeshBatch visible{
                 .Batch = batchHandle,
                 .FirstInstanceOverride = static_cast<uint32_t>(primitiveIndex)};
@@ -237,12 +237,8 @@ bool PreparePassDrawCommands(MeshPassId passId, const Scene& scene,
             if (!scene.GatherVisibleMeshDrawCommands(passId, std::span{&visible, 1}, output)) return false;
             const auto policy = FindPolicy(policies, batchHandle);
             if (!policy) return false;
-            size_t drawIndex = firstCommand;
-            for (const auto& info : batch.CachedCommands) {
-                if (info.Pass != passId) continue;
-                RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} Element={} → Draw={}，CommandHandle={}",
-                                passNames[passId.Value], policy->ObjectName, primitiveHandle, batchHandle, info.ElementIndex, drawIndex++, info.CommandHandle);
-            }
+            RADRAY_INFO_LOG("{} Pass 接受：对象={} Primitive={} Batch={} ElementMask={} → BatchCommand={}",
+                            passNames[passId.Value], policy->ObjectName, primitiveHandle, batchHandle, output.VisibleCommands[firstCommand].ElementMask, firstCommand);
         }
     }
     return true;
@@ -262,7 +258,7 @@ MeshDrawingFramePipeline::MeshDrawingFramePipeline(GpuResources& gpu, const Scen
       _outlineProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.OpaqueTag, "材质缺少或不匹配 Surface=Opaque"},
                         {&gpu.MaterialTags, gpu.OutlineTag, "材质缺少或不匹配 Outline=Enabled"}),
       _transparentProcessor(_defaultOutput, scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.TransparentTag, "材质缺少或不匹配 Surface=Transparent"}, parameters),
-      _passes{{{{0}, &_depthProcessor}, {{1}, &_colorProcessor}, {{2}, &_outlineProcessor}, {{3}, &_transparentProcessor}}},
+      _passes{{{{0}, &_depthProcessor}, {{1}, &_colorProcessor}, {{2}, &_outlineProcessor}, {{3}, &_transparentProcessor, MeshPassSortMode::DepthFirst}}},
       _payloads(slotCount) {}
 
 bool MeshDrawingFramePipeline::Initialize() {
@@ -290,8 +286,8 @@ void MeshDrawingFramePipeline::ExtractFrameData(const Scene& source, FrameSlot& 
     _payloads[slot.GetIndex()] = payload;
     payload->Instances.reserve(_candidates.size());
     for (const auto handle : _candidates) {
-        if (!source.Primitives.IsAlive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
-        const Eigen::Matrix4f matrix = source.Primitives.Get(handle).LocalToWorld.ToMatrix();
+        if (!source.GetPrimitive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
+        const Eigen::Matrix4f matrix = (*source.GetPrimitive(handle)).LocalToWorld.ToMatrix();
         auto& instance = payload->Instances.emplace_back();
         std::memcpy(instance.LocalToWorld.data(), matrix.data(), sizeof(InstanceData));
     }
@@ -305,7 +301,7 @@ void MeshDrawingFramePipeline::ExtractFrameData(const Scene& source, FrameSlot& 
     }
 }
 
-void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept {
+void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, const Scene&, FrameSlot& slot) noexcept {
     const auto slotIndex = slot.GetIndex();
     auto& resources = *_frames[slotIndex];
     const auto& payload = *_payloads[slotIndex];

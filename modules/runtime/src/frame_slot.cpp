@@ -4,46 +4,82 @@
 #include <limits>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/gpu_device.h>
 
 namespace radray {
 
-MeshPassFrameDrawList::MeshPassFrameDrawList() noexcept : DynamicContext(VisibleCommands) {}
+MeshPassFrameDrawList::MeshPassFrameDrawList(MeshPassSortMode mode) noexcept : DynamicContext(VisibleCommands, mode) {}
+
+void MeshPassFrameDrawList::SetSortMode(MeshPassSortMode mode) noexcept {
+    RADRAY_ASSERT(VisibleCommands.empty() || GetSortMode() == mode);
+    DynamicContext.SetSortMode(mode);
+}
 
 MeshPassFrameDrawList::MeshPassFrameDrawList(MeshPassFrameDrawList&& other) noexcept
-    : CachedCommands(std::move(other.CachedCommands)), VisibleCommands(std::move(other.VisibleCommands)), DynamicContext(std::move(other.DynamicContext)) {
+    : VisibleCommands(std::move(other.VisibleCommands)), DynamicContext(std::move(other.DynamicContext)), _scratchCommands(std::move(other._scratchCommands)) {
     DynamicContext.BindVisibleCommands(VisibleCommands);
 }
 
 MeshPassFrameDrawList& MeshPassFrameDrawList::operator=(MeshPassFrameDrawList&& other) noexcept {
     if (this != &other) {
-        CachedCommands = std::move(other.CachedCommands);
         VisibleCommands = std::move(other.VisibleCommands);
         DynamicContext = std::move(other.DynamicContext);
+        _scratchCommands = std::move(other._scratchCommands);
         DynamicContext.BindVisibleCommands(VisibleCommands);
     }
     return *this;
 }
 
 void MeshPassFrameDrawList::SortVisibleCommands() {
-    std::stable_sort(VisibleCommands.begin(), VisibleCommands.end(), [](const VisibleMeshDrawCommand& left, const VisibleMeshDrawCommand& right) {
-        return left.SortKey < right.SortKey;
-    });
+    DynamicContext.FinalizeVisibleCommands();
+    RADRAY_PROFILE_SCOPE_N("RadRay.DrawList.SortVisible");
+    RADRAY_PROFILE_PLOT("RadRay.DrawList.SortCommands", static_cast<int64_t>(VisibleCommands.size()));
+    if (VisibleCommands.size() <= 64) {
+        for (size_t index = 1; index < VisibleCommands.size(); ++index) {
+            const auto value = VisibleCommands[index];
+            auto position = index;
+            while (position != 0 && VisibleCommands[position - 1].SortKey > value.SortKey) {
+                VisibleCommands[position] = VisibleCommands[position - 1];
+                --position;
+            }
+            VisibleCommands[position] = value;
+        }
+        return;
+    }
+    _scratchCommands.resize(VisibleCommands.size());
+    uint64_t differing = 0;
+    for (const auto& command : VisibleCommands) differing |= command.SortKey ^ VisibleCommands.front().SortKey;
+    auto source = VisibleCommands.data();
+    auto destination = _scratchCommands.data();
+    for (uint32_t shift = 0; shift < 64; shift += 8) {
+        if (((differing >> shift) & 255) == 0) continue;
+        array<size_t, 256> offsets{};
+        for (size_t i = 0; i < VisibleCommands.size(); ++i) ++offsets[(source[i].SortKey >> shift) & 255];
+        size_t sum = 0;
+        for (auto& offset : offsets) {
+            const auto count = offset;
+            offset = sum;
+            sum += count;
+        }
+        for (size_t i = 0; i < VisibleCommands.size(); ++i) destination[offsets[(source[i].SortKey >> shift) & 255]++] = source[i];
+        std::swap(source, destination);
+    }
+    if (source != VisibleCommands.data()) std::copy_n(source, VisibleCommands.size(), VisibleCommands.data());
 }
 
-bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
-    return SubmitMeshDrawCommands(encoder, VisibleCommands, std::span<const MeshDrawCommand>{CachedCommands}, DynamicContext.Commands, submitArgs);
-}
-
-bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
-                                   const MeshPassSubmitArgs& submitArgs) const noexcept {
-    return SubmitMeshDrawCommands(encoder, VisibleCommands, cachedDrawList, DynamicContext.Commands, submitArgs);
+bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) noexcept {
+    DynamicContext.FinalizeVisibleCommands();
+    return SubmitMeshDrawCommands(encoder, VisibleCommands, submitArgs);
 }
 
 void MeshPassFrameDrawList::Clear() noexcept {
-    CachedCommands.clear();
+    RADRAY_PROFILE_SCOPE_N("RadRay.DrawList.Clear");
     VisibleCommands.clear();
-    DynamicContext.Clear();
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.DrawList.ClearDynamic");
+        DynamicContext.Clear();
+    }
 }
 
 Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_t index) {
@@ -81,7 +117,9 @@ MeshPassFrameDrawList& FrameSlot::GetPassDrawList(MeshPassId pass) {
 ObjectArena& FrameSlot::GetArena() noexcept { return _arena; }
 
 Nullable<render::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.AcquireCommandBuffer");
     if (_nextCommandIndex == _commands.size()) {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.CreateCommandBuffer");
         auto command = _device.GetDevice().CreateCommandBuffer(_allocator.get());
         if (!command) {
             RADRAY_ERR_LOG("FrameSlot: cannot create command buffer");
@@ -93,18 +131,26 @@ Nullable<render::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
 }
 
 void FrameSlot::ResetCommandStorage() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetCommandStorage");
     _allocator->Reset();
     _nextCommandIndex = 0;
 }
 
-void FrameSlot::ResetRetiredResources() noexcept { _retiredArena.Reset(); }
+void FrameSlot::ResetRetiredResources() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetRetiredResources");
+    _retiredArena.Reset();
+}
 
 void FrameSlot::ResetFrameData() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetFrameData");
 #if RADRAY_IS_DEBUG
     _inFrameCallback = false;
 #endif
     for (auto& drawList : _passDrawLists) drawList.Clear();
-    _arena.Reset();
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetArena");
+        _arena.Reset();
+    }
 }
 
 }  // namespace radray

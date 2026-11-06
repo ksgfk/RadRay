@@ -48,6 +48,7 @@ public:
 struct RecordedParameterBind {
     uint32_t Group;
     render::ShaderParameterSet* Set;
+    vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
 };
 
 class RecordingEncoder final : public render::GraphicsCommandEncoder {
@@ -73,9 +74,9 @@ public:
         Order.emplace_back("index");
         IndexBuffers.push_back(value);
     }
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset>) noexcept override {
+    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets) noexcept override {
         Order.emplace_back("parameters");
-        ParameterBinds.push_back({group, set});
+        ParameterBinds.push_back({group, set, {offsets.begin(), offsets.end()}});
     }
     bool SetPushConstants(uint32_t, uint32_t, std::span<const byte> bytes) noexcept override {
         Order.emplace_back("push");
@@ -197,8 +198,8 @@ public:
     void Extract(const Scene& source, FrameSlot& slot) noexcept override {
         if (OnExtract) OnExtract(source, slot);
     }
-    void Record(FrameSlot& slot) noexcept override {
-        if (OnRecord) OnRecord(slot);
+    void Record(const Scene& source, FrameSlot& slot) noexcept override {
+        if (OnRecord) OnRecord(source, slot);
     }
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
@@ -206,7 +207,7 @@ public:
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
     std::function<void(const Scene&, FrameSlot&)> OnExtract;
-    std::function<void(FrameSlot&)> OnRecord;
+    std::function<void(const Scene&, FrameSlot&)> OnRecord;
     std::function<void(FrameSlot&)> OnWait;
     vector<MeshPassRegistration> Passes;
 };

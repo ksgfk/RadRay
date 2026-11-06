@@ -179,9 +179,16 @@ private:
     bool _executed{false};
 };
 
+// External synchronization remains the caller's responsibility; these flags record ownership barriers.
+struct RDGExternalOwnership {
+    bool Acquire{false};
+    bool Release{false};
+    friend bool operator==(const RDGExternalOwnership&, const RDGExternalOwnership&) = default;
+};
+
 // Builder and compiled graph borrow arena storage until slot reclamation. Setup
 // callbacks run immediately; execute callbacks are owned by the arena and must
-// capture only frame-lifetime data, never Scene or setup-local references.
+// capture only frame-lifetime data, never setup-local references.
 class RDGBuilder final {
 public:
     explicit RDGBuilder(ObjectArena& arena) noexcept;
@@ -189,9 +196,9 @@ public:
     RDGBuilder& operator=(const RDGBuilder&) = delete;
 
     RDGTextureHandle ImportTexture(render::Texture* texture, render::TextureState initialState,
-                                   std::optional<render::TextureState> finalState = std::nullopt);
+                                   std::optional<render::TextureState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGBufferHandle ImportBuffer(render::Buffer* buffer, render::BufferState initialState,
-                                 std::optional<render::BufferState> finalState = std::nullopt);
+                                 std::optional<render::BufferState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGTextureHandle CreateTexture(const render::TextureDescriptor& desc);
     RDGBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
     // Copies bytes now. Upload-memory ranges must be disjoint and precede GPU use.

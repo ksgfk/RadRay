@@ -21,7 +21,8 @@ public:
     uint32_t GetSlotCount() const noexcept;
 
     // Serial calls only. Return means Record completed, not GPU-complete. Frame errors are fatal.
-    // Source borrowing ends when Extract returns; referenced resources survive until allocator reset.
+    // Source remains alive and externally unmodified throughout RunFrame; borrowing ends on return.
+    // Referenced GPU resources survive until allocator reset, independently of CPU command lifetime.
     // The mutable overload synchronizes dirty mesh commands before Extract.
     void RunFrame(Scene& source) noexcept;
     void RunFrame(const Scene& source) noexcept;

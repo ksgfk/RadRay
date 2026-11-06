@@ -14,23 +14,24 @@ class DeviceContext;
 class FrameScheduler;
 
 struct MeshPassFrameDrawList {
-    MeshPassFrameDrawList() noexcept;
+    explicit MeshPassFrameDrawList(MeshPassSortMode mode = MeshPassSortMode::StateFirst) noexcept;
     MeshPassFrameDrawList(MeshPassFrameDrawList&& other) noexcept;
     MeshPassFrameDrawList& operator=(MeshPassFrameDrawList&& other) noexcept;
     MeshPassFrameDrawList(const MeshPassFrameDrawList&) = delete;
     MeshPassFrameDrawList& operator=(const MeshPassFrameDrawList&) = delete;
 
+    // Both operations finalize dynamic pointers first; finish command generation before calling either.
     void SortVisibleCommands();
-    // Uses frame-local cached snapshots and dynamic commands; no Scene borrowing is required.
-    bool Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
-    // Compatibility path for visible handles gathered without snapshots; do not mix handle domains.
-    bool Submit(render::GraphicsCommandEncoder& encoder, Nullable<const CachedPassMeshDrawList*> cachedDrawList,
-                const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
+    void SetSortMode(MeshPassSortMode mode) noexcept;
+    MeshPassSortMode GetSortMode() const noexcept { return DynamicContext.GetSortMode(); }
+    bool Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) noexcept;
     void Clear() noexcept;
 
-    vector<MeshDrawCommand> CachedCommands;
     vector<VisibleMeshDrawCommand> VisibleCommands;
     DynamicMeshPassDrawListContext DynamicContext;
+
+private:
+    vector<VisibleMeshDrawCommand> _scratchCommands;
 };
 
 // See docs/architecture/runtime.md for the frame loop and ownership contract.

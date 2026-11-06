@@ -112,6 +112,16 @@ TEST(SparseSetTest, ReserveDoesNotCreateElements) {
     EXPECT_EQ(set.Get(handle), 11);
 }
 
+TEST(SparseSetTest, ReservedValuesRemainAtStableAddressesUntilCapacityIsFilled) {
+    SparseSet<int> set;
+    set.Reserve(128);
+    const auto first = set.Emplace(42);
+    const auto address = &set.Get(first);
+    for (int index = 1; index < 128; ++index) set.Emplace(index);
+    EXPECT_EQ(&set.Get(first), address);
+    EXPECT_EQ(set.Get(first), 42);
+}
+
 TEST(SparseSetTest, StoresMoveOnlyValues) {
     SparseSet<MoveOnlyValue> set;
     const SparseSetHandle a = set.Emplace(12);
@@ -120,6 +130,22 @@ TEST(SparseSetTest, StoresMoveOnlyValues) {
     set.Destroy(a);
 
     EXPECT_EQ(*set.Get(b).Value, 34);
+}
+
+TEST(SparseSetTest, GeometricReservePreservesValuesAndAmortizesSmallGrowth) {
+    SparseSet<int> set;
+    const auto first = set.Emplace(42);
+    size_t relocations = 0;
+    for (uint32_t required = 2; required <= 128; ++required) {
+        const auto previous = &set.Get(first);
+        set.ReserveGeometric(required);
+        const auto reserved = &set.Get(first);
+        relocations += previous != reserved;
+        set.Emplace(static_cast<int>(required));
+        EXPECT_EQ(&set.Get(first), reserved);
+    }
+    EXPECT_LT(relocations, 20u);
+    EXPECT_EQ(set.Get(first), 42);
 }
 
 TEST(SparseSetTest, MixedOperationsKeepHandlesConsistent) {

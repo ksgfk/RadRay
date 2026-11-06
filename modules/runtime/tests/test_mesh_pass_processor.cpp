@@ -54,10 +54,10 @@ protected:
 };
 
 TEST_F(MeshPassProcessorTest, FinalizeCopiesSelectedElementDrawArguments) {
-    Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexBufferOffset = 8, .IndexStride = 2, .FirstIndex = 4,
-                              .IndexCount = 6, .VertexOffset = -1, .FirstInstance = 2, .InstanceCount = 5});
+    Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexBufferOffset = 8, .IndexStride = 2, .FirstIndex = 4, .IndexCount = 6, .VertexOffset = -1, .FirstInstance = 2, .InstanceCount = 5});
     MeshDrawCommand initializer;
     initializer.Pipeline = &Pipeline;
+    initializer.ValidElementMask = 2;
     auto& command = Output.AddCommand(initializer);
     Output.FinalizeCommand(Context(), 1, command);
     EXPECT_EQ(command.Pipeline.Get(), &Pipeline);
@@ -67,66 +67,93 @@ TEST_F(MeshPassProcessorTest, FinalizeCopiesSelectedElementDrawArguments) {
     EXPECT_EQ(command.FirstIndex, 4u);
     EXPECT_EQ(command.IndexCount, 6u);
     EXPECT_EQ(command.VertexOffset, -1);
-    EXPECT_EQ(command.FirstInstance, 2u);
-    EXPECT_EQ(command.InstanceCount, 5u);
+    ASSERT_EQ(Visible.size(), 1u);
+    EXPECT_EQ(Visible[0].FirstInstance, 2u);
+    EXPECT_EQ(Visible[0].InstanceCount, 5u);
 }
 
 TEST_F(MeshPassProcessorTest, DynamicFinalizeAppendsVisibleCommand) {
     Batch.Elements[0].FirstInstance = 3;
     MeshDrawCommand initializer;
-    initializer.BaseSortKey = 42;
-    auto& command = Output.AddCommand(initializer);
+    auto& command = Output.AddCommand(initializer, 42);
     Output.FinalizeCommand(Context(), 0, command);
     ASSERT_EQ(Visible.size(), 1u);
-    EXPECT_EQ(Visible[0].Source, MeshDrawCommandSource::Dynamic);
-    EXPECT_EQ(ResolveVisibleMeshDrawCommand(Visible[0], nullptr, Output.Commands).Get(), &Output.Commands[0]);
-    EXPECT_EQ(Visible[0].SortKey, 42u);
+    EXPECT_FALSE(Visible[0].CachedCommand);
+    Output.FinalizeVisibleCommands();
+    EXPECT_EQ(Visible[0].CachedCommand.Get(), &Output.Commands[0]);
+    EXPECT_EQ(Visible[0].SortKey, uint64_t{42} << 32);
     EXPECT_EQ(Visible[0].FirstInstance, 3u);
     EXPECT_EQ(Visible[0].InstanceCount, 1u);
 }
 
 TEST_F(MeshPassProcessorTest, CachedFinalizeRecordsEntryOnTargetBatch) {
     CachedPassMeshDrawList list;
-    CachedPassMeshDrawListContext cached{{2}, list, Batch};
+    CachedPassMeshDrawListContext cached{list, 2};
     Batch.Elements[0].FirstInstance = 4;
     MeshDrawCommand initializer;
-    initializer.BaseSortKey = 9;
-    auto& command = cached.AddCommand(initializer);
+    auto& command = cached.AddCommand(initializer, 9);
     cached.FinalizeCommand(Context(), 0, command);
-    ASSERT_EQ(Batch.CachedCommands.size(), 1u);
-    const auto& info = Batch.CachedCommands[0];
-    EXPECT_EQ(info.Pass, MeshPassId{2});
-    EXPECT_EQ(info.ElementIndex, 0u);
-    EXPECT_TRUE(list.Commands.IsAlive(info.CommandHandle));
-    EXPECT_EQ(info.BaseSortKey, 9u);
+    ASSERT_EQ(list.GetCommands().size(), 1u);
+    const auto& info = *list.GetBatchSlot(2);
+    EXPECT_TRUE(list.GetCommand(2));
+    EXPECT_EQ(info.StateSortKey, 9u);
     EXPECT_EQ(info.FirstInstance, 4u);
-    EXPECT_EQ(list.Commands.Get(info.CommandHandle).FirstInstance, 4u);
 }
 
-TEST_F(MeshPassProcessorTest, BuildEmitsOneCommandPerDrawableElement) {
+TEST_F(MeshPassProcessorTest, BuildEmitsOneCommandPerBatch) {
     Batch.Elements.push_back(Element(3));
     Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexCount = 0});
     Batch.Elements.push_back({.IndexBuffer = &Indices, .IndexCount = 3, .InstanceCount = 0});
     ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
-    ASSERT_EQ(Output.Commands.size(), 2u);
+    ASSERT_EQ(Output.Commands.size(), 1u);
     EXPECT_EQ(Output.Commands[0].FirstIndex, 0u);
-    EXPECT_EQ(Output.Commands[1].FirstIndex, 3u);
+    EXPECT_EQ(Output.Commands[0].ValidElementMask, 3u);
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[1].FirstIndex, 3u);
+}
+
+TEST_F(MeshPassProcessorTest, BatchOwnsOneEntryPerNonemptyPool) {
+    for (uint32_t index = 1; index < 7; ++index) Batch.Elements.push_back(Element(index * 3));
+    FakeParameterSet parameters;
+    const MeshShaderParameterBinding binding{1, &parameters, {}};
+    const array<byte, 4> bytes{byte{1}, byte{2}, byte{3}, byte{4}};
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .ParameterSets = std::span{&binding, 1}, .PushConstants = MeshPushConstantBinding{0, 0, bytes}}));
+    ASSERT_EQ(Output.Commands.size(), 1u);
+    const auto& command = Output.Commands[0];
+    EXPECT_EQ(command.ValidElementMask, 127u);
+    EXPECT_EQ(Output.GetBindingStorage().GetPayloadCount(), 1u);
+    EXPECT_EQ(Output.GetBindingStorage().GetVertexBufferCount(), 1u);
+    EXPECT_EQ(Output.GetBindingStorage().GetExtraElementsCount(), 1u);
+    const auto payload = Output.GetBindingStorage().GetPayload(command.PayloadIndex);
+    ASSERT_TRUE(payload);
+    const auto elements = Output.GetBindingStorage().GetExtraElements(command.ExtraElementsIndex);
+    ASSERT_TRUE(elements);
+    ASSERT_EQ(elements->ExtraElements.size(), 6u);
+    EXPECT_EQ(elements->ExtraElements.back().FirstIndex, 18u);
+    EXPECT_EQ(elements->ExtraElements.back().ElementIndex, 6u);
 }
 
 TEST_F(MeshPassProcessorTest, BuildCopiesSharedStateAndVertexStreams) {
     FakeParameterSet parameters;
     const MeshShaderParameterBinding binding{1, &parameters, {}};
-    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .StencilReference = 7, .BaseSortKey = 20, .ParameterSets = std::span{&binding, 1}}));
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .StencilReference = 7, .CustomStateSortKey = 20, .ParameterSets = std::span{&binding, 1}}));
     ASSERT_EQ(Output.Commands.size(), 1u);
     const auto& command = Output.Commands[0];
     EXPECT_EQ(command.Pipeline.Get(), &Pipeline);
     EXPECT_EQ(command.StencilReference, 7);
-    EXPECT_EQ(command.BaseSortKey, 20u);
-    ASSERT_EQ(command.ParameterSets.size(), 1u);
-    EXPECT_EQ(command.ParameterSets[0].ParameterSet.Get(), &parameters);
-    ASSERT_EQ(command.VertexBuffers.size(), 1u);
-    EXPECT_EQ(command.VertexBuffers[0].View.Target, &Vertices);
-    EXPECT_EQ(command.VertexBuffers[0].View.Size, 48u);
+    EXPECT_EQ(Visible[0].SortKey, uint64_t{20} << 32);
+    const auto payload = Output.GetBindingStorage().GetPayload(command.PayloadIndex);
+    ASSERT_TRUE(payload);
+    ASSERT_EQ(payload->ParameterSets.size(), 1u);
+    EXPECT_EQ(payload->ParameterSets[0].ParameterSet.Get(), &parameters);
+    const auto vertices = Output.GetBindingStorage().GetVertexBuffers(command.VertexBuffersIndex);
+    ASSERT_TRUE(vertices);
+    ASSERT_EQ(vertices->Bindings.size(), 1u);
+    EXPECT_EQ(vertices->Bindings[0].View.Target, &Vertices);
+    EXPECT_EQ(vertices->Bindings[0].View.Size, 48u);
 }
 
 TEST_F(MeshPassProcessorTest, BuildCopiesPushConstantBytes) {
@@ -135,7 +162,7 @@ TEST_F(MeshPassProcessorTest, BuildCopiesPushConstantBytes) {
     ASSERT_TRUE(Build({.Pipeline = &Pipeline, .PushConstants = push}));
     value = -1.0f;
     ASSERT_EQ(Output.Commands.size(), 1u);
-    const auto& copied = Output.Commands[0].PushConstants;
+    const auto copied = Output.GetBindingStorage().GetPayload(Output.Commands[0].PayloadIndex)->PushConstants;
     ASSERT_TRUE(copied);
     EXPECT_EQ(copied->PushConstantId, 3u);
     ASSERT_EQ(copied->Data.size(), sizeof(float));
@@ -157,6 +184,8 @@ TEST_F(MeshPassProcessorTest, BuildRejectsAnyInvalidElementWithoutEmitting) {
     EXPECT_FALSE(Build({.Pipeline = &Pipeline}));
     EXPECT_TRUE(Output.Commands.empty());
     EXPECT_TRUE(Visible.empty());
+    EXPECT_TRUE(Output.GetBindingStorage().GetPayloadCount() == 0);
+    EXPECT_TRUE(Output.GetBindingStorage().GetExtraElementsCount() == 0);
 }
 
 TEST_F(MeshPassProcessorTest, BuildRejectsUnalignedPushConstants) {
@@ -170,7 +199,263 @@ TEST_F(MeshPassProcessorTest, BuildRequiresInstanceStreamUnlessDeferred) {
     EXPECT_FALSE(Build({.Pipeline = &Pipeline}));
     ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowDeferredInstanceStream = true}));
     ASSERT_EQ(Output.Commands.size(), 1u);
-    EXPECT_EQ(Output.Commands[0].InstanceStreamBinding, 1u);
+    EXPECT_EQ(Output.GetBindingStorage().GetVertexBuffers(Output.Commands[0].VertexBuffersIndex)->InstanceStreamBinding, 1u);
+}
+
+TEST_F(MeshPassProcessorTest, DynamicClearReleasesBindingsAndAllowsRebuild) {
+    FakeParameterSet parameters;
+    const MeshShaderParameterBinding binding{1, &parameters, {}};
+    const array<byte, 4> bytes{};
+    const MeshDrawCommandSharedState state{.Pipeline = &Pipeline, .ParameterSets = std::span{&binding, 1}, .PushConstants = MeshPushConstantBinding{0, 0, bytes}};
+    ASSERT_TRUE(Build(state));
+    Output.FinalizeVisibleCommands();
+    Visible.clear();
+    Output.Clear();
+    auto& storage = Output.GetBindingStorage();
+    EXPECT_TRUE(storage.GetPayloadCount() == 0);
+    ASSERT_TRUE(Build(state));
+    EXPECT_TRUE(ValidateMeshDrawCommand(Output.Commands[0], storage));
+}
+
+TEST_F(MeshPassProcessorTest, SparseElementsKeepSourceBitsIncludingBit31) {
+    Batch.Elements.clear();
+    for (uint32_t index = 0; index < 32; ++index) Batch.Elements.emplace_back();
+    Batch.Elements[4] = Element(3);
+    Batch.Elements[31] = Element(9);
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+    ASSERT_EQ(Output.Commands.size(), 1u);
+    EXPECT_EQ(Output.Commands[0].ValidElementMask, (uint32_t{1} << 4) | (uint32_t{1} << 31));
+    Output.FinalizeVisibleCommands();
+    Visible[0].ElementMask = uint32_t{1} << 31;
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 1u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 9u);
+    EXPECT_EQ(encoder.VertexCalls.size(), 1u);
+}
+
+TEST_F(MeshPassProcessorTest, SingleHighBitElementNeedsNoExtraElements) {
+    Batch.Elements.clear();
+    for (uint32_t index = 0; index < 32; ++index) Batch.Elements.emplace_back();
+    Batch.Elements[31] = Element(6);
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+    EXPECT_TRUE(Output.GetBindingStorage().GetPayloadCount() == 0);
+    EXPECT_TRUE(Output.GetBindingStorage().GetExtraElementsCount() == 0);
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 1u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 6u);
+}
+
+TEST_F(MeshPassProcessorTest, RejectsMoreThan32ElementsWithoutOutput) {
+    while (Batch.Elements.size() < 33) Batch.Elements.emplace_back();
+    EXPECT_FALSE(Build({.Pipeline = &Pipeline}));
+    EXPECT_TRUE(Output.Commands.empty());
+    EXPECT_TRUE(Visible.empty());
+    EXPECT_TRUE(Output.GetBindingStorage().GetPayloadCount() == 0);
+    EXPECT_TRUE(Output.GetBindingStorage().GetExtraElementsCount() == 0);
+}
+
+TEST_F(MeshPassProcessorTest, BatchBindsSharedStateOnceAndDrawsSelectedIndexBuffers) {
+    FakeBuffer otherIndices{128, render::BufferUse::Index};
+    Batch.Elements.push_back({.IndexBuffer = &otherIndices, .FirstIndex = 3, .IndexCount = 6, .VertexOffset = -2});
+    Batch.Elements.push_back(Element(9));
+    const array<byte, 4> bytes{};
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .PushConstants = MeshPushConstantBinding{0, 0, bytes}}));
+    Output.FinalizeVisibleCommands();
+    Visible[0].ElementMask = 6;
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[0].IndexCount, 6u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 3u);
+    EXPECT_EQ(encoder.Draws[0].VertexOffset, -2);
+    EXPECT_EQ(encoder.Draws[1].FirstIndex, 9u);
+    ASSERT_EQ(encoder.IndexBuffers.size(), 2u);
+    EXPECT_EQ(encoder.IndexBuffers[0].Target, &otherIndices);
+    EXPECT_EQ(encoder.IndexBuffers[1].Target, &Indices);
+    EXPECT_EQ(encoder.Pushes.size(), 1u);
+    EXPECT_EQ(encoder.VertexCalls.size(), 1u);
+}
+
+TEST_F(MeshPassProcessorTest, All32ElementsDrawFromOneDynamicCommand) {
+    Indices.Desc.Size = 1024;
+    Batch.Elements.clear();
+    for (uint32_t index = 0; index < 32; ++index) Batch.Elements.push_back(Element(index * 3));
+    Batch.Elements[31].FirstInstance = 5;
+    Batch.Elements[31].InstanceCount = 2;
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+    ASSERT_EQ(Output.Commands.size(), 1u);
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 32u);
+    for (uint32_t index = 0; index < 32; ++index) EXPECT_EQ(encoder.Draws[index].FirstIndex, index * 3);
+    EXPECT_EQ(encoder.Draws.back().FirstInstance, 5u);
+    EXPECT_EQ(encoder.Draws.back().InstanceCount, 2u);
+    EXPECT_EQ(encoder.IndexBuffers.size(), 1u);
+    EXPECT_EQ(encoder.VertexCalls.size(), 1u);
+}
+
+TEST_F(MeshPassProcessorTest, BuildStoresAllStreamsInOneSortedGroup) {
+    Input.Layouts.push_back({1, 16, render::VertexStepMode::Vertex});
+    Input.Layouts.push_back({2, 16, render::VertexStepMode::Vertex});
+    Input.Attributes.push_back({1, 0, "TEXCOORD", 0, render::VertexFormat::FLOAT32X4, 1});
+    Input.Attributes.push_back({2, 0, "COLOR", 0, render::VertexFormat::FLOAT32X4, 2});
+    Input.Streams = {{&Vertices, 64, 32, 2}, {&Vertices, 0, 32, 0}, {&Vertices, 32, 32, 1}};
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+    ASSERT_EQ(Output.Commands.size(), 1u);
+    auto& storage = Output.GetBindingStorage();
+    EXPECT_EQ(storage.GetVertexBufferCount(), 1u);
+    EXPECT_TRUE(storage.GetPayloadCount() == 0);
+    EXPECT_TRUE(storage.GetExtraElementsCount() == 0);
+    const auto vertices = storage.GetVertexBuffers(Output.Commands[0].VertexBuffersIndex);
+    ASSERT_TRUE(vertices);
+    ASSERT_EQ(vertices->Bindings.size(), 3u);
+    for (uint32_t index = 0; index < 3; ++index) {
+        EXPECT_EQ(vertices->Bindings[index].Binding, index);
+        EXPECT_EQ(vertices->Bindings[index].View.Offset, index * 32);
+    }
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.VertexCalls.size(), 1u);
+    EXPECT_EQ(encoder.VertexCalls[0].size(), 3u);
+}
+
+TEST_F(MeshPassProcessorTest, MergingContiguousSingleInstanceListElementsRequiresOptIn) {
+    Batch.Elements.push_back(Element(3));
+    Batch.Elements.push_back(Element(6));
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+    Output.FinalizeVisibleCommands();
+    const auto elements = Output.GetBindingStorage().GetExtraElements(Output.Commands[0].ExtraElementsIndex);
+    ASSERT_TRUE(elements);
+    EXPECT_EQ(elements->ContiguousMergeMask, 3u);
+    EXPECT_TRUE(elements->AllElementsSharePrimaryIndexBuffer);
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 1u);
+    EXPECT_EQ(encoder.Draws[0].IndexCount, 9u);
+}
+
+TEST_F(MeshPassProcessorTest, MergingRespectsVisibilityHolesAndInstanceOverrides) {
+    Batch.Elements.push_back(Element(3));
+    Batch.Elements.push_back(Element(6));
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+    Output.FinalizeVisibleCommands();
+    auto visible = Visible[0];
+    visible.ElementMask = 5;
+    test::RecordingEncoder holes;
+    ASSERT_TRUE(SubmitMeshDrawCommands(holes, std::span{&visible, 1}));
+    ASSERT_EQ(holes.Draws.size(), 2u);
+    EXPECT_EQ(holes.Draws[1].FirstIndex, 6u);
+    visible.ElementMask = 7;
+    visible.InstanceCount = 2;
+    visible.UseElementInstanceCount = false;
+    test::RecordingEncoder instanced;
+    ASSERT_TRUE(SubmitMeshDrawCommands(instanced, std::span{&visible, 1}));
+    EXPECT_EQ(instanced.Draws.size(), 3u);
+    visible.InstanceCount = 1;
+    visible.FirstInstance = 12;
+    visible.UseElementFirstInstance = false;
+    test::RecordingEncoder single;
+    ASSERT_TRUE(SubmitMeshDrawCommands(single, std::span{&visible, 1}));
+    ASSERT_EQ(single.Draws.size(), 1u);
+    EXPECT_EQ(single.Draws[0].FirstInstance, 12u);
+}
+
+TEST_F(MeshPassProcessorTest, MergingRejectsStripMisalignmentDifferentInstancesAndBaseVertices) {
+    Batch.Elements.push_back(Element(3));
+    const auto verifySeparate = [&]() {
+        ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+        Output.FinalizeVisibleCommands();
+        test::RecordingEncoder encoder;
+        ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+        EXPECT_EQ(encoder.Draws.size(), 2u);
+        Visible.clear();
+        Output.Clear();
+    };
+    Batch.Topology = render::PrimitiveTopology::TriangleStrip;
+    verifySeparate();
+    Batch.Topology = render::PrimitiveTopology::TriangleList;
+    Batch.Elements[0].IndexCount = Batch.Elements[1].FirstIndex = 2;
+    verifySeparate();
+    Batch.Elements[0] = Element(0);
+    Batch.Elements[1] = Element(3);
+    Batch.Elements[0].InstanceCount = Batch.Elements[1].InstanceCount = 2;
+    verifySeparate();
+    Batch.Elements[0].InstanceCount = Batch.Elements[1].InstanceCount = 1;
+    Batch.Elements[1].FirstInstance = 1;
+    verifySeparate();
+    Batch.Elements[1].FirstInstance = 0;
+    Batch.Elements[1].VertexOffset = 1;
+    verifySeparate();
+}
+
+TEST_F(MeshPassProcessorTest, MergingSupportsPointAndLineListsAndHighestAdjacentBits) {
+    for (const auto topology : {render::PrimitiveTopology::PointList, render::PrimitiveTopology::LineList}) {
+        Batch.Topology = topology;
+        Batch.Elements.clear();
+        for (uint32_t i = 0; i < 32; ++i) Batch.Elements.emplace_back();
+        Batch.Elements[30] = Element(0);
+        Batch.Elements[31] = Element(2);
+        Batch.Elements[30].IndexCount = Batch.Elements[31].IndexCount = 2;
+        ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+        Output.FinalizeVisibleCommands();
+        test::RecordingEncoder encoder;
+        ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+        ASSERT_EQ(encoder.Draws.size(), 1u);
+        EXPECT_EQ(encoder.Draws[0].IndexCount, 4u);
+        Visible.clear();
+        Output.Clear();
+    }
+}
+
+TEST_F(MeshPassProcessorTest, CumulativeMergeCountCannotOverflowEvenWhenEachPairFits) {
+    Indices.Desc.Size = uint64_t{1} << 36;
+    Batch.Topology = render::PrimitiveTopology::PointList;
+    Batch.Elements[0].IndexCount = 0x60000000;
+    Batch.Elements.push_back(Element(0x60000000));
+    Batch.Elements[1].IndexCount = 0x60000000;
+    Batch.Elements.push_back(Element(0xc0000000));
+    Batch.Elements[2].IndexCount = 0x60000000;
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.Draws.size(), 2u);
+    EXPECT_EQ(encoder.Draws[0].IndexCount, 0xc0000000u);
+    EXPECT_EQ(encoder.Draws[1].IndexCount, 0x60000000u);
+}
+
+TEST_F(MeshPassProcessorTest, FirstSelectedDrawBindsIndexBufferEvenWhenPrimaryIsInvisible) {
+    Batch.Elements.push_back(Element(3));
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline, .AllowElementMerging = true}));
+    Output.FinalizeVisibleCommands();
+    Visible[0].ElementMask = 2;
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    ASSERT_EQ(encoder.IndexBuffers.size(), 1u);
+    EXPECT_EQ(encoder.IndexBuffers[0].Target, &Indices);
+    ASSERT_EQ(encoder.Draws.size(), 1u);
+    EXPECT_EQ(encoder.Draws[0].FirstIndex, 3u);
+}
+
+TEST_F(MeshPassProcessorTest, DefaultStateKeysClusterEqualBindingsAndKeepBucketsBounded) {
+    Vertices.Desc.Size = 1 << 20;
+    for (uint32_t i = 0; i < 4100; ++i) {
+        Input.Streams[0].Offset = i * 16;
+        ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+        const auto state = static_cast<uint32_t>(Visible.back().SortKey >> 32);
+        EXPECT_EQ(state >> 24, 1u);
+        EXPECT_EQ((state >> 12) & 4095, 0u);
+        EXPECT_NE(state & 4095, 0u);
+    }
+    const auto key = Visible.back().SortKey;
+    ASSERT_TRUE(Build({.Pipeline = &Pipeline}));
+    EXPECT_EQ(Visible.back().SortKey, key);
+    EXPECT_EQ(Output.Commands.back().VertexBuffersIndex, Output.Commands[4099].VertexBuffersIndex);
 }
 
 }  // namespace

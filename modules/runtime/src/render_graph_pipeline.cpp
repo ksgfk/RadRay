@@ -1,5 +1,6 @@
 #include <radray/runtime/render_graph_pipeline.h>
 
+#include <radray/profiler.h>
 #include <radray/runtime/gpu_device.h>
 
 namespace radray {
@@ -21,19 +22,29 @@ RenderGraphFramePipeline::RenderGraphFramePipeline(DeviceContext& device, uint32
 RenderGraphFramePipeline::~RenderGraphFramePipeline() noexcept = default;
 
 void RenderGraphFramePipeline::Extract(const Scene& source, FrameSlot& slot) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Extract");
     if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
     auto& state = *_slotStates[slot.GetIndex()];
-    ExtractFrameData(source, slot);
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractFrameData");
+        ExtractFrameData(source, slot);
+    }
     RDGBuilder graph{slot.GetArena()};
-    SetupGraph(graph, slot);
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.SetupGraph");
+        SetupGraph(graph, source, slot);
+    }
     state.CompiledGraph = graph.Compile();
     if (!state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: RDG compile failed");
     for (const auto pass : state.CompiledGraph->GetAliveMeshPasses()) {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractMeshPass");
+        RADRAY_PROFILE_PLOT("RadRay.FramePipeline.MeshPassId", static_cast<int64_t>(pass.Value));
         ExtractMeshPass(pass, source, slot, slot.GetPassDrawList(pass));
     }
 }
 
-void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
+void RenderGraphFramePipeline::Record(const Scene&, FrameSlot& slot) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Record");
     if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
     auto& state = *_slotStates[slot.GetIndex()];
     if (!state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: no extracted graph");
@@ -43,12 +54,21 @@ void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
     state.TransientPool.BeginFrame();
     auto command = slot.AcquireCommandBuffer();
     if (!command) RADRAY_ABORT("RenderGraphFramePipeline: cannot acquire command buffer");
-    command->Begin();
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.CommandBegin");
+        command->Begin();
+    }
     if (!state.CompiledGraph->Execute(slot, state.TransientPool, *command)) {
         RADRAY_ABORT("RenderGraphFramePipeline: RDG execute failed");
     }
-    command->End();
-    SubmitFrame(slot, *command);
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.CommandEnd");
+        command->End();
+    }
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.SubmitFrame");
+        SubmitFrame(slot, *command);
+    }
     state.CompiledGraph = nullptr;
 }
 

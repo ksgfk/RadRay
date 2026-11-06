@@ -6,7 +6,6 @@
 #include <radray/sparse_set.h>
 #include <radray/types.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/mesh_draw_command.h>
 #include <radray/runtime/vertex_input.h>
 
 namespace radray {
@@ -37,12 +36,9 @@ struct MeshBatch {
     SparseSetHandle Material{};
     // Borrowed; must remain at a stable address for all referencing batches.
     Nullable<const radray::VertexInput*> VertexInput{nullptr};
-    vector<MeshBatchElement> Elements;
+    // At most 32 entries; mask bit i retains the source index even when earlier entries are empty.
+    InlineVector<MeshBatchElement, 8> Elements;
     render::PrimitiveTopology Topology{render::PrimitiveTopology::TriangleList};
-    // Managed by Scene; callers must not copy scene links or cache entries into another batch.
-    SparseSetHandle OwningPrimitive{};
-    bool Dirty{false};
-    InlineVector<CachedMeshDrawCommandInfo, 4> CachedCommands;
 };
 
 struct PrimitiveSceneInfo {

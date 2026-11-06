@@ -13,11 +13,12 @@ public:
     explicit RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount);
     ~RenderGraphFramePipeline() noexcept override;
     void Extract(const Scene& source, FrameSlot& slot) noexcept final;
-    void Record(FrameSlot& slot) noexcept final;
+    void Record(const Scene& source, FrameSlot& slot) noexcept final;
 
 protected:
     virtual void ExtractFrameData(const Scene& source, FrameSlot& slot) noexcept = 0;
-    virtual void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept = 0;
+    // Execute callbacks may borrow source through Record, but must not access it during cleanup.
+    virtual void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept = 0;
     virtual void ExtractMeshPass(MeshPassId pass, const Scene& source, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept = 0;
     virtual void SubmitFrame(FrameSlot& slot, render::CommandBuffer& commandBuffer) noexcept = 0;
 

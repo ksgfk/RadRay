@@ -1,126 +1,189 @@
 #include <radray/runtime/mesh_pass_processor.h>
 
 #include <algorithm>
-#include <limits>
+#include <bit>
 
 namespace radray {
-namespace {
-
-bool ValidateMeshBatchElement(const MeshBatchElement& element) noexcept {
-    if (!element.IndexBuffer || !element.IndexBuffer->IsValid() ||
-        (element.IndexStride != 2 && element.IndexStride != 4) || element.IndexBufferOffset % element.IndexStride != 0 ||
-        uint64_t{element.FirstInstance} + element.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
-    const auto desc = element.IndexBuffer->GetDesc();
-    return desc.Usage.HasFlag(render::BufferUse::Index) &&
-           uint64_t{element.IndexBufferOffset} + (uint64_t{element.FirstIndex} + element.IndexCount) * element.IndexStride <= desc.Size;
-}
-
-}  // namespace
 
 void MeshPassDrawListContext::FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) {
+    RADRAY_ASSERT(command.ValidElementMask != 0 && elementIndex == static_cast<size_t>(std::countr_zero(command.ValidElementMask)) && elementIndex < context.Batch.Elements.size());
     const auto& element = context.Batch.Elements[elementIndex];
     command.IndexBuffer = {element.IndexBuffer.Get(), element.IndexBufferOffset, element.IndexStride};
     command.IndexCount = element.IndexCount;
     command.FirstIndex = element.FirstIndex;
     command.VertexOffset = element.VertexOffset;
-    command.FirstInstance = element.FirstInstance;
-    command.InstanceCount = element.InstanceCount;
 }
 
-CachedPassMeshDrawListContext::CachedPassMeshDrawListContext(MeshPassId passId, CachedPassMeshDrawList& passDrawList, MeshBatch& targetBatch) noexcept
-    : _passId(passId), _passDrawList(&passDrawList), _targetBatch(&targetBatch) {}
+CachedPassMeshDrawListContext::CachedPassMeshDrawListContext(CachedPassMeshDrawList& passDrawList, uint32_t batchIndex) noexcept
+    : _batchIndex(batchIndex), _passDrawList(&passDrawList) {}
 
-MeshDrawCommand& CachedPassMeshDrawListContext::AddCommand(const MeshDrawCommand& initializer) {
-    RADRAY_ASSERT(!_pendingHandle.IsValid());
-    _pendingHandle = _passDrawList->Commands.Emplace(initializer);
-    return _passDrawList->Commands.Get(_pendingHandle);
+MeshDrawCommandBindingStorage& CachedPassMeshDrawListContext::GetBindingStorage() noexcept { return _passDrawList->_bindings; }
+
+MeshDrawCommand& CachedPassMeshDrawListContext::AddCommand(MeshDrawCommand& initializer, uint32_t stateSortKey) {
+    RADRAY_ASSERT(!_pending);
+    _pending = true;
+    _pendingSortKey = stateSortKey;
+    return _passDrawList->AddCommand(_batchIndex, initializer);
 }
 
 void CachedPassMeshDrawListContext::FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) {
-    RADRAY_ASSERT(_pendingHandle.IsValid() && &_passDrawList->Commands.Get(_pendingHandle) == &command);
+    RADRAY_ASSERT(_pending && _passDrawList->GetCommand(_batchIndex).Get() == &command);
     MeshPassDrawListContext::FinalizeCommand(context, elementIndex, command);
-    _targetBatch->CachedCommands.push_back({_passId, static_cast<uint32_t>(elementIndex), _pendingHandle, command.BaseSortKey, command.FirstInstance, command.InstanceCount});
-    _pendingHandle = {};
+    const auto& element = context.Batch.Elements[elementIndex];
+    auto& slot = _passDrawList->_batchSlots[_batchIndex];
+    slot.StateSortKey = _pendingSortKey;
+    slot.FirstInstance = element.FirstInstance;
+    slot.InstanceCount = element.InstanceCount;
+    _pending = false;
 }
 
-DynamicMeshPassDrawListContext::DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept
-    : _visibleCommands(&visibleCommands) {}
+DynamicMeshPassDrawListContext::DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands, MeshPassSortMode sortMode) noexcept
+    : _visibleCommands(&visibleCommands), _sortMode(sortMode) {}
+
+void DynamicMeshPassDrawListContext::SetSortMode(MeshPassSortMode mode) noexcept {
+    RADRAY_ASSERT(Commands.empty() || _sortMode == mode);
+    _sortMode = mode;
+}
 
 void DynamicMeshPassDrawListContext::BindVisibleCommands(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept {
     _visibleCommands = &visibleCommands;
 }
 
-MeshDrawCommand& DynamicMeshPassDrawListContext::AddCommand(const MeshDrawCommand& initializer) {
-    return Commands.emplace_back(initializer);
+MeshDrawCommandBindingStorage& DynamicMeshPassDrawListContext::GetBindingStorage() noexcept {
+    if (!_bindings) _bindings = make_unique<MeshDrawCommandBindingStorage>();
+    return *_bindings;
+}
+
+MeshDrawCommand& DynamicMeshPassDrawListContext::AddCommand(MeshDrawCommand& initializer, uint32_t stateSortKey) {
+    RADRAY_ASSERT(!_finalized);
+    RADRAY_ASSERT(!initializer.BindingStorage || initializer.BindingStorage.Get() == &GetBindingStorage());
+    _pendingSortKey = stateSortKey;
+    auto& command = Commands.emplace_back(initializer);
+    initializer.PayloadIndex = kInvalidBindingIndex;
+    initializer.VertexBuffersIndex = kInvalidBindingIndex;
+    initializer.ExtraElementsIndex = kInvalidBindingIndex;
+    initializer.BindingStorage = nullptr;
+    return command;
 }
 
 void DynamicMeshPassDrawListContext::FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) {
-    RADRAY_ASSERT(!Commands.empty() && &Commands.back() == &command);
+    RADRAY_ASSERT(!_finalized && !Commands.empty() && &Commands.back() == &command);
     MeshPassDrawListContext::FinalizeCommand(context, elementIndex, command);
     if (_visibleCommands) {
-        RADRAY_ASSERT(Commands.size() <= std::numeric_limits<uint32_t>::max());
-        _visibleCommands->push_back({.Source = MeshDrawCommandSource::Dynamic,
-                                     .CommandHandle = {static_cast<uint32_t>(Commands.size() - 1), 0},
-                                     .SortKey = command.BaseSortKey,
-                                     .FirstInstance = command.FirstInstance,
-                                     .InstanceCount = command.InstanceCount});
+        _pendingVisibleCommands.push_back({Commands.size() - 1, _visibleCommands->size()});
+        const auto& element = context.Batch.Elements[elementIndex];
+        _visibleCommands->push_back({.SortKey = ComposeMeshDrawSortKey(_sortMode, _pendingSortKey, context.VisibilitySortKey),
+                                     .FirstInstance = element.FirstInstance,
+                                     .InstanceCount = element.InstanceCount,
+                                     .ElementMask = command.ValidElementMask,
+                                     .UseElementFirstInstance = true,
+                                     .UseElementInstanceCount = true});
     }
 }
 
-void DynamicMeshPassDrawListContext::Clear() noexcept { Commands.clear(); }
+void DynamicMeshPassDrawListContext::FinalizeVisibleCommands() noexcept {
+    if (_finalized) return;
+    for (const auto& pending : _pendingVisibleCommands) {
+        RADRAY_ASSERT(_visibleCommands && pending.VisibleIndex < _visibleCommands->size() && pending.CommandIndex < Commands.size());
+        auto& visible = (*_visibleCommands)[pending.VisibleIndex];
+        visible.CachedCommand = &Commands[pending.CommandIndex];
+    }
+    _pendingVisibleCommands.clear();
+    _finalized = true;
+}
+
+void DynamicMeshPassDrawListContext::Clear() noexcept {
+    Commands.clear();
+    if (_bindings) _bindings->Clear();
+    _pendingVisibleCommands.clear();
+    _finalized = false;
+}
 
 MeshPassProcessor::MeshPassProcessor(MeshPassDrawListContext& drawListContext) noexcept : _drawListContext(&drawListContext) {}
 
 void MeshPassProcessor::SetDrawListContext(MeshPassDrawListContext& drawListContext) noexcept { _drawListContext = &drawListContext; }
 
 bool MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, const MeshDrawCommandSharedState& sharedState) {
+    _drawListContext->_buildFailed = true;
     const auto& batch = context.Batch;
+    if (batch.Elements.size() > 32) return false;
     const auto firstElement = std::find_if(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0 && element.InstanceCount != 0; });
-    if (firstElement == batch.Elements.end()) return true;
-    if (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, sharedState.AllowDeferredInstanceStream) ||
-        batch.Elements.size() > std::numeric_limits<uint32_t>::max()) return false;
+    if (firstElement == batch.Elements.end()) {
+        _drawListContext->_buildFailed = false;
+        return true;
+    }
+    if (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, sharedState.AllowDeferredInstanceStream)) return false;
     MeshDrawCommand initializer;
+    MeshDrawCommandBindings bindings;
     initializer.Pipeline = sharedState.Pipeline;
     initializer.StencilReference = sharedState.StencilReference;
-    initializer.BaseSortKey = sharedState.BaseSortKey;
-    initializer.ParameterSets.assign(sharedState.ParameterSets.begin(), sharedState.ParameterSets.end());
+    bindings.ParameterSets.assign(sharedState.ParameterSets.begin(), sharedState.ParameterSets.end());
     if (sharedState.PushConstants) {
         const auto& source = *sharedState.PushConstants;
         if (source.Data.empty() || !source.Data.data()) return false;
         MeshPushConstantCommandBinding push{source.PushConstantId, source.Offset, {}};
         push.Data.assign(source.Data.begin(), source.Data.end());
-        initializer.PushConstants = std::move(push);
+        bindings.PushConstants = std::move(push);
     }
     for (const auto& stream : batch.VertexInput->Streams) {
-        initializer.VertexBuffers.push_back({stream.Binding, {stream.Buffer.Get(), stream.Offset, stream.Size}});
+        bindings.VertexBuffers.push_back({stream.Binding, {stream.Buffer.Get(), stream.Offset, stream.Size}});
     }
+    std::sort(bindings.VertexBuffers.begin(), bindings.VertexBuffers.end(), [](const auto& a, const auto& b) { return a.Binding < b.Binding; });
     initializer.IndexBuffer = {firstElement->IndexBuffer.Get(), firstElement->IndexBufferOffset, firstElement->IndexStride};
     initializer.IndexCount = firstElement->IndexCount;
     initializer.FirstIndex = firstElement->FirstIndex;
     initializer.VertexOffset = firstElement->VertexOffset;
-    initializer.FirstInstance = firstElement->FirstInstance;
-    initializer.InstanceCount = firstElement->InstanceCount;
-    // Validate shared bindings and the first element once, then reject any invalid remaining geometry before emitting.
-    if (!ValidateMeshDrawCommand(initializer)) return false;
-    for (auto elementIt = firstElement + 1; elementIt != batch.Elements.end(); ++elementIt) {
-        const auto& element = *elementIt;
+    initializer.ValidElementMask = 0;
+    bool hasDifferentInstances = false;
+    for (size_t index = 0; index < batch.Elements.size(); ++index) {
+        const auto& element = batch.Elements[index];
         if (element.IndexCount == 0 || element.InstanceCount == 0) continue;
-        if (!ValidateMeshBatchElement(element)) return false;
+        initializer.ValidElementMask |= uint32_t{1} << index;
+        if (&element != &*firstElement) bindings.ExtraElements.push_back({{element.IndexBuffer.Get(), element.IndexBufferOffset, element.IndexStride}, element.IndexCount, element.FirstIndex, element.VertexOffset, static_cast<uint32_t>(index)});
+        bindings.ElementInstances.push_back({element.FirstInstance, element.InstanceCount});
+        hasDifferentInstances |= element.FirstInstance != firstElement->FirstInstance || element.InstanceCount != firstElement->InstanceCount;
     }
+    if (!hasDifferentInstances) bindings.ElementInstances.clear();
+    bindings.AllElementsSharePrimaryIndexBuffer = std::all_of(bindings.ExtraElements.begin(), bindings.ExtraElements.end(), [&](const auto& element) {
+        return element.IndexBuffer.Target == initializer.IndexBuffer.Target && element.IndexBuffer.Offset == initializer.IndexBuffer.Offset && element.IndexBuffer.Stride == initializer.IndexBuffer.Stride;
+    });
+    const uint32_t primitiveSize = batch.Topology == render::PrimitiveTopology::TriangleList ? 3 : batch.Topology == render::PrimitiveTopology::LineList ? 2
+                                                                                               : batch.Topology == render::PrimitiveTopology::PointList  ? 1
+                                                                                                                                                         : 0;
+    if (sharedState.AllowElementMerging && primitiveSize != 0) {
+        uint64_t runCount = batch.Elements.front().IndexCount;
+        for (size_t index = 0; index + 1 < batch.Elements.size(); ++index) {
+            const auto& a = batch.Elements[index];
+            const auto& b = batch.Elements[index + 1];
+            const bool merge = a.IndexCount != 0 && b.IndexCount != 0 && a.IndexCount % primitiveSize == 0 && b.IndexCount % primitiveSize == 0 &&
+                               a.InstanceCount == 1 && b.InstanceCount == 1 && a.FirstInstance == b.FirstInstance &&
+                               a.IndexBuffer == b.IndexBuffer && a.IndexBufferOffset == b.IndexBufferOffset && a.IndexStride == b.IndexStride &&
+                               a.VertexOffset == b.VertexOffset && uint64_t{a.FirstIndex} + a.IndexCount == b.FirstIndex &&
+                               runCount + b.IndexCount <= std::numeric_limits<uint32_t>::max();
+            if (merge) {
+                bindings.ContiguousMergeMask |= uint32_t{1} << index;
+                runCount += b.IndexCount;
+            } else
+                runCount = b.IndexCount;
+        }
+    }
+    const VisibleMeshDrawCommand visibleDefaults{.FirstInstance = firstElement->FirstInstance, .InstanceCount = firstElement->InstanceCount, .UseElementFirstInstance = true, .UseElementInstanceCount = true};
+    if (!MeshDrawCommandBindingStorage::ValidateConstruction(initializer, bindings, visibleDefaults, !DrawListContext().HasValidatedElements(batch))) return false;
     if (sharedState.AllowDeferredInstanceStream) {
         size_t instanceLayouts = 0;
         for (const auto& layout : batch.VertexInput->Layouts) {
             if (layout.StepMode != render::VertexStepMode::Instance) continue;
             ++instanceLayouts;
-            initializer.InstanceStreamBinding = layout.Binding;
+            bindings.InstanceStreamBinding = layout.Binding;
         }
-        if (instanceLayouts != 1) initializer.InstanceStreamBinding.reset();
+        if (instanceLayouts != 1) bindings.InstanceStreamBinding.reset();
     }
-    for (size_t index = 0; index < batch.Elements.size(); ++index) {
-        if (batch.Elements[index].IndexCount == 0 || batch.Elements[index].InstanceCount == 0) continue;
-        auto& command = DrawListContext().AddCommand(initializer);
-        DrawListContext().FinalizeCommand(context, index, command);
-    }
+    auto& storage = DrawListContext().GetBindingStorage();
+    storage.Store(initializer, bindings);
+    const auto stateSortKey = sharedState.CustomStateSortKey ? *sharedState.CustomStateSortKey : storage.GetStateSortKey(initializer);
+    auto& command = DrawListContext().AddCommand(initializer, stateSortKey);
+    DrawListContext().FinalizeCommand(context, static_cast<size_t>(firstElement - batch.Elements.begin()), command);
+    _drawListContext->_buildFailed = false;
     return true;
 }
 

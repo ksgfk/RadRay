@@ -159,7 +159,7 @@ protected:
             EXPECT_EQ(Trace.BufferAllocations.size(), buffers);
             EXPECT_EQ(Trace.TextureAllocations.size(), textures);
         };
-        pipeline->OnRecord = [&](FrameSlot& slot) {
+        pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
             if (!Compiled) return;
             Pool.BeginFrame();
             auto command = slot.AcquireCommandBuffer();
@@ -888,12 +888,14 @@ public:
     void Wait(FrameSlot&) noexcept override {}
     vector<string> Events;
     vector<MeshPassId> Extracted;
+    std::function<void(RDGBuilder&, const Scene&)> OnSetup;
     bool Reorder{false};
 
 protected:
     void ExtractFrameData(const Scene&, FrameSlot&) noexcept override { Events.push_back("frame"); }
-    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
+    void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override {
         Events.push_back("setup");
+        if (OnSetup) OnSetup(graph, source);
         // A dead list remains untouched, including its initial order.
         slot.GetPassDrawList({7}).VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
         const auto live = graph.CreateTexture(ColorDescriptor());
@@ -952,4 +954,112 @@ TEST(RenderGraphFramePipeline, ExtractionKeepsDeclarationOrderWhenGpuPassesReord
     EXPECT_EQ(trace.RasterScopes.size(), 2);
 }
 
+TEST(RenderGraphFramePipeline, SetupAndExecuteBorrowCurrentSceneUntilRecordCompletes) {
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    DeviceContext context{device, &device->Queue};
+    Scene scene;
+    const auto primitive = scene.AddPrimitive();
+    auto owner = make_unique<FilteringPipeline>(context);
+    vector<uint32_t> recordedCounts;
+    owner->OnSetup = [&](RDGBuilder& graph, const Scene& source) {
+        EXPECT_EQ(&source, &scene);
+        ASSERT_TRUE(source.GetPrimitive(primitive));
+        graph.AddCopyPass("borrow scene", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [&source, &recordedCounts](RDGCopyPassContext&) {
+            recordedCounts.push_back(source.GetPrimitiveCount());
+            return true; });
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(owner), 1);
+    ASSERT_TRUE(scheduler);
+    scheduler->RunFrame(scene);
+    scene.AddPrimitive();
+    scheduler->RunFrame(scene);
+    EXPECT_EQ(recordedCounts, (vector<uint32_t>{1, 2}));
+    scene.Clear();
+    scheduler->WaitIdle();
+}
+
 }  // namespace
+
+TEST_F(RDGExecutionTest, ExternalOwnershipIsRecordedWithoutExecutionGroupsOrStateChanges) {
+    FakeBuffer buffer{64, BufferUse::Vertex};
+    ProbeTexture texture{ColorDescriptor()};
+    Setup = [&](RDGBuilder& graph) {
+        graph.MarkOutput(graph.ImportBuffer(&buffer, BufferState::Vertex, BufferState::Vertex, {true, true}));
+        graph.MarkOutput(graph.ImportTexture(&texture, TextureState::ShaderRead, TextureState::ShaderRead, {true, true}));
+    };
+    Run();
+    ASSERT_EQ(Trace.Barriers.size(), 4u);
+    EXPECT_TRUE(Trace.Executed.empty());
+    const auto& textureAcquire = std::get<BarrierTextureDescriptor>(Trace.Barriers[0]);
+    const auto& bufferAcquire = std::get<BarrierBufferDescriptor>(Trace.Barriers[1]);
+    const auto& textureRelease = std::get<BarrierTextureDescriptor>(Trace.Barriers[2]);
+    const auto& bufferRelease = std::get<BarrierBufferDescriptor>(Trace.Barriers[3]);
+    EXPECT_EQ(textureAcquire.ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+    EXPECT_EQ(bufferAcquire.ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+    EXPECT_EQ(textureRelease.ExternalTransfer, ExternalOwnershipTransfer::Release);
+    EXPECT_EQ(bufferRelease.ExternalTransfer, ExternalOwnershipTransfer::Release);
+    EXPECT_EQ(textureAcquire.Before, textureAcquire.After);
+    EXPECT_EQ(bufferAcquire.Before, bufferAcquire.After);
+    EXPECT_EQ(Trace.BarrierBatches, (vector<size_t>{2, 2}));
+}
+
+TEST_F(RDGExecutionTest, ExternalOwnershipAcquiresOnceBeforeFirstAccessAndReleasesAtGraphEnd) {
+    FakeBuffer buffer{64, BufferUse::Vertex | BufferUse::CopySource};
+    ProbeTexture texture{ColorDescriptor()};
+    Setup = [&](RDGBuilder& graph) {
+        const auto b = graph.ImportBuffer(&buffer, BufferState::Vertex, BufferState::Vertex, {true, true});
+        const auto t = graph.ImportTexture(&texture, TextureState::ShaderRead, TextureState::ShaderRead, {true, true});
+        for (uint32_t i = 0; i < 2; ++i) {
+            graph.AddCopyPass("read", [&](RDGCopyPassBuilder& pass) { pass.ReadBuffer(b).ReadTexture(t).NeverCull(); }, [&](RDGCopyPassContext&) {
+                EXPECT_EQ(Trace.Barriers.size(), 2u);
+                EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[0]).ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+                EXPECT_EQ(std::get<BarrierTextureDescriptor>(Trace.Barriers[1]).ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+                return true; });
+        }
+    };
+    Run();
+    ASSERT_EQ(Trace.Barriers.size(), 6u);
+    EXPECT_EQ(std::get<BarrierTextureDescriptor>(Trace.Barriers[4]).ExternalTransfer, ExternalOwnershipTransfer::Release);
+    EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[5]).ExternalTransfer, ExternalOwnershipTransfer::Release);
+}
+
+TEST_F(RDGExecutionTest, CulledExternalResourcesDoNotTransferOwnership) {
+    FakeBuffer buffer{64, BufferUse::Vertex};
+    Setup = [&](RDGBuilder& graph) { graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, true}); };
+    Run();
+    EXPECT_TRUE(Trace.Barriers.empty());
+}
+
+TEST_F(RDGExecutionTest, ExternalOwnershipWithoutFinalStateStillTransfersBothDirections) {
+    FakeBuffer buffer{64, BufferUse::Vertex};
+    Setup = [&](RDGBuilder& graph) { graph.MarkOutput(graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, true})); };
+    Run();
+    ASSERT_EQ(Trace.Barriers.size(), 2u);
+    EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[0]).ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+    EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[1]).ExternalTransfer, ExternalOwnershipTransfer::Release);
+}
+
+TEST(RDG, DuplicateImportsRequireConsistentOwnership) {
+    FakeBuffer buffer{64, BufferUse::Vertex};
+    ObjectArena arena;
+    RDGBuilder graph{arena};
+    graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, false});
+    graph.ImportBuffer(&buffer, BufferState::Vertex);
+    EXPECT_FALSE(graph.Compile());
+}
+
+TEST_F(RDGExecutionTest, SameStateGroupReadStillAcquiresExternalOwnership) {
+    FakeBuffer buffer{64, BufferUse::CopySource};
+    Setup = [&](RDGBuilder& graph) {
+        const auto handle = graph.ImportBuffer(&buffer, BufferState::CopySource, std::nullopt, {true, false});
+        graph.AddCopyPass("read", [&](RDGCopyPassBuilder& pass) { pass.ReadBuffer(handle).NeverCull(); }, [&](RDGCopyPassContext&) {
+            EXPECT_EQ(Trace.Barriers.size(), 1u);
+            return true; });
+    };
+    Run();
+    ASSERT_EQ(Trace.Barriers.size(), 1u);
+    const auto& barrier = std::get<BarrierBufferDescriptor>(Trace.Barriers[0]);
+    EXPECT_EQ(barrier.Before, barrier.After);
+    EXPECT_EQ(barrier.ExternalTransfer, ExternalOwnershipTransfer::Acquire);
+}

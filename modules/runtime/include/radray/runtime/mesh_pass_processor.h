@@ -21,57 +21,90 @@ struct MeshBatchContext {
     SparseSetHandle PrimitiveHandle{};
     SparseSetHandle BatchHandle{};
     Nullable<const MaterialRenderProxy*> Material{nullptr};
+    uint32_t VisibilitySortKey{0};
 };
 
 struct MeshDrawCommandSharedState {
     render::GraphicsPipelineState* Pipeline;
     uint8_t StencilReference{0};
-    uint64_t BaseSortKey{0};
+    std::optional<uint32_t> CustomStateSortKey{};
     std::span<const MeshShaderParameterBinding> ParameterSets{};
     std::optional<MeshPushConstantBinding> PushConstants{};
     bool AllowDeferredInstanceStream{false};
+    bool AllowElementMerging{false};
 };
 
 class MeshPassDrawListContext {
 public:
     virtual ~MeshPassDrawListContext() noexcept = default;
 
-    // Copies the shared initializer into output storage. The reference must survive until FinalizeCommand returns.
-    // The caller must finalize each command before adding another; references need not survive later additions.
-    virtual MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) = 0;
+    virtual MeshDrawCommandBindingStorage& GetBindingStorage() noexcept = 0;
+    bool HasValidatedElements(const MeshBatch& batch) const noexcept { return _validatedBatch.Get() == &batch; }
 
-    // Fills the selected Element's indexed draw arguments. Overrides call this before adding their own output data.
-    // context is borrowed for this call; elementIndex must identify an existing Element.
+    // Transfers one owned binding reference from the initializer; the context publishes stateSortKey at Finalize.
+    // The reference must survive until FinalizeCommand returns.
+    // The caller must finalize each command before adding another; references need not survive later additions.
+    virtual MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint32_t stateSortKey = 0) = 0;
+
+    // Fills the inline primary element. Overrides call this before publishing output.
+    // elementIndex must be the lowest valid bit; the initializer already contains the mask and extra elements.
     virtual void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command);
+
+private:
+    friend struct Scene;
+    friend class MeshPassProcessor;
+    Nullable<const MeshBatch*> _validatedBatch{nullptr};
+    bool _buildFailed{false};
 };
 
 class CachedPassMeshDrawListContext final : public MeshPassDrawListContext {
 public:
-    CachedPassMeshDrawListContext(MeshPassId passId, CachedPassMeshDrawList& passDrawList, MeshBatch& targetBatch) noexcept;
-    MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) override;
+    CachedPassMeshDrawListContext(CachedPassMeshDrawList& passDrawList, uint32_t batchIndex) noexcept;
+    MeshDrawCommandBindingStorage& GetBindingStorage() noexcept override;
+    MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint32_t stateSortKey = 0) override;
     void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) override;
 
 private:
-    MeshPassId _passId;
+    uint32_t _batchIndex;
     CachedPassMeshDrawList* _passDrawList;
-    MeshBatch* _targetBatch;
-    SparseSetHandle _pendingHandle{};
+    bool _pending{false};
+    uint32_t _pendingSortKey{0};
 };
 
-// Commands and their handles are frame-local; Clear invalidates all prior output.
+// Commands and their visible pointers are frame-local; Clear invalidates all prior output.
 class DynamicMeshPassDrawListContext final : public MeshPassDrawListContext {
 public:
     DynamicMeshPassDrawListContext() noexcept = default;
-    explicit DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
+    explicit DynamicMeshPassDrawListContext(vector<VisibleMeshDrawCommand>& visibleCommands, MeshPassSortMode sortMode = MeshPassSortMode::StateFirst) noexcept;
+    MeshDrawCommandBindingStorage& GetBindingStorage() noexcept override;
+    // Rebinding must preserve the emitted entries at their original positions (e.g. after a list move).
     void BindVisibleCommands(vector<VisibleMeshDrawCommand>& visibleCommands) noexcept;
-    MeshDrawCommand& AddCommand(const MeshDrawCommand& initializer) override;
+    MeshDrawCommand& AddCommand(MeshDrawCommand& initializer, uint32_t stateSortKey = 0) override;
     void FinalizeCommand(const MeshBatchContext& context, size_t elementIndex, MeshDrawCommand& command) override;
+    // Call after all commands are finalized, before sorting, copying or submitting visible entries.
+    // Publishes stable pointers once; further command additions require Clear and a fresh visible list.
+    void FinalizeVisibleCommands() noexcept;
     void Clear() noexcept;
+    void SetSortMode(MeshPassSortMode mode) noexcept;
+    MeshPassSortMode GetSortMode() const noexcept { return _sortMode; }
 
+    // Do not resize, reserve, erase or replace storage after FinalizeVisibleCommands until Clear.
     vector<MeshDrawCommand> Commands;
 
 private:
+    // Stable identity across moves of the owning frame draw list.
+    unique_ptr<MeshDrawCommandBindingStorage> _bindings;
+
+    struct PendingVisibleCommand {
+        size_t CommandIndex;
+        size_t VisibleIndex;
+    };
+
     Nullable<vector<VisibleMeshDrawCommand>*> _visibleCommands{nullptr};
+    vector<PendingVisibleCommand> _pendingVisibleCommands;
+    uint32_t _pendingSortKey{0};
+    bool _finalized{false};
+    MeshPassSortMode _sortMode{MeshPassSortMode::StateFirst};
 };
 
 class MeshPassProcessor {
@@ -81,7 +114,7 @@ public:
     virtual ~MeshPassProcessor() noexcept = default;
     void SetDrawListContext(MeshPassDrawListContext& drawListContext) noexcept;
     MeshPassDrawListContext& DrawListContext() noexcept { return *_drawListContext; }
-    // Emits zero or more commands into the output context. Returning without emitting skips the batch.
+    // Emits at most one batch command into the output context. Returning without emitting skips the batch.
     virtual void AddMeshBatch(const MeshBatchContext& context) = 0;
 
 protected:
@@ -93,6 +126,7 @@ protected:
 struct MeshPassRegistration {
     MeshPassId Pass{};
     MeshPassProcessor* Processor;
+    MeshPassSortMode SortMode{MeshPassSortMode::StateFirst};
 };
 
 }  // namespace radray

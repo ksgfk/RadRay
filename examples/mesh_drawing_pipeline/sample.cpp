@@ -115,11 +115,11 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     vector<SparseSetHandle> candidates;
     vector<BatchPassPolicy> policies;
     for (const auto& cube : cubes) {
-        const auto handle = scene.AddPrimitive();
-        auto& primitive = scene.Primitives.Get(handle);
+        PrimitiveSceneInfo primitive;
         primitive.LocalToWorld = AffineTransform{ComposeTransform(
             cube.Position, Eigen::Quaternionf::Identity(), Eigen::Vector3f::Constant(cube.Scale).eval())};
         primitive.LocalBounds = Aabb{{-0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}};
+        const auto handle = scene.AddPrimitive(std::move(primitive));
         for (size_t sectionIndex = 0; sectionIndex < sections.size(); ++sectionIndex) {
             const auto& section = sections[sectionIndex];
             MeshBatch batch;
@@ -137,7 +137,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
         candidates.push_back(handle);
     }
     RADRAY_INFO_LOG("步骤 2：{} 个 Primitive、{} 个 Batch，共享几何；演示 Batch 参与规则、材质标签筛选、模板描边和透明混合",
-                    scene.Primitives.Count(), scene.Meshes.Count());
+                    scene.GetPrimitiveCount(), scene.GetMeshBatchCount());
 
     // 步骤 3：将相机与 viewport 作为本次 Pass 的输入。
     // 为什么：场景可以被多个相机/Pass 使用，不应把最终 ViewProjection 固定在 MeshBatch 里。
@@ -163,17 +163,19 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     RADRAY_INFO_LOG("多槽帧循环：{} 个 Slot，连续渲染 {} 帧；Frame 1 更新绿色材质，结束后保存最后一帧", slotCount, frameCount);
     scheduler->RunFrame(scene);
 
-    vector<InlineVector<CachedMeshDrawCommandInfo, 4>> originalCommands;
+    vector<array<std::optional<MeshDrawCommand>, 4>> originalCommands;
     MaterialConstants originalGreen;
     for (const auto& policy : policies) {
-        const auto& batch = scene.Meshes.Get(policy.Batch);
-        originalCommands.push_back(batch.CachedCommands);
-        if (batch.Material != materials[2]) continue;
-        for (const auto& info : batch.CachedCommands) {
-            if (info.Pass != MeshPassId{1}) continue;
-            const auto& push = scene.GetCachedDrawList(info.Pass)->Commands.Get(info.CommandHandle).PushConstants;
-            if (!push || push->Data.size() != sizeof(originalGreen)) return 4;
-            std::memcpy(&originalGreen, push->Data.data(), sizeof(originalGreen));
+        auto& snapshot = originalCommands.emplace_back();
+        for (uint32_t passIndex = 0; passIndex < snapshot.size(); ++passIndex) {
+            const auto cache = scene.GetPassCache({passIndex});
+            const auto command = cache->GetCommand(policy.Batch.Index);
+            if (!command) continue;
+            snapshot[passIndex] = *command;
+            if (scene.GetMeshBatch(policy.Batch)->Material != materials[2] || passIndex != 1) continue;
+            const auto payload = cache->GetBindings().GetPayload(command->PayloadIndex);
+            if (!payload || !payload->PushConstants || payload->PushConstants->Data.size() != sizeof(originalGreen)) return 4;
+            std::memcpy(&originalGreen, payload->PushConstants->Data.data(), sizeof(originalGreen));
         }
     }
     if (originalGreen.Color != array<float, 4>{0.09f, 0.34f, 0.15f, 1.0f}) return 4;
@@ -182,7 +184,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     if (!instances[2].SetParameter(parameters.Brightness, 1.0f)) return 4;
     RADRAY_INFO_LOG("材质同步前：实例 Brightness={}，Proxy 仍为 {}",
                     std::get<float>(*instances[2].GetParameter(parameters.Brightness)),
-                    std::get<float>(*scene.Materials.Get(materials[2]).GetParameter(parameters.Brightness)));
+                    std::get<float>(*(*scene.GetMaterial(materials[2])).GetParameter(parameters.Brightness)));
     MaterialRenderProxy editedProxy;
     editedProxy.Update(instances[2]);
     if (!scene.UpdateMaterial(materials[2], std::move(editedProxy))) return 4;
@@ -191,31 +193,31 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     if (scene.HasDirtyBatches()) return 4;
     size_t rebuiltBatches = 0;
     for (size_t index = 0; index < policies.size(); ++index) {
-        const auto& batch = scene.Meshes.Get(policies[index].Batch);
-        const auto& previous = originalCommands[index];
-        if (previous.size() != batch.CachedCommands.size()) return 4;
-        const bool edited = batch.Material == materials[2];
+        const auto batch = policies[index].Batch;
+        const bool edited = scene.GetMeshBatch(batch)->Material == materials[2];
         bool changed = false;
-        for (size_t commandIndex = 0; commandIndex < previous.size(); ++commandIndex) {
-            const bool sameHandle = previous[commandIndex].CommandHandle == batch.CachedCommands[commandIndex].CommandHandle;
-            if (sameHandle == edited) return 4;
-            changed |= !sameHandle;
-            const auto& info = batch.CachedCommands[commandIndex];
-            if (edited && info.Pass == MeshPassId{1}) {
-                const auto& push = scene.GetCachedDrawList(info.Pass)->Commands.Get(info.CommandHandle).PushConstants;
+        for (uint32_t passIndex = 0; passIndex < 4; ++passIndex) {
+            const auto cache = scene.GetPassCache({passIndex});
+            const auto command = cache->GetCommand(batch.Index);
+            const auto& previous = originalCommands[index][passIndex];
+            if (static_cast<bool>(command) != previous.has_value()) return 4;
+            if (!command) continue;
+            if (!edited && (command->VertexBuffersIndex != previous->VertexBuffersIndex || command->PayloadIndex != previous->PayloadIndex)) return 4;
+            if (edited && passIndex == 1) {
+                const auto payload = cache->GetBindings().GetPayload(command->PayloadIndex);
+                if (!payload || !payload->PushConstants || payload->PushConstants->Data.size() != sizeof(MaterialConstants)) return 4;
                 MaterialConstants updated;
-                if (!push || push->Data.size() != sizeof(updated)) return 4;
-                std::memcpy(&updated, push->Data.data(), sizeof(updated));
-                for (size_t channel = 0; channel < 3; ++channel) {
+                std::memcpy(&updated, payload->PushConstants->Data.data(), sizeof(updated));
+                for (size_t channel = 0; channel < 3; ++channel)
                     if (updated.Color[channel] != originalGreen.Color[channel] * 2) return 4;
-                }
                 if (updated.Color[3] != originalGreen.Color[3]) return 4;
+                changed = true;
             }
         }
         rebuiltBatches += changed ? 1 : 0;
     }
     if (rebuiltBatches != 1) return 4;
-    RADRAY_INFO_LOG("增量缓存验证：仅绿色材质的 {} 个 Batch 重建，其余 {} 个 Batch 的 CommandHandle 保持不变", rebuiltBatches, policies.size() - rebuiltBatches);
+    RADRAY_INFO_LOG("增量缓存验证：仅绿色材质的 {} 个 Batch 重建，其余 {} 个 Batch 的驻留状态索引保持不变", rebuiltBatches, policies.size() - rebuiltBatches);
     RADRAY_INFO_LOG("命令颜色验证：绿色材质 Brightness 从 0.5 更新为 1.0，缓存 PushConstants 的 RGB 已翻倍，alpha 保持不变");
 
     for (uint32_t frame = 2; frame < frameCount; ++frame) {

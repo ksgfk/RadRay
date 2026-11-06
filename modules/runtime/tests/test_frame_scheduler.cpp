@@ -28,7 +28,7 @@ protected:
     // Logs "<stage><slot>:<frame>" for every pipeline stage.
     void LogStages() {
         Pipeline->OnExtract = [this](const Scene&, FrameSlot& slot) { Log.push_back(fmt::format("E{}:{}", slot.GetIndex(), slot.GetFrameId())); };
-        Pipeline->OnRecord = [this](FrameSlot& slot) { Log.push_back(fmt::format("R{}:{}", slot.GetIndex(), slot.GetFrameId())); };
+        Pipeline->OnRecord = [this](const Scene&, FrameSlot& slot) { Log.push_back(fmt::format("R{}:{}", slot.GetIndex(), slot.GetFrameId())); };
         Pipeline->OnWait = [this](FrameSlot& slot) { Log.push_back(fmt::format("W{}:{}", slot.GetIndex(), slot.GetFrameId())); };
     }
     // Registers an arena-owned object that logs `text` when the slot reclaims it.
@@ -123,6 +123,32 @@ TEST_F(FrameSchedulerTest, ConstSceneIsNotSynchronized) {
     EXPECT_TRUE(Source.HasDirtyBatches());
 }
 
+TEST_F(FrameSchedulerTest, ExtractAndRecordBorrowTheCurrentSceneAcrossSlots) {
+    Scene other;
+    Source.AddPrimitive();
+    other.AddPrimitive();
+    other.AddPrimitive();
+    auto scheduler = Create(2);
+    ASSERT_TRUE(scheduler);
+    const array<const Scene*, 3> sources{&Source, &other, &Source};
+    vector<uint32_t> counts;
+    Pipeline->OnExtract = [&](const Scene& source, FrameSlot& slot) {
+        EXPECT_EQ(&source, sources[slot.GetFrameId()]);
+    };
+    Pipeline->OnRecord = [&](const Scene& source, FrameSlot& slot) {
+        EXPECT_EQ(&source, sources[slot.GetFrameId()]);
+        counts.push_back(source.GetPrimitiveCount());
+    };
+    scheduler->RunFrame(Source);
+    scheduler->RunFrame(std::as_const(other));
+    Source.AddPrimitive();
+    scheduler->RunFrame(Source);
+    EXPECT_EQ(counts, (vector<uint32_t>{1, 2, 2}));
+    Source.Clear();
+    other.Clear();
+    scheduler->WaitIdle();
+}
+
 TEST_F(FrameSchedulerTest, ArenaObjectsLiveUntilTheirSlotIsWaited) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
@@ -140,10 +166,8 @@ TEST_F(FrameSchedulerTest, DrawListsAreEmptyWhenSlotIsReused) {
     ASSERT_TRUE(scheduler);
     Pipeline->OnExtract = [](const Scene&, FrameSlot& slot) {
         auto& list = slot.GetPassDrawList({0});
-        EXPECT_TRUE(list.CachedCommands.empty());
         EXPECT_TRUE(list.VisibleCommands.empty());
         EXPECT_TRUE(list.DynamicContext.Commands.empty());
-        list.CachedCommands.emplace_back();
         list.VisibleCommands.emplace_back();
         list.DynamicContext.Commands.emplace_back();
     };
@@ -155,7 +179,7 @@ TEST_F(FrameSchedulerTest, RetiredOwnerIsReleasedWhenItsSlotIsReused) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
     bool released = false;
-    Pipeline->OnRecord = [&](FrameSlot& slot) {
+    Pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
         if (slot.GetFrameId() == 0) slot.RetireResource(MakeScopeGuard([&]() noexcept { released = true; }));
     };
     scheduler->RunFrame(Source);
