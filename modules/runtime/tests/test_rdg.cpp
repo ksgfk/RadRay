@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <radray/logger.h>
+
 #include <algorithm>
 #include <cstring>
 
 #include <radray/runtime/rdg.h>
 #include <radray/runtime/render_graph_pipeline.h>
+#include <radray/runtime/geometry_buffer_pool.h>
+#include <radray/runtime/upload_buffer.h>
 
 #include "test_fakes.h"
 
@@ -201,7 +205,7 @@ TEST_F(RDGExecutionTest, MergesRasterAttachmentsFoldsActionsAndHoistsLaterConsta
         depthDesc.Usage = TextureUse::DepthStencilWrite;
         const auto depth = graph.CreateTexture(depthDesc);
         for (uint32_t i = 0; i < 3; ++i) {
-            graph.AddRasterPass(fmt::format("raster{}", i), [&, i](RDGRasterPassBuilder& pass) {
+            graph.AddRasterPass(radray::format("raster{}", i), [&, i](RDGRasterPassBuilder& pass) {
                 const auto load = i == 0 ? LoadAction::Clear : LoadAction::Load;
                 const auto store = i == 2 ? StoreAction::Discard : StoreAction::Store;
                 pass.WriteColor(0, color, load, store, {float(i) * 0.25f, 0.5f, 0.75f, 1.0f})
@@ -212,7 +216,7 @@ TEST_F(RDGExecutionTest, MergesRasterAttachmentsFoldsActionsAndHoistsLaterConsta
                 if (!encoder.Stencils.empty()) EXPECT_EQ(encoder.Stencils.back(), 0);
                 encoder.SetStencilReference(7);
                 EXPECT_EQ(Trace.BarrierBatches, (vector<size_t>{4}));
-                Trace.Executed.push_back(fmt::format("raster{}", i));
+                Trace.Executed.emplace_back(radray::format("raster{}", i));
                 return true; });
         }
         graph.MarkOutput(color);
@@ -511,6 +515,158 @@ TEST_F(RDGExecutionTest, AllocationFailureReturnsFalseBeforeExecutingPasses) {
     EXPECT_TRUE(Trace.Executed.empty());
 }
 
+TEST_F(RDGExecutionTest, CombinesRepeatedReadOnlyBufferAccessesAndRestoresBoundary) {
+    ByteBuffer input{{.Size = 16, .Usage = BufferUse::Vertex | BufferUse::Resource}, Trace};
+    Setup = [&](RDGBuilder& graph) {
+        const auto buffer = graph.ImportBuffer(&input, BufferState::Common, BufferState::Common);
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        graph.AddRasterPass("read geometry", [&](RDGRasterPassBuilder& pass) {
+            pass.WriteColor(0, color, LoadAction::Clear, StoreAction::Store).NeverCull();
+            pass.ReadBuffer(buffer, BufferState::Vertex).ReadBuffer(buffer, BufferState::ShaderRead); }, [](RDGRasterPassContext&) { return true; });
+    };
+    Run();
+    vector<BarrierBufferDescriptor> barriers;
+    for (const auto& barrier : Trace.Barriers) {
+        if (const auto* buffer = std::get_if<BarrierBufferDescriptor>(&barrier)) barriers.push_back(*buffer);
+    }
+    ASSERT_EQ(barriers.size(), 2u);
+    EXPECT_EQ(barriers[0].Before, BufferStates{BufferState::Common});
+    EXPECT_EQ(barriers[0].After, BufferState::Vertex | BufferState::ShaderRead);
+    EXPECT_EQ(barriers[1].Before, barriers[0].After);
+    EXPECT_EQ(barriers[1].After, BufferStates{BufferState::Common});
+}
+
+TEST_F(RDGExecutionTest, PagedUploadKeepsEarlierPointersWritableAfterGrowthAndReusesPages) {
+    ByteBuffer target{{.Size = 64, .Usage = BufferUse::CopyDestination}, Trace};
+    auto upload = BatchedBufferUpload::Create(*Device, 16);
+    ASSERT_TRUE(upload);
+    auto first = upload->Acquire(&target, 0, 16);
+    auto second = upload->Acquire(&target, 32, 32);
+    ASSERT_TRUE(first && second);
+    EXPECT_EQ(upload->GetPageCount(), 2u);
+    std::memset(first.Get(), 0x35, 16);
+    std::memset(second.Get(), 0x79, 32);
+    const auto maps = Trace.Maps;
+    Setup = [&](RDGBuilder& graph) { EXPECT_TRUE(upload->CommitToGraph(graph)); };
+    Run();
+    EXPECT_EQ(Trace.Maps, maps);
+    EXPECT_EQ(Trace.Copies, 2u);
+    EXPECT_TRUE(std::all_of(target.Bytes.begin(), target.Bytes.begin() + 16, [](byte value) { return value == byte{0x35}; }));
+    EXPECT_TRUE(std::all_of(target.Bytes.begin() + 32, target.Bytes.end(), [](byte value) { return value == byte{0x79}; }));
+    const auto& final = std::get<BarrierBufferDescriptor>(Trace.Barriers.back());
+    EXPECT_EQ(final.Target, &target);
+    EXPECT_EQ(final.After, BufferStates{BufferState::Common});
+    Scheduler->BeginFrame();
+    upload->Reset();
+    EXPECT_TRUE(upload->Acquire(&target, 0, 16));
+    EXPECT_EQ(Trace.Maps, maps);
+    Scheduler->WaitIdle();
+}
+
+TEST_F(RDGExecutionTest, GeometryPoolsShareUploadBoundaryAcrossUploadOnlyAndDrawFrames) {
+    const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
+    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+    auto vertices = VertexBufferPool::Create(*Device, {.VertexStride = 12, .PageVertexCapacity = 3, .AdditionalUsage = BufferUse::Resource, .Layouts = layouts, .Attributes = attributes});
+    auto indices = IndexBufferPool::Create(*Device, {.PageIndexCapacity = 3});
+    auto upload = BatchedBufferUpload::Create(*Device, 16);
+    ASSERT_TRUE(vertices && indices && upload);
+    auto v = vertices->Allocate(3);
+    auto i = indices->Allocate(3);
+    ASSERT_TRUE(v && i);
+    const array<byte, 36> vertexBytes{byte{42}};
+    const array<uint32_t, 3> indexBytes{0, 1, 2};
+    ASSERT_TRUE(upload->Stage(v->GetBuffer(), v->GetByteOffset(), vertexBytes.data(), sizeof(vertexBytes)));
+    ASSERT_TRUE(upload->Stage(i->GetBuffer(), i->GetByteOffset(), indexBytes.data(), sizeof(indexBytes)));
+    bool draw = false;
+    Setup = [&](RDGBuilder& graph) {
+        if (!draw) {
+            EXPECT_TRUE(upload->CommitToGraph(graph));
+            return;
+        }
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        graph.AddRasterPass("pooled geometry", [&](RDGRasterPassBuilder& pass) {
+            pass.WriteColor(0, color, LoadAction::Clear, StoreAction::Store).NeverCull();
+            vertices->AddPassReadAccess(graph, pass, BufferState::Vertex | BufferState::ShaderRead);
+            indices->AddPassReadAccess(graph, pass); }, [](RDGRasterPassContext&) { return true; });
+    };
+    Run();
+    EXPECT_EQ(Trace.Copies, 2u);
+    draw = true;
+    Trace.Barriers.clear();
+    Run();
+    uint32_t pooledTransitions = 0;
+    for (const auto& barrier : Trace.Barriers) {
+        if (const auto* buffer = std::get_if<BarrierBufferDescriptor>(&barrier)) {
+            if (buffer->Target == v->GetBuffer()) {
+                EXPECT_TRUE(buffer->Before == BufferState::Common || buffer->After == BufferState::Common);
+                EXPECT_TRUE(buffer->Before == (BufferState::Vertex | BufferState::ShaderRead) || buffer->After == (BufferState::Vertex | BufferState::ShaderRead));
+            }
+            ++pooledTransitions;
+        }
+    }
+    EXPECT_EQ(pooledTransitions, 4u);
+    Scheduler->WaitIdle();
+}
+
+TEST(RDG, CombinedBufferStateRequiresEveryUsageAndPassCompatibleBit) {
+    for (const auto usage : {BufferUses{BufferUse::Vertex}, BufferUse::Vertex | BufferUse::Resource}) {
+        ObjectArena arena;
+        RDGBuilder graph{arena};
+        FakeBuffer input{16, usage};
+        const auto buffer = graph.ImportBuffer(&input, BufferState::Common);
+        graph.AddComputePass("invalid", [&](RDGComputePassBuilder& pass) { pass.ReadBuffer(buffer, BufferState::Vertex | BufferState::ShaderRead).NeverCull(); }, [](RDGComputePassContext&) { return true; });
+        EXPECT_FALSE(graph.Compile());
+    }
+}
+
+TEST(RDG, ValidatesEveryReadOnlyBufferUsageAndCombinedImportBoundary) {
+    const auto combined = BufferState::Vertex | BufferState::ShaderRead;
+    for (const auto usage : {BufferUses{BufferUse::Vertex}, BufferUse::Vertex | BufferUse::Resource}) {
+        ObjectArena arena;
+        RDGBuilder graph{arena};
+        FakeBuffer input{16, usage};
+        const auto buffer = graph.ImportBuffer(&input, combined, combined);
+        graph.AddRasterPass("geometry", [&](RDGRasterPassBuilder& pass) {
+            pass.WriteColor(0, graph.CreateTexture(ColorDescriptor()), LoadAction::Clear, StoreAction::Store);
+            pass.ReadBuffer(buffer, combined).NeverCull(); }, [](RDGRasterPassContext&) { return true; });
+        EXPECT_EQ(bool{graph.Compile()}, usage.HasFlag(BufferUse::Resource));
+    }
+}
+
+TEST(RDG, ComputeCombinesShaderConstantAndIndirectReads) {
+    ObjectArena arena;
+    RDGBuilder graph{arena};
+    FakeBuffer input{16, BufferUse::Resource | BufferUse::CBuffer | BufferUse::Indirect};
+    const auto buffer = graph.ImportBuffer(&input, BufferState::Common);
+    graph.AddComputePass("combined reads", [&](RDGComputePassBuilder& pass) { pass.ReadBuffer(buffer).ReadBuffer(buffer, BufferState::CBuffer | BufferState::Indirect).NeverCull(); }, [](RDGComputePassContext&) { return true; });
+    EXPECT_TRUE(graph.Compile());
+}
+
+TEST(RDGTransientPool, RetainsCombinedReadOnlyBufferStateAcrossReuse) {
+    Probe trace;
+    ProbeDevice device{trace};
+    RDGTransientResourcePool pool{device};
+    const BufferDescriptor desc{.Size = 16, .Usage = BufferUse::Vertex | BufferUse::Resource};
+    const auto first = pool.AcquireBuffer(desc);
+    ASSERT_TRUE(first.Buffer);
+    pool.CommitBufferState(first.Buffer.Get(), BufferState::Vertex | BufferState::ShaderRead);
+    pool.BeginFrame();
+    const auto reused = pool.AcquireBuffer(desc);
+    EXPECT_EQ(reused.Buffer.Get(), first.Buffer.Get());
+    EXPECT_EQ(reused.LastState, BufferState::Vertex | BufferState::ShaderRead);
+}
+
+TEST(RDG, RejectsMixedReadAndWriteBufferStates) {
+    ObjectArena arena;
+    RDGBuilder graph{arena};
+    FakeBuffer input{16, BufferUse::Vertex | BufferUse::UnorderedAccess};
+    const auto buffer = graph.ImportBuffer(&input, BufferState::Common);
+    graph.AddRasterPass("invalid", [&](RDGRasterPassBuilder& pass) {
+        pass.WriteColor(0, graph.CreateTexture(ColorDescriptor()), LoadAction::Clear, StoreAction::Store);
+        pass.ReadBuffer(buffer, BufferState::Vertex | BufferState::UnorderedAccess).NeverCull(); }, [](RDGRasterPassContext&) { return true; });
+    EXPECT_FALSE(graph.Compile());
+}
+
 TEST(RDG, RejectsInvalidResourceHandles) {
     ObjectArena arena;
     RDGBuilder graph{arena};
@@ -795,7 +951,7 @@ TEST_F(RDGExecutionTest, RasterCallbackFailureClosesMergedScopeAndSkipsRemaining
     Setup = [&](RDGBuilder& graph) {
         const auto color = graph.CreateTexture(ColorDescriptor());
         for (uint32_t i = 0; i < 3; ++i) {
-            graph.AddRasterPass("raster", [&, i](RDGRasterPassBuilder& pass) { pass.WriteColor(0, color, i == 0 ? LoadAction::Clear : LoadAction::Load, StoreAction::Store); }, [&, i](RDGRasterPassContext&) { Trace.Executed.push_back(fmt::format("{}", i)); return i != 1; });
+            graph.AddRasterPass("raster", [&, i](RDGRasterPassBuilder& pass) { pass.WriteColor(0, color, i == 0 ? LoadAction::Clear : LoadAction::Load, StoreAction::Store); }, [&, i](RDGRasterPassContext&) { Trace.Executed.emplace_back(radray::format("{}", i)); return i != 1; });
         }
         graph.MarkOutput(color);
     };
@@ -896,7 +1052,7 @@ protected:
     void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override {
         Events.push_back("setup");
         if (OnSetup) OnSetup(graph, source);
-        // A dead list remains untouched, including its initial order.
+        // 被裁剪的列表保持不变，包括其初始顺序。
         slot.GetPassDrawList({7}).VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
         const auto live = graph.CreateTexture(ColorDescriptor());
         const auto dead = graph.CreateTexture(ColorDescriptor());
@@ -979,7 +1135,7 @@ TEST(RenderGraphFramePipeline, SetupAndExecuteBorrowCurrentSceneUntilRecordCompl
     scheduler->WaitIdle();
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 TEST_F(RDGExecutionTest, ExternalOwnershipIsRecordedWithoutExecutionGroupsOrStateChanges) {
     FakeBuffer buffer{64, BufferUse::Vertex};

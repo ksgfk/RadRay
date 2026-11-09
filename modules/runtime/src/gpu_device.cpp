@@ -33,7 +33,7 @@ uint32_t MatchHost(
     RADRAY_WARN_LOG("No external-resource adapter matches the requested identity; using the preferred device");
     return preferred;
 }
-}  // namespace
+}  // 匿名命名空间
 
 DeviceContext::DeviceContext(
     shared_ptr<render::Device> device,

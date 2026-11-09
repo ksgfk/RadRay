@@ -1,4 +1,4 @@
-> - 适用: 理解 `RadRay::runtime` 在 2.2 万驻留批次、多块几何缓冲池（Arena）与持续流式增删高压负载下暴露出的底层架构边界缺陷，以及通过收紧 `Scene` 封装边界、正交拆分 `StateSortKey`/`VisibilitySortKey`、构建期预计算 `ContiguousMergeMask`、收敛 `64 B` 单缓存行命令与治理容器尾延迟的下一阶段架构重构计划
+> - 适用: 理解 `RadRay::runtime` 在命令缓存、共享绑定与流式增删中涉及的底层架构边界缺陷，以及通过收紧 `Scene` 封装边界、正交拆分 `StateSortKey`/`VisibilitySortKey`、构建期预计算 `ContiguousMergeMask`、收敛 `64 B` 单缓存行命令与治理容器尾延迟的下一阶段架构重构计划
 > - 权威: 经用户确认保存的架构重构与演进计划；不作为已实现契约，当前已实现行为见 [Rendering runtime](../architecture/runtime.md)
 > - 锚点: `modules/core/include/radray/sparse_set.h`, `modules/runtime/include/radray/runtime/mesh_draw_command.h`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/include/radray/runtime/mesh_batch.h`, `modules/runtime/include/radray/runtime/mesh_pass_processor.h`, `modules/runtime/src/mesh_pass_processor.cpp`, `modules/runtime/include/radray/runtime/scene.h`, `modules/runtime/src/scene.cpp`, `modules/runtime/include/radray/runtime/frame_slot.h`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/include/radray/runtime/rdg.h`, `modules/runtime/src/rdg.cpp`
 
@@ -8,7 +8,7 @@
 
 - 记录日期：2026-11-08
 - 源码基线：2026-11-08 当前工作树（完成 [Batch 级命令收敛与热路径直达优化计划](2026-11-06-runtime-batch-command-and-fast-submit-plan.md) 后的 `RadRay::runtime` 实现）
-- 状态：基于大规模流式体素地形压测与多轮架构边界审视确认的下一阶段重构计划，待实施
+- 状态：基于架构边界审视确认的下一阶段重构计划，待实施
 - 核心原则：**直接修正底层架构边界，而非在破坏封装的旧契约上堆叠防御性补丁**。涵盖：
   1. 收紧 `Scene`、`CachedPassMeshDrawList` 与 `MeshDrawCommandBindingStorage` 的封装边界，废除外部绕过 `Scene` 直接篡改内部容器与缓存的后门契约；
   2. `VertexBuffersPool` 与 `Payloads` 跨 Batch 引用计数驻留去重（State Interning），并将 `MeshDrawCommand` 压入 **`64 Bytes` 单条缓存行**；
@@ -18,26 +18,15 @@
 
 ---
 
-## 一、背景与压测暴露的真实瓶颈
+## 一、范围
 
-在完成 Batch 级 `MeshDrawCommand` 收敛与 `ElementMask` 连发绘制后，使用大规模流式场景（常驻 `18,175–22,374` 个 `MeshBatch`、每帧可见 `2,592–3,306` 个 Batch、展开 `8,456–10,249` 次 `DrawIndexed`、几何顶点与索引按 8 MiB Arena 分块子分配并伴随持续流式加载/卸载）对 `RadRay::runtime` 进行了 60 秒级全链路 Tracy CPU/GPU 采样。
-
-扣除外部调用方逻辑后，`RadRay::runtime` 自身的 CPU 耗时分布与异常现象如下：
-
-| 指标 / 阶段 | 原世界 32 区块 (`18.2k` 驻留) | 城市穿行 (`22.3k` 驻留，动态流式) | 城市环视 (`22.3k` 驻留，相机旋转) | 城市固定俯瞰 (`22.4k` 驻留，纯静态) | 压测暴露的核心问题 |
-|---|---:|---:|---:|---:|---|
-| `RadRay.DrawList.Submit` (均值) | `0.440 ms` | **`0.417 ms`** | `0.124 ms` | `0.182 ms` | 穿行后段随流式碎片化恶化至 **`0.592 ms/帧`** |
-| 每帧 `DrawIndexed` 调用数 | `8,456` | `8,139` | `6,348` | **`10,249`** | 固定俯瞰 Draw 最多，但 `Submit` 反而比原世界快 2.4 倍 |
-| 每帧 `VertexBuffer` 绑定次数 | **`1,555`** | **`1,252`** (初段 `226` $\to$ 末段 **`2,033`**) | `180` | `294` | `Submit` 耗时与 VB 绑定次数强相关（$r = 0.91 \sim 0.93$），与 Draw 数弱相关（$r = 0.21$） |
-| `RadRay.Scene.GatherVisibleHandles` (均值) | `0.093 ms` | **`0.109 ms`** | `0.044 ms` | `0.057 ms` | 每帧对 ~3,000 个可见 Batch 做双层 `SparseSet` 随机查表 |
-| `RadRay.DrawList.SortVisible` (均值 / 峰值) | `0.065 ms` | `0.067 ms` | `0.051 ms` / **`2.89 ms`** | `0.064 ms` | `std::stable_sort` 临时堆分配引发 **`2.89 ms`** 尾延迟尖峰 |
-| `RadRay.Scene.SyncCachedCommands` (峰值) | **`4.44 ms`** (`BuildBatch` 单次 **`4.21 ms`**) | `0.19 ms` | `0.04 ms` | `0.00 ms` | 驻留数跨过 `18,207` 时触发 18 个 `std::vector` 同步扩容搬移 |
+在 Batch 级 MeshDrawCommand 与 ElementMask 方案基础上，检查 Scene 变更入口、绑定共享、排序键、子网格合并、容器容量和 RDG 外部所有权边界。
 
 ---
 
 ## 二、深层架构审视：为什么局部打补丁会陷入边界泥潭？
 
-对上述性能问题及多轮边界推敲的复盘表明，当前 `RadRay::runtime` 存在 **五处底层架构设计缺陷**。若不修正这些架构边界，任何局部优化都会被迫编写大量防御性状态机：
+对接口与数据结构的审视表明，当前 `RadRay::runtime` 存在 **五处底层架构设计缺陷**。若不修正这些架构边界，任何局部优化都会被迫编写大量防御性状态机：
 
 ### 架构缺陷一：`Scene` 与 `CachedPassMeshDrawList` 暴露为“全公开可写数据袋”，破坏了不变量封装
 
@@ -56,8 +45,8 @@
    - [`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 设计了 `stateCache.LastVertexBuffersHandle != command.VertexBuffersHandle` 的句柄相等性短路，前提是共享相同顶点流绑定的不同命令持有相同句柄。
    - 然而 [`MeshDrawCommandBindingStorage::Store`](../../modules/runtime/src/mesh_draw_command.cpp) 实现为 **1:1 独占分配**：每条 `MeshDrawCommand` 无条件向 `VertexBuffersPool` 和 `Payloads` 插入新副本。
 2. **导致的架构恶果**：
-   - `22,374` 个共享约 10 个 8 MiB Arena Buffer 块和 1 套材质的 `MeshBatch`，在池中生成了 `22,374` 份完全相同的副本；
-   - 每条缓存命令的句柄互不相同，`LastVertexBuffersHandle` 短路**命中率为 0%**，每帧 ~3,000 条可见命令 100% 触发二级查表与逐槽比对，同时 `Payload` 缺乏句柄级短路缓存。
+   - 共享同一顶点缓冲与材质的多个 MeshBatch，仍在绑定池中各自持有相同数据的副本；
+   - 每条缓存命令的句柄互不相同，相同绑定无法通过句柄相等性短路；Payload 也缺乏相应缓存。
 
 ---
 
@@ -68,15 +57,15 @@
    - 这一公式将“构建期静态属性（`BaseSortKey`）”死锁在高 32 位，将“当帧视角相关属性（`VisibilitySortKey`，如相机深度）”死锁在低 32 位。
 2. **导致的架构恶果**：
    - **半透明 Pass 无法实现深度优先排序**：半透明 Pass（如 `Transparent`）要求高 32 位按当帧相机从后到前（Back-to-Front）深度排序、低 32 位按静态状态次级聚类；但在现有 `Gather` 拼接公式下，当帧传入的 32 位 `VisibilitySortKey` 永远进不了高 32 位！
-   - **流式槽位复用引发状态抖动**：由于缺乏去重后的状态桶编号，上层将 `BatchHandle.Index` 放入高 32 位，在 [`SparseSet::Destroy`](../../modules/core/include/radray/sparse_set.h) 的 Swap-and-Pop 与 LIFO `_freeHead` 槽位复用后，句柄顺序与物理 Arena Buffer 彻底脱钩，导致 `newisle-flythrough` 运行 40 秒后 `VertexBufferBinds` 从 `226` 暴涨 9 倍至 `2,033` 次/帧，`Submit` 耗时从 `0.158 ms` 恶化至 `0.592 ms`。
+   - **流式槽位复用与状态排序脱节**：BatchHandle.Index 是对象身份，Swap-and-Pop 与空槽复用会改变其分布；直接按该值排序不能表达共享 GPU 绑定。
 
 ---
 
 ### 架构缺陷四：子网格可合并性未在构建期归一化，推迟到 `Submit` 期逐位解释
 
 1. **现状病灶**：
-   - 同一个 `MeshBatch` 下相邻的 `TriangleList` 子网格（如体素区块的 6 个轴向面组）往往位于同一 `IndexBuffer`、同 `VertexOffset`、单实例且索引区间严格首尾相连（`FirstIndex + IndexCount == next.FirstIndex`）。
-   - 当前架构在 `BuildMeshDrawCommands` 期未预计算相邻元素的连续可合并性，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 对每个可见 bit 单独调用 `std::popcount` 查表并发射独立的 `DrawIndexed`（每帧展开 `8,456–10,249` 次 Draw）。
+   - 同一个 `MeshBatch` 下相邻的 `TriangleList` 子网格往往位于同一 `IndexBuffer`、同 `VertexOffset`、单实例且索引区间严格首尾相连（`FirstIndex + IndexCount == next.FirstIndex`）。
+   - 当前架构在 `BuildMeshDrawCommands` 期未预计算相邻元素的连续可合并性，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 对每个可见 bit 单独调用 `std::popcount` 查表并发射独立的 `DrawIndexed`。
    - 若把拓扑检查、对齐检查、溢出检查和索引连续性判断直接塞进 `Submit` 内层热循环，又会增加每帧命令录制的分支负担。
 
 ---
@@ -84,9 +73,9 @@
 ### 架构缺陷五：AoS 冷热混装、`std::stable_sort` 临时堆分配、`SparseSet` 漏预留与 RDG 边界缺失
 
 1. **`GatherVisible` 双层查表与冷缓存行污染**：每次 `Gather` 都需经 `Meshes.TryGet` 访问包含冷数据的 `MeshBatch`，再遍历 `CachedCommands` 并二次查表 `Commands.TryGet`。
-2. **`SortVisible` 临时堆分配尖峰**：[`MeshPassFrameDrawList::SortVisibleCommands`](../../modules/runtime/src/frame_slot.cpp) 使用 `std::stable_sort`，在 MSVC 下动态分配临时归并缓冲并搬移 `32 B` 结构体，引发 **`2.89 ms`** 尾延迟尖峰。
-3. **`SparseSet::Reserve` 漏预留与同步扩容尖峰**：[`SparseSet::Reserve`](../../modules/core/include/radray/sparse_set.h) 仅预留了 `_sparse`，漏掉了 `_denseValues` 和 `_sparseIndices`；跨过 `18,207` 阈值时十余个大数组同帧重分配搬移（且 `MeshBatch::Elements` 独立堆分配），造成单次 `BuildBatch` **`4.21 ms`** 尖峰。
-4. **RDG 外部队列所有权缺失**：[`RDGBuilder`](../../modules/runtime/include/radray/runtime/rdg.h) 缺乏导入资源的外部队列所有权转移（Acquire / Release）声明，迫使下游每帧额外录制 2 条独立 `CommandBuffer`。
+2. **`SortVisible` 临时堆分配尖峰**：[`MeshPassFrameDrawList::SortVisibleCommands`](../../modules/runtime/src/frame_slot.cpp) 使用 `std::stable_sort`，在 MSVC 下动态分配临时归并缓冲并搬移 `32 B` 结构体。
+3. **SparseSet::Reserve 漏预留**：Reserve 仅预留 sparse 表，denseValues 与 sparseIndices 仍可能在同一轮插入时重分配。
+4. **RDG 外部队列所有权缺失**：[`RDGBuilder`](../../modules/runtime/include/radray/runtime/rdg.h) 缺乏导入资源的外部队列所有权转移（Acquire / Release）声明，无法由图统一描述外部队列的所有权边界。
 
 ---
 
@@ -141,7 +130,7 @@ struct InternedBindingEntry {
 - **`Store` 驻留复用**：对已按 `Binding` 升序排列的 `MeshVertexBufferBindings` 和 `MeshDrawCommandPayload` 计算 64 位哈希；命中等价条目时递增 `RefCount` 并复用同一池索引，未命中时分配新槽位。
 - **`Destroy` 引用递减**：仅当所属列表销毁命令时递减 `RefCount`，归零时回收槽位。
 - **提交期 O(1) 状态跳过与 PSO 切换重置不变量**：
-  - 同一 Arena Buffer 块上的数千条命令共享同一个 `VertexBuffersIndex`，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 中 `stateCache.LastVertexStorage == storage && stateCache.LastVertexBuffersIndex == command.VertexBuffersIndex` 命中率从 **0% 提升至 > 99%**；
+  - 共享相同顶点流的命令复用同一个 `VertexBuffersIndex`，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 中 `stateCache.LastVertexStorage == storage && stateCache.LastVertexBuffersIndex == command.VertexBuffersIndex` 命中率从 **0% 提升至 > 99%**；
   - 在 `MeshDrawCommandStateCache` 中新增 `LastPayloadStorage` 与 `LastPayloadIndex`；
   - **PSO 切换强制重置**：[`MeshDrawCommandStateCache::OnPipelineChanged`](../../modules/runtime/src/mesh_draw_command.cpp) 必须同时清空 `LastVertexStorage`、`LastVertexBuffersIndex`、`LastPayloadStorage`、`LastPayloadIndex` 与 `CommandParameterSets`，确保切换 PSO 后即使下一条命令共享同一 `PayloadIndex` 也会重新绑定 `ParameterSets`；
   - 当 `!pipelineChanged && stateCache.LastPayloadStorage == storage && stateCache.LastPayloadIndex == command.PayloadIndex` 时：若无 `PushConstants`，直接 O(1) 跳过 `GetPayload` 与 `UpdateParameterSet`；若有 `PushConstants`，跳过 `ParameterSets` 比对，仅执行 `SetPushConstants`。
@@ -260,7 +249,7 @@ static_assert(sizeof(MeshDrawCommand) == 64 && alignof(MeshDrawCommand) == 64);
    - **单跳直达 Gather**：`GatherVisibleMeshDrawCommands` 先在 `Scene` 的 Batch 状态表中 $O(1)$ 校验 `visible.Batch` 存活且 `!Dirty`（若无效或为脏则立即回滚并返回 `false`）；随后对已注册的 `pass` 直接读取 `16 Bytes` 的 `PassBatchCacheSlot`（若 `pass` 未注册或 `CommandDenseIndex == kInvalidBindingIndex` 则合法跳过），通过 `&passCache.DrawList.Commands[slot.CommandDenseIndex]` **单次数组下标寻址**取得命令地址，彻底消除 `batch.CachedCommands` 遍历与二次 `SparseSet` 稀疏表跳转。
 2. **`MeshPassFrameDrawList` 预分配双缓冲稳定排序**：
    - `VisibleCommands.size() <= 64`：使用**原地稳定插入排序（In-place Stable Insertion Sort）**，0 堆分配且保持同键顺序；
-   - `VisibleCommands.size() > 64`：复用 `MeshPassFrameDrawList::ScratchCommands` 常驻容量执行 **LSD Radix Sort（最低位优先基数排序）**，自动跳过全数组无差异的字节段，彻底消灭 `std::stable_sort` 的临时堆分配与 `2.89 ms` 尾延迟尖峰。
+   - `VisibleCommands.size() > 64`：复用 `MeshPassFrameDrawList::ScratchCommands` 常驻容量执行 **LSD Radix Sort（最低位优先基数排序）**，自动跳过全数组无差异的字节段，彻底消灭 `std::stable_sort` 的临时堆分配。
 3. **修复 [`SparseSet::Reserve`](../../modules/core/include/radray/sparse_set.h) 与几何增长 `ReserveGeometric`**：
    - `SparseSet::Reserve(capacity)` 同时预留 `_sparse`、`_denseValues` 与 `_sparseIndices`，供 `Scene::Reserve(primitives, batches, materials)` 高水位预算使用；
    - 新增 `SparseSet::ReserveGeometric(requiredCapacity)`，按 `std::max(requiredCapacity, currentCapacity + currentCapacity / 2)` 几何扩容，杜绝在逐帧小幅流式增长时调用精确 `reserve` 导致的 $O(N^2)$ 逐帧全量重分配。
@@ -274,7 +263,7 @@ static_assert(sizeof(MeshDrawCommand) == 64 && alignof(MeshDrawCommand) == 64);
 
 | 阶段 | 涉及文件 | 关键验证指标 |
 |---|---|---|
-| **Stage 1：收紧 `Scene` 与缓存池封装边界 + `MeshBatch` 内联化 + `SparseSet` 几何扩容** | `sparse_set.h`、`mesh_batch.h`、`scene.h/.cpp`、`test_scene.cpp` | 1. 私有化 `Scene` 内部容器与账本，迁移单测至受控 API；<br>2. 验证 `RemoveMaterial` $O(1)$ 引用检查、`MarkMaterialDirty` 精准标脏、`RemoveMeshBatch` $O(1)$ 惰性清脏，以及外部修改借用 `VertexInput::Streams` 后 `MarkBatchDirty` 重建时仍严格执行顶点流范围校验；<br>3. 验证 `SparseSet::Reserve` 与 `ReserveGeometric`，消除 `18,207` 扩容点处 `4.21 ms` 与 `3.59 ms` 的重分配尖峰。 |
+| **Stage 1：收紧 `Scene` 与缓存池封装边界 + `MeshBatch` 内联化 + `SparseSet` 几何扩容** | `sparse_set.h`、`mesh_batch.h`、`scene.h/.cpp`、`test_scene.cpp` | 1. 私有化 `Scene` 内部容器与账本，迁移单测至受控 API；<br>2. 验证 `RemoveMaterial` $O(1)$ 引用检查、`MarkMaterialDirty` 精准标脏、`RemoveMeshBatch` $O(1)$ 惰性清脏，以及外部修改借用 `VertexInput::Streams` 后 `MarkBatchDirty` 重建时仍严格执行顶点流范围校验；<br>3. 验证 `SparseSet::Reserve` 与 `ReserveGeometric`，验证三张内部表的容量预留与增长行为。 |
 | **Stage 2：状态驻留、`64 B` 命令、`StateSortKey`/`VisibilitySortKey` 正交合成与构建期 `ContiguousMergeMask`** | `mesh_draw_command.h/.cpp`、`mesh_pass_processor.h/.cpp`、`test_mesh_draw_command.cpp`、`test_mesh_pass_processor.cpp` | 1. `static_assert(sizeof(MeshDrawCommand) == 64)`；验证跨 Batch 共享 VB / Payload 池索引与引用计数回收，验证 **PSO 切换后强制重绑 ParameterSets**；<br>2. 验证 `ComposeMeshDrawSortKey` 在 `MeshPassSortMode::StateFirst`（不透明）与 `DepthFirst`（半透明跨材质从后到前排序）下对缓存命令与动态命令混排的一致性及桶号溢出保护；<br>3. 验证 `ContiguousMergeMask` 构建期仅对 `AllowElementMerging == true`、List 拓扑、单实例、连续索引置位，以及 `Submit` 期首实际绘制元素 IB 绑定守卫、多实例覆盖禁用合并与单实例连续合并。 |
 | **Stage 3：`16 B` Pass 紧凑热表与零分配稳定排序** | `scene.h/.cpp`、`frame_slot.h/.cpp`、`test_scene.cpp`、`test_frame_slot.cpp` | 1. 验证 `PassBatchCacheSlot` 直查下脏 Batch 拒绝回滚、未注册/已撤销/筛选跳过 Pass 合法空输出、以及缓存扩容与 Swap-and-Pop 删除其他 Batch 后 `CommandDenseIndex` 反向修正与地址正确；<br>2. 验证 `SortVisibleCommands` 在 `<= 64`（稳定插入排序）与 `> 64`（LSD 基数排序）下严格保持同键输入顺序且帧间零额外堆分配。 |
 | **Stage 4：RDG 外部所有权边界与文档同步** | `rdg.h/.cpp`、`test_rdg.cpp`、`docs/architecture/runtime.md` | 1. 验证包含 Acquire/Release 的导入资源在常规图、**零执行组图（仅 `MarkOutput`）**及 `BeforeState == AfterState` 下均正确发出所有权屏障；<br>2. 运行 `radray_runtime_tests`、`radray_mesh_drawing_sample` 全部通过；同步更新 `docs/architecture/runtime.md`，运行 `python tools/check_docs.py` 与 `git diff --check` 零报错。 |

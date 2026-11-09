@@ -19,7 +19,7 @@ std::optional<MaterialTagId> MaterialTagTable::Intern(std::string_view text) {
     const size_t size = text.size();
     const size_t required = offset + size;
     if (required > _text.capacity()) {
-        // Keep the old pool alive while copying: text may be a substring returned by GetText.
+        // 复制期间必须保持旧文本池存活；text 可能是 GetText 返回的子串。
         vector<char> replacement;
         const size_t growth = std::min(_text.capacity(), _text.max_size() - _text.capacity());
         replacement.reserve(std::max(required, _text.capacity() + growth));

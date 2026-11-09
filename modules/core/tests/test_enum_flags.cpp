@@ -1,5 +1,7 @@
 #include <radray/enum_flags.h>
 
+#include <radray/logger.h>
+
 #include <gtest/gtest.h>
 
 enum class TestFlags : uint32_t {
@@ -74,9 +76,9 @@ TEST(EnumFlagsTest, HasFlagRequiresEveryRequestedBit) {
 }
 
 TEST(EnumFlagsTest, FormatsSetFlagsByName) {
-    EXPECT_EQ(fmt::format("{}", Flags{}), "[]");
-    EXPECT_EQ(fmt::format("{}", Flags{TestFlags::A}), "[A]");
-    EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B | TestFlags::Far), "[A | B | Far]");
+    EXPECT_EQ(radray::format("{}", Flags{}), "[]");
+    EXPECT_EQ(radray::format("{}", Flags{TestFlags::A}), "[A]");
+    EXPECT_EQ(radray::format("{}", TestFlags::A | TestFlags::B | TestFlags::Far), "[A | B | Far]");
 }
 
 TEST(EnumFlagsTest, FormatsUnnamedBitsAsBinary) {
@@ -86,9 +88,9 @@ TEST(EnumFlagsTest, FormatsUnnamedBitsAsBinary) {
 }
 
 TEST(EnumFlagsTest, CompoundFlagsFormatThroughAdlFormatAs) {
-    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A}), "[A]");
-    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A | CompoundFlags::B}), "[UNKNOWN]");
-    EXPECT_EQ(fmt::format("{}", EnumFlags<CompoundFlags>{}), "[]");
+    EXPECT_EQ(radray::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A}), "[A]");
+    EXPECT_EQ(radray::format("{}", EnumFlags<CompoundFlags>{CompoundFlags::A | CompoundFlags::B}), "[UNKNOWN]");
+    EXPECT_EQ(radray::format("{}", EnumFlags<CompoundFlags>{}), "[]");
 }
 
 TEST(EnumFlagsTest, FlagBitNameReachesBitsOutsideReflectionRange) {

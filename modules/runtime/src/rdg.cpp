@@ -79,8 +79,8 @@ struct RDGTexture {
 struct RDGBuffer {
     render::BufferDescriptor Desc;
     Nullable<render::Buffer*> Imported{nullptr};
-    render::BufferState InitialState{render::BufferState::Undefined};
-    std::optional<render::BufferState> FinalState{};
+    render::BufferStates InitialState{render::BufferState::Undefined};
+    std::optional<render::BufferStates> FinalState{};
     std::optional<uint32_t> LastWriter{};
     vector<uint32_t> Readers{};
     RDGExternalOwnership Ownership{};
@@ -124,12 +124,12 @@ struct RDGExecution {
     RDGTransientResourcePool& Pool;
     render::CommandBuffer& Command;
     vector<RDGPhysicalResource<render::Texture, render::TextureState>> Textures;
-    vector<RDGPhysicalResource<render::Buffer, render::BufferState>> Buffers;
+    vector<RDGPhysicalResource<render::Buffer, render::BufferStates>> Buffers;
     Nullable<const RDGPass*> Pass{nullptr};
     vector<FrameView> ImportedViews{};
 };
 
-}  // namespace detail
+}  // 命名空间 detail
 
 namespace {
 
@@ -173,13 +173,30 @@ bool IsWriteState(render::TextureState state) noexcept {
            state == render::TextureState::UnorderedAccess || state == render::TextureState::CopyDestination;
 }
 
-bool IsWriteState(render::BufferState state) noexcept {
+bool IsWriteState(render::BufferStates state) noexcept {
     return state == render::BufferState::HostWrite || state == render::BufferState::UnorderedAccess || state == render::BufferState::CopyDestination;
 }
 
-bool ValidBufferState(const render::BufferDescriptor& desc, render::BufferState state) noexcept {
+bool IsReadOnlyBufferState(render::BufferStates state) noexcept {
+    constexpr auto kReadOnlyBufferStates = render::BufferState::CopySource | render::BufferState::Vertex | render::BufferState::Index |
+                                           render::BufferState::CBuffer | render::BufferState::ShaderRead | render::BufferState::Indirect;
+    return state && !(state & ~kReadOnlyBufferStates);
+}
+
+bool ValidBufferState(const render::BufferDescriptor& desc, render::BufferStates state) noexcept {
+    if (IsReadOnlyBufferState(state)) {
+        const auto compatible = [&](render::BufferState bit, render::BufferUse usage) {
+            return !state.HasFlag(bit) || desc.Usage.HasFlag(usage);
+        };
+        return compatible(render::BufferState::CopySource, render::BufferUse::CopySource) &&
+               compatible(render::BufferState::Vertex, render::BufferUse::Vertex) &&
+               compatible(render::BufferState::Index, render::BufferUse::Index) &&
+               compatible(render::BufferState::CBuffer, render::BufferUse::CBuffer) &&
+               compatible(render::BufferState::ShaderRead, render::BufferUse::Resource) &&
+               compatible(render::BufferState::Indirect, render::BufferUse::Indirect);
+    }
     using enum render::BufferState;
-    switch (state) {
+    switch (static_cast<render::BufferState>(state)) {
         case Undefined:
         case Common: return true;
         case render::BufferState::CopySource: return desc.Usage.HasFlag(render::BufferUse::CopySource);
@@ -215,6 +232,8 @@ bool ValidTextureState(const render::TextureDescriptor& desc, render::TextureSta
     }
 }
 
+bool ValidAccess(const RDGData& data, const RDGPass& pass, const RDGAccess& access) noexcept;
+
 void AddAccess(RDGData& data, uint32_t passIndex, RDGAccess access) {
     RequireOpen(data);
     if ((access.Texture && access.Index >= data.Textures.size()) || (!access.Texture && access.Index >= data.Buffers.size())) {
@@ -225,6 +244,14 @@ void AddAccess(RDGData& data, uint32_t passIndex, RDGAccess access) {
     for (auto& previous : pass.Accesses) {
         if (previous.Texture != access.Texture || previous.Index != access.Index) continue;
         if (previous.State != access.State) {
+            if (!access.Texture && !previous.Write && !access.Write &&
+                IsReadOnlyBufferState(render::BufferStates{previous.State}) && IsReadOnlyBufferState(render::BufferStates{access.State})) {
+                access.State |= previous.State;
+                if (ValidAccess(data, pass, access)) {
+                    previous.State = access.State;
+                    return;
+                }
+            }
             Fail(data, "conflicting whole-resource states in a pass");
             return;
         }
@@ -236,8 +263,8 @@ void AddAccess(RDGData& data, uint32_t passIndex, RDGAccess access) {
     pass.Accesses.push_back(access);
 }
 
-void BufferAccess(RDGData& data, uint32_t pass, RDGBufferHandle buffer, render::BufferState state, bool read, bool write) {
-    AddAccess(data, pass, {false, buffer.Index, static_cast<uint32_t>(state), read, write, write});
+void BufferAccess(RDGData& data, uint32_t pass, RDGBufferHandle buffer, render::BufferStates state, bool read, bool write) {
+    AddAccess(data, pass, {false, buffer.Index, state.value(), read, write, write});
 }
 
 void TextureAccess(RDGData& data, uint32_t pass, RDGTextureHandle texture, render::TextureState state, bool read, bool write) {
@@ -326,18 +353,17 @@ bool ValidAccess(const RDGData& data, const RDGPass& pass, const RDGAccess& acce
         return state == render::TextureState::ShaderRead || state == render::TextureState::CopySource ||
                state == render::TextureState::DepthRead || state == render::TextureState::UnorderedAccess;
     }
-    const auto state = static_cast<render::BufferState>(access.State);
+    const auto state = render::BufferStates{access.State};
     if (!ValidBufferState(data.Buffers[access.Index].Desc, state)) return false;
     if (pass.Kind == RDGPassKind::Raster || pass.Kind == RDGPassKind::Compute) {
-        if (access.Write && state != render::BufferState::UnorderedAccess) return false;
-        const bool shader = state == render::BufferState::ShaderRead || state == render::BufferState::CBuffer || state == render::BufferState::UnorderedAccess || state == render::BufferState::Indirect;
-        const bool geometry = pass.Kind == RDGPassKind::Raster && (state == render::BufferState::Vertex || state == render::BufferState::Index);
-        if (!shader && !geometry) return false;
+        if (state == render::BufferState::UnorderedAccess) return true;
+        auto allowed = render::BufferState::CBuffer | render::BufferState::ShaderRead | render::BufferState::Indirect;
+        if (pass.Kind == RDGPassKind::Raster) allowed |= render::BufferState::Vertex | render::BufferState::Index;
+        return !access.Write && state && !(state & ~allowed);
     }
-    if (access.Write) return state == render::BufferState::UnorderedAccess || state == render::BufferState::CopyDestination ||
+    if (access.Write) return state == render::BufferState::CopyDestination ||
                              (pass.Kind == RDGPassKind::Upload && state == render::BufferState::HostWrite);
-    return state == render::BufferState::ShaderRead || state == render::BufferState::CopySource || state == render::BufferState::Vertex ||
-           state == render::BufferState::Index || state == render::BufferState::CBuffer || state == render::BufferState::Indirect || state == render::BufferState::UnorderedAccess;
+    return state == render::BufferState::CopySource;
 }
 
 render::TextureViewDescriptor ViewDescriptor(render::Texture& texture, render::TextureViewUsage usage) noexcept {
@@ -502,7 +528,7 @@ void TransitionTexture(RDGExecution& execution, uint32_t index, render::TextureS
     current.PendingWrite = write;
 }
 
-void TransitionBuffer(RDGExecution& execution, uint32_t index, render::BufferState next, bool write, vector<render::ResourceBarrierDescriptor>& barriers) noexcept {
+void TransitionBuffer(RDGExecution& execution, uint32_t index, render::BufferStates next, bool write, vector<render::ResourceBarrierDescriptor>& barriers) noexcept {
     auto& current = execution.Buffers[index];
     const auto before = current.CurrentState;
     if (current.PendingExternalAcquire) {
@@ -540,7 +566,7 @@ bool ExecuteUpload(RDGExecution& execution, const RDGPass& pass) noexcept {
     const auto allocation = execution.Pool.AcquireBuffer({.Size = pass.UploadBytes.size(), .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite});
     if (!allocation.Buffer) return false;
     auto& staging = *allocation.Buffer;
-    // This staging object is unique for this execution and its prior epoch completed.
+    // 此暂存对象由本次执行独占，其此前的命令 epoch 已完成。
     const render::ResourceBarrierDescriptor toHost = render::BarrierBufferDescriptor{&staging, allocation.LastState, render::BufferState::HostWrite};
     if (allocation.LastState != render::BufferState::HostWrite) execution.Command.ResourceBarrier(std::span{&toHost, 1});
     if (!MapUpload(staging, 0, pass.UploadBytes)) return false;
@@ -551,9 +577,10 @@ bool ExecuteUpload(RDGExecution& execution, const RDGPass& pass) noexcept {
     return true;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
-struct RDGTransientResourcePool::Impl {
+class RDGTransientResourcePool::Impl {
+public:
     struct TextureEntry {
         render::TextureDescriptor Desc;
         unique_ptr<render::Texture> Resource;
@@ -563,7 +590,7 @@ struct RDGTransientResourcePool::Impl {
     struct BufferEntry {
         render::BufferDescriptor Desc;
         unique_ptr<render::Buffer> Resource;
-        render::BufferState State;
+        render::BufferStates State;
         bool Used{true};
     };
     struct ViewEntry {
@@ -641,7 +668,7 @@ void RDGTransientResourcePool::CommitTextureState(render::Texture* texture, rend
     RADRAY_ABORT("RDG: committing texture not borrowed from this pool");
 }
 
-void RDGTransientResourcePool::CommitBufferState(render::Buffer* buffer, render::BufferState state) noexcept {
+void RDGTransientResourcePool::CommitBufferState(render::Buffer* buffer, render::BufferStates state) noexcept {
     for (auto& entry : _impl->Buffers) {
         if (entry.Resource.get() == buffer && entry.Used) {
             entry.State = state;
@@ -680,7 +707,7 @@ RDGTextureHandle RDGBuilder::ImportTexture(render::Texture* texture, render::Tex
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::ImportBuffer(render::Buffer* buffer, render::BufferState initialState, std::optional<render::BufferState> finalState, RDGExternalOwnership ownership) {
+RDGBufferHandle RDGBuilder::ImportBuffer(render::Buffer* buffer, render::BufferStates initialState, std::optional<render::BufferStates> finalState, RDGExternalOwnership ownership) {
     RequireOpen(_data);
     for (uint32_t i = 0; i < _data.Buffers.size(); ++i) {
         auto& previous = _data.Buffers[i];
@@ -848,7 +875,7 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
             std::sort(pass.Colors.begin(), pass.Colors.end(), [](const auto& a, const auto& b) { return a.Slot < b.Slot; });
             ValidateAttachments(_data, pass);
             for (const auto& access : pass.Accesses) {
-                if (!ValidAccess(_data, pass, access)) Fail(_data, fmt::format("pass '{}': {}#{} state {} is incompatible with usage, access mode or pass kind", pass.Name, access.Texture ? "texture" : "buffer", access.Index, access.State));
+                if (!ValidAccess(_data, pass, access)) Fail(_data, radray::format("pass '{}': {}#{} state {} is incompatible with usage, access mode or pass kind", pass.Name, access.Texture ? "texture" : "buffer", access.Index, access.State));
                 auto& lastWriter = access.Texture ? _data.Textures[access.Index].LastWriter : _data.Buffers[access.Index].LastWriter;
                 const bool imported = access.Texture ? bool(_data.Textures[access.Index].Imported) : bool(_data.Buffers[access.Index].Imported);
                 const bool undefined = access.Texture ? _data.Textures[access.Index].InitialState == render::TextureState::Undefined : _data.Buffers[access.Index].InitialState == render::BufferState::Undefined;
@@ -980,7 +1007,7 @@ bool CompiledRDG::Execute(FrameSlot& slot, RDGTransientResourcePool& pool, rende
                     if (access.Texture)
                         TransitionTexture(execution, access.Index, static_cast<render::TextureState>(access.State), access.Write, barriers);
                     else
-                        TransitionBuffer(execution, access.Index, static_cast<render::BufferState>(access.State), access.Write, barriers);
+                        TransitionBuffer(execution, access.Index, render::BufferStates{access.State}, access.Write, barriers);
                 }
             }
             if (!barriers.empty()) command.ResourceBarrier(barriers);
@@ -1120,7 +1147,7 @@ FrameSlot& RDGCopyPassContext::GetSlot() noexcept { return _execution.Slot; }
 render::Texture& RDGCopyPassContext::Resolve(RDGTextureHandle handle) const noexcept { return ResolveTexture(_execution, handle); }
 render::Buffer& RDGCopyPassContext::Resolve(RDGBufferHandle handle) const noexcept { return ResolveBuffer(_execution, handle); }
 
-RDGRasterPassBuilder& RDGRasterPassBuilder::ReadBuffer(RDGBufferHandle handle, render::BufferState state) {
+RDGRasterPassBuilder& RDGRasterPassBuilder::ReadBuffer(RDGBufferHandle handle, render::BufferStates state) {
     BufferAccess(_data, _pass, handle, state, true, false);
     return *this;
 }
@@ -1156,7 +1183,7 @@ RDGRasterPassBuilder& RDGRasterPassBuilder::NeverCull() noexcept {
     return *this;
 }
 
-RDGComputePassBuilder& RDGComputePassBuilder::ReadBuffer(RDGBufferHandle handle, render::BufferState state) {
+RDGComputePassBuilder& RDGComputePassBuilder::ReadBuffer(RDGBufferHandle handle, render::BufferStates state) {
     BufferAccess(_data, _pass, handle, state, true, false);
     return *this;
 }

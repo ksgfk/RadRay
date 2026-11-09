@@ -207,9 +207,9 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
             return false;
         }
         f.readyToPresent = readyToPresentOpt.Release();
-        auto name = fmt::format("SwapChain_{}/Image_{}", fmt::ptr(swapChain->_swapchain), frames.size() - 1);
+        auto name = radray::format("SwapChain_{}/Image_{}", fmt::ptr(swapChain->_swapchain), frames.size() - 1);
         swapChain->_device->SetObjectName(name, img);
-        swapChain->_device->SetObjectName(fmt::format("{}/PresentSemaphore", name), f.readyToPresent->_semaphore->_semaphore);
+        swapChain->_device->SetObjectName(radray::format("{}/PresentSemaphore", name), f.readyToPresent->_semaphore->_semaphore);
         f.image->_name = name;
         f.image->_rawFormat = rawFormat;
         f.image->_dim = TextureDimension::Dim2D;
@@ -436,7 +436,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
         } else if (messageSeverity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
             lvl = LogLevel::Debug;
         }
-        const auto msg = fmt::format(
+        const auto msg = radray::format(
             "type={} id={} {}: {}",
             VulkanDebugUtilsMessageTypeFlagsEXT{static_cast<std::underlying_type_t<VkDebugUtilsMessageTypeFlagBitsEXT>>(messageType)},
             pCallbackData->messageIdNumber,
@@ -3028,7 +3028,7 @@ QueueVulkan::QueueVulkan(
     if (_device->_ftb.vkAllocateCommandBuffers(_device->_device, &bufferInfo, &cmdBuf) == VK_SUCCESS) {
         _profilerContext = TracyVkContext(_device->_instance->_instance, _device->_physicalDevice, _device->_device, _queue, cmdBuf,
                                           vkGetInstanceProcAddr, vkGetDeviceProcAddr);
-        const auto name = fmt::format("Vulkan {}", _type);
+        const auto name = radray::format("Vulkan {}", _type);
         TracyVkContextName(static_cast<TracyVkCtx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
     }
     _device->_ftb.vkDestroyCommandPool(_device->_device, pool, _device->GetAllocationCallbacks());
@@ -4095,7 +4095,7 @@ void FenceVulkan::Destroy() noexcept {
 }
 
 void FenceVulkan::SetDebugName(std::string_view name) noexcept {
-    _device->SetObjectName(fmt::format("FenceTimeline_{}", name), _fence->_semaphore);
+    _device->SetObjectName(radray::format("FenceTimeline_{}", name), _fence->_semaphore);
 }
 
 uint64_t FenceVulkan::GetCompletedValue() const noexcept {

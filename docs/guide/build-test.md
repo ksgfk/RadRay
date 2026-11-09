@@ -386,12 +386,12 @@ ctest --preset win-x64-debug-clangcl
 
 | 目标 | suite |
 |---|---|
-| `test_radray_core` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BasicMathTest`、`BinaryIoTest`、`ChannelTest`、`ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest`、`EnumFlagsTest`、`FileTest`、`GuidTest`、`HashTest`、`ImageDataTest`、`IntrusivePtrTest`、`JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest`、`MemoryTest`、`NullableTest`、`ObjectArenaTest`、`ArenaAllocatorTest`、`RuntimeTypeIdTest`、`ScopeGuardTest`、`SparseSetTest`、`StructuredBufferTest`、`TextEncodingTest`、`UtilityTest`、`WavefrontObjTest`、`XmlTest`；libpng 开启时另有 `PngTest`、`PngTest/PngRoundTripTest`；静态 CRT 且启用 mimalloc 时另有 `MimallocOverrideTest` |
+| `test_radray_core` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BasicMathTest`、`BinaryIoTest`、`ChannelTest`、`ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest`、`EnumFlagsTest`、`FileTest`、`FormatTest`、`GuidTest`、`HashTest`、`ImageDataTest`、`IntrusivePtrTest`、`JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest`、`MemoryTest`、`NullableTest`、`ObjectArenaTest`、`ArenaAllocatorTest`、`RuntimeTypeIdTest`、`ScopeGuardTest`、`SparseSetTest`、`BestFitAllocator`、`StructuredBufferTest`、`TextEncodingTest`、`UtilityTest`、`WavefrontObjTest`、`XmlTest`；libpng 开启时另有 `PngTest`、`PngTest/PngRoundTripTest`；静态 CRT 且启用 mimalloc 时另有 `MimallocOverrideTest` |
 | `test_inline_vector` | `InlineVectorTest` |
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_render` | 见下文 [render 测试](#render-测试) |
-| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`（CPU fake，不需要 GPU 或 shader） |
+| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`MappedUploadBuffer`、`BatchedBufferUpload`（CPU fake）；`Backends/GeometryUploadGpuTest`（D3D12/Vulkan GPU 与预编译 shader） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -561,13 +561,14 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 
 安装消费继续使用 `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 和 `RadRay::runtime`，
 传递加载 render/core，不要求 shader 或 DXC。`RADRAY_BUILD_TESTS=ON` 时提供
-`test_radray_runtime`，用 `modules/runtime/tests/test_fakes.h` 中的 CPU fake 代替 RHI 对象，不需要 GPU 或预编译 shader。
+`test_radray_runtime`。CPU 用例使用 `modules/runtime/tests/test_fakes.h` 的 RHI fake；GeometryUploadGpuTest 共用 render 的 GPU fixture，验证分页上传、池间绘制和 BeginFrame 后扩容，需预先生成本地测试 shader。
 它覆盖材质标签、材质参数与快照、MeshDrawCommand 校验与录制、Processor 构建、Scene 增量缓存，
 以及 FrameScheduler 的槽位轮转、等待、Scene 借用、退役资源与析构顺序；RDG 覆盖裁剪、上传、同槽物理状态复用、原地 Compute、UAV 与附件屏障及管线钩子顺序。suite 列表见[测试](#测试)：
 
 ```powershell
+python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline)' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|MappedUploadBuffer|BatchedBufferUpload|Backends/GeometryUploadGpuTest)' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -632,7 +633,7 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 | [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，连续 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
 | [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
 | [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 命令借用与提交/等待 |
-| [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、可切换输出 Context、共享状态和 Batch 构建 helper；AddMeshBatch 返回 void。静态 Context 存入 SparseSet 并回写缓存句柄；动态 Context 自动追加当帧可见命令 |
+| [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、显式传入的输出 Context、共享状态和返回 void 的构建 helper；单步 AddCommand 发布完整命令。缓存 Context 写入连续命令表与 Batch 槽位；动态 Context 自动追加当帧可见命令 |
 | [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 64 字节 Batch 命令、VB/Payload 驻留池与自持有 PushConstants、Pass 提交参数与延迟实例流，可见命令指针与 SubmitMeshDrawCommands |
 | [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
@@ -644,8 +645,9 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 `BatchPassPolicy` 仅属于样例，通过 Batch 句柄关联记录。
 候选收集不按 Pass 预先分组，Processor 内的条件才决定是否生成命令。
 `MeshDrawingFramePipeline::GetMeshPassRegistrations` 登记四个 Processor，Scheduler 在每次 `RunFrame(Scene&)` 的 Extract 前调用 `Scene::SyncCachedMeshDrawCommands`。
-Scene 为脏 Batch 创建静态 Context，Processor 完成 Pass 筛选后调用 runtime 的 `BuildMeshDrawCommands`，
-重新检查借用的顶点输入与共享状态，复用 Scene 入库时的 Element 校验，再通过一次 `AddCommand → FinalizeCommand` 输出 Batch 命令并记录 Pass 热表槽位。
+Scene 为脏 Batch 创建缓存 Context 并显式传给 `AddMeshBatch`，Processor 完成 Pass 筛选后调用 runtime 的 `BuildMeshDrawCommands`，
+Debug 下重新检查借用的顶点输入与共享状态，复用 Scene 入库时的 Element 校验；Release 构建信任调用方提供合法输入。
+随后通过单步 `AddCommand` 输出 Batch 命令并记录 Pass 热表槽位。
 绿色材质变化后用 `Scene::UpdateMaterial` 标脏，再同步时仅引用它的 Batch 重新进入四个 Processor。
 样例检查未修改 Batch 的 VB/Payload 索引不变，并核对修改 Batch 的颜色常量数值；缓存稠密下标不能作为跨重建身份。
 
@@ -673,7 +675,9 @@ Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数
 主循环只调用 RunFrame，结束时调用 WaitIdle，再从 `(frameCount - 1) % slotCount` 对应的读回缓冲保存图片。
 Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才销毁 Pipeline 的每槽资源和瞬态池；外部共享资源和源 Scene 晚于 Scheduler 销毁。
 完整接口、裁剪与上传约束见 [RDG 与 RenderGraphFramePipeline](../architecture/runtime.md#rdg-与-rendergraphframepipeline)。
-未同步材质、标签表不一致、缺失 PSO、参数类型不匹配或构建失败会使样例放弃渲染；具体校验边界见 [命令校验与录制](../architecture/runtime.md#校验与录制)。
+样例 Processor 检查到材质句柄失效、未同步材质、标签表身份不一致、缺失 BatchPassPolicy 或 PSO、参数提取失败时均带诊断终止程序。
+runtime 构建 helper 的输入校验仅在 Debug 启用，Release 信任前置条件，不保证构建违约诊断；
+未绑定材质标签表或标签不匹配仍合法跳过该 Pass。具体构建契约见 [增量持久缓存](../architecture/runtime.md#增量持久缓存)。
 
 ### 准备 shader 与构建
 
@@ -736,7 +740,7 @@ Depth 与 Color 之间仍保留跨组 `DepthWrite → DepthWrite` barrier；组�
 读回逐行去除 padding，日志打印实际 GPU row pitch；Vulkan 使用负 viewport 高度统一输出方向。
 
 指定后端失败时直接报错，不切换后端。退出码 `2` 表示参数或输出目录错误，`3` 表示 GPU/资源/shader
-准备失败，`4` 表示帧外材质/缓存构建或增量校验失败，`6` 表示图片读回/写入失败；帧 Extract/Record 错误带诊断终止程序，不返回退出码 `5`。可将 `--shader-dir`
+准备失败，`4` 表示材质/场景初始化、帧间材质更新或增量校验失败，`6` 表示图片读回/写入失败；Pass 登记与帧 Extract/Record 检查到的违约带诊断终止程序，不返回退出码 `5`。可将 `--shader-dir`
 设为不存在的目录检查缺失 shader 提示，将 `--output` 指向已有目录检查路径错误；不会生成伪造图片。
 正常退出及帧外返回错误的路径在 GPU 完成后才读取或释放资源；帧执行中的致命错误直接终止，不承诺执行清理回调。
 

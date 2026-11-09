@@ -3,7 +3,7 @@
 #include <filesystem>
 #include <system_error>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <gtest/gtest.h>
 
 namespace radray {
@@ -12,7 +12,7 @@ namespace {
 class ScopedTempDirectory {
 public:
     explicit ScopedTempDirectory(std::string_view name)
-        : _path(std::filesystem::temp_directory_path() / fmt::format("radray_core_file_{}", name)) {
+        : _path(std::filesystem::temp_directory_path() / radray::format("radray_core_file_{}", name)) {
         std::error_code ec;
         std::filesystem::remove_all(_path, ec);
     }

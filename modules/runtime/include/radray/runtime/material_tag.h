@@ -1,5 +1,7 @@
 #pragma once
 
+// 材质标签所有权与渲染边界见 docs/architecture/runtime.md。
+
 #include <optional>
 #include <span>
 #include <string_view>
@@ -10,22 +12,23 @@
 
 namespace radray {
 
-// Material tag ownership and rendering boundaries: docs/architecture/runtime.md.
-// IDs belong to one table, are not persistent identifiers, and use zero for invalid.
-struct MaterialTagId {
+// ID 仅属于一张表，不是持久标识符；零表示无效。
+class MaterialTagId {
+public:
     uint32_t Value{0};
 
     friend bool operator==(MaterialTagId, MaterialTagId) = default;
 };
 
-struct MaterialTag {
+class MaterialTag {
+public:
     MaterialTagId Key;
     MaterialTagId Value;
 
     friend bool operator==(MaterialTag, MaterialTag) = default;
 };
 
-// Caller serializes access and keeps the table alive at a stable address for its users.
+// 调用方须串行组织访问，并在使用期间保持表存活、地址稳定。
 class MaterialTagTable {
 public:
     MaterialTagTable() noexcept = default;
@@ -34,10 +37,10 @@ public:
     MaterialTagTable(MaterialTagTable&&) = delete;
     MaterialTagTable& operator=(MaterialTagTable&&) = delete;
 
-    // Case-sensitive; empty text is rejected. Existing IDs survive further registration.
+    // 区分大小写，拒绝空文本；继续登记不会使已有 ID 失效。
     std::optional<MaterialTagId> Intern(std::string_view text);
     std::optional<MaterialTagId> Find(std::string_view text) const noexcept;
-    // Returned views must not be retained across Intern calls.
+    // 返回的视图不得跨 Intern 调用保存。
     std::optional<std::string_view> GetText(MaterialTagId id) const noexcept;
 
 private:
@@ -59,8 +62,8 @@ public:
     MaterialTagSet() noexcept = default;
     explicit MaterialTagSet(const MaterialTagTable& table) noexcept;
 
-    // IDs must originate from the bound table. Replaces an existing key in place.
-    // Unbound sets and zero/out-of-range IDs are rejected without changing the set.
+    // ID 必须来自绑定的表；已有键的值会被原位替换。
+    // 集合未绑定表，或 ID 为零、越界时拒绝操作，集合保持不变。
     bool Set(MaterialTagId key, MaterialTagId value);
     std::optional<MaterialTagId> Find(MaterialTagId key) const noexcept;
     bool Matches(MaterialTagId key, MaterialTagId value) const noexcept;

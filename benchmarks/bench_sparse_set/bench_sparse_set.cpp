@@ -1,5 +1,7 @@
 // Measurement boundaries and case selection: docs/guide/performance.md#sparse-set
 #include <algorithm>
+
+#include <radray/logger.h>
 #include <numeric>
 #include <random>
 #include <string_view>
@@ -474,7 +476,7 @@ void RegisterPayload(bool& failed, std::string_view label, const vector<int64_t>
         const char* name = mode == InsertMode::Fresh ? "Fresh" : mode == InsertMode::Reserved   ? "Reserved"
                                                              : mode == InsertMode::ReuseOrdered ? "ReuseOrdered"
                                                                                                 : "ReuseRandom";
-        auto* bench = Register(fmt::format("SparseSet/Insert/{}/{}", name, label), failed,
+        auto* bench = Register(radray::format("SparseSet/Insert/{}/{}", name, label), failed,
                                [mode](auto& state, bool& error) { Insert<T>(state, error, mode); });
         bench->ArgName("n");
         for (auto size : sizes) bench->Arg(size);
@@ -482,7 +484,7 @@ void RegisterPayload(bool& failed, std::string_view label, const vector<int64_t>
     for (auto order : {Order::Reverse, Order::Forward, Order::Random}) {
         const char* name = order == Order::Reverse ? "Tail" : order == Order::Forward ? "Forward"
                                                                                       : "Random";
-        auto* bench = Register(fmt::format("SparseSet/Destroy/{}/{}", name, label), failed,
+        auto* bench = Register(radray::format("SparseSet/Destroy/{}/{}", name, label), failed,
                                [order](auto& state, bool& error) { Destroy<T>(state, error, order); });
         bench->ArgName("n");
         for (auto size : sizes) bench->Arg(size);
@@ -490,7 +492,7 @@ void RegisterPayload(bool& failed, std::string_view label, const vector<int64_t>
     for (auto mode : {ChurnMode::Tail, ChurnMode::Random, ChurnMode::Burst}) {
         const char* name = mode == ChurnMode::Tail ? "Tail" : mode == ChurnMode::Random ? "Random"
                                                                                         : "Burst";
-        auto* bench = Register(fmt::format("SparseSet/Churn/{}/{}", name, label), failed,
+        auto* bench = Register(radray::format("SparseSet/Churn/{}/{}", name, label), failed,
                                [mode](auto& state, bool& error) { Churn<T>(state, error, mode); });
         bench->ArgNames({"n", "percent"});
         for (auto size : sizes) {
@@ -513,7 +515,7 @@ void RegisterReads(bool& failed, std::string_view label, const vector<int64_t>& 
                 if (mode == ReadMode::IsAlive && order == Order::Stride) continue;
                 const char* access = order == Order::Forward ? "Sequential" : order == Order::Random ? "Random"
                                                                                                      : "Stride257";
-                auto* bench = Register(fmt::format("SparseSet/Read/{}/{}/{}/{}", api, layout, access, label), failed,
+                auto* bench = Register(radray::format("SparseSet/Read/{}/{}/{}/{}", api, layout, access, label), failed,
                                        [mode, order, fragmented](auto& state, bool& error) { Read<T>(state, error, mode, order, fragmented); });
                 bench->ArgNames({"n", "spread"});
                 for (auto size : sizes) bench->Args({size, 1});
@@ -543,13 +545,13 @@ void RegisterBenchmarks(bool& failed) {
     Register("SparseSet/DependentRead/P8", failed, DependentRead)->ArgName("n")->Arg(256)->Arg(16384)->Arg(1048576);
     for (bool grow : {false, true}) {
         const char* name = grow ? "Grow" : "Spare";
-        Register(fmt::format("SparseSet/GrowthEdge/{}/P8", name), failed,
+        Register(radray::format("SparseSet/GrowthEdge/{}/P8", name), failed,
                  [grow](auto& state, bool& error) { GrowthEdge<Payload<8>>(state, error, grow); })
             ->ArgName("target")
             ->Arg(256)
             ->Arg(16384)
             ->Arg(262144);
-        Register(fmt::format("SparseSet/GrowthEdge/{}/P256", name), failed,
+        Register(radray::format("SparseSet/GrowthEdge/{}/P256", name), failed,
                  [grow](auto& state, bool& error) { GrowthEdge<Payload<256>>(state, error, grow); })
             ->ArgName("target")
             ->Arg(256)
@@ -560,7 +562,7 @@ void RegisterBenchmarks(bool& failed) {
                                                                : kind == MissKind::Dead         ? "Dead"
                                                                                                 : "Recycled";
         for (bool shuffled : {false, true}) {
-            auto* bench = Register(fmt::format("SparseSet/Misses/{}/{}", name, shuffled ? "Shuffled" : "Grouped"), failed,
+            auto* bench = Register(radray::format("SparseSet/Misses/{}/{}", name, shuffled ? "Shuffled" : "Grouped"), failed,
                                    [kind, shuffled](auto& state, bool& error) { Misses(state, error, kind, shuffled); });
             bench->ArgNames({"n", "hit_percent"});
             for (auto size : {16384, 1048576}) {
@@ -585,7 +587,7 @@ void RegisterBenchmarks(bool& failed) {
         ->Args({16384, 1})
         ->Args({16384, 16384});
     for (bool shuffled : {false, true}) {
-        Register(fmt::format("SparseSet/ClearDistribution/{}/P8", shuffled ? "Random" : "Clustered"), failed,
+        Register(radray::format("SparseSet/ClearDistribution/{}/P8", shuffled ? "Random" : "Clustered"), failed,
                  [shuffled](auto& state, bool& error) { ClearDistribution(state, error, shuffled); })
             ->ArgName("peak")
             ->Arg(16384)

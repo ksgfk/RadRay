@@ -15,7 +15,7 @@
 #include <random>
 #endif
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 
 #include <radray/hash.h>
 
@@ -131,7 +131,7 @@ void FillRandomBytes(Guid::ByteArray& bytes) {
             if (errno == EINTR) {
                 continue;
             }
-            throw std::runtime_error(fmt::format("getrandom failed with errno {}", errno));
+            throw std::runtime_error(radray::format("getrandom failed with errno {}", errno).c_str());
         }
         offset += static_cast<size_t>(count);
     }
@@ -155,7 +155,7 @@ Guid Guid::NewGuid() {
         ::GUID value{};
         const HRESULT hr = ::CoCreateGuid(&value);
         if (FAILED(hr)) {
-            throw std::runtime_error(fmt::format("CoCreateGuid failed with HRESULT 0x{:08x}", static_cast<uint32_t>(hr)));
+            throw std::runtime_error(radray::format("CoCreateGuid failed with HRESULT 0x{:08x}", static_cast<uint32_t>(hr)).c_str());
         }
 
         result = Guid{

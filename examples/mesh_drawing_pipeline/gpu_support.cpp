@@ -48,9 +48,9 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     }
     auto& device = Device->GetDevice();
     const auto suffix = backend == render::RenderBackend::Vulkan ? "spirv" : "dxil";
-    VertexShader = LoadShader(device, shaderDirectory / fmt::format("cube.VSMain.{}.bin", suffix), render::ShaderStage::Vertex);
+    VertexShader = LoadShader(device, shaderDirectory / radray::format("cube.VSMain.{}.bin", suffix), render::ShaderStage::Vertex);
     if (!VertexShader) return false;
-    PixelShader = LoadShader(device, shaderDirectory / fmt::format("cube.PSMain.{}.bin", suffix), render::ShaderStage::Pixel);
+    PixelShader = LoadShader(device, shaderDirectory / radray::format("cube.PSMain.{}.bin", suffix), render::ShaderStage::Pixel);
     if (!PixelShader) return false;
 
     // 步骤 M1：把离线编译并加载的 shader、布局和材质性质放进 MaterialResource。

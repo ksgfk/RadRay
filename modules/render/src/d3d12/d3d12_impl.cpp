@@ -1,4 +1,6 @@
 #include <radray/render/backend/d3d12_impl.h>
+
+#include <radray/logger.h>
 #include "external_resource_d3d12.h"
 #include <radray/profiler.h>
 #include "d3d12_diagnostics.h"
@@ -156,7 +158,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
             RADRAY_ERR_LOG("IDXGISwapChain1::GetBuffer failed: {} {}", GetErrorName(hr), hr);
             return false;
         }
-        auto name = fmt::format("SwapChain_BackBuffer_{}", i);
+        auto name = radray::format("SwapChain_BackBuffer_{}", i);
         frame.image = make_unique<TextureD3D12>(swapChain->_device, std::move(rt), ComPtr<D3D12MA::Allocation>{});
         frame.image->_name = name;
         frame.image->_dimension = TextureDimension::Dim2D;
@@ -833,7 +835,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         if (SUCCEEDED(hr)) {
             const int64_t mask = 0xFFFF;
             auto quad = l.QuadPart;
-            auto ver = fmt::format(
+            auto ver = radray::format(
                 "{}.{}.{}.{}",
                 quad >> 48,
                 (quad >> 32) & mask,
@@ -957,7 +959,7 @@ bool DeviceD3D12::CreateQueues(const array<uint32_t, static_cast<size_t>(QueueTy
                 return false;
             }
             auto instance = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, fence.Release());
-            SetObjectName(fmt::format("Queue-{}-{}", static_cast<QueueType>(index), slot), instance->_queue.Get());
+            SetObjectName(radray::format("Queue-{}-{}", static_cast<QueueType>(index), slot), instance->_queue.Get());
             _queues[index].push_back(std::move(instance));
         }
         _capabilities.Queues[index] = {counts[index], false};
@@ -2308,7 +2310,7 @@ CmdQueueD3D12::CmdQueueD3D12(
 #ifdef RADRAY_ENABLE_PROFILER
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY && _queue != nullptr) {
         _profilerContext = TracyD3D12Context(_device->_device.Get(), _queue.Get());
-        const auto name = fmt::format("D3D12 {}", GetQueueType());
+        const auto name = radray::format("D3D12 {}", GetQueueType());
         TracyD3D12ContextName(static_cast<TracyD3D12Ctx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
     }
 #endif

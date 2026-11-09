@@ -8,7 +8,7 @@
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/gpu_device.h>
 
-// CPU-side stand-ins for the RHI objects runtime touches. Each fake records only what tests observe.
+// runtime 所用 RHI 对象的 CPU 替身；各替身仅记录测试观察的数据。
 namespace radray::test {
 
 class FakeBuffer : public render::Buffer {
@@ -152,7 +152,7 @@ public:
     render::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
 };
 
-// Creates command allocators and buffers; every other factory fails.
+// 仅创建命令分配器与命令缓冲；其余工厂接口均返回失败。
 class FakeDevice : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
@@ -192,7 +192,7 @@ public:
     bool FailCommandBuffers{false};
 };
 
-// Forwards each stage to an optional test callback.
+// 将各阶段转发到可选的测试回调。
 class CallbackPipeline final : public FramePipeline {
 public:
     void Extract(const Scene& source, FrameSlot& slot) noexcept override {
@@ -217,7 +217,7 @@ struct FakeGpu {
     DeviceContext Context{Device, &Device->Queue};
 };
 
-// Returns null when creation fails; pipeline keeps borrowing the scheduler-owned pipeline.
+// 创建失败时返回空值；pipeline 继续借用调度器拥有的流水线。
 inline unique_ptr<FrameScheduler> CreateScheduler(DeviceContext& device, CallbackPipeline*& pipeline, uint32_t slotCount = 2) {
     auto owner = make_unique<CallbackPipeline>();
     pipeline = owner.get();

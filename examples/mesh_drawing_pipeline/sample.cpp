@@ -93,7 +93,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     // Engine/Private/StaticMeshSceneProxy.cpp 的 GetMeshElement / DrawStaticElements 把 Section 组织为 Batch。
     // 本例简化：BatchPassPolicy 单独保存在样例中；Scene 只拥有 Proxy，用户材质和实例在外部存活。
     Scene scene;
-    array<SparseSetHandle, 8> materials;
+    array<MaterialHandle, 8> materials;
     for (size_t index = 0; index < materials.size(); ++index) {
         MaterialRenderProxy proxy;
         proxy.Update(instances[index]);
@@ -112,7 +112,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
                                            {"C-只参加颜色", {0.20f, -0.10f, 0.15f}, 1.05f, {PassParticipation::ColorOnly, PassParticipation::ColorOnly}, {2, 3}},
                                            {"D-Section 规则不同且描边", {1.75f, -0.10f, 0.45f}, 1.05f, {PassParticipation::DepthAndColor, PassParticipation::ColorOnly}, {4, 5}},
                                            {"E-透明叠加", {0.72f, -0.10f, -0.95f}, 1.10f, {PassParticipation::DepthAndColor, PassParticipation::DepthAndColor}, {6, 7}}}};
-    vector<SparseSetHandle> candidates;
+    vector<PrimitiveHandle> candidates;
     vector<BatchPassPolicy> policies;
     for (const auto& cube : cubes) {
         PrimitiveSceneInfo primitive;
@@ -169,7 +169,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
         auto& snapshot = originalCommands.emplace_back();
         for (uint32_t passIndex = 0; passIndex < snapshot.size(); ++passIndex) {
             const auto cache = scene.GetPassCache({passIndex});
-            const auto command = cache->GetCommand(policy.Batch.Index);
+            const auto command = cache->GetCommand(policy.Batch.GetIndex());
             if (!command) continue;
             snapshot[passIndex] = *command;
             if (scene.GetMeshBatch(policy.Batch)->Material != materials[2] || passIndex != 1) continue;
@@ -198,7 +198,7 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
         bool changed = false;
         for (uint32_t passIndex = 0; passIndex < 4; ++passIndex) {
             const auto cache = scene.GetPassCache({passIndex});
-            const auto command = cache->GetCommand(batch.Index);
+            const auto command = cache->GetCommand(batch.GetIndex());
             const auto& previous = originalCommands[index][passIndex];
             if (static_cast<bool>(command) != previous.has_value()) return 4;
             if (!command) continue;

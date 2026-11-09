@@ -83,7 +83,7 @@ protected:
         command.IndexCount = 3;
         return command;
     }
-    // Adds a default per-instance stream at binding 1 that submit arguments may replace.
+    // 在绑定槽 1 添加默认逐实例流，提交参数可以替换它。
     TestCommand MakeInstancedCommand() {
         auto command = MakeCommand();
         command.Bindings.VertexBuffers.push_back({1, {&Instances, 0, 64}});
@@ -456,8 +456,7 @@ TEST_F(MeshDrawCommandTest, CachedListMoveRebindsPayloadIdentityAndCanBeReused) 
         CachedPassMeshDrawListContext context{list, index};
         MeshDrawCommand initializer = source;
         context.GetBindingStorage().Store(initializer, source.Bindings);
-        auto& command = context.AddCommand(initializer);
-        context.FinalizeCommand({primitive, batch}, 0, command);
+        context.AddCommand({primitive, batch}, 0, initializer);
     };
     add(lists[0], 0);
     add(lists[0], 1);
@@ -611,5 +610,5 @@ TEST_F(MeshDrawCommandTest, PipelineAndPayloadBucketOverflowDoesNotContaminateAd
     }
 }
 
-}  // namespace
+}  // 匿名命名空间
 }  // namespace radray

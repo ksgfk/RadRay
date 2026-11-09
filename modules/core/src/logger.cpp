@@ -24,7 +24,7 @@ public:
         if (allWhitespace) {
             return;
         }
-        auto str = fmt::format(" {}:{}\n", msg.source.filename, msg.source.line);
+        auto str = radray::format(" {}:{}\n", msg.source.filename, msg.source.line);
         dest.append(str.data(), str.data() + str.size());
     }
 

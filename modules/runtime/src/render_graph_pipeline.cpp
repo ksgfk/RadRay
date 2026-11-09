@@ -5,7 +5,8 @@
 
 namespace radray {
 
-struct RenderGraphFramePipeline::SlotState {
+class RenderGraphFramePipeline::SlotState {
+public:
     explicit SlotState(render::Device& device) noexcept : TransientPool(device) {}
     RDGTransientResourcePool TransientPool;
     Nullable<CompiledRDG*> CompiledGraph{nullptr};

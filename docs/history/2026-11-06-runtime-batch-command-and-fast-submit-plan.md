@@ -18,9 +18,9 @@
 ### 1. 前序演进复盘
 
 回顾 `2026-11-04` 至 `2026-11-06` 的四次迭代：
-1. **[11-04 基础修复](2026-11-04-runtime-mdc-performance-plan.md)**：移除了 Release 下 `SubmitMeshDrawCommands` 每帧重复执行的 `ValidateMeshDrawCommand` 预检（省去 `1.133 ms/帧` 的高频 `Buffer::GetDesc()` 虚调用），并为 `Scene` 补齐 `OwningPrimitive` 反向句柄与 $O(1)$ `Dirty` 标记（消除批量更新时 `7.52 ms` 的 $O(K \times P)$ 线性扫描尖峰）。这部分属于清理原型期实现硬伤。
-2. **[11-05 接口拆分](2026-11-05-runtime-rdg-pipeline-interface-plan.md) $\to$ [11-06 第一轮提交 (`842d8f2`)](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md)**：`11-05` 误将 `Scene` 视为在 `Record` 期间会被并发修改的对象，为切断 `Record` 对 `Scene` 的借用而引入每帧 `SnapshotCommands` 深拷贝，导致每帧多出 `0.310 ms` 的拷贝与析构开销，并迫使下游在 `ExtractFrameData` 与 `ExtractMeshPass` 中对可见批次扫描两遍。`11-06` 第一轮提交对齐 UE5 `FScene` 渲染线程模型，恢复 `RunFrame` 内 `Scene` 只读借用并移除快照，使收集与清理合计省下 `0.307 ms/帧`。
-3. **[11-06 第二轮提交 (`7e465fe`)](2026-11-06-runtime-mdc-soa-pools-plan.md)**：移除快照后，`SnapshotCommands` 不再充当“隐式缓存预取器 + 连续内存紧缩器”，`SubmitMeshDrawCommands` 直接面对 `Scene` 缓存池的跨页稀疏冷读取，耗时从 `0.118 ms` 回升至 `0.261 ms`。为缩小 `472 B` 的胖 `MeshDrawCommand` 并让同一 `MeshBatch` 的多个 Submesh 共享绑定，第二轮提交将 `VertexBuffers`、`ParameterSets`、`PushConstants` 拆入 `MeshDrawCommandBindingStorage` 的三个带引用计数（`References` / `Retain` / `Release`）的 `SparseSet` 池中。
+1. **[11-04 基础修复](2026-11-04-runtime-mdc-performance-plan.md)**：移除了 Release 下 `SubmitMeshDrawCommands` 每帧重复执行的 `ValidateMeshDrawCommand` 预检，并为 `Scene` 补齐 `OwningPrimitive` 反向句柄与 $O(1)$ `Dirty` 标记（避免批量更新时的 $O(K \times P)$ 线性扫描）。这部分属于清理原型期实现硬伤。
+2. **[11-05 接口拆分](2026-11-05-runtime-rdg-pipeline-interface-plan.md) $\to$ [11-06 第一轮提交 (`842d8f2`)](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md)**：`11-05` 误将 `Scene` 视为在 `Record` 期间会被并发修改的对象，为切断 `Record` 对 `Scene` 的借用而引入每帧 `SnapshotCommands` 深拷贝，增加每帧命令的拷贝与析构。`11-06` 第一轮提交对齐 UE5 `FScene` 渲染线程模型，恢复 `RunFrame` 内 `Scene` 只读借用并移除快照。
+3. **[11-06 第二轮提交 (`7e465fe`)](2026-11-06-runtime-mdc-soa-pools-plan.md)**：移除快照后，`SnapshotCommands` 不再充当“隐式缓存预取器 + 连续内存紧缩器”，`SubmitMeshDrawCommands` 直接面对 `Scene` 缓存池的跨页稀疏冷读取。为缩小 `472 B` 的胖 `MeshDrawCommand` 并让同一 `MeshBatch` 的多个 Submesh 共享绑定，第二轮提交将 `VertexBuffers`、`ParameterSets`、`PushConstants` 拆入 `MeshDrawCommandBindingStorage` 的三个带引用计数（`References` / `Retain` / `Release`）的 `SparseSet` 池中。
 
 正是第二轮提交中“为了同 Batch 多 Submesh 去重被迫引入引用计数池、二次稀疏表跳转与每条可见命令携带池指针”的复杂性，暴露出当前 Runtime 的数据结构与抽象粒度本身存在三处深层缺陷。
 
@@ -33,10 +33,10 @@
 1. **契约与存储模型的自相矛盾**：
    - 在 [`MeshBatch`](../../modules/runtime/include/radray/runtime/mesh_batch.h) 与 [`MeshPassProcessor::BuildMeshDrawCommands`](../../modules/runtime/src/mesh_pass_processor.cpp) 的契约中，同一个 `MeshBatch` 下的所有 [`MeshBatchElement`](../../modules/runtime/include/radray/runtime/mesh_batch.h) **强制共享同一个 `Material`、同一个 `VertexInput`（全部顶点流）、同一个 `Topology`、同一个 `Pipeline`、同一个 `ParameterSets`、同一个 `PushConstants`、`StencilReference` 和 `BaseSortKey`**。各个 `Element` 之间唯一不同的只有索引范围（`IndexBuffer`、`FirstIndex`、`IndexCount`、`VertexOffset`、`FirstInstance`、`InstanceCount`）。
    - 然而在存储实现上，`BuildMeshDrawCommands` 照搬了 UE5“1 Batch $\approx$ 1 Element”的假设，在缓存构建期通过循环将每个 `Element` 拆散并生成了完全独立的 [`MeshDrawCommand`](../../modules/runtime/include/radray/runtime/mesh_draw_command.h)。
-2. **在多 Submesh 场景（如地形每个 Section 含最多 7 个轴向面组 Element，或通用多子网格同材质模型）下的四重连锁放大**：
-   - **缓存规模膨胀 5.4 倍**：约 `2,700` 个驻留 `MeshBatch` 被拍扁为 `14,510` 条缓存命令；每帧视锥与朝向剔除后仅 `~19%`（`2,752` 条）可见，导致可见命令在内存中高度稀疏。
+2. **在同材质多 Submesh 场景下的四重连锁放大**：
+   - **缓存规模随 Element 数量膨胀**：每个 Batch 的共享状态被复制到多个 Element 命令中，可见 Element 稀疏时需要访问更多分散记录。
    - **`MeshBatch::CachedCommands` 发生隐蔽的堆分配爆炸**：
-     [`MeshBatch::CachedCommands`](../../modules/runtime/include/radray/runtime/mesh_batch.h) 定义为 `InlineVector<CachedMeshDrawCommandInfo, 4>`，内联容量仅为 `4`。当一个 `MeshBatch` 含有 $> 4$ 个子网格命令（地形 Section 单 Pass 平均 `5.4` 个、最多 7 个，跨多 Pass 则达 10～14 条）时，**几乎所有 `MeshBatch::CachedCommands` 都会撑爆内联容量 `4`，退化为散落在堆上的独立动态数组**。
+     [`MeshBatch::CachedCommands`](../../modules/runtime/include/radray/runtime/mesh_batch.h) 定义为 `InlineVector<CachedMeshDrawCommandInfo, 4>`，内联容量仅为 `4`。当一个 `MeshBatch` 含有 $> 4$ 个子网格命令时，该 Batch 的 CachedCommands 会超出内联容量并分配动态数组。
    - **`GatherVisibleMeshDrawCommands` 退化为 3 倍重复查表与堆上内层线性扫描**：
      由于 [`VisibleMeshBatch`](../../modules/runtime/include/radray/runtime/scene.h) 每次只能指定单个 `ElementIndex`，当一个可见 Batch 有 3 个子网格可见时，上层被迫传入 3 个 `VisibleMeshBatch`。[`Scene::GatherVisibleMeshDrawCommands`](../../modules/runtime/src/scene.cpp) 对同一个 Batch：
      - 重复执行 3 次 `Meshes.TryGet(visible.Batch)`；
@@ -64,7 +64,7 @@ static_assert(sizeof(VisibleMeshDrawCommand) == 40);
 
 #### 缺陷三：`SubmitMeshDrawCommands` 内层循环的“通用解释器”开销
 
-即便数据已命中缓存，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 在每次切换 Batch（每帧 ~913 次）时仍在运行一套代价高昂的动态重排逻辑：
+即便数据已命中缓存，[`SubmitMeshDrawCommands`](../../modules/runtime/src/mesh_draw_command.cpp) 在每次切换 Batch 时仍在运行一套代价高昂的动态重排逻辑：
 1. 在栈上构造并析构 `264 Bytes` 的 `InlineVector<render::VertexBufferBinding, 8> dirtyVertexBuffers`（[`InlineVector`](../../modules/core/include/radray/inline_vector.h) 含 `24 B` 头部与 `ReleaseStorage()` 析构分支）；
 2. 对每个顶点流在 `stateCache.VertexBuffers` 中调用 `std::find_if` 线性查找槽位；
 3. 在录制热循环内对 `dirtyVertexBuffers` 调用 `std::sort` 并扫描连续区间；
@@ -85,8 +85,8 @@ static_assert(sizeof(VisibleMeshDrawCommand) == 40);
    - **两头落空**：Color Pass 中几乎所有网格都有 $\ge 2$ 个流，此时既在每条命令中白占了 16 字节内联空间，又依然必须访问外部池读取剩余流；
    - **破坏连续 `span` 下发**：D3D12 `IASetVertexBuffers` 与 Vulkan `vkCmdBindVertexBuffers` 均期望一次接收连续槽位的绑定数组。若 Slot 0 在命令内联字段、Slot 1..N 在池中，`Submit` 被迫拆成 2 次 RHI 调用或在栈上重新拷贝拼装临时数组；
    - **破坏多 Batch 共享同一 `VertexInput` 时的单句柄 $O(1)$ 短路**：一个多材质复杂模型的多个 `MeshBatch`（或共享 MegaBuffer 的批次）往往拥有完全相同的 2～3 个顶点流。保持全部顶点流作为一个整体存储在 `VertexBuffersPool` 中，切换 Batch 时只需比对 1 次 `VertexBuffersHandle` 即可跳过全部流的检查。
-3. **配合方向 A 后，池体积已自然缩小 5.4 倍，无需靠劈裂内联赌单流特例**：
-   - 采用方向 A 按 Batch 收敛命令后，常驻命令与绑定池条目均从 `14,510` 降至 `~2,700`（合计仅数百 KB，完全常驻 L2/L3 Cache）。保持 `VertexBuffers` 在池中作为**构建期预排序的连续整体**，可让单流地形与多流通用场景走完全一致的高速路径。
+3. **方向 A 按 Batch 保存共享状态**：
+   - 按 Batch 收敛后，共享绑定无需按 Element 重复持有。VertexBuffers 在池中保持构建期预排序的连续整体，统一处理单流与多流输入。
 
 ---
 
@@ -113,7 +113,7 @@ static_assert(sizeof(MeshDrawElement) == 32 && std::is_trivially_copyable_v<Mesh
 - **单 Submesh 与多 Submesh 统一表达**：
   - `MeshDrawCommand` 首条缓存行直接保存第 0 个有效元素的索引绘制参数（`IndexBuffer`、`IndexCount`、`FirstIndex`、`VertexOffset`）以及 `ValidElementMask`；
   - 当 `MeshBatch` 仅有 1 个有效 `Element`（常规单分段网格）时，无需分配任何额外元素池条目；
-  - 当 `MeshBatch` 拥有多个有效 `Element`（如地形 Section 的 2～7 个轴向面组，或多子网格同材质模型）时，其余有效 `MeshDrawElement` 存入 `MeshDrawCommandBindingStorage::ElementsPool`。
+  - 当 `MeshBatch` 拥有多个有效 `Element` 时，其余有效 `MeshDrawElement` 存入 `MeshDrawCommandBindingStorage::ElementsPool`。
 - **`MeshBatch::CachedCommands` 彻底告别堆溢出**：
   - 1 个 `MeshBatch` 在 1 个 Pass 下**最多生成 1 条 `MeshDrawCommand`**，[`CachedMeshDrawCommandInfo`](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) 移除 `ElementIndex` 字段：
     ```cpp
@@ -150,14 +150,14 @@ struct VisibleMeshBatch {
 ```
 
 - 在 [`Scene::GatherVisibleMeshDrawCommands`](../../modules/runtime/src/scene.cpp) 中：
-  - 913 个可见地形 Section 只需传入 **913 个 `VisibleMeshBatch`**（而非 `2,752` 个）；
+  - 每个可见 Batch 传入一个 VisibleMeshBatch，通过 ElementMask 表达可见子网格；
   - 每个可见 Batch 仅执行 **1 次** `Meshes.TryGet(visible.Batch)`；
   - 在内联的 `batch.CachedCommands`（仅 1～4 项）中直接匹配 `info.Pass == pass`；
   - 计算 `const uint32_t activeMask = visible.ElementMask & command->ValidElementMask;`，若非零则仅向 `outCommands` 追加 **1 条** `VisibleMeshDrawCommand`（携带 `activeMask`）。
 
 #### 3. 排序与录制（`Sort` & `Submit`）：按 Batch 排序与绑定，内层位扫描连发 `DrawIndexed`
 
-- **`SortVisibleCommands`**：仅对 **913 条** Batch 级 `VisibleMeshDrawCommand` 排序（规模缩减 **67%**）。
+- **`SortVisibleCommands`**：对 Batch 级 VisibleMeshDrawCommand 排序。
 - **`SubmitMeshDrawCommands`**：
   - 外层循环每条可见 Batch 命令只执行 **1 次** PSO、Pass 参数组、`VertexBuffers`、模板参考值、`ParameterSets` 与 `PushConstants` 的状态去重与绑定；
   - 内层循环根据 `visible.ElementMask`（已在 Gather 期或入口与 `command.ValidElementMask` 求交）连续发射该 Batch 下所有可见的 Submesh：
@@ -175,7 +175,7 @@ struct VisibleMeshBatch {
     }
     ```
   - 对于通用 `1 Batch = 1 Element` 网格，`mask` 仅有 1 个 bit 为 1，内层循环只执行 1 次，零额外开销；
-  - 对于多 Submesh 网格（如地形 Section 的 3 个可见面组，或多分段同材质网格），内层循环直接连发 `DrawIndexed`，中间**零 PSO/VB/ParameterSet/PushConstants 状态检查分支**。
+  - 对于多 Submesh 网格，内层循环直接连发 `DrawIndexed`，中间**零 PSO/VB/ParameterSet/PushConstants 状态检查分支**。
 
 ---
 
@@ -261,17 +261,12 @@ static_assert(sizeof(VisibleMeshDrawCommand) == 32);
 
 ---
 
-## 三、全链路收益对比（兼顾体素地形与通用 PBR 多流场景）
+## 三、数据组织变化
 
-| 维度 | 当前基线 (`7e465fe`，逐 Element + 动态重排) | A + B 通用方案（Batch 级命令 + 预排序连续 VB + 掩码连发） | 改善机理与通用性保证 |
-|---|---|---|---|
-| 常驻 `Commands` 数量（以 2,700 Section 地形为例） | **`14,510` 条**（`1.16 MB`） | **`~2,700` 条**（`0.21 MB`，常驻 L2 Cache） | 消除 1 Batch $\to$ $N$ Element 的过早拍扁；对 `1 Batch = 1 Element` 通用网格则为 1:1 零额外开销 |
-| `MeshBatch::CachedCommands` 堆分配 | 超过 4 个子网格命令时 **100% 触发堆内存分配** | 每个 Pass 仅 1 条记录，**0 次堆内存分配**（100% 内联） | 无论单个 Batch 有多少个 Submesh，每个 Pass 固定只占 1 个槽位 |
-| 绑定池引用计数管理 | 3 个 `SparseSet` 均维护 `References` 计数与 `Retain`/`Release` | **0 引用计数**（命令与绑定条目严格 1:1 独占） | 同 Batch 的多个 Element 聚于同一命令内，无需跨命令共享句柄 |
-| `GatherVisible` 查表与扫描 | 传入 `2,752` 项，重复查表与堆上线性扫描 | 传入 **`913` 项**（带 `ElementMask`），单次查表直取 | 多 Submesh 场景查表次数砍掉 **67%**；单 Submesh 场景保持单次直取 |
-| `SortVisible` 排序规模与体积 | `2,752 × 40 B =` **`110 KB`**（跨缓存行边界） | `913 × 32 B =` **`29.2 KB`**（精确对齐 64B 缓存行） | 任何场景下排序元素体积均缩小 **20%**；多 Submesh 场景总排序带宽减少 **73.5%** |
-| `Submit` 顶点流绑定（单流 & 通用 2～4 分离流） | 每次切换在栈上构造 `264B` `InlineVector` + `std::find_if` + `std::sort` | 构建期预排序 + `BoundVertexSlots[slot]` **$O(1)$ 直查** + 原位连续 `subspan` 下发 | **流越多收益越大**：零栈容器构造、零 `find_if`、零 `std::sort`，不劈裂多流数据 |
-| `Submit` 多 Submesh 绘制 | 每个 Submesh 均跑一遍完整外层状态机 | 外层每 Batch 绑定 1 次，内层 5 行代码位扫描连发 `DrawIndexed` | 消除同 Batch 子网格间的全部冗余状态比对 |
+- 每个 Batch 在一个 Pass 下保留一条命令，ElementMask 表达同 Batch 的可见元素集合。
+- 可见收集与排序按 Batch 组织，Element 绘制参数在命令内部展开。
+- 顶点绑定在构建期预排序，Submit 按槽位检查连续区间，统一处理单流与分离多流输入。
+- VisibleMeshDrawCommand 的定长布局与变长元素存储分别校验，不依赖具体场景规模。
 
 ---
 

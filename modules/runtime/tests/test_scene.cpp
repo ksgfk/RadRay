@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <type_traits>
+#include <utility>
 
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/scene.h>
@@ -13,21 +15,37 @@ namespace {
 using test::FakeBuffer;
 using test::FakePipeline;
 
+// Scene 查询仅接受对应类型的句柄，拒绝其他元素类型与底层原始句柄。
+static_assert(std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, PrimitiveHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, MeshBatchHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, MaterialHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, SparseSetHandle>);
+static_assert(std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, MeshBatchHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, PrimitiveHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, MaterialHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, SparseSetHandle>);
+static_assert(std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, MaterialHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, PrimitiveHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, MeshBatchHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, SparseSetHandle>);
+static_assert(!std::is_constructible_v<PrimitiveHandle, SparseSetHandle> &&
+              !std::is_constructible_v<MeshBatchHandle, SparseSetHandle> &&
+              !std::is_constructible_v<MaterialHandle, SparseSetHandle>);
+
 class RecordingProcessor final : public MeshPassProcessor {
 public:
-    RecordingProcessor(MeshPassDrawListContext& output, render::GraphicsPipelineState& pipeline) noexcept
-        : MeshPassProcessor(output), _pipeline(&pipeline) {}
+    explicit RecordingProcessor(render::GraphicsPipelineState& pipeline) noexcept
+        : _pipeline(&pipeline) {}
 
-    void AddMeshBatch(const MeshBatchContext& context) override {
+    void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
         Calls.push_back(context.BatchHandle);
         LastMaterial = context.Material;
-        BuildSucceeded = BuildMeshDrawCommands(context, {.Pipeline = _pipeline, .CustomStateSortKey = SortKey});
+        BuildMeshDrawCommands(context, {.Pipeline = _pipeline, .CustomStateSortKey = SortKey}, output);
     }
 
-    vector<SparseSetHandle> Calls;
+    vector<MeshBatchHandle> Calls;
     Nullable<const MaterialRenderProxy*> LastMaterial{nullptr};
     uint32_t SortKey{0};
-    bool BuildSucceeded{true};
 
 private:
     render::GraphicsPipelineState* _pipeline;
@@ -51,13 +69,13 @@ protected:
         }
         return batch;
     }
-    SparseSetHandle AddBatch(uint32_t elementCount = 1) { return World.AddMeshBatch(Primitive, MakeBatch(elementCount)); }
+    MeshBatchHandle AddBatch(uint32_t elementCount = 1) { return World.AddMeshBatch(Primitive, MakeBatch(elementCount)); }
     void Sync() {
         const MeshPassRegistration pass{Pass, &Processor};
         World.SyncCachedMeshDrawCommands(std::span{&pass, 1});
     }
-    uint32_t CommandIndex(SparseSetHandle batch) const { return World.GetPassCache(Pass)->GetBatchSlot(batch.Index)->CommandDenseIndex; }
-    const MeshDrawCommand& CachedCommand(SparseSetHandle batch) const { return *World.GetPassCache(Pass)->GetCommand(batch.Index); }
+    uint32_t CommandIndex(MeshBatchHandle batch) const { return World.GetPassCache(Pass)->GetBatchSlot(batch.GetIndex())->CommandDenseIndex; }
+    const MeshDrawCommand& CachedCommand(MeshBatchHandle batch) const { return *World.GetPassCache(Pass)->GetCommand(batch.GetIndex()); }
     bool Gather(std::span<const VisibleMeshBatch> requests, vector<VisibleMeshDrawCommand>& output) const {
         return World.GatherVisibleMeshDrawCommands(Pass, requests, output);
     }
@@ -67,17 +85,16 @@ protected:
     FakeBuffer Vertices{128, render::BufferUse::Vertex};
     FakeBuffer Indices{128, render::BufferUse::Index};
     VertexInput Input;
-    DynamicMeshPassDrawListContext DefaultOutput;
-    RecordingProcessor Processor{DefaultOutput, Pipeline};
+    RecordingProcessor Processor{Pipeline};
     Scene World;
-    SparseSetHandle Material;
-    SparseSetHandle Primitive;
+    MaterialHandle Material;
+    PrimitiveHandle Primitive;
 };
 
 TEST_F(SceneTest, AddMeshBatchLinksBatchToPrimitive) {
     const auto batch = AddBatch();
     ASSERT_TRUE(batch.IsValid());
-    EXPECT_EQ((*World.GetPrimitive(Primitive)).Meshes, (vector<SparseSetHandle>{batch}));
+    EXPECT_EQ((*World.GetPrimitive(Primitive)).Meshes, (vector<MeshBatchHandle>{batch}));
     EXPECT_EQ(World.GetOwningPrimitive(batch), Primitive);
     EXPECT_EQ(World.GetDirtyBatches().size(), 1u);
 }
@@ -141,7 +158,7 @@ TEST_F(SceneTest, RemoveMaterialRejectsReferencedMaterial) {
 
 TEST_F(SceneTest, AddPrimitiveRejectsPrepopulatedLinks) {
     PrimitiveSceneInfo primitive;
-    primitive.Meshes.push_back({9, 0});
+    primitive.Meshes.push_back({});
     EXPECT_FALSE(World.AddPrimitive(primitive).IsValid());
 }
 
@@ -158,8 +175,8 @@ TEST_F(SceneTest, FirstSyncBuildsEveryLinkedBatch) {
     const auto direct = AddBatch();
     Sync();
     EXPECT_EQ(Processor.Calls.size(), 2u);
-    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(added.Index) ? 1u : 0u), 1u);
-    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(direct.Index) ? 1u : 0u), 1u);
+    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(added.GetIndex()) ? 1u : 0u), 1u);
+    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(direct.GetIndex()) ? 1u : 0u), 1u);
     EXPECT_FALSE(World.HasDirtyBatches());
 }
 
@@ -183,7 +200,7 @@ TEST_F(SceneTest, UpdatedBatchIsRebuiltOnNextSync) {
     ASSERT_TRUE(World.UpdateMeshBatch(edited, std::move(batch)));
     Processor.Calls.clear();
     Sync();
-    EXPECT_EQ(Processor.Calls, (vector<SparseSetHandle>{edited}));
+    EXPECT_EQ(Processor.Calls, (vector<MeshBatchHandle>{edited}));
     EXPECT_EQ(CachedCommand(edited).FirstIndex, 6u);
     EXPECT_EQ(CachedCommand(untouched).VertexBuffersIndex, untouchedBindings);
 }
@@ -214,7 +231,7 @@ TEST_F(SceneTest, UpdateMaterialMarksOnlyReferencingBatchesDirty) {
     ASSERT_TRUE(World.AddMeshBatch(Primitive, std::move(other)).IsValid());
     Sync();
     ASSERT_TRUE(World.UpdateMaterial(Material, {}));
-    EXPECT_EQ(vector<SparseSetHandle>(World.GetDirtyBatches().begin(), World.GetDirtyBatches().end()), (vector<SparseSetHandle>{referencing}));
+    EXPECT_EQ(vector<MeshBatchHandle>(World.GetDirtyBatches().begin(), World.GetDirtyBatches().end()), (vector<MeshBatchHandle>{referencing}));
 }
 
 TEST_F(SceneTest, ProcessorReceivesBatchMaterial) {
@@ -223,20 +240,13 @@ TEST_F(SceneTest, ProcessorReceivesBatchMaterial) {
     EXPECT_EQ(Processor.LastMaterial.Get(), &(*World.GetMaterial(Material)));
 }
 
-TEST_F(SceneTest, SyncRestoresProcessorContext) {
-    AddBatch();
-    Sync();
-    EXPECT_EQ(&Processor.DrawListContext(), &DefaultOutput);
-    EXPECT_TRUE(DefaultOutput.Commands.empty());
-}
-
 TEST_F(SceneTest, RegistrationChangeRebuildsEveryBatch) {
     const auto batch = AddBatch();
     Sync();
-    RecordingProcessor replacement{DefaultOutput, Pipeline};
+    RecordingProcessor replacement{Pipeline};
     const MeshPassRegistration pass{Pass, &replacement};
     World.SyncCachedMeshDrawCommands(std::span{&pass, 1});
-    EXPECT_EQ(replacement.Calls, (vector<SparseSetHandle>{batch}));
+    EXPECT_EQ(replacement.Calls, (vector<MeshBatchHandle>{batch}));
     EXPECT_EQ(World.GetCachedDrawList(Pass)->GetCommands().size(), 1u);
 }
 
@@ -247,20 +257,21 @@ TEST_F(SceneTest, RemovedPassDropsCachedCommands) {
     EXPECT_FALSE(World.GetPassCache(Pass));
 }
 
-TEST_F(SceneTest, BorrowedVertexInputIsRevalidatedAfterMarkBatchDirty) {
+TEST_F(SceneTest, BorrowedVertexInputBindingsUpdateAfterMarkBatchDirty) {
     const auto batch = AddBatch();
     Sync();
-    Input.Streams[0].Size = 256;
+    Input.Streams[0].Offset = 16;
+    Input.Streams[0].Size = 64;
     World.MarkBatchDirty(batch);
     Sync();
-    EXPECT_FALSE(Processor.BuildSucceeded);
-    EXPECT_TRUE(World.IsBatchDirty(batch));
-    EXPECT_FALSE(World.GetPassCache(Pass)->GetCommand(batch.Index));
-    Input.Streams[0].Size = 48;
-    Sync();
-    EXPECT_TRUE(Processor.BuildSucceeded);
     EXPECT_FALSE(World.HasDirtyBatches());
-    EXPECT_TRUE(World.GetPassCache(Pass)->GetCommand(batch.Index));
+    EXPECT_TRUE(World.GetDirtyBatches().empty());
+    const auto& command = CachedCommand(batch);
+    const auto vertices = command.BindingStorage->GetVertexBuffers(command.VertexBuffersIndex);
+    ASSERT_TRUE(vertices);
+    ASSERT_EQ(vertices->Bindings.size(), 1u);
+    EXPECT_EQ(vertices->Bindings[0].View.Offset, 16u);
+    EXPECT_EQ(vertices->Bindings[0].View.Size, 64u);
 }
 
 TEST_F(SceneTest, GatherCombinesBaseAndVisibilitySortKeys) {
@@ -379,7 +390,7 @@ TEST_F(SceneTest, FrameDrawListSubmitsSortedBorrowedCommands) {
 
 TEST_F(SceneTest, FrameGatherAppendsOnlyRequestedPassAndKeepsPreviousBorrowing) {
     const auto batch = AddBatch();
-    RecordingProcessor other{DefaultOutput, Pipeline};
+    RecordingProcessor other{Pipeline};
     other.SortKey = 99;
     const array<MeshPassRegistration, 2> passes{{{Pass, &Processor}, {{1}, &other}}};
     World.SyncCachedMeshDrawCommands(passes);
@@ -388,7 +399,7 @@ TEST_F(SceneTest, FrameGatherAppendsOnlyRequestedPassAndKeepsPreviousBorrowing) 
     ASSERT_TRUE(World.GatherVisiblePrimitives({1}, std::span{&Primitive, 1}, list));
     ASSERT_EQ(list.VisibleCommands.size(), 2u);
     EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &CachedCommand(batch));
-    EXPECT_EQ(list.VisibleCommands[1].CachedCommand.Get(), World.GetPassCache({1})->GetCommand(batch.Index).Get());
+    EXPECT_EQ(list.VisibleCommands[1].CachedCommand.Get(), World.GetPassCache({1})->GetCommand(batch.GetIndex()).Get());
     EXPECT_NE(list.VisibleCommands[0].CachedCommand.Get(), list.VisibleCommands[1].CachedCommand.Get());
     EXPECT_EQ(list.VisibleCommands[0].SortKey, 0u);
     EXPECT_EQ(list.VisibleCommands[1].SortKey, uint64_t{99} << 32);
@@ -429,7 +440,7 @@ TEST_F(SceneTest, FramePrimitiveGatherRollsBackOnInvalidPrimitive) {
     Sync();
     MeshPassFrameDrawList list;
     ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, list));
-    const array<SparseSetHandle, 2> invalid{Primitive, {}};
+    const array<PrimitiveHandle, 2> invalid{Primitive, {}};
     EXPECT_FALSE(World.GatherVisiblePrimitives(Pass, invalid, list));
     EXPECT_EQ(list.VisibleCommands.size(), 2u);
     test::RecordingEncoder encoder;
@@ -514,7 +525,7 @@ TEST_F(SceneTest, GatherFiltersEmptyAndUnknownBitsWithoutExpandingBatch) {
     ASSERT_TRUE(Gather(requests, visible));
     ASSERT_EQ(visible.size(), 1u);
     EXPECT_EQ(visible[0].ElementMask, 5u);
-    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(batch.Index) ? 1u : 0u), 1u);
+    EXPECT_EQ((World.GetPassCache(Pass)->GetCommand(batch.GetIndex()) ? 1u : 0u), 1u);
     test::RecordingEncoder encoder;
     ASSERT_TRUE(SubmitMeshDrawCommands(encoder, visible));
     ASSERT_EQ(encoder.Draws.size(), 2u);
@@ -590,9 +601,9 @@ TEST_F(SceneTest, DeletedDirtyEntryDoesNotRebuildReusedSlotTwice) {
     const auto removed = AddBatch();
     ASSERT_TRUE(World.RemoveMeshBatch(removed));
     const auto replacement = AddBatch();
-    ASSERT_EQ(removed.Index, replacement.Index);
+    ASSERT_EQ(removed.GetIndex(), replacement.GetIndex());
     Sync();
-    EXPECT_EQ(Processor.Calls, (vector<SparseSetHandle>{replacement}));
+    EXPECT_EQ(Processor.Calls, (vector<MeshBatchHandle>{replacement}));
     EXPECT_FALSE(World.HasDirtyBatches());
     const VisibleMeshBatch stale{.Batch = removed};
     vector<VisibleMeshDrawCommand> visible;
@@ -620,9 +631,9 @@ TEST_F(SceneTest, CachedAndDynamicCommandsUseTheSamePassSortMode) {
         MeshPassFrameDrawList list{mode};
         const VisibleMeshBatch request{.Batch = cachedBatch, .VisibilitySortKey = 3};
         ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, std::span{&request, 1}, list));
-        RecordingProcessor dynamic{list.DynamicContext, Pipeline};
+        RecordingProcessor dynamic{Pipeline};
         dynamic.SortKey = 2;
-        dynamic.AddMeshBatch({*World.GetPrimitive(Primitive), dynamicBatch, {}, {}, nullptr, 9});
+        dynamic.AddMeshBatch({*World.GetPrimitive(Primitive), dynamicBatch, {}, {}, nullptr, 9}, list.DynamicContext);
         list.SortVisibleCommands();
         ASSERT_EQ(list.VisibleCommands.size(), 2u);
         const auto cachedKey = ComposeMeshDrawSortKey(mode, 7, 3);
@@ -652,7 +663,7 @@ TEST_F(SceneTest, SwappingLastCommandIntoHolePreservesItsBatchAndInstanceDefault
     EXPECT_EQ(visible[0].FirstInstance, 17u);
 }
 
-TEST_F(SceneTest, SyncReusesOwnedElementValidationButRevalidatesBorrowedVertices) {
+TEST_F(SceneTest, SyncRevalidatesBorrowedVerticesOnlyInDebug) {
     class DescribedBuffer final : public FakeBuffer {
     public:
         using FakeBuffer::FakeBuffer;
@@ -670,10 +681,15 @@ TEST_F(SceneTest, SyncReusesOwnedElementValidationButRevalidatesBorrowedVertices
     const auto handle = World.AddMeshBatch(Primitive, batch);
     ASSERT_TRUE(handle.IsValid());
     EXPECT_GT(indices.Descriptions, 0u);
+    EXPECT_GT(vertices.Descriptions, 0u);
     indices.Descriptions = vertices.Descriptions = 0;
     Sync();
     EXPECT_EQ(indices.Descriptions, 0u);
+#if RADRAY_IS_DEBUG
     EXPECT_GT(vertices.Descriptions, 0u);
+#else
+    EXPECT_EQ(vertices.Descriptions, 0u);
+#endif
     World.MarkMaterialDirty(Material);
     Sync();
     EXPECT_EQ(indices.Descriptions, 0u);

@@ -1,5 +1,7 @@
 #pragma once
 
+// 渲染图、上传与槽位所有权契约见 docs/architecture/runtime.md。
+
 #include <limits>
 #include <optional>
 #include <span>
@@ -16,15 +18,17 @@ namespace radray {
 namespace detail {
 struct RDGData;
 struct RDGExecution;
-}  // namespace detail
+}  // 命名空间 detail
 
-struct RDGTextureHandle {
+class RDGTextureHandle {
+public:
     uint32_t Index{std::numeric_limits<uint32_t>::max()};
     constexpr bool IsValid() const noexcept { return Index != std::numeric_limits<uint32_t>::max(); }
     friend constexpr bool operator==(RDGTextureHandle, RDGTextureHandle) = default;
 };
 
-struct RDGBufferHandle {
+class RDGBufferHandle {
+public:
     uint32_t Index{std::numeric_limits<uint32_t>::max()};
     constexpr bool IsValid() const noexcept { return Index != std::numeric_limits<uint32_t>::max(); }
     friend constexpr bool operator==(RDGBufferHandle, RDGBufferHandle) = default;
@@ -37,10 +41,9 @@ struct RDGTransientTextureAllocation {
 
 struct RDGTransientBufferAllocation {
     Nullable<render::Buffer*> Buffer{nullptr};
-    render::BufferState LastState{render::BufferState::Undefined};
+    render::BufferStates LastState{render::BufferState::Undefined};
 };
 
-// See docs/architecture/runtime.md for graph, upload and slot ownership contracts.
 class RDGTransientResourcePool final {
 public:
     explicit RDGTransientResourcePool(render::Device& device) noexcept;
@@ -48,18 +51,18 @@ public:
     RDGTransientResourcePool(const RDGTransientResourcePool&) = delete;
     RDGTransientResourcePool& operator=(const RDGTransientResourcePool&) = delete;
 
-    // Call only after this slot's previous work completed and command storage reset.
+    // 仅在本槽上一帧工作完成且命令存储已重置后调用。
     void BeginFrame() noexcept;
-    // All referencing command storage must have reset before releasing pooled owners.
+    // 释放池内资源所有者前，所有引用它们的命令存储必须先重置。
     void Clear() noexcept;
     RDGTransientTextureAllocation AcquireTexture(const render::TextureDescriptor& desc);
     RDGTransientBufferAllocation AcquireBuffer(const render::BufferDescriptor& desc);
     void CommitTextureState(render::Texture* texture, render::TextureState finalState) noexcept;
-    void CommitBufferState(render::Buffer* buffer, render::BufferState finalState) noexcept;
+    void CommitBufferState(render::Buffer* buffer, render::BufferStates finalState) noexcept;
     Nullable<render::TextureView*> AcquireTextureView(const render::TextureViewDescriptor& desc);
 
 private:
-    struct Impl;
+    class Impl;
     unique_ptr<Impl> _impl;
 };
 
@@ -67,7 +70,7 @@ class RDGRasterPassContext final {
 public:
     render::GraphicsCommandEncoder& GetEncoder() noexcept;
     FrameSlot& GetSlot() noexcept;
-    // Resolve only resources declared by this pass. Borrowings end with the command epoch.
+    // 仅可解析本 Pass 已声明的资源；借用随命令 epoch 结束而失效。
     render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     render::Buffer& Resolve(RDGBufferHandle handle) const noexcept;
     Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
@@ -110,7 +113,7 @@ private:
 class RDGRasterPassBuilder final {
 public:
     RDGRasterPassBuilder& UseMeshPass(MeshPassId pass);
-    RDGRasterPassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferState state);
+    RDGRasterPassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferStates state);
     RDGRasterPassBuilder& WriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
     RDGRasterPassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
     RDGRasterPassBuilder& ReadTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::ShaderRead);
@@ -134,7 +137,7 @@ private:
 
 class RDGComputePassBuilder final {
 public:
-    RDGComputePassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::ShaderRead);
+    RDGComputePassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferStates state = render::BufferState::ShaderRead);
     RDGComputePassBuilder& WriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
     RDGComputePassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
     RDGComputePassBuilder& ReadTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::ShaderRead);
@@ -168,8 +171,8 @@ class CompiledRDG final {
 public:
     explicit CompiledRDG(detail::RDGData& data) noexcept;
     std::span<const MeshPassId> GetAliveMeshPasses() const noexcept;
-    // Execute once during Record, inside an open command buffer. Does not submit.
-    // Failure is fatal to the frame: no retry, state rollback or partial submission.
+    // 在 Record 期间、已开启录制的命令缓冲内执行一次；不负责提交。
+    // 失败使本帧不可恢复；不支持重试、状态回滚或部分提交。
     bool Execute(FrameSlot& slot, RDGTransientResourcePool& transientPool, render::CommandBuffer& commandBuffer) noexcept;
 
 private:
@@ -179,16 +182,17 @@ private:
     bool _executed{false};
 };
 
-// External synchronization remains the caller's responsibility; these flags record ownership barriers.
-struct RDGExternalOwnership {
+// 外部同步由调用方负责；这些标志记录所有权屏障。
+class RDGExternalOwnership {
+public:
     bool Acquire{false};
     bool Release{false};
     friend bool operator==(const RDGExternalOwnership&, const RDGExternalOwnership&) = default;
 };
 
-// Builder and compiled graph borrow arena storage until slot reclamation. Setup
-// callbacks run immediately; execute callbacks are owned by the arena and must
-// capture only frame-lifetime data, never setup-local references.
+// 构图器和编译后的图借用 arena 存储，直到槽位回收。
+// 设置回调立即执行；执行回调由 arena 持有，仅可捕获帧内有效的数据，
+// 不得捕获设置阶段的局部引用。
 class RDGBuilder final {
 public:
     explicit RDGBuilder(ObjectArena& arena) noexcept;
@@ -197,11 +201,11 @@ public:
 
     RDGTextureHandle ImportTexture(render::Texture* texture, render::TextureState initialState,
                                    std::optional<render::TextureState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
-    RDGBufferHandle ImportBuffer(render::Buffer* buffer, render::BufferState initialState,
-                                 std::optional<render::BufferState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
+    RDGBufferHandle ImportBuffer(render::Buffer* buffer, render::BufferStates initialState,
+                                 std::optional<render::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGTextureHandle CreateTexture(const render::TextureDescriptor& desc);
     RDGBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
-    // Copies bytes now. Upload-memory ranges must be disjoint and precede GPU use.
+    // 立即复制字节；上传内存的写入区间不得重叠，且写入必须先于 GPU 使用。
     void UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, std::span<const byte> data);
     void MarkOutput(RDGTextureHandle texture);
     void MarkOutput(RDGBufferHandle buffer);
@@ -236,7 +240,7 @@ public:
         std::forward<SetupFn>(setup)(builder);
     }
 
-    // One-shot CPU validation and culling. Invalid declarations log and return null.
+    // 执行一次 CPU 校验与裁剪；声明无效时记录日志并返回空值。
     Nullable<CompiledRDG*> Compile();
 
 private:

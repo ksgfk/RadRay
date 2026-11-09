@@ -9,7 +9,7 @@
 namespace radray {
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
-    if (!_materials.IsAlive(batch.Material) || batch.Elements.size() > 32) return false;
+    if (!_materials.IsAlive(batch.Material._handle) || batch.Elements.size() > 32) return false;
     const bool draws = std::any_of(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0 && element.InstanceCount != 0; });
     if (draws && (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, true))) return false;
     for (const auto& element : batch.Elements) {
@@ -42,117 +42,117 @@ void Scene::Reserve(uint32_t primitives, uint32_t batches, uint32_t materials) {
     for (auto& cache : _cachedDrawLists) cache.Reserve(_reservedBatches);
 }
 
-Nullable<const PrimitiveSceneInfo*> Scene::GetPrimitive(SparseSetHandle handle) const noexcept { return _primitives.TryGet(handle); }
-Nullable<const MeshBatch*> Scene::GetMeshBatch(SparseSetHandle handle) const noexcept { return _meshes.TryGet(handle); }
-Nullable<const MaterialRenderProxy*> Scene::GetMaterial(SparseSetHandle handle) const noexcept { return _materials.TryGet(handle); }
-bool Scene::IsBatchDirty(SparseSetHandle handle) const noexcept { return _meshes.IsAlive(handle) && _batchDirty[handle.Index]; }
-SparseSetHandle Scene::GetOwningPrimitive(SparseSetHandle handle) const noexcept { return _meshes.IsAlive(handle) ? _batchOwners[handle.Index] : SparseSetHandle{}; }
+Nullable<const PrimitiveSceneInfo*> Scene::GetPrimitive(PrimitiveHandle handle) const noexcept { return _primitives.TryGet(handle._handle); }
+Nullable<const MeshBatch*> Scene::GetMeshBatch(MeshBatchHandle handle) const noexcept { return _meshes.TryGet(handle._handle); }
+Nullable<const MaterialRenderProxy*> Scene::GetMaterial(MaterialHandle handle) const noexcept { return _materials.TryGet(handle._handle); }
+bool Scene::IsBatchDirty(MeshBatchHandle handle) const noexcept { return _meshes.IsAlive(handle._handle) && _batchDirty[handle.GetIndex()]; }
+PrimitiveHandle Scene::GetOwningPrimitive(MeshBatchHandle handle) const noexcept { return _meshes.IsAlive(handle._handle) ? _batchOwners[handle.GetIndex()] : PrimitiveHandle{}; }
 
-SparseSetHandle Scene::AddMaterial(MaterialRenderProxy proxy) {
-    const auto handle = _materials.Emplace(std::move(proxy));
-    if (_materialBatches.size() <= handle.Index) _materialBatches.resize(size_t{handle.Index} + 1);
+MaterialHandle Scene::AddMaterial(MaterialRenderProxy proxy) {
+    const MaterialHandle handle{_materials.Emplace(std::move(proxy))};
+    if (_materialBatches.size() <= handle.GetIndex()) _materialBatches.resize(size_t{handle.GetIndex()} + 1);
     return handle;
 }
-bool Scene::UpdateMaterial(SparseSetHandle handle, MaterialRenderProxy proxy) {
-    if (!_materials.IsAlive(handle)) return false;
-    _materials.Get(handle) = std::move(proxy);
+bool Scene::UpdateMaterial(MaterialHandle handle, MaterialRenderProxy proxy) {
+    if (!_materials.IsAlive(handle._handle)) return false;
+    _materials.Get(handle._handle) = std::move(proxy);
     MarkMaterialDirty(handle);
     return true;
 }
-bool Scene::RemoveMaterial(SparseSetHandle handle) {
-    if (!_materials.IsAlive(handle) || !_materialBatches[handle.Index].empty()) return false;
-    _materials.Destroy(handle);
+bool Scene::RemoveMaterial(MaterialHandle handle) {
+    if (!_materials.IsAlive(handle._handle) || !_materialBatches[handle.GetIndex()].empty()) return false;
+    _materials.Destroy(handle._handle);
     return true;
 }
-SparseSetHandle Scene::AddPrimitive(PrimitiveSceneInfo primitive) {
-    // Scene links are output only; batches must be added through AddMeshBatch.
+PrimitiveHandle Scene::AddPrimitive(PrimitiveSceneInfo primitive) {
+    // Scene 关联列表仅作为输出；Batch 必须通过 AddMeshBatch 添加。
     if (!primitive.Meshes.empty()) return {};
-    return _primitives.Emplace(std::move(primitive));
+    return PrimitiveHandle{_primitives.Emplace(std::move(primitive))};
 }
-bool Scene::UpdatePrimitiveTransform(SparseSetHandle handle, const AffineTransform& transform) {
-    if (!_primitives.IsAlive(handle)) return false;
-    _primitives.Get(handle).LocalToWorld = transform;
+bool Scene::UpdatePrimitiveTransform(PrimitiveHandle handle, const AffineTransform& transform) {
+    if (!_primitives.IsAlive(handle._handle)) return false;
+    _primitives.Get(handle._handle).LocalToWorld = transform;
     return true;
 }
-bool Scene::UpdatePrimitiveBounds(SparseSetHandle handle, const Aabb& bounds) {
-    if (!_primitives.IsAlive(handle)) return false;
-    _primitives.Get(handle).LocalBounds = bounds;
+bool Scene::UpdatePrimitiveBounds(PrimitiveHandle handle, const Aabb& bounds) {
+    if (!_primitives.IsAlive(handle._handle)) return false;
+    _primitives.Get(handle._handle).LocalBounds = bounds;
     return true;
 }
-bool Scene::RemovePrimitive(SparseSetHandle handle) {
-    if (!_primitives.IsAlive(handle)) return false;
-    auto& primitive = _primitives.Get(handle);
+bool Scene::RemovePrimitive(PrimitiveHandle handle) {
+    if (!_primitives.IsAlive(handle._handle)) return false;
+    auto& primitive = _primitives.Get(handle._handle);
     while (!primitive.Meshes.empty()) RemoveMeshBatch(primitive.Meshes.back());
-    _primitives.Destroy(handle);
+    _primitives.Destroy(handle._handle);
     return true;
 }
-void Scene::LinkMaterial(SparseSetHandle handle) {
-    auto& references = _materialBatches[_meshes.Get(handle).Material.Index];
-    _materialPositions[handle.Index] = static_cast<uint32_t>(references.size());
+void Scene::LinkMaterial(MeshBatchHandle handle) {
+    auto& references = _materialBatches[_meshes.Get(handle._handle).Material.GetIndex()];
+    _materialPositions[handle.GetIndex()] = static_cast<uint32_t>(references.size());
     references.push_back(handle);
 }
-void Scene::UnlinkMaterial(SparseSetHandle handle) noexcept {
-    auto& references = _materialBatches[_meshes.Get(handle).Material.Index];
-    const auto position = _materialPositions[handle.Index];
+void Scene::UnlinkMaterial(MeshBatchHandle handle) noexcept {
+    auto& references = _materialBatches[_meshes.Get(handle._handle).Material.GetIndex()];
+    const auto position = _materialPositions[handle.GetIndex()];
     references[position] = references.back();
-    _materialPositions[references.back().Index] = position;
+    _materialPositions[references.back().GetIndex()] = position;
     references.pop_back();
 }
-SparseSetHandle Scene::AddMeshBatch(SparseSetHandle primitive, MeshBatch batch) {
-    if (!_primitives.IsAlive(primitive) || !ValidateBatch(batch)) return {};
-    const auto handle = _meshes.Emplace(std::move(batch));
-    const auto count = size_t{handle.Index} + 1;
+MeshBatchHandle Scene::AddMeshBatch(PrimitiveHandle primitive, MeshBatch batch) {
+    if (!_primitives.IsAlive(primitive._handle) || !ValidateBatch(batch)) return {};
+    const MeshBatchHandle handle{_meshes.Emplace(std::move(batch))};
+    const auto count = size_t{handle.GetIndex()} + 1;
     if (_batchOwners.size() < count) {
         _batchOwners.resize(count);
         _batchDirty.resize(count);
         _primitivePositions.resize(count);
         _materialPositions.resize(count);
     }
-    _batchOwners[handle.Index] = primitive;
-    _batchDirty[handle.Index] = false;
-    auto& meshes = _primitives.Get(primitive).Meshes;
-    _primitivePositions[handle.Index] = static_cast<uint32_t>(meshes.size());
+    _batchOwners[handle.GetIndex()] = primitive;
+    _batchDirty[handle.GetIndex()] = false;
+    auto& meshes = _primitives.Get(primitive._handle).Meshes;
+    _primitivePositions[handle.GetIndex()] = static_cast<uint32_t>(meshes.size());
     meshes.push_back(handle);
     LinkMaterial(handle);
     AddUniqueDirtyBatch(handle);
     return handle;
 }
-bool Scene::UpdateMeshBatch(SparseSetHandle handle, MeshBatch batch) {
-    if (!_meshes.IsAlive(handle) || !ValidateBatch(batch)) return false;
+bool Scene::UpdateMeshBatch(MeshBatchHandle handle, MeshBatch batch) {
+    if (!_meshes.IsAlive(handle._handle) || !ValidateBatch(batch)) return false;
     UnlinkMaterial(handle);
-    _meshes.Get(handle) = std::move(batch);
+    _meshes.Get(handle._handle) = std::move(batch);
     LinkMaterial(handle);
     AddUniqueDirtyBatch(handle);
     return true;
 }
-bool Scene::RemoveMeshBatch(SparseSetHandle primitive, SparseSetHandle batch) {
-    return GetOwningPrimitive(batch) == primitive && _primitives.IsAlive(primitive) && RemoveMeshBatch(batch);
+bool Scene::RemoveMeshBatch(PrimitiveHandle primitive, MeshBatchHandle batch) {
+    return GetOwningPrimitive(batch) == primitive && _primitives.IsAlive(primitive._handle) && RemoveMeshBatch(batch);
 }
-bool Scene::RemoveMeshBatch(SparseSetHandle handle) {
-    if (!_meshes.IsAlive(handle)) return false;
-    InvalidateBatchCachedCommands(handle.Index);
+bool Scene::RemoveMeshBatch(MeshBatchHandle handle) {
+    if (!_meshes.IsAlive(handle._handle)) return false;
+    InvalidateBatchCachedCommands(handle.GetIndex());
     UnlinkMaterial(handle);
-    auto& meshes = _primitives.Get(_batchOwners[handle.Index]).Meshes;
-    const auto position = _primitivePositions[handle.Index];
+    auto& meshes = _primitives.Get(_batchOwners[handle.GetIndex()]._handle).Meshes;
+    const auto position = _primitivePositions[handle.GetIndex()];
     meshes[position] = meshes.back();
-    _primitivePositions[meshes.back().Index] = position;
+    _primitivePositions[meshes.back().GetIndex()] = position;
     meshes.pop_back();
-    if (_batchDirty[handle.Index]) --_dirtyCount;
-    _batchDirty[handle.Index] = false;
-    _batchOwners[handle.Index] = {};
-    _meshes.Destroy(handle);
+    if (_batchDirty[handle.GetIndex()]) --_dirtyCount;
+    _batchDirty[handle.GetIndex()] = false;
+    _batchOwners[handle.GetIndex()] = {};
+    _meshes.Destroy(handle._handle);
     return true;
 }
-void Scene::AddUniqueDirtyBatch(SparseSetHandle handle) {
-    if (!_meshes.IsAlive(handle) || _batchDirty[handle.Index]) return;
-    _batchDirty[handle.Index] = true;
+void Scene::AddUniqueDirtyBatch(MeshBatchHandle handle) {
+    if (!_meshes.IsAlive(handle._handle) || _batchDirty[handle.GetIndex()]) return;
+    _batchDirty[handle.GetIndex()] = true;
     ++_dirtyCount;
     _dirtyBatches.push_back(handle);
 }
-void Scene::MarkBatchDirty(SparseSetHandle handle) { AddUniqueDirtyBatch(handle); }
-void Scene::MarkMaterialDirty(SparseSetHandle handle) {
-    if (!_materials.IsAlive(handle)) return;
-    for (const auto batch : _materialBatches[handle.Index]) AddUniqueDirtyBatch(batch);
+void Scene::MarkBatchDirty(MeshBatchHandle handle) { AddUniqueDirtyBatch(handle); }
+void Scene::MarkMaterialDirty(MaterialHandle handle) {
+    if (!_materials.IsAlive(handle._handle)) return;
+    for (const auto batch : _materialBatches[handle.GetIndex()]) AddUniqueDirtyBatch(batch);
 }
 void Scene::InvalidateBatchCachedCommands(uint32_t batchIndex) noexcept {
     for (auto& cache : _cachedDrawLists) cache.DestroyCommand(batchIndex);
@@ -164,13 +164,12 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
     RADRAY_PROFILE_SCOPE_N("RadRay.Scene.SyncCachedCommands");
     for (size_t index = 0; index < passes.size(); ++index) {
         if (passes[index].Pass.Value == std::numeric_limits<uint32_t>::max()) {
-            RADRAY_ERR_LOG("Scene: mesh pass ID must be a compact index");
-            return;
+            RADRAY_ABORT("Scene: mesh pass ID must be a compact index");
         }
+        if (!passes[index].Processor) RADRAY_ABORT("Scene: mesh pass processor must not be null");
         for (size_t previous = 0; previous < index; ++previous) {
             if (passes[previous].Pass == passes[index].Pass) {
-                RADRAY_ERR_LOG("Scene: duplicate mesh pass ID");
-                return;
+                RADRAY_ABORT("Scene: duplicate mesh pass ID");
             }
         }
     }
@@ -182,7 +181,7 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
                          });
     if (!_initializedCache || changed) {
         for (auto& cache : _cachedDrawLists) cache.Clear();
-        for (uint32_t i = 0; i < _meshes.Count(); ++i) AddUniqueDirtyBatch(_meshes.GetHandleAt(i));
+        for (uint32_t i = 0; i < _meshes.Count(); ++i) AddUniqueDirtyBatch(MeshBatchHandle{_meshes.GetHandleAt(i)});
         _registeredPasses.assign(passes.begin(), passes.end());
         _initializedCache = true;
     }
@@ -194,33 +193,20 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
         cache._registered = true;
     }
     RADRAY_PROFILE_PLOT("RadRay.Scene.DirtyBatches", static_cast<int64_t>(_dirtyCount));
-    size_t retryCount = 0;
-    for (size_t index = 0; index < _dirtyBatches.size(); ++index) {
-        const auto handle = _dirtyBatches[index];
+    for (const auto handle : _dirtyBatches) {
         if (!IsBatchDirty(handle)) continue;
-        InvalidateBatchCachedCommands(handle.Index);
-        const auto& batch = _meshes.Get(handle);
-        const auto primitive = _batchOwners[handle.Index];
-        const MeshBatchContext context{_primitives.Get(primitive), batch, primitive, handle, &_materials.Get(batch.Material)};
-        bool failed = false;
+        InvalidateBatchCachedCommands(handle.GetIndex());
+        const auto& batch = _meshes.Get(handle._handle);
+        const auto primitive = _batchOwners[handle.GetIndex()];
+        const MeshBatchContext context{_primitives.Get(primitive._handle), batch, primitive, handle, &_materials.Get(batch.Material._handle)};
         for (const auto& pass : passes) {
-            CachedPassMeshDrawListContext output{_cachedDrawLists[pass.Pass.Value], handle.Index};
-            output._validatedBatch = &batch;
-            auto& previous = pass.Processor->DrawListContext();
-            pass.Processor->SetDrawListContext(output);
-            pass.Processor->AddMeshBatch(context);
-            pass.Processor->SetDrawListContext(previous);
-            failed |= output._buildFailed;
+            CachedPassMeshDrawListContext output{_cachedDrawLists[pass.Pass.Value], handle.GetIndex(), &batch};
+            pass.Processor->AddMeshBatch(context, output);
         }
-        if (failed) {
-            InvalidateBatchCachedCommands(handle.Index);
-            _dirtyBatches[retryCount++] = handle;
-        } else {
-            _batchDirty[handle.Index] = false;
-            --_dirtyCount;
-        }
+        _batchDirty[handle.GetIndex()] = false;
     }
-    _dirtyBatches.resize(retryCount);
+    _dirtyBatches.clear();
+    _dirtyCount = 0;
 }
 
 bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches, vector<VisibleMeshDrawCommand>& output) const {
@@ -231,11 +217,11 @@ bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const Visib
     if (output.capacity() < required) output.reserve(std::max(required, output.capacity() + output.capacity() / 2));
     const auto cache = GetPassCache(pass);
     for (const auto& visible : visibleBatches) {
-        if (!_meshes.IsAlive(visible.Batch) || _batchDirty[visible.Batch.Index]) {
+        if (!_meshes.IsAlive(visible.Batch._handle) || _batchDirty[visible.Batch.GetIndex()]) {
             output.resize(initialSize);
             return false;
         }
-        const auto slot = cache ? cache->GetBatchSlot(visible.Batch.Index) : nullptr;
+        const auto slot = cache ? cache->GetBatchSlot(visible.Batch.GetIndex()) : nullptr;
         if (!slot || slot->CommandDenseIndex == kInvalidBindingIndex) continue;
         const auto& command = cache->_commands[slot->CommandDenseIndex];
         const auto mask = visible.ElementMask & command.ValidElementMask;
@@ -251,15 +237,15 @@ bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const Visib
     return true;
 }
 
-bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
+bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const PrimitiveHandle> visiblePrimitives,
                                     vector<VisibleMeshDrawCommand>& outCommands) const {
     const auto initialSize = outCommands.size();
     for (const auto handle : visiblePrimitives) {
-        if (!_primitives.IsAlive(handle)) {
+        if (!_primitives.IsAlive(handle._handle)) {
             outCommands.resize(initialSize);
             return false;
         }
-        for (const auto batch : _primitives.Get(handle).Meshes) {
+        for (const auto batch : _primitives.Get(handle._handle).Meshes) {
             const VisibleMeshBatch visible{.Batch = batch};
             if (!GatherVisibleMeshDrawCommands(pass, std::span{&visible, 1}, outCommands)) {
                 outCommands.resize(initialSize);
@@ -277,7 +263,7 @@ bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const Visib
     return GatherVisibleMeshDrawCommands(pass, visibleBatches, outDrawList.VisibleCommands);
 }
 
-bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const SparseSetHandle> visiblePrimitives,
+bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const PrimitiveHandle> visiblePrimitives,
                                     MeshPassFrameDrawList& outDrawList) const {
     const auto cache = GetPassCache(pass);
     if (cache) outDrawList.SetSortMode(cache->GetSortMode());

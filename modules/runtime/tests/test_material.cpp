@@ -146,5 +146,5 @@ TEST_F(MaterialRenderProxyTest, UpdateReplacesWholeSnapshot) {
     EXPECT_FALSE(proxy.GetParameter(1));
 }
 
-}  // namespace
+}  // 匿名命名空间
 }  // namespace radray

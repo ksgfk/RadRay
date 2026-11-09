@@ -16,5 +16,5 @@ TEST(DeviceContextTest, SupportsIndirectRequiresBothIndirectFeatures) {
     EXPECT_TRUE(gpu.Context.SupportsIndirect());
 }
 
-}  // namespace
+}  // 匿名命名空间
 }  // namespace radray

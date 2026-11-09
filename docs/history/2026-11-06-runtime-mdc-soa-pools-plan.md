@@ -7,42 +7,21 @@
 ## 状态、基线与范围
 
 - 记录日期：2026-11-06
-- 状态：用户提出并要求制定的下一阶段优化计划（承接 [Runtime Scene 帧内借用对齐与 MeshDrawCommand 寻址/布局优化计划](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md) 阶段一至三落地后的实测分析）
+- 状态：用户提出并要求制定的下一阶段优化计划（承接 [Runtime Scene 帧内借用对齐与 MeshDrawCommand 寻址/布局优化计划](2026-11-06-runtime-scene-borrow-and-mdc-layout-plan.md) 阶段一至三的结构分析）
 - 范围：涵盖 `RadRay::runtime` 中 `MeshDrawCommand` 的 SoA（Structure of Arrays）数据拆分、`CachedPassMeshDrawList` 与 `DynamicMeshPassDrawListContext` 的分池存储、`MeshPassProcessor::BuildMeshDrawCommands` 的批次级共享写入，以及 `SubmitMeshDrawCommands` 的句柄级状态去重。
 
 ---
 
-## 一、遇到了什么问题：移除每帧命令快照与字段重排后的实测瓶颈
+## 一、命令布局与共享绑定问题
 
-### 1. 三轮配对 Tracy 采样的完整表现
+### 1. 移除快照后的对象读取
 
-在实施完上一阶段的前三步改造（① 放开 `RunFrame` 内 `Scene` 只读借用并移除每帧 `SnapshotCommands` / `ClearSnapshots`；② `VisibleMeshDrawCommand` 直接保存 `const MeshDrawCommand*` 指针；③ 不改内联容器的前提下重排 `MeshDrawCommand` 字段顺序）后，采集 `tracy-session-20261106-175340-deep` 并与前两轮采集在相同稳态负载（`steady_2500_3000`：无几何上传、无纹理变化、无脏缓存重建，常驻约 `14,500–14,800` 条缓存命令，每帧 `2,714–2,752` 次可见 Draw）下对比：
+移除 SnapshotCommands 可以避免每帧命令的深拷贝和清理，但不会改变 MeshDrawCommand 内部绑定容器的数据布局。
+可见命令保存指针时，Submit 仍需读取源命令及其绑定数据；结构体大小和共享绑定的存储方式需要独立处理。
 
-| 指标（稳态每帧均值） | 无快照最初基线 (`20261105-1623`) | 带快照基线 (`20261106-153753`) | 本轮无快照+指针+重排 (`20261106-175340`) | 本轮 vs 带快照基线 |
-|---|---:|---:|---:|---:|
-| native `render_ms` 总耗时 | `0.796 ms` | `1.067 ms` | **`0.891 ms`** | **−16.5%** |
-| 可见命令收集 (`GatherVisible`) | `0.150 ms` | `0.364 ms`（含快照 `0.255 ms`） | **`0.113 ms`** | **−69.0%** |
-| 帧槽数据清理 (`ResetFrameData`) | `~0.002 ms` | `0.057 ms`（含清理 `0.055 ms`） | **`0.002 ms`** | **−96.8%** |
-| **`RadRay.MeshDraw.Submit`** | **`0.283 ms`** | **`0.118 ms`** | **`0.261 ms`** | **+122% (+0.143 ms)** |
-| `RDG.Compile` | — | `0.00475 ms` | `0.00475 ms` | 持平 |
-| native GPU 耗时 (`gpu_ms`) | `0.190 ms` | `0.188 ms` | `0.185 ms` | −1.6% |
+### 2. AoS 布局与绑定重复存储
 
-数据反映出两个核心事实：
-1. **移除每帧快照的收益完全符合预期**：收集与清理两项合计省下 **`0.307 ms/帧`**（`0.364 + 0.057 = 0.421 ms` 降至 `0.113 + 0.002 = 0.115 ms`），推动整帧 native CPU 耗时下降 `16.5%`（严格按 Draw、实例数、几何块数与驻留规模分层匹配后仍稳定改善 `11%–16%`）。
-2. **`MeshDraw.Submit` 从 `0.118 ms` 回升到 `0.261 ms`（增加 `0.143 ms/帧`），抵消了约 47% 的快照移除收益**：它目前占整帧 native CPU 耗时的 **29%**；且对比最初无快照基线的 `0.283 ms`，直达指针寻址 + `MeshDrawCommand` 字段顺序重排仅将 `Submit` 降低了 `0.022 ms`（`−7.8%`）。
-
----
-
-### 2. 根因剖析：为什么 `MeshDraw.Submit` 变慢了 `0.143 ms`？
-
-通过对比三轮采集的时间线、本机缓存层级（`i7-11700F`：单核 **512 KB L2**、共享 **16 MB L3**）以及 `layout-probe` 实测结构体偏移（`sizes.json`），定位到以下三层物理根因：
-
-#### （1）上轮 `SnapshotCommands` 充当了“隐式缓存预取器 + 工作集紧缩器”，移除后冷访存成本回归 `Submit`
-* 在两帧之间（约 `3.4 ms` 间隔），宿主游戏主渲染线程在同核上运行原版世界 Vulkan 录制、区块处理与 GC/JFR，会将 `Scene::CachedDrawLists[0].Commands` 从 L1/L2 中彻底冲刷掉。
-* **带快照基线（`153753`）**：`SnapshotCommands` 花费 `0.255 ms` 从 `Scene` 缓存池中跨页读取 `2,714` 条命令（**在此处承担了全部冷缓存未命中代价**），并将其拷贝紧缩到帧槽的连续数组 `CachedCommands`（`2,714 × 472 B = 1.28 MB`）。从 `SnapshotCommands` 结束到 `MeshDraw.Submit` 开始仅相隔 `~0.10 ms`（中间仅执行访问 `88 KB` 的 `SortVisible` 和 `CommandBegin`），因此上轮 `Submit` 读取的是 **100% 刚写入 L2/L3 的 `1.28 MB` 热连续内存**。
-* **本轮无快照（`175340`）**：`GatherVisibleHandles` 仅计算指针地址不解引用，`SortVisible` 仅重排 `32 B` 的 `VisibleMeshDrawCommand`；**`MeshDraw.Submit` 是整帧第一个解引用 `MeshDrawCommand*` 的阶段**，必须直接去 `Scene` 的大缓存池中执行冷读取。
-
-#### （2）`472 B` 的胖 `MeshDrawCommand` 从宏观与微观两端放大了内存拉取延迟
+#### （1）`472 B` 的胖 `MeshDrawCommand` 从宏观与微观两端放大了内存拉取延迟
 只要非平凡的内联容器还嵌在 `MeshDrawCommand` 内部，单靠调整字段声明顺序无法改变其 **`sizeof(MeshDrawCommand) == 472 B`（跨越 7.375 条 64B Cache Line）** 的体积：
 
 ```text
@@ -50,21 +29,18 @@ previous: command_bytes=472 visible_bytes=32 vertex_offset=8  parameters_offset=
 current:  command_bytes=472 visible_bytes=32 vertex_offset=56 parameters_offset=208 index_count_offset=32  push_constants_offset=368
 ```
 
-1. **宏观池膨胀与跨页稀疏访问（`6.85 MB` 工作集）**：
-   * `14,510` 条缓存命令 × `472 B` = **`6.85 MB`**（跨越约 `1,712` 个 4KB 页），是单核 L2（`512 KB`）的 **13.7 倍**，占共享 L3（`16 MB`）近一半。
-   * 每个地形 Section 缓存最多 7 个轴向面组（平均每 Batch 约 `5.4` 条命令），但每帧视锥与朝向剔除后平均只有 1～2 个面组可见（命中率仅 `~19%`）。命令单体高达 `472 B` 导致相邻可见命令之间的平均地址跨度达 **`~2.5 KB`**，硬件空间预取器（Spatial Prefetcher）难以跨页跟进，触发大量 L2/L3 Miss 与 dTLB/STLB Miss。
+1. **命令池工作集**：缓存池占用随命令数量和单条命令大小增长；每条命令内联全部变长绑定会增大对象跨度。
 2. **微观单命令跨触 5 条 Cache Line（每 Draw 拉取 `320 B`）**：
    * 在当前布局下，`SubmitMeshDrawCommands` 每处理 1 条命令仍需触碰 **5 条不同的 64B 缓存行**：
      * **CL 0 (`0..63`)**：读取 `Pipeline` (`0`)、`IndexBuffer` (`8..23`)、`IndexCount`/`FirstIndex`/`VertexOffset` (`32..43`)、`StencilReference` (`52`)、`VertexBuffers._data` (`56`)。其中 `InstanceStreamBinding` (`24..31`)、`FirstInstance` (`44..47`)、`InstanceCount` (`48..51`) 共 `16 B` 在 Release 的 `Submit` 中根本不读，却把 `VertexBuffers._size` 挤出了 CL 0。
      * **CL 1 (`64..127`)**：读取 `VertexBuffers._size` (`64`) 与 `VertexBuffers[0]` (`80..111`)。由于 `VertexBuffers` 内联了 4 个槽位（`152 B`），后 3 个空槽（`96 B`）把 `ParameterSets` 推到了偏移 `208`。
      * **CL 3 (`192..255`)**：读取 `ParameterSets._data` (`208`)、`ParameterSets._size` (`216`)、`ParameterSets[0].GroupIndex` (`232`)、`ParameterSet` (`240`)、`DynamicOffsets._data` (`248`)。
      * **CL 4 (`256..319`)**：`SameParameterBinding` 比较 `DynamicOffsets` 时读取 `ParameterSets[0].DynamicOffsets._size`（偏移 `256`）。
-     * **CL 7 (`448..471`)**：`PushConstants` 为 `std::optional<MeshPushConstantCommandBinding>`（`96 B`，偏移 `368..463`）。MSVC STL 将 `std::optional<T>::_Has_value` 放在对象末尾（偏移 **`456`**），导致 `if (command.PushConstants)` 每次 Draw 都必须加载结构体最末尾的第 7 条缓存行，只为了读取一个恒为 `false` 的布尔字节。
-   * `2,752 draws × 5 cache lines = 13,760` 次缓存行访问散落在 `6.85 MB` 中，直接构成了这 `0.143 ms`（约 `52 ns/draw`）的访存停顿。
+     * **CL 7 (`448..471`)**：`PushConstants` 为 `std::optional<MeshPushConstantCommandBinding>`（`96 B`，偏移 `368..463`）。MSVC STL 将 `std::optional<T>::_Has_value` 放在对象末尾（偏移 **`456`**），导致 `if (command.PushConstants)` 每次 Draw 都必须加载结构体最末尾的第 7 条缓存行，以读取可选字段的存在标记。
 
-#### （3）同一 `MeshBatch` 的多条 Submesh 命令在 AoS 下重复存储相同的绑定容器
-* 在 [`MeshPassProcessor::BuildMeshDrawCommands`](../../modules/runtime/src/mesh_pass_processor.cpp) 中，同一个 `MeshBatch` 的所有 `Elements`（例如一个地形 Section 的 1～7 个轴向面组 Submesh）共享**完全相同**的 `VertexBuffers`、`ParameterSets` 和 `PushConstants`，仅 `IndexBuffer`、`IndexCount`、`FirstIndex`、`VertexOffset` 等绘制标量按 Element 变化。
-* 但在当前 AoS 结构下，每个 Submesh Element 都会把 `152 B` 的 `VertexBuffers`、`152 B` 的 `ParameterSets` 和 `96 B` 的 `PushConstants`（合计 **`400 B` 的非平凡容器**）原样复制一份，不仅造成 `Scene` 缓存内存 5 倍以上的冗余膨胀，还使 `SubmitMeshDrawCommands` 在连续绘制同一 Batch 的多个可见 Submesh 时，被迫在每条命令上重复遍历和比对相同的 `VertexBuffers` 与 `ParameterSets`。
+#### （2）同一 `MeshBatch` 的多条 Submesh 命令在 AoS 下重复存储相同的绑定容器
+* 在 [`MeshPassProcessor::BuildMeshDrawCommands`](../../modules/runtime/src/mesh_pass_processor.cpp) 中，同一个 `MeshBatch` 的所有 `Elements` 共享**完全相同**的 `VertexBuffers`、`ParameterSets` 和 `PushConstants`，仅 `IndexBuffer`、`IndexCount`、`FirstIndex`、`VertexOffset` 等绘制标量按 Element 变化。
+* 但在当前 AoS 结构下，每个 Submesh Element 都会把 `152 B` 的 `VertexBuffers`、`152 B` 的 `ParameterSets` 和 `96 B` 的 `PushConstants`（合计 **`400 B` 的非平凡容器**）原样复制一份，造成绑定容器重复存储，并使 `SubmitMeshDrawCommands` 在连续绘制同一 Batch 的多个可见 Submesh 时，被迫在每条命令上重复遍历和比对相同的 `VertexBuffers` 与 `ParameterSets`。
 
 ---
 
@@ -137,7 +113,7 @@ struct CachedPassMeshDrawList {
 * **方式 B（同一 `MeshBatch` 内跨 Element 共享 SoA 句柄，极致内存与缓存压缩）**：
   * 在 `MeshPassProcessor::BuildMeshDrawCommands` 中，同一个 `MeshBatch` 的所有 Submesh `Elements` 共享同一份 `VertexBuffers`、`ParameterSets` 和 `PushConstants`。
   * 若在批次构建时为整个 Batch 仅分配 **1 份** `VertexBuffersHandle` 与 **1 份** `ParameterSetsHandle`（记录在 `MeshBatch` 缓存信息中或使用轻量引用计数，在 `InvalidateBatchCachedCommands` 时统一释放），则：
-    * `14,510` 条缓存命令只需在 `VertexBuffersPool` 和 `ParameterSetsPool` 中存储 **`~2,700` 份** 条目（池体积直接再缩减 **81%**！）；
+    * 绑定池按 Batch 保存共享条目，无需按每个 Element 重复分配；
     * 同一 Batch 的多个可见 Submesh 在排序后天然相邻，它们在 `SubmitMeshDrawCommands` 中持有**完全相同的 `VertexBuffersHandle` 和 `ParameterSetsHandle`**，可直接触发句柄级 $O(1)$ 状态去重短路！
 
 ---
@@ -159,27 +135,21 @@ struct CachedPassMeshDrawList {
 1. **单缓存行读取核心命令**：
    * 通过 `visible.CachedCommand` 解引用 `MeshDrawCommand`（仅 `64–80 B`），**1 次 Cache Line 读取**即可拿到 `Pipeline`、`IndexBuffer`、`IndexCount`、`FirstIndex`、`VertexOffset`、`StencilReference` 以及三个 SoA 池句柄（`VertexBuffersHandle`、`ParameterSetsHandle`、`PushConstantsHandle`）。
 2. **`PushConstants` 零冷尾触碰**：
-   * 直接在 Cache Line 0 内检查 `if (command.PushConstantsHandle.IsValid())`。对于不使用 PushConstants 的常规绘制（如 100% 的地形 Draw），**彻底消除原先到结构体偏移 `456`（第 7 条缓存行）读取 `std::optional::_Has_value` 的访存开销**。
+   * 直接在 Cache Line 0 内检查 `if (command.PushConstantsHandle.IsValid())`。对于不使用 PushConstants 的常规绘制，**彻底消除原先到结构体偏移 `456`（第 7 条缓存行）读取 `std::optional::_Has_value` 的访存开销**。
 3. **句柄级状态缓存短路（Handle-Level State Cache Short-Circuit）**：
    * 在 `MeshDrawCommandStateCache` 中记录当前已绑定的 `LastVertexBuffersHandle` 与 `LastParameterSetsHandle`（在 `OnPipelineChanged` 时重置）：
      * **顶点流绑定**：若 `command.VertexBuffersHandle == stateCache.LastVertexBuffersHandle`（且 `submitArgs.InstanceStream` 已在 Pass 级/PSO 切换时处理完毕），**无需去 `VertexBuffersPool` 解引用读取 `InlineVector`，也无需构建和排序 `dirtyVertexBuffers`，直接 $O(1)$ 跳过顶点缓冲绑定**！仅当句柄变化时，才从 `VertexBuffersPool.Get(command.VertexBuffersHandle)` 读取并执行槽位去重。
      * **参数集绑定**：若 `!command.ParameterSetsHandle.IsValid()` 直接跳过；若 `command.ParameterSetsHandle == stateCache.LastParameterSetsHandle`，**无需去 `ParameterSetsPool` 解引用读取 `MeshShaderParameterBinding` 和 `DynamicOffsets`，直接 $O(1)$ 跳过参数集绑定**！仅当句柄变化时，才访问 `ParameterSetsPool` 并执行 `UpdateParameterSet`。
 4. **Pass 级 `submitArgs.InstanceStream` 提至外层处理**：
-   * `submitArgs.InstanceStream` 在整个 `SubmitMeshDrawCommands` 调用期内恒定不变，在 PSO 绑定或首次绑定时直接写入对应的实例流槽位，不再在 `2,752` 次逐 Draw 循环内重复合并与 `std::sort`。
+   * `submitArgs.InstanceStream` 在整个 `SubmitMeshDrawCommands` 调用期内恒定不变，在 PSO 绑定或首次绑定时直接写入对应的实例流槽位，不再在逐 Draw 循环内重复合并与 `std::sort`。
 
 ---
 
-## 三、为什么该 SoA 方案能精准解决当前瓶颈（收益推演）
+## 三、结构变化
 
-以 `steady_2500_3000`（常驻 `14,510` 条缓存命令、约 `2,700` 个 Resident Batches、每帧 `2,752` 次可见 Draw）定量对比：
-
-| 维度 | 当前方案（胖 AoS `MeshDrawCommand`） | 计划方案（瘦 `MeshDrawCommand` + SoA 绑定池） | 改善机理 |
-|---|---|---|---|
-| `sizeof(MeshDrawCommand)` | **`472 Bytes`**（7.375 条缓存行，非平凡类型） | **`64–80 Bytes`**（1～1.25 条缓存行，100% 平凡类型） | 剥离 `VertexBuffers` (`152B`)、`ParameterSets` (`152B`)、`PushConstants` (`96B`) |
-| `Commands` 主池总内存 | `14,510 × 472 B =` **`6.85 MB`**（~1,712 页） | `14,510 × 64~80 B =` **`0.93–1.16 MB`**（~230–290 页） | 主命令池缩小 **6～7.4 倍**，完整常驻 L3 Cache，相邻命令跨度从 `2.5 KB` 降至 `~350 B`，硬件预取与 TLB 命中率大幅提升 |
-| `PushConstants` 访存开销 | 每次 Draw 必读偏移 `456`（第 7 条缓存行） | 无 PushConstants 时池占用 **`0 Bytes`**，每次 Draw **`0` 次额外缓存行读取** | 句柄有效性在主命令首条缓存行内直接判别 |
-| 同一 Batch 多 Submesh 连续绘制时的绑定开销 | 每个 Submesh 都要跨缓存行读取各自的 `VertexBuffers` (CL 1) 与 `ParameterSets` (CL 3 + CL 4) 并逐元素比对 | 若同 Batch 共享句柄，后续 Submesh 在首条缓存行比对 Handle 相等即可 **$O(1)$ 短路跳过**，连 SoA 池都不必访问 | 2,752 次 Draw 仅来自约 913 个可见 Section（平均每 Section 3 个可见 Submesh），约 **2/3 的 Draw 可直接短路跳过 SoA 池读取** |
-| 每条可见 Draw 平均触碰 Cache Line 数 | **5 条 / Draw**（共 `13,760` 条冷缓存行） | 命中句柄短路时 **1 条 / Draw**；首次访问 Batch 时 **3 条 / Draw**（平均约 **1.7 条 / Draw**） | 整帧 `Submit` 缓存行拉取总数减少 **约 65%–70%** |
+- 主命令只保存绘制标量和绑定池句柄，变长绑定数据独立存储。
+- 同 Batch 的多个 Element 复用绑定，避免重复持有相同容器。
+- Submit 可按句柄短路相同绑定，命中时无需解析绑定池载荷。
 
 ---
 
@@ -201,6 +171,6 @@ struct CachedPassMeshDrawList {
    - 更新 [`docs/architecture/runtime.md`](../architecture/runtime.md) 的事实描述。
 
 ### 2. 性能回归验证标准
-- 在 `Raynium` 中接入更新后的 `RadRay::runtime`，在相同 Release + Tracy 配置下采集 `steady_2500_3000` 稳态帧：
-  - 验证 `RadRay.MeshDraw.Submit` 是否从 `0.261 ms` 显著回落至 `0.10–0.14 ms` 区间；
-  - 验证 `Raynium.Frame.GatherVisible`（`~0.11 ms`）与 `RadRay.FrameSlot.ResetFrameData`（`~0.002 ms`）保持无快照的高速水准，推动整帧 native `render_ms` 进一步下降。
+
+- 使用 RadRay 的可重复负载，分别记录 Debug 与 Release 的命令构建、可见收集、槽清理和 Submit 耗时。
+- 固定 Batch、Element、实例和绑定规模，对比命令池占用、绑定复用与录制结果。

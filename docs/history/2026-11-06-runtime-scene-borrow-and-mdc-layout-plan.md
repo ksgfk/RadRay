@@ -14,26 +14,14 @@
 
 ## 一、问题背景与起因：为什么重新审视 `Scene` 借用边界与命令布局
 
-### 1. 两次 Tracy 采样揭示的性能倒退（每帧命令快照的代价）
+### 1. 每帧命令快照的复制与清理
 
 在 [Runtime RDG 接入与 FramePipeline 跨线程接口拆分计划](2026-11-05-runtime-rdg-pipeline-interface-plan.md) 中，为了切断 `FramePipeline::Record` 对外部 `Scene` 的只读借用，引入了 `MeshPassFrameDrawList::CachedCommands`（`vector<MeshDrawCommand>`）与 `Scene::SnapshotVisibleMeshDrawCommands`：在 `Extract` 阶段按 `VisibleCommands` 逐条解析句柄，将 `Scene` 中的 `MeshDrawCommand` 深拷贝到 `FrameSlot`；并在下一轮槽位复用（`FrameSlot::BeginFrame` -> `MeshPassFrameDrawList::Clear`）时逐条析构旧命令。
 
-在相同稳态场景（`steady_2500_3000` 窗口共 501 帧，`Scene` 常驻约 `15,000` 条缓存命令，每帧平均可见绘制 `2,714` 条）下，对比引入每帧快照前后的两组 Tracy 实测数据（`tracy-session-20261105-1623` 无快照基线 vs `tracy-session-20261106-153753-runtime` 快照基线，稳态 `FrameScheduler.RunFrame` 均值 `0.945 ms`）：
+### 2. 构图与录制的 Scene 读取边界
 
-| 阶段 / Tracy Zone | 无快照基线 (`20261105-1623`) 均值 / P50 | 带快照基线 (`20261106-153753-runtime`) 均值 / P50 | 占 `RunFrame` (`0.945 ms`) 比例 | 差值与根因说明 |
-|---|---|---|---|---|
-| `GatherVisibleHandles` | `0.104 ms` / `0.097 ms` | `0.109 ms` / `0.101 ms` | `11.5%` | 遍历 `visibleBatches` 解析句柄并生成 `VisibleMeshDrawCommand` |
-| `SnapshotCommands` | — | **`0.255 ms` / `0.239 ms`** | **`27.0%`** | 稳态 501 帧内 `vector` 扩容为 `0` 次；耗时 100% 来自 `2,714` 次 `SparseSet` 查表与 `480 B` `MeshDrawCommand` 逐成员拷贝构造 |
-| `ClearSnapshots` | — | **`0.055 ms` / `0.050 ms`** | **`5.8%`** | 槽位复用时遍历 `2,714 × 480 B = 1.30 MiB` 冷内存执行 `~InlineVector` / `~optional` 非平凡析构分支检查 |
-| `SortVisible` | `0.062 ms` / `0.059 ms` | `0.063 ms` / `0.061 ms` | `6.7%` | 对 `2,714` 条 `16 B` `VisibleMeshDrawCommand` 排序 |
-| `MeshDraw.Submit` | **`0.283 ms` / `0.264 ms`** | `0.118 ms` / `0.107 ms` | `12.4%` | 快照把散落在 `7.2 MiB` 池中的可见命令压入 `1.30 MiB` 连续数组并省去二次 `SparseSet` 查找，使 `Submit` 减少 `0.165 ms` |
-| **MeshDraw CPU 路径合计** | **`0.449 ms`** | **`0.600 ms`** | **`63.5%`** | **净倒退 `+0.151 ms/帧`**（新增 `0.310 ms` 的拷贝+销毁开销，远超 `Submit` 节省的 `0.165 ms`） |
-
-### 2. 衍生副作用：禁止 `SetupGraph` / `Record` 借用 `Scene` 迫使下游重复遍历与额外拷贝
-
-由于 `RenderGraphFramePipeline::SetupGraph(RDGBuilder&, FrameSlot&)` 被禁止读取 `const Scene&`，下游管线（例如接入层的 `SolidFramePipeline`）无法在 `SetupGraph` 或延迟的 `ExtractMeshPass` 中按需向 RDG 声明网格缓冲依赖，被迫拆成两遍扫描：
-1. 先在 `ExtractFrameData(const Scene&, FrameSlot&)` 中遍历一遍 `visibleBatches`，访问每个 `MeshBatchEntry` 的 `VertexStreams` 和 `IndexElement`，使用 `std::unordered_set<Buffer*>` 去重并拷贝到 `FrameSlot`（稳态平均耗时 `0.135 ms`，占 `RunFrame` 的 `14.3%`）；
-2. 紧接着在 `ExtractMeshPass(const Scene&, FrameSlot&)` 中对同一批 `visibleBatches` 再遍历第二遍收集 `VisibleMeshDrawCommand`。
+禁止 SetupGraph / Record 读取 Scene，会使资源依赖声明和可见命令收集依赖额外的中间存储。
+该边界应由帧内只读借用与 CPU 命令寿命约束决定，避免为阶段切换复制本可直接读取的数据。
 
 ### 3. 架构根因反思与 UE5 `FScene` 渲染线程模型对照
 
@@ -44,15 +32,15 @@
 2. **`Scene` 的变更与 `RunFrame` 在渲染线程时间轴上天然互斥**：游戏逻辑对场景图元/网格的增删改查，应通过帧间同步或渲染线程命令在 `FrameScheduler::RunFrame` 之外应用到 `Scene`。在整次 `FrameScheduler::RunFrame` 调用期间（从 `SyncCachedMeshDrawCommands` 开始，经过 `Extract`、`SetupGraph`、`RDGBuilder::Compile`，直到 `Record` / `SubmitMeshDrawCommands` 录制完毕返回），`Scene` 全程处于稳定的只读借用状态，不存在帧录制中途 `CachedDrawLists` 元素被销毁或移动的情况。
 3. **`MeshDrawCommand` 的生命周期只需覆盖到 `Record` 结束，无需延续到 `Wait(slot)`**：一旦 `SubmitMeshDrawCommands` 在 `Record` 阶段将绑定与绘制参数编码进 RHI `CommandBuffer`，后续的 `SubmitCommandBuffer`（GPU 异步执行）以及数帧后的 `Wait(slot)` 均不再读取 CPU 侧的 `MeshDrawCommand`。真正需要跨帧保活到 `Wait(slot)` 的仅是底层 GPU 资源（通过 `FrameSlot` 与 `RetireResource` 管理）。
 
-### 4. 无快照基线（`20261105-1623`）下 `Submit` 耗时 `0.283 ms` 与 `Gather` 耗时 `0.109 ms` 的物理原因
+### 4. 命令寻址与缓存行布局的开销来源
 
-若仅删除每帧命令快照而不做寻址与内存布局改造，虽然能立刻消除 `0.310 ms` 的拷贝与清理开销，但 `MeshDraw.Submit` 会退回无快照时的 `0.283 ms`。剖析源码与缓存行为可知，无快照时 `Submit` 与 `Gather` 偏慢的根因有 3 点：
+删除每帧命令快照后，命令解析和对象布局仍需独立审视：
 
-1. **`Submit` 阶段排序后触发 2,714 次 `SparseSet` 随机二次间接跳转**：
+1. **`Submit` 阶段排序后触发逐命令的 `SparseSet` 随机二次间接跳转**：
    - 当 `VisibleMeshDrawCommand` 只存 `CachedMeshDrawCommandHandle` 时，`SortVisibleMeshDrawCommands` 按材质/PSO 排序会把句柄下标彻底打乱；
    - `SubmitMeshDrawCommands` 遍历时，每次调用 `drawList.Commands.TryGet(visibleCommand.CachedCommand)` 都要先随机查 `SparseSet::_sparse[handle.Index]`，再跳转 `_denseValues[denseIndex]`，共产生两次跨大数组的非连续内存间接访问。
 2. **`MeshDrawCommand` 单体过大（`sizeof = 480 B`，跨 8 条 64B 缓存行）且热冷字段散落在首尾 6 条缓存行**：
-   - `Scene` 中 `15,000` 条缓存命令共占用 `15,000 × 480 B = 7.20 MiB`，超出常规 CPU 单核 L2 Cache；
+   - 缓存池占用随命令数与单条命令大小增长，大对象中的冷热数据混排会扩大读取工作集；
    - 在当前 `MeshDrawCommand` 字段声明顺序中，每次 `Submit` 必读的热字段分散在 **6 条不同缓存行**：
      - Cache Line 0 (`0..63`): `Pipeline` (`0..7`), `VertexBuffers._size` (`16..23`)
      - Cache Line 2 (`128..191`): `IndexBuffer` (`168..191`)
@@ -60,10 +48,10 @@
      - Cache Line 5 (`320..383`): `DynamicOffsets._size` (`328..335`)
      - Cache Line 6 (`384..447`): `PushConstants._Has_value` (`440`)
      - Cache Line 7 (`448..479`): `BaseSortKey`, `IndexCount`, `FirstIndex`, `VertexOffset`, `FirstInstance`, `InstanceCount`, `InstanceStreamBinding`, `StencilReference`
-   - 排序后在 `7.20 MiB` 地址空间中随机访问一条命令，即使不绑第 2 个顶点流、不用动态偏移、不用 PushConstants，CPU 仍被迫拉取 6 条离散缓存行（`2,714 × 6 × 64 B ≈ 1.04 MiB`）。
+   - 排序后按指针访问命令时，即使不用额外顶点流、动态偏移或 PushConstants，分散的热字段仍会跨缓存行读取。
 3. **`GatherVisibleMeshDrawCommands` 存在双倍稀疏表查找且为读 `BaseSortKey` 提前污染 `MeshDrawCommand` 缓存行**：
    - 循环内对同一 `batch` 先调 `Meshes.IsAlive(batch)` 再调 `Meshes.Get(batch)`，执行了 2 次完全相同的 `SparseSet` 查表；
-   - 为了计算 `VisibleMeshDrawCommand::SortKey`，`Gather` 阶段调用 `drawList->Commands.TryGet(cachedHandle)` 去读 `command->BaseSortKey`（位于 `480 B` 对象的第 8 条缓存行），导致 `Gather` 阶段就要跨 `7.20 MiB` 随机触碰 `MeshDrawCommand` 本体；且入口处未对 `outCommands` 调用 `reserve`。
+   - 为了计算 `VisibleMeshDrawCommand::SortKey`，`Gather` 阶段调用 `drawList->Commands.TryGet(cachedHandle)` 去读 `command->BaseSortKey`（位于 `480 B` 对象的第 8 条缓存行），导致 `Gather` 阶段就要随机触碰 `MeshDrawCommand` 本体；且入口处未对 `outCommands` 调用 `reserve`。
 
 ---
 
@@ -78,9 +66,9 @@
 2. **移除每帧 `MeshDrawCommand` 快照拷贝与析构**：
    - 从 [`MeshPassFrameDrawList`](../../modules/runtime/include/radray/runtime/frame_slot.h) 中删除 `vector<MeshDrawCommand> CachedCommands`；
    - 从 [`Scene`](../../modules/runtime/include/radray/runtime/scene.h) 中删除 `SnapshotVisibleMeshDrawCommands`；
-   - `MeshPassFrameDrawList::Clear()` 仅执行 `VisibleCommands.clear()`（由于 `VisibleMeshDrawCommand` 为平凡可析构类型，`clear()` 为 $O(1)$ 修改 `size` 且保留容量复用，徹底消除 `0.255 ms` 快照拷贝与 `0.055 ms` 快照清理）。
+   - `MeshPassFrameDrawList::Clear()` 仅执行 `VisibleCommands.clear()`（由于 `VisibleMeshDrawCommand` 为平凡可析构类型，`clear()` 为 $O(1)$ 修改 `size` 且保留容量复用，避免命令快照的构造与析构）。
 3. **允许 `FramePipeline::Record` 与 `RenderGraphFramePipeline::SetupGraph` 只读借用 `const Scene&`**：
-   - 将 `FramePipeline::Record` 签名调整为接收 `const Scene& scene`（或在 `RenderGraphFramePipeline::SetupGraph` 中传入 `const Scene& scene`），使下游管线无需仅为了跨越 `ExtractFrameData -> SetupGraph/Record` 边界而在 `ExtractFrameData` 中提前遍历拷贝场景缓冲集合；
+   - 将 `FramePipeline::Record` 签名调整为接收 `const Scene& scene`（或在 `RenderGraphFramePipeline::SetupGraph` 中传入 `const Scene& scene`），使调用方管线无需仅为了跨越 `ExtractFrameData -> SetupGraph/Record` 边界而在 `ExtractFrameData` 中提前遍历拷贝场景缓冲集合；
    - 保留 `RenderGraphFramePipeline` 中“先调用 `SetupGraph` 与 `RDGBuilder::Compile()` 裁剪死 Pass，再仅对 `IsPassAlive` 的存活 MeshPass 调用 `ExtractMeshPass`（执行可见命令收集与排序）”的按需提取机制。
 
 ### 阶段二：单遍 `Gather` 与直达命令寻址（消除 `Submit` 期 `_sparse` 二次跳转）
@@ -103,7 +91,7 @@
          uint32_t InstanceCount{1};
      };
      ```
-   - `ResolveVisibleMeshDrawCommand` 在 `Source == Cached && visibleCommand.CachedCommand != nullptr` 时直接返回该指针（若仅填了 `CommandHandle` 则回退到 `cachedDrawList->Commands.TryGet(visibleCommand.CommandHandle)`），从而将排序后 `SubmitMeshDrawCommands` 中的 `2,714` 次 `SparseSet::_sparse` 随机间接跳转降为 **0 次**。
+   - `ResolveVisibleMeshDrawCommand` 在 `Source == Cached && visibleCommand.CachedCommand != nullptr` 时直接返回该指针（若仅填了 `CommandHandle` 则回退到 `cachedDrawList->Commands.TryGet(visibleCommand.CommandHandle)`），从而将排序后 `SubmitMeshDrawCommands` 中的逐命令 `SparseSet::_sparse` 随机间接跳转降为 **0 次**。
 3. **`GatherVisibleMeshDrawCommands` 内部单遍查表与预留容量**：
    - 函数入口若 `outCommands.capacity() < outCommands.size() + visibleBatches.size()`，先执行 `outCommands.reserve(outCommands.size() + visibleBatches.size())`；
    - 将原先的 `Meshes.IsAlive(visible.Batch)` + `Meshes.Get(visible.Batch)` 合并为单次 `const auto* batchPtr = Meshes.TryGet(visible.Batch)`，省去一半的 `Meshes` 稀疏表查找。
@@ -139,15 +127,12 @@
 
 ---
 
-## 三、预期收益与验证要求
+## 三、验证要求
 
-### 1. 预期性能收益（以稳态 `2,714` draws / `15,000` cached commands 为基准）
+### 1. 独立性能比较
 
-| 优化项 | 消除或收敛的开销 | 预期节省耗时 |
-|---|---|---|
-| 阶段一：放开 `RunFrame` 内 `Scene` 只读借用并移除每帧快照 | 100% 消除 `SnapshotCommands` (`0.255 ms`) 与 `ClearSnapshots` (`0.055 ms`)；同时允许下游消除 `ExtractFrameData` 独立缓冲去重遍历 | 约 `0.310 ms/帧`（仅 Runtime 侧） |
-| 阶段二：单遍 `Gather` + `VisibleMeshDrawCommand` 直达指针 + 缓存 `BaseSortKey` | 消除 `Gather` 期双倍 `Meshes` 查找与 `MeshDrawCommand` 缓存行触碰；消除 `Submit` 期 `2,714` 次 `SparseSet::_sparse` 随机间接跳转 | `Gather` 预计由 `0.109 ms` 降至 `~0.05 ms`；`Submit` 消除二次查表开销 |
-| 阶段三（配合阶段四）：`MeshDrawCommand` 热冷缓存行重排与结构体瘦身 | 将单条可见命令在 `Submit` 时的离散缓存行读取从 6 条收敛至连续的 1～2 条，大幅降低 L2/L3 Cache Miss | `Submit` 预计从无快照基线的 `0.283 ms` 收敛至 `0.10 ~ 0.13 ms` 区间 |
+使用固定输入规模的 RadRay 负载，分别比较命令快照、可见收集、排序与 Submit 的 CPU 耗时和分配行为。
+保留绘制结果、多 Pass 参与及同键排序语义的一致性。
 
 ### 2. 测试与文档同步清单
 

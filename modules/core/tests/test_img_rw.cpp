@@ -1,5 +1,7 @@
 #include <radray/image_data.h>
 
+#include <radray/logger.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -15,7 +17,7 @@ namespace {
 class ScopedTempFile {
 public:
     explicit ScopedTempFile(std::string_view name)
-        : _path(std::filesystem::temp_directory_path() / fmt::format("radray_core_png_{}", name)) {}
+        : _path(std::filesystem::temp_directory_path() / radray::format("radray_core_png_{}", name)) {}
     ScopedTempFile(const ScopedTempFile&) = delete;
     ScopedTempFile& operator=(const ScopedTempFile&) = delete;
     ~ScopedTempFile() noexcept {
@@ -43,7 +45,7 @@ std::optional<ImageData> WriteAndLoad(const ImageData& image, std::string_view n
     const ScopedTempFile file{name};
     const string path = file.PathString();
     if (!image.WritePNG({path, false})) return std::nullopt;
-    std::ifstream stream{path, std::ios::binary};
+    std::ifstream stream{path.c_str(), std::ios::binary};
     return ImageData::LoadPNG(stream, settings);
 }
 
@@ -94,7 +96,7 @@ TEST(PngTest, AddAlphaIfRGBExpandsToRGBA) {
 TEST(PngTest, IsPNGChecksSignatureWithoutConsumingStream) {
     const ScopedTempFile file{"signature"};
     ASSERT_TRUE(MakeGradient(1, 1, ImageFormat::RGBA8_BYTE).WritePNG({file.PathString(), false}));
-    std::ifstream png{file.PathString(), std::ios::binary};
+    std::ifstream png{file.PathString().c_str(), std::ios::binary};
     std::istringstream text{"definitely not a png"};
 
     EXPECT_TRUE(ImageData::IsPNG(png));

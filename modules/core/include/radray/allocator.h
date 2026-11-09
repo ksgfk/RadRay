@@ -70,4 +70,38 @@ private:
 
 static_assert(is_allocator<FirstFitAllocator, FirstFitAllocator::Allocation>, "FirstFitAllocator is not an allocator");
 
+// Fixed-capacity integer ranges. See docs/architecture/core-facilities.md.
+class BestFitAllocator final {
+public:
+    struct Allocation {
+        uint32_t Offset{0};
+        uint32_t Count{0};
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+        friend bool operator==(Allocation, Allocation) = default;
+    };
+
+    explicit BestFitAllocator(uint32_t capacity);
+    BestFitAllocator(const BestFitAllocator&) = delete;
+    BestFitAllocator& operator=(const BestFitAllocator&) = delete;
+
+    // Zero count or insufficient contiguous space returns null.
+    std::optional<Allocation> Allocate(uint32_t count);
+    // Return an exact live allocation once, after all users have finished.
+    void Destroy(Allocation allocation) noexcept;
+    uint32_t GetCapacity() const noexcept;
+    uint32_t GetFreeCount() const noexcept;
+
+private:
+    void InsertFree(uint32_t offset, uint32_t count);
+    void EraseFree(map<uint32_t, uint32_t>::iterator range) noexcept;
+
+    set<std::pair<uint32_t, uint32_t>> _freeByCount;
+    map<uint32_t, uint32_t> _freeByOffset;
+    uint32_t _capacity;
+    uint32_t _freeCount;
+};
+
+static_assert(is_allocator<BestFitAllocator, BestFitAllocator::Allocation, uint32_t>, "BestFitAllocator is not an allocator");
+
 }  // namespace radray

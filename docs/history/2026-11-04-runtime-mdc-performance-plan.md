@@ -10,10 +10,10 @@
 - 源码基线：`c8bc3bdc035b52433c7eab72cc2d92c714cbda46`
 - 状态：设计已确认，待实施
 - 范围：严格限定在 `modules/runtime/`（含其单测 `modules/runtime/tests/test_mesh_drawing_pipeline.cpp`），**不向 `modules/render/`（RHI 层）外溢改动**。
-- 背景：实机 Tracy 采样（大场景稳态：平均 3,464 个驻留网格、3,687 条可见子网格命令、19,098 条缓存绘制命令）定位出 `RadRay::runtime` 的 4 处 CPU 性能退化：
-  1. `SubmitMeshDrawCommands` 每帧对全部可见命令重复执行重量级 `ValidateMeshDrawCommand` 预检（含高频 `Buffer::GetDesc()` 虚调用与二次 `SparseSet` 查找），耗时约 **1.133 ms / 帧**；
+- 背景：源码审阅定位出 `RadRay::runtime` 的 4 处 CPU 性能退化：
+  1. `SubmitMeshDrawCommands` 每帧对全部可见命令重复执行重量级 `ValidateMeshDrawCommand` 预检（含高频 `Buffer::GetDesc()` 虚调用与二次 `SparseSet` 查找）；
   2. `SubmitMeshDrawCommands` 录制循环仅对 `Pipeline` 去重，其余状态（`VertexBuffers`、`InstanceStream`、`IndexBuffer`、`StencilReference`、命令级 `ParameterSets`）在每条命令上无条件重绑；
-  3. `Scene` 缺乏 `MeshBatch -> OwningPrimitive` 反向句柄与 $O(1)$ `Dirty` 标记，批量更新 2,116 个 `MeshBatch` 时退化为 $O(K \times P)$ 与 $O(D^2)$ 线性扫描（约 447 万次遍历），产生 **7.52 ms** 帧尖峰；
+  3. `Scene` 缺乏 `MeshBatch -> OwningPrimitive` 反向句柄与 $O(1)$ `Dirty` 标记，批量更新 `MeshBatch` 时退化为 $O(K \times P)$ 与 $O(D^2)$ 线性扫描；
   4. `GatherVisibleMeshDrawCommands` 为获取默认实例范围无条件解引用 `Commands` 稀疏集大对象数组，且 `MeshDrawCommand::VertexBuffers` 使用堆分配 `vector` 并在 `BuildMeshDrawCommands` 中产生冗余深拷贝。
 
 ---
@@ -22,7 +22,7 @@
 
 | 编号 | 决策项 | 确认方案 | 设计理由与 UE 5.8.4 对照 |
 |---|---|---|---|
-| **D1** | `SubmitMeshDrawCommands` 预检策略 | **对齐 UE5：Release 下跳过提交期预检循环**，仅在命令构建期（`BuildMeshDrawCommands`）与 Debug 构建（`RADRAY_IS_DEBUG`）下执行提交期预检 | UE5 在 `FMeshBatch::Validate` 与 `FMeshDrawShaderBindings::Finalize`（`DO_GUARD_SLOW`）完成校验，`SubmitDraw` 零预检、零 `GetDesc()` 虚调用。Release 单遍解析并录制可彻底消除每帧数万次虚函数分发与二次 `SparseSet::TryGet` |
+| **D1** | `SubmitMeshDrawCommands` 预检策略 | **对齐 UE5：Release 下跳过提交期预检循环**，仅在命令构建期（`BuildMeshDrawCommands`）与 Debug 构建（`RADRAY_IS_DEBUG`）下执行提交期预检 | UE5 在 `FMeshBatch::Validate` 与 `FMeshDrawShaderBindings::Finalize`（`DO_GUARD_SLOW`）完成校验，`SubmitDraw` 零预检、零 `GetDesc()` 虚调用。Release 单遍解析并录制可彻底消除重复预检中的虚函数分发与二次 `SparseSet::TryGet` |
 | **D2** | `SubmitMeshDrawCommands` 状态去重范围 | **在 `runtime` 层实现全状态去重（`MeshDrawCommandStateCache`）**，覆盖 `Pipeline`、按槽位 `VertexBuffers`（含 `InstanceStream`）合并下发、`IndexBuffer`、`StencilReference`、按 `GroupIndex` 的命令级 `ParameterSets`；**不修改 `modules/render`（不外溢）** | 对齐 UE5 `FMeshDrawCommandStateCache`。在 `SubmitMeshDrawCommands` 局部作用域内完成按槽位过滤与单次 `BindVertexBuffers` 合并下发后，Pass 级 `InstanceStream` 每个 PSO 仅绑定 1 次、同 Batch 相邻子网格 Slot 0 顶点流仅绑定 1 次，无需改动 D3D12/Vulkan RHI 实现 |
 | **D3** | `Scene` 反向句柄与 $O(1)$ 脏追踪 | 在 `MeshBatch` 上新增由 `Scene` 维护的 `SparseSetHandle OwningPrimitive{}` 与 `bool Dirty{false}` | 对齐 UE5 `FStaticMeshBatch::PrimitiveSceneInfo` 反向指针与 `bPendingAddStaticMeshes` 1-bit 标志，使 `FindOwningPrimitive`、标脏查重和 `GatherVisible` 的脏检查全部降为 $O(1)$ |
 | **D4** | `CachedMeshDrawCommandInfo` 缓存默认实例范围与 `VertexBuffers` 内联 | `CachedMeshDrawCommandInfo` 新增 `FirstInstance` / `InstanceCount`；`MeshDrawCommand::VertexBuffers` 改为 `InlineVector<render::VertexBufferBinding, 4>`；`BuildMeshDrawCommands` 消除逐 Element 预检深拷贝 | 对齐 UE5 `FCachedMeshDrawCommandInfo`（`InitViews` 不触碰 `FMeshDrawCommand` 缓存行）与 `FVertexInputStreamArray` 内联存储 |

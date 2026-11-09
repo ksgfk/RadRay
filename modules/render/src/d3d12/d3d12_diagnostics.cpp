@@ -1,5 +1,7 @@
 #include "d3d12_diagnostics.h"
 
+#include <radray/logger.h>
+
 #include <algorithm>
 #include <atomic>
 #include <mutex>
@@ -84,7 +86,7 @@ static void _DispatchDiagnostic(DiagnosticState& channel, const DiagnosticMessag
         }
     }
     const auto level = _MapD3D12ValidationLogLevel(static_cast<D3D12_MESSAGE_SEVERITY>(message.Severity));
-    const auto text = fmt::format(
+    const auto text = radray::format(
         "{} {} channel:{} producer:{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} category:{} id:{} HRESULT:{:#x}\n{}",
         message.Source == DiagnosticSource::D3D12 ? "d3d12" : "dxgi",
         message.IsCollectionFailure() ? "diagnostic collection failure" : "validation message",

@@ -76,8 +76,7 @@ TEST(MeshPassFrameDrawListTest, SortPublishesDynamicPointersAfterCommandStorageG
     const MeshDrawCommand cached{};
     for (uint32_t index = 0; index < 64; ++index) {
         MeshDrawCommand initializer;
-        auto& command = list.DynamicContext.AddCommand(initializer, 63 - index);
-        list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+        list.DynamicContext.AddCommand({primitive, batch}, 0, initializer, 63 - index);
         if (index == 31) list.VisibleCommands.push_back({.SortKey = uint64_t{32} << 32, .CachedCommand = &cached});
     }
 
@@ -98,12 +97,10 @@ TEST(MeshPassFrameDrawListTest, MovedListKeepsDynamicContextBoundToItself) {
     MeshBatch batch;
     batch.Elements.emplace_back();
     MeshDrawCommand initializer;
-    auto& first = lists[0].DynamicContext.AddCommand(initializer);
-    lists[0].DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
+    lists[0].DynamicContext.AddCommand({primitive, batch}, 0, initializer);
     lists.resize(16);
     auto& list = lists[0];
-    auto& command = list.DynamicContext.AddCommand(initializer);
-    list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+    auto& command = list.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
     ASSERT_EQ(list.VisibleCommands.size(), 3u);
     EXPECT_EQ(list.VisibleCommands[0].CachedCommand.Get(), &cached);
     EXPECT_EQ(list.VisibleCommands[0].SortKey, 42u);
@@ -120,12 +117,10 @@ TEST(MeshPassFrameDrawListTest, MoveAssignmentKeepsBorrowingAndRebindsDynamicCon
     MeshBatch batch;
     batch.Elements.emplace_back();
     MeshDrawCommand initializer;
-    auto& first = source.DynamicContext.AddCommand(initializer);
-    source.DynamicContext.FinalizeCommand({primitive, batch}, 0, first);
+    source.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
     MeshPassFrameDrawList target;
     target = std::move(source);
-    auto& command = target.DynamicContext.AddCommand(initializer);
-    target.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+    auto& command = target.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
     ASSERT_EQ(target.VisibleCommands.size(), 3u);
     EXPECT_EQ(target.VisibleCommands[0].CachedCommand.Get(), &cached);
     EXPECT_EQ(target.VisibleCommands[0].SortKey, 42u);
@@ -220,13 +215,14 @@ TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndC
     batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
     MeshDrawCommand initializer;
     initializer.Pipeline = &pipeline;
+    initializer.IndexBuffer = {&indices, 0, 4};
+    initializer.IndexCount = 3;
     MeshPassFrameDrawList list;
     list.DynamicContext.Commands.reserve(1);
     for (uint32_t frame = 0; frame < 2; ++frame) {
         for (uint32_t index = 0; index < 64; ++index) {
-            batch.Elements[0].FirstIndex = index;
-            auto& command = list.DynamicContext.AddCommand(initializer);
-            list.DynamicContext.FinalizeCommand({primitive, batch}, 0, command);
+            initializer.FirstIndex = index;
+            list.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
             list.VisibleCommands.back().FirstInstance = frame + index;
             list.VisibleCommands.back().InstanceCount = 2;
         }
@@ -252,11 +248,12 @@ TEST(MeshPassFrameDrawListTest, FinalizedDynamicBindingsSurviveListMoveAndGrowth
     auto& context = lists[0].DynamicContext;
     MeshDrawCommand initializer;
     initializer.Pipeline = &pipeline;
+    initializer.IndexBuffer = {&indices, 0, 4};
+    initializer.IndexCount = 3;
     MeshDrawCommandBindings bindings;
     bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{1}, byte{2}, byte{3}, byte{4}}};
     context.GetBindingStorage().Store(initializer, bindings);
-    auto& command = context.AddCommand(initializer);
-    context.FinalizeCommand({primitive, batch}, 0, command);
+    context.AddCommand({primitive, batch}, 0, initializer);
     lists[0].SortVisibleCommands();
     const auto storage = lists[0].VisibleCommands[0].CachedCommand->BindingStorage;
     lists.resize(16);
@@ -288,5 +285,5 @@ TEST(MeshPassFrameDrawListTest, RadixSortMatchesStableOrderAcrossAllKeyBytesAndR
     }
 }
 
-}  // namespace
+}  // 匿名命名空间
 }  // namespace radray

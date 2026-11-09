@@ -2,7 +2,7 @@
 
 #include <limits>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <radray/runtime/material_tag.h>
 
 namespace radray {
@@ -43,12 +43,12 @@ TEST(MaterialTagTableTest, IdsSurviveTableGrowth) {
     MaterialTagTable table;
     vector<MaterialTagId> ids;
     for (int i = 0; i < 64; ++i) {
-        const auto id = table.Intern(fmt::format("tag-{:02}-long-enough-to-grow-the-text-pool", 63 - i));
+        const auto id = table.Intern(radray::format("tag-{:02}-long-enough-to-grow-the-text-pool", 63 - i));
         ASSERT_TRUE(id);
         ids.push_back(*id);
     }
     for (int i = 0; i < 64; ++i) {
-        const auto text = fmt::format("tag-{:02}-long-enough-to-grow-the-text-pool", 63 - i);
+        const auto text = radray::format("tag-{:02}-long-enough-to-grow-the-text-pool", 63 - i);
         EXPECT_EQ(table.GetText(ids[i]), text);
         EXPECT_EQ(table.Find(text), ids[i]);
     }
@@ -120,7 +120,7 @@ TEST_F(MaterialTagSetTest, CopyBeyondInlineCapacityOwnsIndependentTags) {
     MaterialTagSet original{Table};
     vector<MaterialTagId> keys;
     for (int i = 0; i < 6; ++i) {
-        keys.push_back(Tag(fmt::format("Key{}", i)));
+        keys.push_back(Tag(radray::format("Key{}", i)));
         ASSERT_TRUE(original.Set(keys.back(), on));
     }
     auto copy = original;
@@ -131,5 +131,5 @@ TEST_F(MaterialTagSetTest, CopyBeyondInlineCapacityOwnsIndependentTags) {
     EXPECT_TRUE(copy.Matches(keys[0], on));
 }
 
-}  // namespace
+}  // 匿名命名空间
 }  // namespace radray

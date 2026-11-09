@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <fstream>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <gtest/gtest.h>
 
 namespace radray::shader {
@@ -146,7 +146,7 @@ DiagnosticResult<ShaderArtifactView> DecodeFixture(std::string_view name, Shader
                       (string{name} + (target == ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin"));
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
-        return {std::nullopt, "missing fixture " + path.string()};
+        return {std::nullopt, string{"missing fixture " + path.string()}};
     }
     vector<byte> blob(static_cast<size_t>(file.tellg()));
     file.seekg(0);
@@ -710,7 +710,7 @@ TEST(RadRayShaderArtifact, RejectsVertexInputWithMoreThanFourComponents) {
 TEST(RadRayShaderArtifact, DecodesCompilerFixturesForBothTargets) {
     for (const std::string_view name : {"texture_sampler", "shadow_static_sampler", "spirv_push_constant", "nested_types", "compute"}) {
         for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
-            SCOPED_TRACE(fmt::format("{} target={}", name, static_cast<uint32_t>(target)));
+            SCOPED_TRACE(radray::format("{} target={}", name, static_cast<uint32_t>(target)));
 
             const auto decoded = DecodeFixture(name, target);
 

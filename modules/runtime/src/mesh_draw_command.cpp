@@ -98,7 +98,7 @@ struct MeshDrawCommandStateCache {
     }
 };
 
-}  // namespace
+}  // 匿名命名空间
 
 namespace {
 
@@ -203,7 +203,7 @@ uint32_t BindingBucket(uint32_t index, uint32_t maxBucket) noexcept {
     return (1 + (index < maxBucket ? index : static_cast<uint32_t>(MixBindingHash(index) % maxBucket))) & maxBucket;
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 void MeshDrawCommandBindingStorage::Reserve(uint32_t commands) {
     _vertices.Entries.reserve(commands);
@@ -375,7 +375,7 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
 
 namespace {
 
-// Pass-wide arguments have already been validated by the caller.
+// 调用方已经校验整个 Pass 共用的参数。
 bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const render::VertexBufferBinding> vertexBuffers,
                                  std::span<const MeshShaderParameterBinding> parameterSets,
                                  Nullable<const MeshPushConstantCommandBinding*> pushConstants, std::optional<uint32_t> instanceStreamBinding,
@@ -469,7 +469,7 @@ bool ValidateStoredMeshDrawCommand(const MeshDrawCommand& command,
                             elements ? std::span<const MeshDrawElementInstances>{elements->ElementInstances.data(), elements->ElementInstances.size()} : std::span<const MeshDrawElementInstances>{}, visibleCommand);
 }
 
-}  // namespace
+}  // 匿名命名空间
 
 bool MeshDrawCommandBindingStorage::ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements) noexcept {
     return ValidateMeshDrawCommandImpl(command, {bindings.VertexBuffers.data(), bindings.VertexBuffers.size()}, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, {}, validateElements) &&

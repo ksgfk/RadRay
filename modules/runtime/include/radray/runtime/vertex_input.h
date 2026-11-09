@@ -16,7 +16,7 @@ struct VertexInputAttribute {
 };
 
 struct VertexInputStream {
-    // Borrowed; required for every bound stream. Offset and Size are in bytes.
+    // 借用缓冲；每条已绑定的流都必须提供；Offset 与 Size 的单位为字节。
     Nullable<render::Buffer*> Buffer{nullptr};
     uint64_t Offset{0};
     uint64_t Size{0};

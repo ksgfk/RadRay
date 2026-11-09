@@ -12,6 +12,7 @@ set(radray_core_test_sources
     test_image_data.cpp
     test_intrusive_ptr.cpp
     test_json.cpp
+    test_logger.cpp
     test_memory.cpp
     test_nullable.cpp
     test_object_arena.cpp

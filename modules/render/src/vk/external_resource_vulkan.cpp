@@ -1,5 +1,7 @@
 #include "external_resource_vulkan.h"
 
+#include <radray/logger.h>
+
 #include <limits>
 
 #include <radray/render/backend/vulkan_impl.h>
@@ -10,7 +12,7 @@ namespace {
 ExternalError Fail(std::string_view op, ExternalError error, std::string_view parameters = {}) noexcept {
     return detail::LogExternalError(op, RenderBackend::Vulkan, error, parameters);
 }
-ExternalError NativeError(VkResult r, std::string_view operation) noexcept { return {fmt::format("{} failed: {}", operation, r), ExternalNativeApi::Vulkan, r}; }
+ExternalError NativeError(VkResult r, std::string_view operation) noexcept { return {radray::format("{} failed: {}", operation, r), ExternalNativeApi::Vulkan, r}; }
 VkExternalMemoryHandleTypeFlagBits MemoryHandleType(ExternalMemoryHandleType type) noexcept {
     switch (type) {
         case ExternalMemoryHandleType::D3D12Resource: return VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
@@ -69,7 +71,7 @@ VkBufferUsageFlags BufferUsage(BufferUses u) noexcept {
 ExternalSupport DirectionSupport(bool exportable, bool importable, std::string_view handleType) noexcept {
     ExternalSupport result{exportable, importable, {}};
     if (!exportable || !importable)
-        result.Reason.Message = fmt::format("Vulkan does not support {} {} for the requested resource", handleType, !exportable && !importable ? "export or import" : !exportable ? "export"
+        result.Reason.Message = radray::format("Vulkan does not support {} {} for the requested resource", handleType, !exportable && !importable ? "export or import" : !exportable ? "export"
                                                                                                                                                                                   : "import");
     return result;
 }
@@ -193,13 +195,13 @@ ExternalResult<Output> ExportObject(Input* input, std::string_view operation) no
     auto* object = static_cast<Native*>(input);
     string parameters;
     if constexpr (std::is_same_v<Input, Buffer>)
-        parameters = fmt::format("size={} usage={}", object->GetDesc().Size, object->GetDesc().Usage);
+        parameters = radray::format("size={} usage={}", object->GetDesc().Size, object->GetDesc().Usage);
     else if constexpr (std::is_same_v<Input, Texture>) {
         const auto d = object->GetDesc();
-        parameters = fmt::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
+        parameters = radray::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
     } else
-        parameters = fmt::format("lastLocalSignal={}", object->GetLastSignaledValue());
-    parameters += fmt::format(" handleType={}", radray::render::detail::ExternalHandleName(object->_externalInfo->HandleType));
+        parameters = radray::format("lastLocalSignal={}", object->GetLastSignaledValue());
+    parameters += radray::format(" handleType={}", radray::render::detail::ExternalHandleName(object->_externalInfo->HandleType));
     auto handle = object->_externalHandle.Duplicate();
     if (auto* error = std::get_if<ExternalError>(&handle)) return Fail(operation, *error, parameters);
     return Output{*object->_externalInfo, std::get<OwnedExternalHandle>(std::move(handle))};
@@ -211,7 +213,7 @@ ExternalResult<ExternalDeviceIdentity> ExternalResourceVulkan::GetDeviceIdentity
     ExternalDeviceIdentity result;
     const auto& id = _device->_extProperties.Vulkan11;
     if (!id.deviceLUIDValid) return ExternalError{"Vulkan device does not provide a valid LUID"};
-    if (id.deviceNodeMask != 1) return ExternalError{fmt::format("External resources require Vulkan node mask 1; device reports {:#x}", id.deviceNodeMask)};
+    if (id.deviceNodeMask != 1) return ExternalError{radray::format("External resources require Vulkan node mask 1; device reports {:#x}", id.deviceNodeMask)};
     std::copy_n(id.deviceLUID, result.Luid.size(), result.Luid.begin());
     result.NodeMask = id.deviceNodeMask;
     return result;
@@ -243,7 +245,7 @@ ExternalSupport ExternalResourceVulkan::QueryTextureSupport(const TextureDescrip
     output.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
     output.pNext = &externalProperties;
     const auto r = vkGetPhysicalDeviceImageFormatProperties2(_device->_physicalDevice, &input, &output);
-    if (r != VK_SUCCESS) return {false, false, NativeError(r, fmt::format("vkGetPhysicalDeviceImageFormatProperties2 for {}", detail::ExternalHandleName(external.HandleType)))};
+    if (r != VK_SUCCESS) return {false, false, NativeError(r, radray::format("vkGetPhysicalDeviceImageFormatProperties2 for {}", detail::ExternalHandleName(external.HandleType)))};
     const auto& p = output.imageFormatProperties;
     if (native.extent.width > p.maxExtent.width || native.extent.height > p.maxExtent.height || native.extent.depth > p.maxExtent.depth ||
         native.mipLevels > p.maxMipLevels || native.arrayLayers > p.maxArrayLayers || !(p.sampleCounts & native.samples)) return {false, false, {"Texture dimensions, mip count, layer count or sample count exceed the Vulkan external image limits"}};
@@ -258,10 +260,10 @@ ExternalSupport ExternalResourceVulkan::QueryFenceSupport(ExternalFenceHandleTyp
     VkExternalSemaphoreProperties output{};
     output.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
     vkGetPhysicalDeviceExternalSemaphoreProperties(_device->_physicalDevice, &input, &output);
-    return DirectionSupport((output.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) != 0, (output.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0, fmt::format("timeline {}", detail::ExternalHandleName(type)));
+    return DirectionSupport((output.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) != 0, (output.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT) != 0, radray::format("timeline {}", detail::ExternalHandleName(type)));
 }
 ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::CreateExportableBuffer(const BufferDescriptor& desc, const ExternalResourceDescriptor& external) noexcept {
-    const auto params = fmt::format("handleType={} size={} usage={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Size, desc.Usage);
+    const auto params = radray::format("handleType={} size={} usage={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Size, desc.Usage);
     const auto support = QueryBufferSupport(desc, external);
     if (!support.CanCreateExportable) return Fail("CreateExportableBuffer", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -285,7 +287,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::CreateExportableBuffe
     return unique_ptr<Buffer>{std::move(result)};
 }
 ExternalResult<unique_ptr<Texture>> ExternalResourceVulkan::CreateExportableTexture(const TextureDescriptor& desc, const ExternalTextureDescriptor& external) noexcept {
-    const auto params = fmt::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, external.AllowFormatReinterpretation);
+    const auto params = radray::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, external.AllowFormatReinterpretation);
     const auto support = QueryTextureSupport(desc, external);
     if (!support.CanCreateExportable) return Fail("CreateExportableTexture", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -304,7 +306,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceVulkan::CreateExportableText
     return unique_ptr<Texture>{std::move(result)};
 }
 ExternalResult<unique_ptr<Fence>> ExternalResourceVulkan::CreateExportableFence(const ExternalFenceDescriptor& desc) noexcept {
-    const auto params = fmt::format("handleType={} initialValue={}", radray::render::detail::ExternalHandleName(desc.HandleType), desc.InitialValue);
+    const auto params = radray::format("handleType={} initialValue={}", radray::render::detail::ExternalHandleName(desc.HandleType), desc.InitialValue);
     const auto support = QueryFenceSupport(desc.HandleType);
     if (!support.CanCreateExportable) return Fail("CreateExportableFence", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -331,7 +333,7 @@ ExternalResult<ExternalBufferExport> ExternalResourceVulkan::ExportBuffer(Buffer
 ExternalResult<ExternalTextureExport> ExternalResourceVulkan::ExportTexture(Texture* t) noexcept { return ExportObject<ImageVulkan, ExternalTextureExport>(t, "ExportTexture"); }
 ExternalResult<ExternalFenceExport> ExternalResourceVulkan::ExportFence(Fence* f) noexcept { return ExportObject<FenceVulkan, ExternalFenceExport>(f, "ExportFence"); }
 ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::ImportBuffer(BorrowedExternalHandle handle, const ExternalBufferInfo& info) noexcept {
-    const auto params = fmt::format("handleType={} size={} nativeSize={} usage={}", radray::render::detail::ExternalHandleName(info.HandleType), info.Descriptor.Size, info.NativeSize, info.Descriptor.Usage);
+    const auto params = radray::format("handleType={} size={} nativeSize={} usage={}", radray::render::detail::ExternalHandleName(info.HandleType), info.Descriptor.Size, info.NativeSize, info.Descriptor.Usage);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportBuffer", *error, params);
     if (info.Device != std::get<ExternalDeviceIdentity>(identity)) return Fail("ImportBuffer", {"Exported device LUID or node mask does not match the importing device"}, params);
@@ -354,7 +356,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::ImportBuffer(Borrowed
 }
 ExternalResult<unique_ptr<Texture>> ExternalResourceVulkan::ImportTexture(BorrowedExternalHandle handle, const ExternalTextureInfo& info) noexcept {
     const auto& desc = info.Descriptor;
-    const auto params = fmt::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(info.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, info.AllowFormatReinterpretation);
+    const auto params = radray::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(info.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, info.AllowFormatReinterpretation);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportTexture", *error, params);
     if (info.Device != std::get<ExternalDeviceIdentity>(identity)) return Fail("ImportTexture", {"Exported device LUID or node mask does not match the importing device"}, params);
@@ -376,7 +378,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceVulkan::ImportTexture(Borrow
     return unique_ptr<Texture>{std::move(result)};
 }
 ExternalResult<unique_ptr<Fence>> ExternalResourceVulkan::ImportFence(BorrowedExternalHandle handle, const ExternalFenceInfo& info) noexcept {
-    const auto params = fmt::format("handleType={} nodeMask={} handle={:#x}", radray::render::detail::ExternalHandleName(info.HandleType), info.Device.NodeMask, handle.Value);
+    const auto params = radray::format("handleType={} nodeMask={} handle={:#x}", radray::render::detail::ExternalHandleName(info.HandleType), info.Device.NodeMask, handle.Value);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportFence", *error, params);
     if (info.Device != std::get<ExternalDeviceIdentity>(identity)) return Fail("ImportFence", {"Exported device LUID or node mask does not match the importing device"}, params);

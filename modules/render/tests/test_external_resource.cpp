@@ -1,5 +1,6 @@
 #include "gpu_test_fixture.h"
 
+#include <radray/logger.h>
 #include <radray/render/external_resource.h>
 
 namespace radray::render {
@@ -16,9 +17,9 @@ constexpr Route AllRoutes[]{{RenderBackend::D3D12, RenderBackend::D3D12},
                             {RenderBackend::Vulkan, RenderBackend::D3D12},
                             {RenderBackend::Vulkan, RenderBackend::Vulkan, ExternalMemoryHandleType::OpaqueWin32}};
 
-string RouteName(const testing::TestParamInfo<Route>& info) {
+auto RouteName(const testing::TestParamInfo<Route>& info) {
     const auto name = [](RenderBackend backend) { return backend == RenderBackend::D3D12 ? "D3D12" : "Vulkan"; };
-    return fmt::format("{}To{}", name(info.param.Source), name(info.param.Destination));
+    return std::string{radray::format("{}To{}", name(info.param.Source), name(info.param.Destination))};
 }
 
 constexpr uint32_t BufferSize = 256;

@@ -53,6 +53,10 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 
 ## 接口风格
 
+runtime 的公开头文件（`modules/runtime/include/radray/runtime/`）中，只有纯数据记录使用 `struct`；
+含构造或析构函数、成员函数（含静态成员函数）、运算符、虚接口或继承的类型使用 `class`。
+前置声明与 `friend` 声明须保持一致；使用 `class` 不要求把原有公开数据成员改为私有。
+
 整数上下界统一使用 `<limits>` 中的 `std::numeric_limits<T>::min()` / `max()`，使用处直接包含 `<limits>`；
 不使用 `<cstdint>` / `<stdint.h>` 的整数边界宏。
 
@@ -179,6 +183,8 @@ gtest_discover_tests(test_radray_core)
 没有 `.clang-tidy`，没有 `.editorconfig`。
 
 ## 注释
+
+`modules/runtime/` 内的注释使用中文；类型名、API 名称、路径、末尾namespace保留原文。
 
 `AGENTS.md` 已定基调：**代码注释只承载 API 契约，设计理由归 `docs/`**。落到实践：
 

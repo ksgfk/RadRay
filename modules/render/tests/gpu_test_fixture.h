@@ -16,7 +16,7 @@ namespace radray::render::test {
 
 inline constexpr RenderBackend AllBackends[]{RenderBackend::D3D12, RenderBackend::Vulkan};
 
-string BackendParamName(const testing::TestParamInfo<RenderBackend>& info);
+const char* BackendParamName(const testing::TestParamInfo<RenderBackend>& info);
 
 // Owns every device a test opens. Devices use native validation and RHI validation;
 // a test fails when native validation reports an error or RHI validation reports a

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <iterator>
 
 #include <radray/logger.h>
 
@@ -207,6 +208,58 @@ void FirstFitAllocator::Destroy(Allocation allocation) noexcept {
     }
 
     _freeRanges.insert(it, FreeRange{mergedStart, mergedLength});
+}
+
+BestFitAllocator::BestFitAllocator(uint32_t capacity) : _capacity(capacity), _freeCount(capacity) {
+    if (capacity) InsertFree(0, capacity);
+}
+
+std::optional<BestFitAllocator::Allocation> BestFitAllocator::Allocate(uint32_t count) {
+    if (!count) return std::nullopt;
+    const auto found = _freeByCount.lower_bound({count, 0});
+    if (found == _freeByCount.end()) return std::nullopt;
+    const auto [available, offset] = *found;
+    EraseFree(_freeByOffset.find(offset));
+    if (available > count) InsertFree(offset + count, available - count);
+    _freeCount -= count;
+    return Allocation{offset, count};
+}
+
+void BestFitAllocator::Destroy(Allocation allocation) noexcept {
+    auto [offset, count] = allocation;
+    RADRAY_ASSERT(count && offset <= _capacity && count <= _capacity - offset);
+    RADRAY_ASSERT(count <= _capacity - _freeCount);
+    _freeCount += count;
+    auto next = _freeByOffset.lower_bound(offset);
+    RADRAY_ASSERT(next == _freeByOffset.end() || offset + count <= next->first);
+    if (next != _freeByOffset.end() && offset + count == next->first) {
+        count += next->second;
+        const auto adjacent = next++;
+        EraseFree(adjacent);
+    }
+    if (next != _freeByOffset.begin()) {
+        const auto previous = std::prev(next);
+        RADRAY_ASSERT(previous->first + previous->second <= offset);
+        if (previous->first + previous->second == offset) {
+            offset = previous->first;
+            count += previous->second;
+            EraseFree(previous);
+        }
+    }
+    InsertFree(offset, count);
+}
+
+uint32_t BestFitAllocator::GetCapacity() const noexcept { return _capacity; }
+uint32_t BestFitAllocator::GetFreeCount() const noexcept { return _freeCount; }
+
+void BestFitAllocator::InsertFree(uint32_t offset, uint32_t count) {
+    _freeByOffset.emplace(offset, count);
+    _freeByCount.emplace(count, offset);
+}
+
+void BestFitAllocator::EraseFree(map<uint32_t, uint32_t>::iterator range) noexcept {
+    _freeByCount.erase({range->second, range->first});
+    _freeByOffset.erase(range);
 }
 
 }  // namespace radray

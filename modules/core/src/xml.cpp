@@ -1,6 +1,6 @@
 #include <radray/xml.h>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 
 #include <pugixml.hpp>
 
@@ -353,7 +353,7 @@ bool XmlDocument::LoadXml(std::string_view xml, EnumFlags<XmlParseFlag> flags, s
     const pugi::xml_parse_result result = _document->load_buffer(data, xml.size(), ToPugiParse(flags), pugi::encoding_auto);
     if (!result) {
         if (outError != nullptr) {
-            *outError = fmt::format("XML parse failed at offset {}: {}", result.offset, result.description());
+            *outError = radray::format("XML parse failed at offset {}: {}", result.offset, result.description());
         }
         return false;
     }
@@ -366,7 +366,7 @@ bool XmlDocument::Load(const std::filesystem::path& path, EnumFlags<XmlParseFlag
     const pugi::xml_parse_result result = _document->load_file(path.c_str(), ToPugiParse(flags), pugi::encoding_auto);
     if (!result) {
         if (outError != nullptr) {
-            *outError = fmt::format("{}: XML parse failed at offset {}: {}", path.string(), result.offset, result.description());
+            *outError = radray::format("{}: XML parse failed at offset {}: {}", path.string(), result.offset, result.description());
         }
         return false;
     }
