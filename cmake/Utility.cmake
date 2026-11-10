@@ -99,8 +99,12 @@ function(radray_default_compile_flags target)
     endif()
     if (MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
-        target_compile_options(${target} PRIVATE /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus /W4 /wd4324 /EHsc)
-        target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GR>)
+        target_compile_options(${target} PRIVATE /utf-8 /Zc:preprocessor /W4 /wd4324)
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:/permissive->
+            $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>
+            $<$<COMPILE_LANGUAGE:CXX>:/EHsc>
+            $<$<COMPILE_LANGUAGE:CXX>:/GR>)
     else()
         target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-frtti>)
     endif()

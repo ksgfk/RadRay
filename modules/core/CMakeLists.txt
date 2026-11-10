@@ -2,6 +2,12 @@ file(GLOB_RECURSE RADRAY_CORE_SRC CONFIGURE_DEPENDS "src/*.cpp")
 file(GLOB_RECURSE RADRAY_CORE_INC CONFIGURE_DEPENDS "include/*.h")
 
 add_library(radraycore STATIC ${RADRAY_CORE_SRC} ${RADRAY_CORE_INC})
+if (RADRAY_ENABLE_LIBPNG)
+    target_sources(radraycore PRIVATE src/png_codec.c)
+endif()
+if (RADRAY_ENABLE_LIBJPEG)
+    target_sources(radraycore PRIVATE src/jpeg_codec.c)
+endif()
 add_library(RadRay::core ALIAS radraycore)
 set_target_properties(radraycore PROPERTIES EXPORT_NAME core)
 target_include_directories(radraycore PUBLIC

@@ -4,23 +4,21 @@
 #include <array>
 #include <cstring>
 #include <limits>
-#include <bit>
-#include <stdexcept>
-#include <fstream>
+#include <cstdio>
+#include <utility>
 
 #ifdef RADRAY_ENABLE_PNG
-#include <exception>
-#include <png.h>
+#include "png_codec.h"
 #endif
 
 #ifdef RADRAY_ENABLE_JPEG
-#include <jpeglib.h>
+#include "jpeg_codec.h"
 #endif
 
 #include <radray/enum_flags.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
-#include <radray/memory.h>
+#include <radray/nullable.h>
 #include <radray/scope_guard.h>
 
 namespace radray {
@@ -150,64 +148,60 @@ size_t ImageData::FormatSize(ImageFormat format) noexcept {
     Unreachable();
 }
 
+#if defined(RADRAY_ENABLE_PNG) || defined(RADRAY_ENABLE_JPEG)
+
+namespace {
+
+bool ReadImageStream(std::istream& stream, vector<byte>& encoded) {
+    const Nullable<std::streambuf*> source{stream.rdbuf()};
+    if (!stream.good() || !source) {
+        return false;
+    }
+    array<char, 4096> chunk{};
+    for (;;) {
+        const std::streamsize count = source->sgetn(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        if (count == 0) {
+            return !encoded.empty();
+        }
+        if (count < 0 || static_cast<size_t>(count) > encoded.max_size() - encoded.size()) {
+            return false;
+        }
+        const auto* first = reinterpret_cast<const byte*>(chunk.data());
+        encoded.insert(encoded.end(), first, first + static_cast<size_t>(count));
+    }
+}
+
+}  // namespace
+
+#endif
+
 #ifdef RADRAY_ENABLE_PNG
 
-class LibpngException : public std::runtime_error {
-public:
-    LibpngException() : std::runtime_error("LibpngException") {}
-    explicit LibpngException(const char* msg) : std::runtime_error(msg) {}
-    ~LibpngException() noexcept override = default;
-};
-static void radray_libpng_user_error_fn(png_structp png_ptr, png_const_charp msg) {
-    RADRAY_UNUSED(png_ptr);
-    RADRAY_ERR_LOG("libpng error msg: {}", msg);
-    throw LibpngException(msg);
-}
-static void radray_libpng_user_warn_fn(png_structp png_ptr, png_const_charp msg) {
-    RADRAY_UNUSED(png_ptr);
-    RADRAY_WARN_LOG("libpng warning msg: {}", msg);
-}
-static void* radray_libpng_malloc_fn(png_structp png_ptr, png_size_t size) {
-    RADRAY_UNUSED(png_ptr);
-    return radray::Malloc(size);
-}
-static void radray_libpng_free_fn(png_structp png_ptr, void* ptr) {
-    RADRAY_UNUSED(png_ptr);
-    radray::Free(ptr);
-}
-static void radray_libpng_read_fn(png_structp png_ptr, png_bytep data, png_size_t length) {
-    auto* stream = static_cast<std::istream*>(png_get_io_ptr(png_ptr));
-    stream->read(reinterpret_cast<char*>(data), length);
-    if ((png_size_t)stream->gcount() != length) {
-        png_error(png_ptr, "gcount not equal length");
+namespace {
+
+bool PngImageFormat(const RadRayPngState& state, ImageFormat& format) noexcept {
+    if (state.BitDepth != 8 && state.BitDepth != 16) {
+        return false;
+    }
+    switch (state.Channels) {
+        case 1: format = state.BitDepth == 8 ? ImageFormat::R8_BYTE : ImageFormat::R16_USHORT; return true;
+        case 2: format = state.BitDepth == 8 ? ImageFormat::RG8_BYTE : ImageFormat::RG16_USHORT; return true;
+        case 3: format = state.BitDepth == 8 ? ImageFormat::RGB8_BYTE : ImageFormat::RGB16_USHORT; return true;
+        case 4: format = state.BitDepth == 8 ? ImageFormat::RGBA8_BYTE : ImageFormat::RGBA16_USHORT; return true;
+        default: return false;
     }
 }
 
-static void radray_libpng_write_fn(png_structp png_ptr, png_bytep data, png_size_t length) {
-    auto* stream = static_cast<std::ostream*>(png_get_io_ptr(png_ptr));
-    stream->write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(length));
-    if (!stream->good()) {
-        png_error(png_ptr, "ostream write failed");
+void LogPngWarning(const RadRayPngState& state) {
+    if (state.Warning[0] != '\0') {
+        RADRAY_WARN_LOG("libpng warning: {}", state.Warning);
     }
 }
 
-static void radray_libpng_flush_fn(png_structp png_ptr) {
-    auto* stream = static_cast<std::ostream*>(png_get_io_ptr(png_ptr));
-    stream->flush();
-    if (!stream->good()) {
-        png_error(png_ptr, "ostream flush failed");
-    }
-}
+}  // namespace
 
-static size_t _SafeMulSize(size_t a, size_t b) {
-    if (b != 0 && a > std::numeric_limits<size_t>::max() / b) {
-        throw LibpngException("image buffer too large");
-    }
-    return a * b;
-}
-
-static constexpr size_t PNG_SIG_SIZE = 8;
 bool ImageData::IsPNG(std::istream& stream) {
+    constexpr size_t PNG_SIG_SIZE = 8;
     if (!stream.good()) {
         return false;
     }
@@ -215,11 +209,12 @@ bool ImageData::IsPNG(std::istream& stream) {
     const std::istream::pos_type original_pos = stream.tellg();
     const bool can_seek = original_pos != std::istream::pos_type(-1);
     stream.clear();
-    std::array<png_byte, PNG_SIG_SIZE> pngsig{};
+    array<unsigned char, PNG_SIG_SIZE> pngsig{};
+    constexpr array<unsigned char, PNG_SIG_SIZE> expected{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
     stream.read(reinterpret_cast<char*>(pngsig.data()), static_cast<std::streamsize>(pngsig.size()));
     const std::streamsize read_bytes = stream.gcount();
     const bool is_png = (read_bytes == static_cast<std::streamsize>(pngsig.size())) &&
-                        (png_sig_cmp(pngsig.data(), 0, PNG_SIG_SIZE) == 0);
+                        (std::memcmp(pngsig.data(), expected.data(), PNG_SIG_SIZE) == 0);
     stream.clear();
     if (can_seek) {
         stream.seekg(original_pos);
@@ -230,247 +225,86 @@ bool ImageData::IsPNG(std::istream& stream) {
     return is_png;
 }
 std::optional<ImageData> ImageData::LoadPNG(std::istream& stream, PNGLoadSettings settings) {
-    if (!stream.good()) {
-        RADRAY_ERR_LOG("stream is not good");
+    vector<byte> encoded;
+    if (!ReadImageStream(stream, encoded)) {
+        RADRAY_ERR_LOG("failed to read PNG input");
         return std::nullopt;
     }
-    png_structp png_ptr = nullptr;
-    png_infop info_ptr = nullptr;
-    auto guard_png_ptr = MakeScopeGuard([&]() {
-        if (png_ptr) {
-            png_destroy_read_struct(&png_ptr, info_ptr ? &info_ptr : nullptr, nullptr);
-            png_ptr = nullptr;
-            info_ptr = nullptr;
-        }
-    });
-    try {
-        png_ptr = png_create_read_struct_2(
-            PNG_LIBPNG_VER_STRING,
-            nullptr, radray_libpng_user_error_fn, radray_libpng_user_warn_fn,
-            nullptr, radray_libpng_malloc_fn, radray_libpng_free_fn);
-        if (!png_ptr) {
-            throw LibpngException("png_create_read_struct_2 failed");
-        }
-        info_ptr = png_create_info_struct(png_ptr);
-        if (!info_ptr) {
-            throw LibpngException("png_create_info_struct failed");
-        }
-        png_set_read_fn(png_ptr, &stream, radray_libpng_read_fn);
-#if PNG_LIBPNG_VER >= 10600
-#ifdef PNG_MAXIMUM_INFLATE_WINDOW
-        png_set_option(png_ptr, PNG_MAXIMUM_INFLATE_WINDOW, PNG_OPTION_ON);
-#endif
-        png_set_check_for_invalid_index(png_ptr, 1);
-#endif
-        png_set_crc_action(png_ptr, PNG_CRC_DEFAULT, PNG_CRC_WARN_USE);
-        png_read_info(png_ptr, info_ptr);
-        png_uint_32 width = png_get_image_width(png_ptr, info_ptr);
-        png_uint_32 height = png_get_image_height(png_ptr, info_ptr);
-        if (width == 0 || height == 0) {
-            throw LibpngException("png image has zero dimension");
-        }
-        if (width > std::numeric_limits<uint32_t>::max() || height > std::numeric_limits<uint32_t>::max()) {
-            throw LibpngException("png image exceeds supported dimensions");
-        }
-        png_byte bit_depth = png_get_bit_depth(png_ptr, info_ptr);
-        png_byte color_type = png_get_color_type(png_ptr, info_ptr);
-        if (color_type == PNG_COLOR_TYPE_PALETTE) {
-            png_set_palette_to_rgb(png_ptr);
-        }
-        if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) {
-            png_set_tRNS_to_alpha(png_ptr);
-        }
-        if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) {
-            png_set_expand_gray_1_2_4_to_8(png_ptr);
-            bit_depth = 8;
-        }
-        if (bit_depth == 16 && std::endian::native == std::endian::little) {
-            png_set_swap(png_ptr);
-        }
-        if (settings.AddAlphaIfRGB.has_value() &&
-            (color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_PALETTE)) {
-            const uint32_t alpha_limit = (bit_depth == 16) ? 0xFFFFu : 0xFFu;
-            const png_uint_32 alpha_value = static_cast<png_uint_32>(
-                std::min(*settings.AddAlphaIfRGB, alpha_limit));
-            png_set_add_alpha(png_ptr, alpha_value, PNG_FILLER_AFTER);
-        }
-        const int passes = png_set_interlace_handling(png_ptr);
-        RADRAY_UNUSED(passes);
-        png_read_update_info(png_ptr, info_ptr);
-        width = png_get_image_width(png_ptr, info_ptr);
-        height = png_get_image_height(png_ptr, info_ptr);
-        bit_depth = png_get_bit_depth(png_ptr, info_ptr);
-        color_type = png_get_color_type(png_ptr, info_ptr);
-        const size_t height_sz = static_cast<size_t>(height);
-        const size_t rowbytes = static_cast<size_t>(png_get_rowbytes(png_ptr, info_ptr));
-        if (rowbytes == 0 || height_sz == 0) {
-            throw LibpngException("png rowbytes invalid");
-        }
-        const size_t image_byte_size = _SafeMulSize(rowbytes, height_sz);
-        auto image_data = make_unique<radray::byte[]>(image_byte_size);
-        static_assert(sizeof(radray::byte) == sizeof(png_byte), "what");
-        static_assert(std::is_trivial_v<radray::byte> && std::is_trivial_v<png_byte>, "what");
-        static_assert(std::is_standard_layout_v<radray::byte> && std::is_standard_layout_v<png_byte>, "what");
-        vector<png_bytep> row_pointers(height_sz);
-        png_bytep base_ptr = reinterpret_cast<png_bytep>(image_data.get());
-        if (settings.IsFlipY) {
-            png_bytep row = base_ptr + (height_sz - 1) * rowbytes;
-            for (size_t i = 0; i < height_sz; ++i, row -= rowbytes) {
-                row_pointers[i] = row;
-            }
-        } else {
-            png_bytep row = base_ptr;
-            for (size_t i = 0; i < height_sz; ++i, row += rowbytes) {
-                row_pointers[i] = row;
-            }
-        }
-        png_read_image(png_ptr, row_pointers.data());
-        png_read_end(png_ptr, nullptr);
-        ImageData imgData;
-        imgData.Data = std::move(image_data);
-        imgData.Width = static_cast<uint32_t>(width);
-        imgData.Height = static_cast<uint32_t>(height);
-        switch (color_type) {
-            case PNG_COLOR_TYPE_GRAY: {
-                switch (bit_depth) {
-                    case 8: imgData.Format = ImageFormat::R8_BYTE; break;
-                    case 16: imgData.Format = ImageFormat::R16_USHORT; break;
-                    default: throw LibpngException("unsupported PNG bit depth");
-                }
-                break;
-            }
-            case PNG_COLOR_TYPE_GRAY_ALPHA: {
-                switch (bit_depth) {
-                    case 8: imgData.Format = ImageFormat::RG8_BYTE; break;
-                    case 16: imgData.Format = ImageFormat::RG16_USHORT; break;
-                    default: throw LibpngException("unsupported PNG bit depth");
-                }
-                break;
-            }
-            case PNG_COLOR_TYPE_RGB: {
-                switch (bit_depth) {
-                    case 8: imgData.Format = ImageFormat::RGB8_BYTE; break;
-                    case 16: imgData.Format = ImageFormat::RGB16_USHORT; break;
-                    default: throw LibpngException("unsupported PNG bit depth");
-                }
-                break;
-            }
-            case PNG_COLOR_TYPE_RGB_ALPHA: {
-                switch (bit_depth) {
-                    case 8: imgData.Format = ImageFormat::RGBA8_BYTE; break;
-                    case 16: imgData.Format = ImageFormat::RGBA16_USHORT; break;
-                    default: throw LibpngException("unsupported PNG bit depth");
-                }
-                break;
-            }
-            default: throw LibpngException("unsupported PNG color type");
-        }
-        RADRAY_ASSERT(image_byte_size == imgData.GetSize());
-        return std::make_optional(std::move(imgData));
-    } catch (LibpngException& e) {
-        RADRAY_ERR_LOG("LibpngException: {}", e.what());
-        return std::nullopt;
-    } catch (...) {
-        RADRAY_ERR_LOG("LibpngException: {}", "unknown error");
+
+    ImageData image;
+    RadRayPngState state{};
+    state.Input = reinterpret_cast<const unsigned char*>(encoded.data());
+    state.InputRemaining = encoded.size();
+    auto cleanup = MakeScopeGuard([&]() { radray_png_destroy(&state); });
+    const int64_t alpha = settings.AddAlphaIfRGB.has_value() ? static_cast<int64_t>(*settings.AddAlphaIfRGB) : -1;
+    if (!radray_png_read_header(&state, alpha)) {
+        RADRAY_ERR_LOG("libpng read header failed: {}", state.Error);
         return std::nullopt;
     }
+    if (!PngImageFormat(state, image.Format)) {
+        RADRAY_ERR_LOG("unsupported PNG pixel format");
+        return std::nullopt;
+    }
+    image.Width = state.Width;
+    image.Height = state.Height;
+    image.Data = make_unique<byte[]>(state.ByteSize);
+    if (!radray_png_read_pixels(&state, image.Data.get(), settings.IsFlipY)) {
+        RADRAY_ERR_LOG("libpng read pixels failed: {}", state.Error);
+        return std::nullopt;
+    }
+    LogPngWarning(state);
+    return std::make_optional(std::move(image));
 }
 
 bool ImageData::WritePNG(PNGWriteSettings settings) const {
-    if (settings.FilePath.empty()) {
-        RADRAY_ERR_LOG("WritePNG file path is empty");
+    if (settings.FilePath.empty() || Data == nullptr || Width == 0 || Height == 0) {
+        RADRAY_ERR_LOG("WritePNG requires a destination and nonempty image data");
         return false;
     }
-    if (Data == nullptr || Width == 0 || Height == 0) {
-        RADRAY_ERR_LOG("WritePNG image data is invalid");
+    if (Format != ImageFormat::RGB8_BYTE && Format != ImageFormat::RGBA8_BYTE) {
+        RADRAY_ERR_LOG("WritePNG unsupported image format {}, only RGB8/RGBA8 are supported", Format);
         return false;
     }
-    const size_t bytesPerPixel = ImageData::FormatSize(Format);
-    if (bytesPerPixel == 0) {
-        RADRAY_ERR_LOG("WritePNG invalid image format {}", Format);
+    const size_t pixelBytes = ImageData::FormatSize(Format);
+    const size_t maxSize = std::numeric_limits<size_t>::max();
+    if (Width > maxSize / pixelBytes) {
+        RADRAY_ERR_LOG("WritePNG row size exceeds supported storage");
+        return false;
+    }
+    const size_t rowBytes = static_cast<size_t>(Width) * pixelBytes;
+    if (Height > maxSize / rowBytes) {
+        RADRAY_ERR_LOG("WritePNG image size exceeds supported storage");
         return false;
     }
 
-    png_byte colorType = 0;
-    int bitDepth = 8;
-    switch (Format) {
-        case ImageFormat::RGB8_BYTE: colorType = PNG_COLOR_TYPE_RGB; break;
-        case ImageFormat::RGBA8_BYTE: colorType = PNG_COLOR_TYPE_RGB_ALPHA; break;
-        default:
-            RADRAY_ERR_LOG("WritePNG unsupported image format {}, only RGB8/RGBA8 are supported", Format);
-            return false;
-    }
-
-    std::ofstream stream{std::string(settings.FilePath), std::ios::binary};
-    if (!stream.is_open()) {
+    const string path{settings.FilePath};
+    Nullable<std::FILE*> destination{std::fopen(path.c_str(), "wb")};
+    if (!destination) {
         RADRAY_ERR_LOG("WritePNG cannot open file '{}'", settings.FilePath);
         return false;
     }
-
-    png_structp png_ptr = nullptr;
-    png_infop info_ptr = nullptr;
-    auto guard_png_ptr = MakeScopeGuard([&]() {
-        if (png_ptr) {
-            png_destroy_write_struct(&png_ptr, info_ptr ? &info_ptr : nullptr);
-            png_ptr = nullptr;
-            info_ptr = nullptr;
+    auto closeFile = MakeScopeGuard([&]() {
+        if (destination) {
+            std::fclose(destination.Get());
         }
     });
-
-    try {
-        png_ptr = png_create_write_struct_2(
-            PNG_LIBPNG_VER_STRING,
-            nullptr, radray_libpng_user_error_fn, radray_libpng_user_warn_fn,
-            nullptr, radray_libpng_malloc_fn, radray_libpng_free_fn);
-        if (!png_ptr) {
-            throw LibpngException("png_create_write_struct_2 failed");
-        }
-        info_ptr = png_create_info_struct(png_ptr);
-        if (!info_ptr) {
-            throw LibpngException("png_create_info_struct failed");
-        }
-
-        png_set_write_fn(png_ptr, &stream, radray_libpng_write_fn, radray_libpng_flush_fn);
-        png_set_IHDR(
-            png_ptr,
-            info_ptr,
-            Width,
-            Height,
-            bitDepth,
-            colorType,
-            PNG_INTERLACE_NONE,
-            PNG_COMPRESSION_TYPE_DEFAULT,
-            PNG_FILTER_TYPE_DEFAULT);
-
-        const size_t rowBytes = static_cast<size_t>(Width) * bytesPerPixel;
-        const size_t expectedSize = rowBytes * static_cast<size_t>(Height);
-        if (expectedSize != GetSize()) {
-            RADRAY_ERR_LOG("WritePNG image byte size mismatch, expected={}, got={}", expectedSize, GetSize());
+    {
+        RadRayPngState state{};
+        state.Width = Width;
+        state.Height = Height;
+        state.Channels = Format == ImageFormat::RGB8_BYTE ? 3 : 4;
+        auto cleanup = MakeScopeGuard([&]() { radray_png_destroy(&state); });
+        if (!radray_png_write(&state, destination.Get(), Data.get(), settings.IsFlipY)) {
+            RADRAY_ERR_LOG("libpng write failed: {}", state.Error);
             return false;
         }
-
-        vector<png_bytep> rowPointers(static_cast<size_t>(Height));
-        png_bytep basePtr = reinterpret_cast<png_bytep>(Data.get());
-        if (settings.IsFlipY) {
-            for (size_t y = 0; y < Height; ++y) {
-                rowPointers[y] = basePtr + (static_cast<size_t>(Height) - 1 - y) * rowBytes;
-            }
-        } else {
-            for (size_t y = 0; y < Height; ++y) {
-                rowPointers[y] = basePtr + y * rowBytes;
-            }
-        }
-
-        png_set_rows(png_ptr, info_ptr, rowPointers.data());
-        png_write_png(png_ptr, info_ptr, PNG_TRANSFORM_IDENTITY, nullptr);
-        return true;
-    } catch (const LibpngException& e) {
-        RADRAY_ERR_LOG("WritePNG LibpngException: {}", e.what());
-        return false;
-    } catch (...) {
-        RADRAY_ERR_LOG("WritePNG failed with unknown error");
+        LogPngWarning(state);
+    }
+    if (std::fclose(destination.Release()) != 0) {
+        RADRAY_ERR_LOG("WritePNG failed to close file '{}'", settings.FilePath);
         return false;
     }
+    return true;
 }
 #else
 bool ImageData::IsPNG(std::istream& stream) {
@@ -496,65 +330,34 @@ bool ImageData::WritePNG(PNGWriteSettings settings) const {
 
 namespace {
 
-class LibjpegException : public std::runtime_error {
-public:
-    explicit LibjpegException(const char* msg) : std::runtime_error(msg) {}
-    ~LibjpegException() noexcept override = default;
-};
-
-struct LibjpegErrorManager {
-    jpeg_error_mgr Pub;
-    char Message[JMSG_LENGTH_MAX]{};
-};
-
-[[noreturn]] void LibjpegErrorExit(j_common_ptr cinfo) {
-    auto* error = reinterpret_cast<LibjpegErrorManager*>(cinfo->err);
-    (*cinfo->err->format_message)(cinfo, error->Message);
-    throw LibjpegException(error->Message);
-}
-
-bool ReadStreamToBytes(std::istream& stream, vector<byte>& out) {
-    if (!stream.good()) {
+bool ReadJpegStream(std::istream& stream, vector<byte>& encoded) {
+    const Nullable<std::streambuf*> source{stream.rdbuf()};
+    if (!stream.good() || !source) {
         return false;
     }
-    const auto original_state = stream.rdstate();
-    const std::istream::pos_type original_pos = stream.tellg();
-    const bool can_seek = original_pos != std::istream::pos_type(-1);
-    stream.clear();
-    if (can_seek) {
-        stream.seekg(0, std::ios::end);
-        const std::istream::pos_type end_pos = stream.tellg();
-        if (end_pos == std::istream::pos_type(-1) || end_pos < original_pos) {
-            stream.clear(original_state);
-            return false;
-        }
-        const auto size = static_cast<size_t>(end_pos - original_pos);
-        stream.seekg(original_pos);
-        out.resize(size);
-        if (size > 0) {
-            stream.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
-            if (static_cast<size_t>(stream.gcount()) != size) {
-                stream.clear(original_state);
-                return false;
-            }
-        }
-    } else {
-        std::array<char, 4096> buffer{};
-        while (stream.good()) {
-            stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-            const std::streamsize count = stream.gcount();
-            if (count > 0) {
-                const size_t old_size = out.size();
-                out.resize(old_size + static_cast<size_t>(count));
-                std::memcpy(out.data() + old_size, buffer.data(), static_cast<size_t>(count));
-            }
-        }
+    const auto originalPos = source->pubseekoff(0, std::ios::cur, std::ios::in);
+    if (originalPos == std::streampos(-1)) {
+        return ReadImageStream(stream, encoded);
     }
-    stream.clear(original_state);
-    if (can_seek) {
-        stream.seekg(original_pos);
+    const auto endPos = source->pubseekoff(0, std::ios::end, std::ios::in);
+    if (source->pubseekpos(originalPos, std::ios::in) == std::streampos(-1) ||
+        endPos == std::streampos(-1) || endPos < originalPos) {
+        return false;
     }
-    return !out.empty();
+    const auto length = endPos - originalPos;
+    if (!std::in_range<size_t>(length) || !std::in_range<std::streamsize>(length)) {
+        return false;
+    }
+    const size_t size = static_cast<size_t>(length);
+    if (size == 0 || size > encoded.max_size()) {
+        return false;
+    }
+    encoded.resize(size);
+    const auto count = source->sgetn(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(length));
+    if (source->pubseekpos(originalPos, std::ios::in) == std::streampos(-1)) {
+        return false;
+    }
+    return count == length;
 }
 
 }  // namespace
@@ -567,7 +370,7 @@ bool ImageData::IsJPEG(std::istream& stream) {
     const std::istream::pos_type original_pos = stream.tellg();
     const bool can_seek = original_pos != std::istream::pos_type(-1);
     stream.clear();
-    std::array<unsigned char, 3> sig{};
+    array<unsigned char, 3> sig{};
     stream.read(reinterpret_cast<char*>(sig.data()), static_cast<std::streamsize>(sig.size()));
     const std::streamsize read_bytes = stream.gcount();
     const bool is_jpeg = read_bytes >= 2 &&
@@ -585,73 +388,33 @@ bool ImageData::IsJPEG(std::istream& stream) {
 
 std::optional<ImageData> ImageData::LoadJPEG(std::istream& stream, JPEGLoadSettings settings) {
     vector<byte> encoded;
-    if (!ReadStreamToBytes(stream, encoded)) {
+    if (!ReadJpegStream(stream, encoded)) {
         RADRAY_ERR_LOG("failed to read JPEG stream");
         return std::nullopt;
     }
 
-    jpeg_decompress_struct cinfo{};
-    LibjpegErrorManager jerr{};
-    cinfo.err = jpeg_std_error(&jerr.Pub);
-    jerr.Pub.error_exit = LibjpegErrorExit;
-    auto guard_jpeg = MakeScopeGuard([&]() {
-        jpeg_destroy_decompress(&cinfo);
-    });
-
-    try {
-        jpeg_create_decompress(&cinfo);
-        jpeg_mem_src(
-            &cinfo,
-            reinterpret_cast<const unsigned char*>(encoded.data()),
-            encoded.size());
-        jpeg_read_header(&cinfo, TRUE);
-        cinfo.out_color_space = JCS_RGB;
-        jpeg_start_decompress(&cinfo);
-
-        const uint32_t width = static_cast<uint32_t>(cinfo.output_width);
-        const uint32_t height = static_cast<uint32_t>(cinfo.output_height);
-        const uint32_t channels = static_cast<uint32_t>(cinfo.output_components);
-        if (width == 0 || height == 0 || channels != 3) {
-            RADRAY_ERR_LOG("unsupported JPEG output dimensions/channels: {}x{}x{}", width, height, channels);
-            return std::nullopt;
-        }
-
-        ImageData img;
-        img.Width = width;
-        img.Height = height;
-        img.Format = settings.AddAlphaIfRGB.has_value() ? ImageFormat::RGBA8_BYTE : ImageFormat::RGB8_BYTE;
-        img.Data = make_unique<byte[]>(img.GetSize());
-
-        vector<unsigned char> scanline(static_cast<size_t>(width) * channels);
-        const size_t dst_pixel_size = ImageData::FormatSize(img.Format);
-        while (cinfo.output_scanline < cinfo.output_height) {
-            const uint32_t src_y = static_cast<uint32_t>(cinfo.output_scanline);
-            unsigned char* row_ptr = scanline.data();
-            jpeg_read_scanlines(&cinfo, &row_ptr, 1);
-
-            const uint32_t dst_y = settings.IsFlipY ? (height - 1u - src_y) : src_y;
-            byte* dst = img.Data.get() + static_cast<size_t>(dst_y) * width * dst_pixel_size;
-            if (img.Format == ImageFormat::RGB8_BYTE) {
-                std::memcpy(dst, scanline.data(), scanline.size());
-            } else {
-                const byte alpha = static_cast<byte>(std::min(settings.AddAlphaIfRGB.value(), 0xFFu));
-                for (uint32_t x = 0; x < width; ++x) {
-                    const size_t src_i = static_cast<size_t>(x) * 3u;
-                    const size_t dst_i = static_cast<size_t>(x) * 4u;
-                    dst[dst_i + 0] = static_cast<byte>(scanline[src_i + 0]);
-                    dst[dst_i + 1] = static_cast<byte>(scanline[src_i + 1]);
-                    dst[dst_i + 2] = static_cast<byte>(scanline[src_i + 2]);
-                    dst[dst_i + 3] = alpha;
-                }
-            }
-        }
-
-        jpeg_finish_decompress(&cinfo);
-        return std::make_optional(std::move(img));
-    } catch (const LibjpegException& e) {
-        RADRAY_ERR_LOG("libjpeg error: {}", e.what());
+    ImageData image;
+    RadRayJpegState state{};
+    state.Input = reinterpret_cast<const unsigned char*>(encoded.data());
+    state.InputSize = encoded.size();
+    auto cleanup = MakeScopeGuard([&]() { radray_jpeg_destroy(&state); });
+    const int64_t alpha = settings.AddAlphaIfRGB.has_value() ? static_cast<int64_t>(*settings.AddAlphaIfRGB) : -1;
+    if (!radray_jpeg_read_header(&state, alpha)) {
+        RADRAY_ERR_LOG("libjpeg read header failed: {}", state.Error);
         return std::nullopt;
     }
+    image.Width = state.Width;
+    image.Height = state.Height;
+    image.Format = state.Channels == 4 ? ImageFormat::RGBA8_BYTE : ImageFormat::RGB8_BYTE;
+    image.Data = make_unique<byte[]>(state.ByteSize);
+    if (!radray_jpeg_read_pixels(&state, image.Data.get(), settings.IsFlipY)) {
+        RADRAY_ERR_LOG("libjpeg read pixels failed: {}", state.Error);
+        return std::nullopt;
+    }
+    if (state.Warning[0] != '\0') {
+        RADRAY_WARN_LOG("libjpeg warning: {}", state.Warning);
+    }
+    return std::make_optional(std::move(image));
 }
 
 #else

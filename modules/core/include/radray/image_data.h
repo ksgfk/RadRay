@@ -79,9 +79,14 @@ public:
 
     static size_t FormatSize(ImageFormat format) noexcept;
     static bool IsPNG(std::istream& stream);
+    // Buffers the remaining stream before decoding. Invalid PNG data returns
+    // nullopt; stream-buffer and allocation exceptions propagate normally.
     static std::optional<ImageData> LoadPNG(std::istream& stream, PNGLoadSettings settings = PNGLoadSettings{});
     static bool IsJPEG(std::istream& stream);
+    // Buffers the remaining stream and restores its position when seekable.
+    // Fatal JPEG errors return nullopt; stream-buffer and allocation exceptions propagate.
     static std::optional<ImageData> LoadJPEG(std::istream& stream, JPEGLoadSettings settings = JPEGLoadSettings{});
+    // Supports RGB8/RGBA8; encoding and file write/close errors return false.
     bool WritePNG(PNGWriteSettings settings = PNGWriteSettings{}) const;
 
     static PixelCompareResult CompareImageRGBA8(const ImageData& actual, const ImageData& expected, uint8_t tolerance) noexcept;

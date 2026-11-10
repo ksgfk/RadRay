@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/allocator.h`, `modules/core/src/allocator.cpp`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/allocator.h`, `modules/core/src/allocator.cpp`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`, `modules/core/src/image_data.cpp`, `modules/core/src/png_codec.h`, `modules/core/src/png_codec.c`, `modules/core/src/jpeg_codec.h`, `modules/core/src/jpeg_codec.c`
 
 # core 基础设施
 
@@ -430,9 +430,28 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
   `SetValue` 是旧接口。
 - **`text_encoding.h`** — Windows 使用 `MultiByteToWideChar` / `WideCharToMultiByte` 的 `CP_UTF8` 模式转换。
   其他平台使用 `mbsrtowcs` / `wcstombs`，编码由当前 C locale 决定，不保证 UTF-8。
-- **`image_data.h`** — `ImageData` + PNG/JPEG 读写，底层 **libpng / IJG libjpeg**（不是 stb），
+- **`image_data.h`** — `ImageData` + PNG 读写 / JPEG 读取，底层 **libpng / IJG libjpeg**（不是 stb），
   由 `RADRAY_ENABLE_LIBPNG` / `RADRAY_ENABLE_LIBJPEG` 门控。另有
   `CompareImageRGBA8` / `ImageDiffRGBA8` 供测试对比。
+  PNG 的跳转边界位于私有 `modules/core/src/png_codec.h` / `png_codec.c`，以 C11 编译并通过 C ABI 调用。
+  读取头部、读取像素与写入分别建立仍在调用栈中的 `setjmp`；codec 及回调只依赖 C 接口。
+  错误与首条警告复制到调用方 context 的固定缓冲，辅助函数普通返回后才记录日志。
+  `LoadPNG` 从流当前位置缓冲全部剩余压缩数据，支持不可 seek 的流；回调只作边界检查和字节复制。
+  输入缓冲和解码像素由外层 C++ 持有，流缓冲与分配异常正常传播，非法 PNG 返回空值。
+  C context 直接返回尺寸、通道数、位深和已检查的字节数，`ImageFormat` 只在外层映射。像素阶段借用连续
+  存储的首地址，由 codec 按行计算地址、处理翻转和 Adam7 各轮，不构造或传递行指针数组。
+  codec 按 `RADRAY_ENABLE_MIMALLOC` 直接调用 mimalloc C API 或配对的 `malloc/free`，与 core 的分配选择一致。
+  `WritePNG` 支持 RGB8/RGBA8，外层持有 C 文件句柄，写回调只调用 C stdio；编码、写入和关闭
+  失败返回 `false`。两条路径在成功或失败后都先销毁 libpng 状态，再释放其借用的外层资源；保留 `/EHsc`。
+  JPEG 的读取边界位于私有 `modules/core/src/jpeg_codec.h` / `jpeg_codec.c`，同样以 C11 编译并通过 C ABI 调用。
+  不透明 decoder 持有 libjpeg 对象、错误管理器与跳转缓冲，头部和像素阶段分别建立当前调用中的 `setjmp`。
+  致命错误在 C 内跳转并返回失败，错误与首条警告保存在调用方 context；外层 C++ 记录日志并负责销毁。
+  `LoadJPEG` 从流当前位置缓冲全部剩余压缩数据：可 seek 时按已知长度一次分配并直接读取，正常返回时恢复原位置；
+  不可 seek 时与 PNG 共用分块缓冲逻辑。读取不改流状态，支持开启异常的流。输入与最终像素由 C++ 持有，
+  流缓冲与分配异常正常传播，致命 JPEG 错误返回空值；可恢复警告
+  沿用 libjpeg 的继续解码行为，例如缺少末尾 EOI。输出为 RGB8，灰度输入扩展为 RGB；可选 alpha 饱和到 255。
+  RGB 行直接解码到最终缓冲，RGBA 行先写 RGB 再从后向前原地补 alpha；翻转仅改变目标行地址，不分配临时扫描行。
+  decoder 自身按 `RADRAY_ENABLE_MIMALLOC` 使用 `mi_zalloc/mi_free` 或 `calloc/free`，libjpeg 内部内存仍由其内存管理器配对释放。
 - **`binary_io.h`** — 固定小端。reader 越界返回 false 且不消费输入。
 - **`channel.h`** — `BoundedChannel` / `UnboundedChannel`，`Complete()` 后写入失败；已有消息仍可读完，排空后读取失败。
 - **`sparse_set.h`** — 带世代编号的 handle 容器。
@@ -456,6 +475,7 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 | `test_hash.cpp` | `HashTest` |
 | `test_image_data.cpp` | `ImageDataTest` |
 | `test_img_rw.cpp` | `PngTest`、`PngTest/PngRoundTripTest`（仅 `RADRAY_ENABLE_LIBPNG`） |
+| `test_jpeg.cpp` | `JpegTest`、`JpegTest/JpegAlphaTest`（仅 `RADRAY_ENABLE_LIBJPEG`） |
 | `test_inline_vector.cpp` | `InlineVectorTest`（独立 exe `test_inline_vector`） |
 | `test_intrusive_ptr.cpp` | `IntrusivePtrTest` |
 | `test_json.cpp` | `JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest` |
