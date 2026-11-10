@@ -801,6 +801,7 @@ TEST(RadRayShaderArtifact, FixtureSpirvPushBlockOwnsPayloadRoot) {
     ASSERT_EQ(decoded.Value->RootConstants().size(), 1u);
     const WireRootConstantRecord& push = decoded.Value->RootConstants()[0];
     EXPECT_EQ(NameOf(*decoded.Value, push.Name), "PushConstants");
+    EXPECT_EQ(push.StageMask, 1u << static_cast<uint8_t>(ShaderStage::Pixel));
     ASSERT_LT(push.TypeIndex, decoded.Value->Types().size());
     EXPECT_EQ(NameOf(*decoded.Value, decoded.Value->Types()[push.TypeIndex].Name), "PushData");
 }

@@ -12,7 +12,7 @@ HLSL 是 compiler 的 pass source authoring 输入。shader 模块定义 wire co
 布局与参数 ABI、变体之间的稳定槽位、原生兼容性及共享策略由调用方负责，见 [RHI 绑定模型](render-rhi.md#绑定模型)。
 
 当前 metadata schema 为 8，decoder 拒绝其他 schema 版本。
-RadRay DXC package 为 `1.9.2609.radray.1`（基于 upstream `v1.9.2609`），extension ABI 为 5，
+RadRay DXC package 为 `1.9.2609.radray.2`（基于 upstream `v1.9.2609`），extension ABI 为 5，
 wire 的 `kShaderToolchainIdentity` 为 `0x0000000001090214`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
 
 正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
@@ -221,7 +221,7 @@ compiler 要求 shader，tools 要求 compiler，非法开关组合配置失败�
 runtime 与 examples 均有独立构建开关，当前不提供 runtime shader JIT 选项。
 
 compiler 配置通过 `find_package(RadRayDXC CONFIG REQUIRED GLOBAL COMPONENTS Headers Compiler)`
-查找 fork 包，核对完整版本标识 `1.9.2609.radray.1` 和 Compiler/Validator 运行库。仓库 preset 设置依赖三元组后，
+查找 fork 包，核对完整版本标识 `1.9.2609.radray.2` 和 Compiler/Validator 运行库。仓库 preset 设置依赖三元组后，
 主工程将 `SDKs/radray_dxc/extracted` 作为查找提示；也可使用 `RADRAY_DXC_ROOT` 显式指定包。
 `tools/fetch_sdks.py restore` 负责 manifest 的版本锁定与 SHA-256 校验；主工程不自动恢复或构建依赖。
 
