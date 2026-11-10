@@ -57,8 +57,9 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 
 `[RootSignature]`不是`platform.hlsli`的另一套numbering gate，而是compiler-owned跨target base policy：
 DXIL保留serialized carrier，SPIR-V把table/root descriptor/RootConstants/StaticSampler lower成对应
-Vulkan records。没有attribute时D3与Vulkan各用普通默认layout；pipeline的精确Target layout modifier
-不进入shaderlib。RootSignature中的static sampler必须唯一关联active `SamplerState` declaration，
+Vulkan records。没有 attribute 时 artifact 发布普通 descriptor placement，DXIL carrier 为空；
+RHI 的两侧布局始终由调用方显式提供，不由 shaderlib 或 compiler metadata 创建。
+RootSignature 中的 static sampler 必须唯一关联 active `SamplerState` declaration，
 SPIR-V metadata保留完整filter/address/LOD/bias/anisotropy/compare/border/reduction state，不能只记
 immutable bit。
 

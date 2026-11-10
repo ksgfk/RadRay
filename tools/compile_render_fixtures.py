@@ -15,6 +15,7 @@ FIXTURES = (
     ("compute", "CombineGroups", "cs_6_0"),
     ("graphics", "FullscreenVS", "vs_6_0"),
     ("graphics", "SolidPS", "ps_6_0"),
+    ("geometry", "VSMain", "vs_6_0"),
 )
 
 TARGETS = (

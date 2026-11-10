@@ -1,5 +1,7 @@
 #include "gpu_test_fixture.h"
 
+#include <radray/logger.h>
+
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
@@ -59,7 +61,7 @@ void FailTest(std::string_view reason) {
 
 }  // namespace
 
-string BackendParamName(const testing::TestParamInfo<RenderBackend>& info) {
+const char* BackendParamName(const testing::TestParamInfo<RenderBackend>& info) {
     return info.param == RenderBackend::D3D12 ? "D3D12" : "Vulkan";
 }
 
@@ -127,7 +129,7 @@ GpuTest::OpenStatus GpuTest::CreateD3D12Device([[maybe_unused]] bool externalRes
     }
     const auto adapters = _dxgiFactory->GetAdapters();
     if (adapter && std::ranges::none_of(adapters, [&](const auto& info) { return info.Index == *adapter; })) {
-        reason = fmt::format("D3D12 adapter {} does not exist", *adapter);
+        reason = radray::format("D3D12 adapter {} does not exist", *adapter);
         return OpenStatus::Failed;
     }
     if (!adapter) adapter = _dxgiFactory->SelectHighPerformanceAdapter();
@@ -169,7 +171,7 @@ GpuTest::OpenStatus GpuTest::CreateVulkanDevice([[maybe_unused]] bool externalRe
     }
     const auto adapters = _vulkanInstance->GetPhysicalDevices();
     if (adapter && std::ranges::none_of(adapters, [&](const auto& info) { return info.Index == *adapter; })) {
-        reason = fmt::format("Vulkan physical device {} does not exist", *adapter);
+        reason = radray::format("Vulkan physical device {} does not exist", *adapter);
         return OpenStatus::Failed;
     }
     if (!adapter) adapter = _vulkanInstance->SelectHighPerformancePhysicalDevice();
@@ -222,7 +224,7 @@ CommandQueue& DirectQueue(Device& device) {
 Nullable<unique_ptr<Shader>> LoadShader(Device& device, std::string_view source, std::string_view entry, ShaderStages stages) {
     const bool dxil = device.GetBackend() == RenderBackend::D3D12;
     const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode" /
-                      fmt::format("{}.{}.{}.bin", source, entry, dxil ? "dxil" : "spirv");
+                      radray::format("{}.{}.{}.bin", source, entry, dxil ? "dxil" : "spirv");
     const auto bytes = ReadBinaryFile(path);
     if (!bytes || bytes->empty()) {
         ADD_FAILURE() << "missing shader fixture " << path.string() << "; run tools/compile_test_shaders.py";

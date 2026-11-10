@@ -55,6 +55,8 @@ else()
     add_subdirectory("${RADRAY_DEPENDENCY_SOURCE}" upstream)
     if (RADRAY_DEPENDENCY_NAME STREQUAL "zlib" AND WIN32)
         # FindZLIB supports this spelling without a package-specific static hint.
-        set_target_properties(zlibstatic PROPERTIES OUTPUT_NAME zlibstatic)
+        set_target_properties(zlibstatic PROPERTIES
+            OUTPUT_NAME zlibstatic
+            ARCHIVE_OUTPUT_NAME zlibstatic)
     endif()
 endif()

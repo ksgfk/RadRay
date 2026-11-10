@@ -1,5 +1,7 @@
 #include "external_resource_d3d12.h"
 
+#include <radray/logger.h>
+
 #include <limits>
 
 #include <cstring>
@@ -10,7 +12,7 @@ namespace {
 ExternalError Fail(std::string_view op, ExternalError e, std::string_view parameters = {}) noexcept {
     return radray::render::detail::LogExternalError(op, RenderBackend::D3D12, e, parameters);
 }
-ExternalError NativeError(HRESULT hr, std::string_view operation) noexcept { return {fmt::format("{} failed: {} ({:#x})", operation, GetErrorName(hr), uint32_t(hr)), ExternalNativeApi::D3D12, hr}; }
+ExternalError NativeError(HRESULT hr, std::string_view operation) noexcept { return {radray::format("{} failed: {} ({:#x})", operation, GetErrorName(hr), uint32_t(hr)), ExternalNativeApi::D3D12, hr}; }
 ExternalResult<OwnedExternalHandle> Share(DeviceD3D12* device, ID3D12DeviceChild* object) noexcept {
     HANDLE handle = nullptr;
     const HRESULT hr = device->_device->CreateSharedHandle(object, nullptr, GENERIC_ALL, nullptr, &handle);
@@ -46,13 +48,13 @@ ExternalResult<Output> ExportObject(Input* input, std::string_view operation) no
     auto* object = static_cast<Native*>(input);
     string parameters;
     if constexpr (std::is_same_v<Input, Buffer>)
-        parameters = fmt::format("size={} usage={}", object->GetDesc().Size, object->GetDesc().Usage);
+        parameters = radray::format("size={} usage={}", object->GetDesc().Size, object->GetDesc().Usage);
     else if constexpr (std::is_same_v<Input, Texture>) {
         const auto d = object->GetDesc();
-        parameters = fmt::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
+        parameters = radray::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
     } else
-        parameters = fmt::format("lastLocalSignal={}", object->GetLastSignaledValue());
-    parameters += fmt::format(" handleType={}", radray::render::detail::ExternalHandleName(object->_externalInfo->HandleType));
+        parameters = radray::format("lastLocalSignal={}", object->GetLastSignaledValue());
+    parameters += radray::format(" handleType={}", radray::render::detail::ExternalHandleName(object->_externalInfo->HandleType));
     auto handle = object->_externalHandle.Duplicate();
     if (auto* e = std::get_if<ExternalError>(&handle)) return Fail(operation, *e, parameters);
     return Output{*object->_externalInfo, std::get<OwnedExternalHandle>(std::move(handle))};
@@ -63,7 +65,7 @@ ExternalResourceD3D12::ExternalResourceD3D12(DeviceD3D12* device) noexcept : _de
 ExternalResult<ExternalDeviceIdentity> ExternalResourceD3D12::GetDeviceIdentity() const noexcept {
     ExternalDeviceIdentity result;
     const auto nodes = _device->_device->GetNodeCount();
-    if (nodes != 1) return ExternalError{fmt::format("External resources require one D3D12 node; device has {} nodes", nodes)};
+    if (nodes != 1) return ExternalError{radray::format("External resources require one D3D12 node; device has {} nodes", nodes)};
     const auto luid = _device->_device->GetAdapterLuid();
     std::memcpy(result.Luid.data(), &luid, result.Luid.size());
     result.NodeMask = 1;
@@ -86,7 +88,7 @@ ExternalSupport ExternalResourceD3D12::QueryTextureSupport(const TextureDescript
     const auto support = _device->QueryTextureSupportWithNativeStatus({d.Dim, d.Format, d.Usage}, status);
     if (FAILED(status)) return {false, false, NativeError(status, "ID3D12Device::CheckFeatureSupport(texture)")};
     if (!support.Supported || !support.SampleCounts.HasFlag(static_cast<SampleCount>(d.SampleCount)))
-        return {false, false, {fmt::format("D3D12 does not support texture format={} usage={} samples={}", d.Format, d.Usage, d.SampleCount)}};
+        return {false, false, {radray::format("D3D12 does not support texture format={} usage={} samples={}", d.Format, d.Usage, d.SampleCount)}};
     if (d.Width > support.MaxWidth || d.Height > support.MaxHeight || d.MipLevels > support.MaxMipLevels ||
         d.DepthOrArraySize > (d.Dim == TextureDimension::Dim3D ? support.MaxDepth : support.MaxArrayLayers))
         return {false, false, {"Texture dimensions, mip count or layer count exceed the D3D12 image limits"}};
@@ -102,7 +104,7 @@ ExternalSupport ExternalResourceD3D12::QueryFenceSupport(ExternalFenceHandleType
 }
 
 ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::CreateExportableBuffer(const BufferDescriptor& desc, const ExternalResourceDescriptor& external) noexcept {
-    const auto params = fmt::format("handleType={} size={} usage={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Size, desc.Usage);
+    const auto params = radray::format("handleType={} size={} usage={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Size, desc.Usage);
     const auto support = QueryBufferSupport(desc, external);
     if (!support.CanCreateExportable) return Fail("CreateExportableBuffer", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -138,7 +140,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::CreateExportableBuffer
     return unique_ptr<Buffer>{std::move(result)};
 }
 ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::CreateExportableTexture(const TextureDescriptor& desc, const ExternalTextureDescriptor& external) noexcept {
-    const auto params = fmt::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, external.AllowFormatReinterpretation);
+    const auto params = radray::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(external.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, external.AllowFormatReinterpretation);
     const auto support = QueryTextureSupport(desc, external);
     if (!support.CanCreateExportable) return Fail("CreateExportableTexture", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -166,7 +168,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::CreateExportableTextu
     return unique_ptr<Texture>{std::move(result)};
 }
 ExternalResult<unique_ptr<Fence>> ExternalResourceD3D12::CreateExportableFence(const ExternalFenceDescriptor& desc) noexcept {
-    const auto params = fmt::format("handleType={} initialValue={}", radray::render::detail::ExternalHandleName(desc.HandleType), desc.InitialValue);
+    const auto params = radray::format("handleType={} initialValue={}", radray::render::detail::ExternalHandleName(desc.HandleType), desc.InitialValue);
     const auto support = QueryFenceSupport(desc.HandleType);
     if (!support.CanCreateExportable) return Fail("CreateExportableFence", support.Reason, params);
     const auto identity = GetDeviceIdentity();
@@ -192,7 +194,7 @@ ExternalResult<ExternalTextureExport> ExternalResourceD3D12::ExportTexture(Textu
 ExternalResult<ExternalFenceExport> ExternalResourceD3D12::ExportFence(Fence* f) noexcept { return ExportObject<FenceD3D12, ExternalFenceExport>(f, "ExportFence"); }
 
 ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::ImportBuffer(BorrowedExternalHandle handle, const ExternalBufferInfo& info) noexcept {
-    const auto params = fmt::format("handleType={} size={} nativeSize={} usage={}", radray::render::detail::ExternalHandleName(info.HandleType), info.Descriptor.Size, info.NativeSize, info.Descriptor.Usage);
+    const auto params = radray::format("handleType={} size={} nativeSize={} usage={}", radray::render::detail::ExternalHandleName(info.HandleType), info.Descriptor.Size, info.NativeSize, info.Descriptor.Usage);
     if (info.HandleType != ExternalMemoryHandleType::D3D12Resource) return Fail("ImportBuffer", {"D3D12 does not support the requested external handle type"}, params);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportBuffer", *error, params);
@@ -216,7 +218,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::ImportBuffer(BorrowedE
 }
 ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::ImportTexture(BorrowedExternalHandle handle, const ExternalTextureInfo& info) noexcept {
     const auto& desc = info.Descriptor;
-    const auto params = fmt::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(info.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, info.AllowFormatReinterpretation);
+    const auto params = radray::format("handleType={} dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", radray::render::detail::ExternalHandleName(info.HandleType), desc.Dim, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Format, desc.Usage, info.AllowFormatReinterpretation);
     if (info.HandleType != ExternalMemoryHandleType::D3D12Resource) return Fail("ImportTexture", {"D3D12 does not support the requested external handle type"}, params);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportTexture", *error, params);
@@ -240,7 +242,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::ImportTexture(Borrowe
     return unique_ptr<Texture>{std::move(result)};
 }
 ExternalResult<unique_ptr<Fence>> ExternalResourceD3D12::ImportFence(BorrowedExternalHandle handle, const ExternalFenceInfo& info) noexcept {
-    const auto params = fmt::format("handleType={} nodeMask={} handle={:#x}", radray::render::detail::ExternalHandleName(info.HandleType), info.Device.NodeMask, handle.Value);
+    const auto params = radray::format("handleType={} nodeMask={} handle={:#x}", radray::render::detail::ExternalHandleName(info.HandleType), info.Device.NodeMask, handle.Value);
     if (info.HandleType != ExternalFenceHandleType::D3D12Fence) return Fail("ImportFence", {"D3D12 does not support the requested external handle type"}, params);
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("ImportFence", *error, params);

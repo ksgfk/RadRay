@@ -1,5 +1,7 @@
 #include "rhi_validation.h"
 
+#include <radray/logger.h>
+
 #include <limits>
 #include <radray/render/external_resource.h>
 
@@ -32,7 +34,7 @@ struct ValidationContext {
     size_t LiveOwned{0};
 
     bool Reject(std::string_view operation, std::string_view reason) const noexcept {
-        const auto message = fmt::format("RHI validation: {}: {}", operation, reason);
+        const auto message = radray::format("RHI validation: {}: {}", operation, reason);
         if (Options.LogCallback)
             Options.LogCallback(LogLevel::Err, message, Options.LogUserData);
         else
@@ -99,7 +101,7 @@ bool ValidateLayoutLimitsVulkan(const ValidationContext& context, const vulkan::
                 if (binding.Stages.HasFlag(stageTypes[i])) stages[i].Add(binding);
         }
     const auto fits = [&context](uint64_t count, uint32_t limit, std::string_view name) {
-        return count <= limit || context.Reject("CreatePipelineLayout", fmt::format("{} exceeds {}", count, name));
+        return count <= limit || context.Reject("CreatePipelineLayout", radray::format("{} exceeds {}", count, name));
     };
     if (!fits(total.Samplers, limits.maxDescriptorSetSamplers, "maxDescriptorSetSamplers") ||
         !fits(total.UniformBuffers - total.DynamicUniformBuffers, limits.maxDescriptorSetUniformBuffers, "maxDescriptorSetUniformBuffers") ||

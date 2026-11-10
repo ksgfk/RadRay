@@ -6,9 +6,9 @@
 #include <string>
 #include <string_view>
 
-#include <fmt/format.h>
 #include <magic_enum/magic_enum_flags.hpp>
 
+#include <radray/logger.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -68,7 +68,7 @@ constexpr std::string_view EnumFlagBitNameOr(T value, std::string_view fallback 
 template <class T>
 requires std::is_enum_v<T>
 string EnumFlagsName(T value, char sep = '|') {
-    return magic_enum::enum_flags_name(value, sep);
+    return string{magic_enum::enum_flags_name(value, sep)};
 }
 
 // 该值是否是枚举里已声明的成员。
@@ -228,7 +228,7 @@ public:
             return "[]";
         }
         if constexpr (is_compound_enum_flags<T>::value) {
-            return fmt::format("[{}]", format_as(_value));
+            return radray::format("[{}]", format_as(_value));
         } else {
             const string names = EnumFlagsName(_value);
             if (names.empty()) {

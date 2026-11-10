@@ -2,14 +2,14 @@
     "Artifacts": [
         {
             "Name": "radray_dxc",
-            "Version": "1.9.2609.radray.1",
+            "Version": "1.9.2609.radray.2",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/latest/dxc-{Platform}-{Arch}-{Version}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "e2135770465dd026f3211c10b6ab7a3e84ce599861d04dd78b8bfecf39aa78b7"
+                    "Hash": "a4b18ab7c5328dff7f3f3f45368d5ece81ad03777bd5e7d3de0447895715fbe1"
                 }
             ]
         }
@@ -19,7 +19,7 @@
             "Name": "fmt",
             "Type": "git",
             "Git": "https://github.com/fmtlib/fmt.git",
-            "Tag": "12.2.0"
+            "Tag": "12.2.1"
         },
         {
             "Name": "magic_enum",
@@ -67,7 +67,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.5.3"
+            "Tag": "v3.6.1"
         },
         {
             "Name": "pugixml",
@@ -79,7 +79,7 @@
             "Name": "zlib",
             "Type": "git",
             "Git": "https://github.com/madler/zlib.git",
-            "Tag": "v1.3.2"
+            "Tag": "v1.4"
         },
         {
             "Name": "libpng",
@@ -97,31 +97,31 @@
             "Name": "Vulkan-Headers",
             "Type": "git",
             "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
-            "Tag": "vulkan-sdk-1.4.357.0"
+            "Tag": "vulkan-sdk-1.4.363.0"
         },
         {
             "Name": "volk",
             "Type": "git",
             "Git": "https://github.com/zeux/volk.git",
-            "Tag": "vulkan-sdk-1.4.357.0"
+            "Tag": "vulkan-sdk-1.4.363.0"
         },
         {
             "Name": "VulkanMemoryAllocator",
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git",
-            "Tag": "v3.4.0"
+            "Tag": "v3.5.0"
         },
         {
             "Name": "DirectX-Headers",
             "Type": "git",
             "Git": "https://github.com/microsoft/DirectX-Headers.git",
-            "Tag": "v1.619.5"
+            "Tag": "v1.620.2"
         },
         {
             "Name": "D3D12MemoryAllocator",
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
-            "Tag": "v3.2.0"
+            "Tag": "v3.3.0"
         },
         {
             "Name": "freetype",
@@ -151,7 +151,7 @@
             "Name": "tracy",
             "Type": "git",
             "Git": "https://github.com/wolfpld/tracy.git",
-            "Tag": "v0.14.1"
+            "Tag": "v0.15.0"
         }
     ]
 }

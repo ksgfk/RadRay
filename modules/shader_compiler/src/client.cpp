@@ -28,7 +28,7 @@ template <typename T>
 shader::DiagnosticResult<T> WithSourceContext(
     shader::DiagnosticResult<T> result, std::string_view sourceName, std::string_view operation) {
     if (!result.Diagnostics.empty()) {
-        result.Diagnostics = fmt::format("{} '{}':\n{}", operation, sourceName, result.Diagnostics);
+        result.Diagnostics = radray::format("{} '{}':\n{}", operation, sourceName, result.Diagnostics);
     }
     return result;
 }

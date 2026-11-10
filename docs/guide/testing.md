@@ -37,7 +37,7 @@
 
 render 测试链接进 `test_radray_render`，共用 [gpu_test_fixture.h](../../modules/render/tests/gpu_test_fixture.h)：
 
-- 每个后端各实例化一次（参数 `D3D12`、`Vulkan`）。后端未编译或没有可用设备时跳过；
+- 每个后端各实例化一次（参数 `D3D12`、`Vulkan`）。后端未编译、所需 validation 环境不可用或没有可用适配器时跳过；
   `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 把跳过变为失败。
 - 设备默认开启原生 validation 与 RHI validation，用例结束时出现 validation 错误即失败。
   `RADRAY_TEST_GPU_VALIDATION=1` 额外开启 GPU-assisted validation。
@@ -56,4 +56,5 @@ render 测试链接进 `test_radray_render`，共用 [gpu_test_fixture.h](../../
 4. 重复以上步骤，直到行为完整。提交前运行所属模块的全部用例。
 
 接口尚未稳定时，先用一两条用例确定调用方式，再补边界与错误路径。
-发现现有实现与文档契约不一致时，按文档写用例并报告差异，不为了通过测试修改断言。
+发现现有实现与文档不一致时，先核对源码和用户要求：过时文档按现状修正；已确认的代码缺陷按修复要求编写复现用例。
+未实施的目标行为不提前写入 architecture/guide，也不为了通过测试修改断言。

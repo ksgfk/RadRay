@@ -14,5 +14,9 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
+#if defined(__spirv__)
+    return PushConstants.Tint;
+#else
     return float4(1.0, 1.0, 1.0, 1.0);
+#endif
 }

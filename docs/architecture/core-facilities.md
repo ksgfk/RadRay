@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/allocator.h`, `modules/core/src/allocator.cpp`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`, `modules/core/src/image_data.cpp`, `modules/core/src/png_codec.h`, `modules/core/src/png_codec.c`, `modules/core/src/jpeg_codec.h`, `modules/core/src/jpeg_codec.c`
 
 # core 基础设施
 
@@ -13,7 +13,7 @@
 | 头文件 | 提供 |
 |---|---|
 | `types.h` | 全部容器与字符串别名的唯一出口 |
-| `logger.h` | 日志宏、`RADRAY_ABORT`、`RADRAY_ASSERT` |
+| `logger.h` | `radray::format`、日志宏、`RADRAY_ABORT`、`RADRAY_ASSERT` |
 | `nullable.h` | `Nullable<T>` |
 | `enum_flags.h` | `EnumFlags<T>` + `magic_enum` 的唯一出口 |
 | `basic_math.h` | Eigen 封装 + 视图/投影辅助；48 B `AffineTransform` 和 24 B 三维 `Aabb` |
@@ -24,7 +24,7 @@
 
 专用的：`json.h`（yyjson）、`xml.h`（pugixml）、`binary_io.h`（小端读写）、`file.h`、`environment.h`、
 `dynamic_library.h`、`guid.h`、`text_encoding.h`、`runtime_type.h`、
-`allocator.h`（GPU 子分配器，与堆无关）、`memory.h`、`sparse_set.h`、`channel.h`、
+`allocator.h`（偏移区间子分配，与堆无关）、`memory.h`、`sparse_set.h`、`channel.h`、
 `intrusive_ptr.h`、`structured_buffer.h`、`image_data.h`、`viewport.h`、
 `triangle_mesh.h`、`wavefront_obj.h`、`camera_control.h`、`platform/win32_headers.h`。
 
@@ -34,7 +34,9 @@
 template <class T> using vector = std::vector<T, allocator<T>>;
 ```
 
-**这些别名的底层就是 std + `std::allocator`，不接受自定义分配器参数。** 没有 EASTL。
+**这些别名的底层是标准容器，不接受自定义分配器参数。** 没有 EASTL。
+`radray::allocator<T>` 在启用 `RADRAY_ENABLE_MIMALLOC` 时使用 `mi_stl_allocator<T>`，
+关闭时使用 `std::allocator<T>`；容器与字符串别名统一使用该分配器。
 `unique_ptr` / `shared_ptr` / `weak_ptr` / `make_unique` / `make_shared` /
 `enable_shared_from_this` 也都被 `using` 拉进 `radray` 命名空间。
 
@@ -43,7 +45,9 @@ template <class T> using vector = std::vector<T, allocator<T>>;
 标准分配的覆盖交给该依赖提供，core 不包含 `mimalloc-new-delete.h` 或自行定义全局 `new/delete`。
 Windows 动态覆盖由最终程序负责部署 DLL 和安排加载；RadRay 不自动复制或强制加载 DLL。
 具体配置、宿主约束与覆盖检查见[动态 CRT](../guide/build-test.md#windows-动态-crt-与-mimalloc)
-和[静态 CRT](../guide/build-test.md#静态-crt-与-mimalloc)。容器别名统一类型入口，不自行选择分配器。
+和[静态 CRT](../guide/build-test.md#静态-crt-与-mimalloc)。启用时，容器与字符串的堆分配
+通过 `mi_stl_allocator` 直接进入 mimalloc，不依赖 CRT 全局覆盖；开关会改变这些别名的类型，
+库与使用者必须保持配置一致。
 
 `memory.h` 的 `Malloc/Free`、`AlignedAlloc/AlignedFree` 在启用 mimalloc 时由 `memory.cpp`
 直接调用 `mi_malloc/mi_free`、`mi_malloc_aligned/mi_free`，不依赖 CRT 符号覆盖；Windows `/MD[d]`
@@ -156,6 +160,20 @@ Get、Destroy 要求句柄存活，前置条件仅使用 Debug assert；可能�
 删除用交换末项保持值数组稠密，可能移动其他值；句柄不因此改变，但值的地址与遍历顺序不稳定。
 `GetHandleAt(denseIndex)` 将当前 `Values()` 的有效下标 O(1) 转为稳定句柄；稠密下标不能跨删除保存。
 
+`Reserve(capacity)` 同时预留稀疏槽位、稠密值与稠密反向索引，不创建元素。
+`ReserveGeometric(requiredCapacity)` 仅在容量不足时按 max(required, capacity + capacity / 2) 扩容，
+避免流式小幅增长时反复精确 reserve；增长保持现有值与句柄有效，但可能移动值地址。
+
+## BestFitAllocator
+
+`allocator.h/.cpp` 的 BestFitAllocator 管理固定容量 `[0, capacity)` 的连续整数区间，与 GPU 和字节对齐无关。
+Allocate(count) 返回 `optional<BestFitAllocator::Allocation>`，其 Offset / Count 表示起点和长度；零长度或无足够连续空间返回空值。
+与同文件的分配器一致，释放接口为 Destroy(allocation)，并通过 `is_allocator<BestFitAllocator, BestFitAllocator::Allocation, uint32_t>` 编译期检查。
+内部按 `(count, offset)` 的有序 set 选择最小可容纳空闲段，同尺寸时取较小偏移；按 offset 的 map 在 Destroy 时合并前驱、后继或两侧相邻空闲段。
+GetCapacity / GetFreeCount 返回固定容量与当前总空闲数量；总空闲量足够不表示存在足够大的连续段。
+Destroy 只接受本分配器返回的完整、仍存活分配，且只能释放一次；不维护所有活跃分配的额外表，Debug 检查边界和空闲段重叠。
+分配器不可复制，调用者负责串行访问。Runtime 几何池使用它管理各页的顶点/索引元素范围。
+
 ## Nullable
 
 三个特化：裸指针类、`unique_ptr`、`shared_ptr`。API：
@@ -213,6 +231,12 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 
 底层是 spdlog。
 
+`logger.h` 的 `radray::format` 提供窄字符与宽字符重载，分别返回 `radray::string` 和
+`radray::wstring`。它通过 `fmt::format_to` 直接写入结果字符串，结果存储使用
+`radray::allocator`，不创建中间 `std::string`。格式字面量保留 fmt 的编译期检查，
+运行时格式串使用 `fmt::runtime`；已有 fmt formatter 可继续使用。函数不声明 `noexcept`，
+格式化与分配错误沿用 fmt 和分配器的异常行为。花括号风格日志也使用此封装。
+
 | 宏 | 语义 |
 |---|---|
 | `RADRAY_DEBUG_LOG` | **仅 Debug**，Release 下展开为空 |
@@ -239,7 +263,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 | `RADRAY_PROFILE_SCOPE()` | 以所在函数名命名的作用域 zone |
 | `RADRAY_PROFILE_SCOPE_N("name")` | 字符串字面量命名；同一花括号作用域内只能出现一个 `SCOPE*` 宏，需要嵌套时用 `{}` 分隔 |
 | `RADRAY_PROFILE_SCOPE_DYN(sv)` | 运行时 `string_view` 作为 **zone 名**（Tracy transient，导出与 GUI 都用该名字，而不是函数名）；与 `SCOPE*` 同样受单作用域限制 |
-| `RADRAY_PROFILE_FRAME()` | 当前线程一帧结束；单线程 runner 在 `TickFrame` 尾部，多线程 runner 在渲染线程 |
+| `RADRAY_PROFILE_FRAME()` | 标记调用线程的一帧结束；由调用方显式插入，宏不调度帧循环或线程 |
 | `RADRAY_PROFILE_PLOT("name", v)` | 数值曲线 |
 | `RADRAY_PROFILE_THREAD("name")` | 命名当前线程 |
 | `RADRAY_PROFILE_MESSAGE(sv)` | 时间线文本消息 |
@@ -312,7 +336,7 @@ return h.ToHashCode();
 3. **缓存散列值的 key 在移动后也须保持内容与散列一致。** 默认移动成员可能保留旧散列而改变源内容；
    若移后对象仍可参与比较或查表，就显式恢复它的有效状态，不假定所有容器移后必为空。
 
-当前 native layout key 及完整判等见 [RHI 布局缓存](render-rhi.md#native-pipelinelayout-缓存)。
+RHI 布局直接拥有原生对象，不维护布局 key 或去重缓存，见 [RHI 布局所有权](render-rhi.md#原生布局直接所有权与显式共享)。
 附件顺序有渲染语义，`AttachmentSignature` 与 `RenderPassExecutionKeyVulkan` 不得为了复用而重排 color slots；
 允许忽略的字段见[直接附件与 Vulkan 原生缓存](render-rhi.md#直接附件与-vulkan-原生缓存)。
 
@@ -358,9 +382,9 @@ RadRay 通用内存接口的后续实现变化产生不一致。该路径不依�
 
 辅助：`Align`、`Degree` / `Radian`、`Lerp`、`Clamp`、`AbsDot`、`ComposeTransform` /
 `DecomposeTransform`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
-可以直接 `fmt::format("{}", mat)`。
+可以直接 `radray::format("{}", mat)`。
 
-`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 不必包含本头。
+`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 只需包含 `viewport.h`，无需包含 `basic_math.h`。
 `basic_math.h` 会包含 `viewport.h`，已有数学调用方仍能看见这两个类型。
 
 `AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；
@@ -388,8 +412,8 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 ## 其他
 
 - **`scope_guard.h`** — `ScopeGuard` / `MakeScopeGuard`，`Dismiss()` 取消。移动后源自动 dismiss。
-- **`allocator.h`** — `BuddyAllocator` / `FirstFitAllocator`，都是**偏移量式子分配器**
-  （返回 `Allocation{Offset, ...}`），给描述符堆和 GPU 内存用。**不是堆分配器**，那是 `memory.h`。
+- **`allocator.h`** — `BuddyAllocator`、`FirstFitAllocator` 与 [BestFitAllocator](#bestfitallocator) 都是偏移区间子分配器，
+  不拥有被划分的资源，可用于描述符、GPU 内存或几何元素范围；实际堆内存分配由 `memory.h` 提供。
 - **`runtime_type.h`** — 独立、稳定的 GUID 声明设施。`RuntimeTypeId` 是 `Guid` 的别名；
   需要稳定标识的类型特化 `RuntimeTypeTrait<T>::value`，显式读取 `runtime_type_id_v<T>` 时会先按
   `remove_cvref_t` 归一化并要求 GUID 非空。它不描述继承、不保存对象描述符，也不建立 GUID 与
@@ -404,11 +428,30 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
   `IntrusivePtrAddRef` / `IntrusivePtrRelease`。
 - **`structured_buffer.h`** — CPU 侧反射式结构化缓冲。新代码用 `TrySetValue`（fail-fast），
   `SetValue` 是旧接口。
-- **`text_encoding.h`** — UTF-8 ⇄ wchar。Windows 走 `MultiByteToWideChar`，
-  其他平台走 `mbsrtowcs`（依赖 locale，行为可能不一致，有 TODO）。
-- **`image_data.h`** — `ImageData` + PNG/JPEG 读写，底层 **libpng / IJG libjpeg**（不是 stb），
+- **`text_encoding.h`** — Windows 使用 `MultiByteToWideChar` / `WideCharToMultiByte` 的 `CP_UTF8` 模式转换。
+  其他平台使用 `mbsrtowcs` / `wcstombs`，编码由当前 C locale 决定，不保证 UTF-8。
+- **`image_data.h`** — `ImageData` + PNG 读写 / JPEG 读取，底层 **libpng / IJG libjpeg**（不是 stb），
   由 `RADRAY_ENABLE_LIBPNG` / `RADRAY_ENABLE_LIBJPEG` 门控。另有
   `CompareImageRGBA8` / `ImageDiffRGBA8` 供测试对比。
+  PNG 的跳转边界位于私有 `modules/core/src/png_codec.h` / `png_codec.c`，以 C11 编译并通过 C ABI 调用。
+  读取头部、读取像素与写入分别建立仍在调用栈中的 `setjmp`；codec 及回调只依赖 C 接口。
+  错误与首条警告复制到调用方 context 的固定缓冲，辅助函数普通返回后才记录日志。
+  `LoadPNG` 从流当前位置缓冲全部剩余压缩数据，支持不可 seek 的流；回调只作边界检查和字节复制。
+  输入缓冲和解码像素由外层 C++ 持有，流缓冲与分配异常正常传播，非法 PNG 返回空值。
+  C context 直接返回尺寸、通道数、位深和已检查的字节数，`ImageFormat` 只在外层映射。像素阶段借用连续
+  存储的首地址，由 codec 按行计算地址、处理翻转和 Adam7 各轮，不构造或传递行指针数组。
+  codec 按 `RADRAY_ENABLE_MIMALLOC` 直接调用 mimalloc C API 或配对的 `malloc/free`，与 core 的分配选择一致。
+  `WritePNG` 支持 RGB8/RGBA8，外层持有 C 文件句柄，写回调只调用 C stdio；编码、写入和关闭
+  失败返回 `false`。两条路径在成功或失败后都先销毁 libpng 状态，再释放其借用的外层资源；保留 `/EHsc`。
+  JPEG 的读取边界位于私有 `modules/core/src/jpeg_codec.h` / `jpeg_codec.c`，同样以 C11 编译并通过 C ABI 调用。
+  不透明 decoder 持有 libjpeg 对象、错误管理器与跳转缓冲，头部和像素阶段分别建立当前调用中的 `setjmp`。
+  致命错误在 C 内跳转并返回失败，错误与首条警告保存在调用方 context；外层 C++ 记录日志并负责销毁。
+  `LoadJPEG` 从流当前位置缓冲全部剩余压缩数据：可 seek 时按已知长度一次分配并直接读取，正常返回时恢复原位置；
+  不可 seek 时与 PNG 共用分块缓冲逻辑。读取不改流状态，支持开启异常的流。输入与最终像素由 C++ 持有，
+  流缓冲与分配异常正常传播，致命 JPEG 错误返回空值；可恢复警告
+  沿用 libjpeg 的继续解码行为，例如缺少末尾 EOI。输出为 RGB8，灰度输入扩展为 RGB；可选 alpha 饱和到 255。
+  RGB 行直接解码到最终缓冲，RGBA 行先写 RGB 再从后向前原地补 alpha；翻转仅改变目标行地址，不分配临时扫描行。
+  decoder 自身按 `RADRAY_ENABLE_MIMALLOC` 使用 `mi_zalloc/mi_free` 或 `calloc/free`，libjpeg 内部内存仍由其内存管理器配对释放。
 - **`binary_io.h`** — 固定小端。reader 越界返回 false 且不消费输入。
 - **`channel.h`** — `BoundedChannel` / `UnboundedChannel`，`Complete()` 后写入失败；已有消息仍可读完，排空后读取失败。
 - **`sparse_set.h`** — 带世代编号的 handle 容器。
@@ -421,7 +464,7 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 
 | 文件 | 套件名 |
 |---|---|
-| `test_allocator.cpp` | `BuddyAllocatorTest`、`FirstFitAllocatorTest` |
+| `test_allocator.cpp` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BestFitAllocator` |
 | `test_basic_math.cpp` | `BasicMathTest` |
 | `test_binary_io.cpp` | `BinaryIoTest` |
 | `test_channel.cpp` | `ChannelTest` |
@@ -432,9 +475,11 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 | `test_hash.cpp` | `HashTest` |
 | `test_image_data.cpp` | `ImageDataTest` |
 | `test_img_rw.cpp` | `PngTest`、`PngTest/PngRoundTripTest`（仅 `RADRAY_ENABLE_LIBPNG`） |
+| `test_jpeg.cpp` | `JpegTest`、`JpegTest/JpegAlphaTest`（仅 `RADRAY_ENABLE_LIBJPEG`） |
 | `test_inline_vector.cpp` | `InlineVectorTest`（独立 exe `test_inline_vector`） |
 | `test_intrusive_ptr.cpp` | `IntrusivePtrTest` |
 | `test_json.cpp` | `JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest` |
+| `test_logger.cpp` | `FormatTest` |
 | `test_memory.cpp` | `MemoryTest` |
 | `test_memory_override.cpp` | `MimallocOverrideTest`（仅 Windows 静态 CRT 且启用 mimalloc） |
 | `test_nullable.cpp` | `NullableTest` |

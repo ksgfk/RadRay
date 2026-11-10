@@ -32,21 +32,6 @@ Nullable<unique_ptr<render::Shader>> LoadShader(
     return device.CreateShader({bytes, category, stage});
 }
 
-Nullable<unique_ptr<render::Buffer>> UploadBuffer(
-    render::Device& device, std::span<const byte> bytes, render::BufferUse use) {
-    auto buffer = device.CreateBuffer({.Size = bytes.size(), .Memory = render::MemoryType::Upload, .Usage = use | render::BufferUse::MapWrite});
-    if (!buffer) return nullptr;
-    Nullable<void*> mapped = buffer->Map(0, bytes.size());
-    if (!mapped) {
-        RADRAY_ERR_LOG("无法映射上传缓冲");
-        return nullptr;
-    }
-    std::memcpy(mapped.Get(), bytes.data(), bytes.size());
-    buffer->FlushMappedRange({0, bytes.size()});
-    buffer->Unmap();
-    return buffer;
-}
-
 }  // namespace
 
 bool GpuResources::Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
@@ -63,9 +48,9 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     }
     auto& device = Device->GetDevice();
     const auto suffix = backend == render::RenderBackend::Vulkan ? "spirv" : "dxil";
-    VertexShader = LoadShader(device, shaderDirectory / fmt::format("cube.VSMain.{}.bin", suffix), render::ShaderStage::Vertex);
+    VertexShader = LoadShader(device, shaderDirectory / radray::format("cube.VSMain.{}.bin", suffix), render::ShaderStage::Vertex);
     if (!VertexShader) return false;
-    PixelShader = LoadShader(device, shaderDirectory / fmt::format("cube.PSMain.{}.bin", suffix), render::ShaderStage::Pixel);
+    PixelShader = LoadShader(device, shaderDirectory / radray::format("cube.PSMain.{}.bin", suffix), render::ShaderStage::Pixel);
     if (!PixelShader) return false;
 
     // 步骤 M1：把离线编译并加载的 shader、布局和材质性质放进 MaterialResource。
@@ -120,13 +105,13 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     return true;
 }
 
-bool GpuResources::UploadGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices) {
-    // 步骤 1（GPU 部分）：为所有立方体只准备一份顶点和索引资源。
-    // 为什么：多个 Primitive 的区别在物体变换，不需要重复上传相同的几何。
-    // UE5 对照：Engine/Public/StaticMeshResources.h 的 FStaticMeshLODResources 持有可复用的几何资源。
-    // 本例简化：直接使用 CPU 可写的 Upload 缓冲，省去 staging copy；录制时仍显式处理访问同步。
-    VertexBuffer = UploadBuffer(Device->GetDevice(), vertices, render::BufferUse::Vertex);
-    IndexBuffer = UploadBuffer(Device->GetDevice(), std::as_bytes(indices), render::BufferUse::Index);
+bool GpuResources::PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices) {
+    // Scene 可以引用尚未写入的 Device 缓冲；字节由首帧 RDG 的 Staging Copy 上传。
+    VertexBuffer = Device->GetDevice().CreateBuffer({.Size = vertices.size(), .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Vertex | render::BufferUse::CopyDestination});
+    IndexBuffer = Device->GetDevice().CreateBuffer({.Size = indices.size_bytes(), .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Index | render::BufferUse::CopyDestination});
+    PendingVertexBytes.assign(vertices.begin(), vertices.end());
+    const auto indexBytes = std::as_bytes(indices);
+    PendingIndexBytes.assign(indexBytes.begin(), indexBytes.end());
     return VertexBuffer && IndexBuffer;
 }
 
@@ -135,13 +120,6 @@ bool GpuFrameResources::Initialize(const GpuResources& shared, uint32_t instance
     Width = shared.Width;
     Height = shared.Height;
     auto& device = shared.Device->GetDevice();
-    ColorTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource});
-    DepthTexture = device.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = Width, .Height = Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::D32_FLOAT_S8_UINT, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::DepthStencilWrite});
-    if (!ColorTexture || !DepthTexture) return false;
-    ColorView = device.CreateTextureView({ColorTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
-    DepthWriteView = device.CreateTextureView({DepthTexture.Get(), render::TextureDimension::Dim2D, render::TextureFormat::D32_FLOAT_S8_UINT, {0, 1, 0, 1}, render::TextureViewUsage::DepthWrite});
-    if (!ColorView || !DepthWriteView) return false;
-
     RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
     Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
     if (!Readback) return false;
@@ -161,33 +139,6 @@ bool GpuFrameResources::Initialize(const GpuResources& shared, uint32_t instance
     }
     CompletionFence = device.CreateFence();
     return CompletionFence.HasValue();
-}
-
-bool GpuFrameResources::UploadSceneParameters(const Eigen::Matrix4f& viewProjection, std::span<const Eigen::Matrix4f> localToWorlds) {
-    if (localToWorlds.empty() || localToWorlds.size() != InstanceBuffer->GetDesc().Size / sizeof(InstanceData)) return false;
-    const uint64_t instanceSize = InstanceBuffer->GetDesc().Size;
-    Nullable<void*> mapped = InstanceBuffer->Map(0, instanceSize);
-    if (!mapped) return false;
-    auto* instanceBytes = static_cast<byte*>(mapped.Get());
-    for (size_t index = 0; index < localToWorlds.size(); ++index) {
-        std::memcpy(instanceBytes + index * sizeof(InstanceData), localToWorlds[index].data(), sizeof(InstanceData));
-    }
-    InstanceBuffer->FlushMappedRange({0, instanceSize});
-    InstanceBuffer->Unmap();
-    const array scales{1.0f, 1.12f};
-    for (size_t index = 0; index < scales.size(); ++index) {
-        PassConstants constants;
-        std::memcpy(constants.ViewProjection.data(), viewProjection.data(), sizeof(constants.ViewProjection));
-        constants.LocalScale = scales[index];
-        const uint64_t cbufferSize = PassBuffers[index]->GetDesc().Size;
-        Nullable<void*> passMapped = PassBuffers[index]->Map(0, cbufferSize);
-        if (!passMapped) return false;
-        std::memset(passMapped.Get(), 0, static_cast<size_t>(cbufferSize));
-        std::memcpy(passMapped.Get(), &constants, sizeof(constants));
-        PassBuffers[index]->FlushMappedRange({0, cbufferSize});
-        PassBuffers[index]->Unmap();
-    }
-    return true;
 }
 
 bool GpuResources::CreatePipelines(const VertexInput& input, const MaterialResource& resource) {
@@ -313,12 +264,6 @@ bool GpuFrameResources::SaveImage(const std::filesystem::path& output) const {
     }
     RADRAY_INFO_LOG("PNG 已写入：{}（{}×{}，GPU row pitch={}）", outputName, Width, Height, RowPitch);
     return true;
-}
-
-void TransitionTexture(render::CommandBuffer& command, render::Texture& texture,
-                       render::TextureStates before, render::TextureStates after) {
-    const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{&texture, before, after, {0, 1, 0, 1}};
-    command.ResourceBarrier(std::span{&barrier, 1});
 }
 
 }  // namespace radray::examples::mesh_drawing

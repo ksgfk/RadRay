@@ -13,22 +13,22 @@
 |---|---|---|
 | 类型（class / struct / enum） | PascalCase | `Device`, `TaskScope`, `ScopeGuard` |
 | 函数与方法（含自由函数） | PascalCase | `CreateBuffer`, `BeginRenderPass`, `PerspectiveLH` |
-| 私有成员变量 | `_` 前缀 + camelCase | `_activePasses`, `_renderStateCreated` |
+| 私有成员变量 | `_` 前缀 + camelCase | `_currentSlotIndex`, `_nextFrameId` |
 | 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `Viewport::Height` |
-| `constexpr` 常量 | `k` 前缀 + PascalCase | `kShaderAssetFormatVersion`, `kMaxPointLights` |
-| 宏 | ALL_CAPS | `RADRAY_ABORT`, `RADRAY_FORWARD_OBJECT_GROUP` |
+| `constexpr` 常量 | `k` 前缀 + PascalCase | `kShaderMetadataSchemaVersion`, `kShaderToolchainIdentity` |
+| 宏 | ALL_CAPS | `RADRAY_ABORT`, `RADRAY_PROFILE_SCOPE` |
 | 命名空间 | 全小写 | `radray`, `radray::render`, `radray::detail` |
 
 **没有 `m_` 前缀**，一律 `_`。公开数据成员用 PascalCase 是刻意的：它让 descriptor struct
 的字段读起来像"属性"而非局部变量。
 
-枚举成员在**新代码里 PascalCase**（`AssetState::Ready`、`LightType::Point`），
+枚举成员在**新代码里 PascalCase**（`MemoryType::Device`、`QueueType::Direct`），
 部分已有枚举使用 ALL_CAPS（例如 `TextureFormat::UNKNOWN`）。
 **不要为统一风格去改它们**——`AGENTS.md` 禁止重命名枚举成员，`magic_enum` 与序列化数据在消费
 这些名字。
 
-文件内辅助函数有两派并存，**以文件为单位自洽**：render/shader 后端用 `static` + `_` 前缀
-（`_CreateVkSwapChain`），core 用匿名 namespace + 无前缀。改哪个文件就跟那个文件。
+文件内辅助函数同时存在文件级 `static` 与匿名 namespace 两种组织；改动遵循所在文件风格，
+不据模块名假定所有文件使用同一命名方式。
 
 ## 文件组织
 
@@ -49,15 +49,18 @@ include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`）�
 
 平台相关的 include 用 `#if defined(RADRAY_PLATFORM_WINDOWS)` 包在末尾。
 
-`.cpp` 内部实现放匿名 namespace（core）或文件级 `static`（render / shader 后端），
-见上文命名一节。
+`.cpp` 内部辅助实现使用所在文件已有的匿名 namespace 或文件级 `static` 组织，见上文命名一节。
 
 ## 接口风格
+
+runtime 的公开头文件（`modules/runtime/include/radray/runtime/`）中，只有纯数据记录使用 `struct`；
+含构造或析构函数、成员函数（含静态成员函数）、运算符、虚接口或继承的类型使用 `class`。
+前置声明与 `friend` 声明须保持一致；使用 `class` 不要求把原有公开数据成员改为私有。
 
 整数上下界统一使用 `<limits>` 中的 `std::numeric_limits<T>::min()` / `max()`，使用处直接包含 `<limits>`；
 不使用 `<cstdint>` / `<stdint.h>` 的整数边界宏。
 
-**可空指针用 `Nullable<T>`，可空值用 `std::optional`。** 这条分界在仓库里执行得很干净：
+**可空指针用 `Nullable<T>`，可空值用 `std::optional`。** 接口写法例如：
 
 ```cpp
 Nullable<unique_ptr<Buffer>> CreateBuffer(...);   // 指针类，可能没有
@@ -73,12 +76,12 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 `bool` + out 参数用在"填充一个已有对象"的场合（例如 `JsonDeserializer<T>::Read(value, output)`），
 不用来代替返回值。
 
-**错误处理的主流做法是：`RADRAY_ERR_LOG` + 返回空/false。** 不可恢复的不变量违反用
-`RADRAY_ABORT`。业务代码几乎不用异常——异常只出现在三类边界：第三方 C/C++ 库
-（例如 libpng）、平台 API、以及需要处理可恢复异常的 C 回调。新增 `try`/`catch`/`throw`
-**要先问用户**（`AGENTS.md`）。
+错误处理按已有接口返回结果：RHI 工厂使用 `RADRAY_ERR_LOG` + 空值，shader 使用
+`DiagnosticResult<T>`，外部资源扩展使用 `ExternalResult<T>`。不可恢复的不变量违反用 `RADRAY_ABORT`。
+已有异常还包括 `Nullable::Unwrap()` 的误用检测与 ObjectArena 的分配失败。
+新增 `try`/`catch`/`throw` **要先问用户**（`AGENTS.md`）。
 
-`noexcept` 用得很密：访问器、setter、析构一律标。虚接口批量标（`rhi.h` 大部分纯虚方法）。
+访问器、析构和 RHI 虚接口广泛使用 `noexcept`；会分配的接口按实际失败契约决定，例如 `Material::Create` 不声明它。
 但**不要为了保住 `noexcept` 而加 try/catch**——那是硬规则禁止的。
 
 ## 构造与析构
@@ -88,26 +91,26 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 **RHI 与 window 层用「接口 + 静态 Create 工厂」**，返回 `Nullable<unique_ptr/shared_ptr>`：
 
 ```cpp
-static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc);
+// Device 类内的工厂声明。
+static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc,
+                                          const RhiValidationOptions& validation = {});
 ```
 
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
 [RHI 所有权](../architecture/render-rhi.md)。普通资源包装使用析构函数与成员声明顺序。
 
-RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`ScopeGuard`、`TaskScope`、
-`ScopedBufferMap`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
-是后端私有的例外。）
+RAII 包装类使用表达职责的名称，例如 `ScopeGuard`、`TaskScope`；
+`d3d12_impl.h` 内部也有 `DescriptorHeapViewRAII`。
 
-**成员声明顺序常常有语义**，因为析构是逆序的。这类地方都有注释标出，不要"顺手整理"。
+成员按声明的逆序析构；例如 `FrameScheduler` 先释放 Slot，再释放 Pipeline。调整顺序前核查依赖关系。
 
 ## 每帧热路径
 
-每帧按 primitive / draw 执行的函数（snapshot 变换、culling、renderer list 处理、后端 encoder 绑定）
-要同时对 Release 与 Debug 负责：Debug 默认 `/Od /Ob0`，Eigen 表达式模板、`std::span`、小容器的
-每个算子都是一次真实调用，Debug 帧率主要由这些路径决定。约定：
+每帧按 primitive / draw 执行的函数包括 Scene 可见命令收集、MDC 录制与后端 encoder 绑定。
+性能比较分别记录 Release 与 Debug 配置；不能从类型或代码形态推断实际调用次数和帧率。现行约定：
 
-- 每 primitive 一次的 bounds/剔除数值代码优先使用直接分量访问（当前入口为 `raster_scene.cpp`、`render_scene.cpp`）；
-  既有矩阵运算可继续使用 Eigen，是否展开由测量决定。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
+- bounds 数值实现位于 `modules/core/src/basic_math.cpp`，Scene 不执行可见性剔除；
+  既有矩阵运算使用 Eigen，是否展开由测量决定。4×4 默认列主序矩阵的 `(r, c)` 位于 `data()[c * 4 + r]`。
 - 不在每 draw 路径上构造 `string`、`fmt::format`、按名字查找绑定；启动或首次遇到 program 时解析成
   绑定句柄或索引再复用。
 - 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
@@ -180,6 +183,8 @@ gtest_discover_tests(test_radray_core)
 没有 `.clang-tidy`，没有 `.editorconfig`。
 
 ## 注释
+
+`modules/runtime/` 内的注释使用中文；类型名、API 名称、路径、末尾namespace保留原文。
 
 `AGENTS.md` 已定基调：**代码注释只承载 API 契约，设计理由归 `docs/`**。落到实践：
 

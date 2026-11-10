@@ -8,8 +8,7 @@
 
 装扩展：`C/C++ Extension Pack`、`clangd`。
 
-两个 IntelliSense 引擎不能共存，方案是**全程用 clangd，把 cpptools 的 IntelliSense 全关**，
-只留它的 clang-tidy 代码分析。
+下面的配置使用 clangd 提供补全，关闭 cpptools 的 IntelliSense，保留其 clang-tidy 代码分析。
 
 `.vscode/` 不在版本控制内，下面的配置需要手动落地。
 
@@ -136,4 +135,4 @@ Visual Studio/MSBuild 不创建该目标，也不自动调用或串联 `win_gen_
 
 ## opencode
 
-`opencode.json` 配置了 clangd LSP。文件本身在 `.gitignore` 里，属于个人配置。
+`.gitignore` 忽略 `opencode.json`；仓库不提供该文件或统一的 LSP 配置，其内容由本机环境维护。

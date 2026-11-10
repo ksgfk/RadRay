@@ -138,8 +138,8 @@ Factory 包装对象可以先释放，Device 继续持有会话。最后一个�
 创建原生 Factory 前会话已经就绪，失败路径和最终释放仍在其生命周期内；测试也可在创建前订阅上下文。
 内部 `ObserveDiagnostics(context, observer)` 只订阅指定上下文；相同 callback/userData 只在该上下文内去重。
 关闭 validation 不建立会话。结构化 observer 与日志收到同一消息；消息保存来源、通道、producer、
-severity、category、原生 ID、自有描述字符串、HRESULT 与采集故障类型。测试计数、消息历史、
-预期匹配和自检均位于测试侧，不放入生产对象。
+severity、category、原生 ID、自有描述字符串、HRESULT 与采集故障类型。当前 GPU 测试通过日志回调在 fixture 内计数错误，
+不向生产对象添加测试计数。
 
 D3D12 在创建原生 Device 后、创建内部资源前选择一种模式，活动期间不混用：
 
@@ -197,21 +197,17 @@ APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留�
 同一通道的重复采集故障去重，类型或 HRESULT 变化另行报告。不再维护滚动游标、精确缺口数或恢复成功状态。
 有限容量和非原子清空无法保证永不丢失；无法确认完整性就必须失败，不能按零错误通过。
 
-#### 每个测试的统一收尾
+#### 当前测试的诊断收尾
 
-公共 `DeviceContext::Reset()` 幂等收尾。测试先停止并 join 自己的 CPU 线程，等待所有已创建的
-Direct/Compute/Copy 队列及 slot，再显式释放 fixture 成员。局部 GPU 资源在 Submit 前声明
-`GpuWorkGuard`，保证提前 ASSERT 返回也先等待、后析构。Reset 再次等待所有队列，完成检查点、
-Device/Factory 释放、通道关闭和末次 DXGI 读取；停止订阅后统一匹配、断言、记录报告，最后释放 probe。
-等待失败、设备移除或 30 秒超时会终止，不能继续作为成功收尾。
+`modules/render/tests/gpu_test_fixture.h/.cpp` 的 `GpuTest` 通过原生与 RHI 日志回调，
+分别记录 `Err` / `Critical` 级别消息数量。`TearDown()` 等待每个已创建设备的 Direct 队列，
+释放设备、DXGI factory/context 或 Vulkan instance，再检查两个计数为零。
+测试可以用 `TakeRhiValidationErrors()` 取走并检查预期的 RHI 诊断；原生错误没有同类豁免接口。
+当前 fixture 不按原生 ID、producer 或 HRESULT 匹配错误，也没有诊断自检 marker。
+`SubmitAndWait` helper 提交后同步等待；局部 GPU 资源的使用仍须在自身析构前结束，不能依赖稍后的 `TearDown()`。
+实际 suite 与后端跳过规则见[render 测试](../guide/build-test.md#render-测试)。
 
-正常用例要求零非预期 ERROR/CORRUPTION、零采集故障、成功检查点及 GPU 等待；warning 默认只记录。
-预期错误匹配来源、producer、ID、severity、数量和消息区间，采集故障还匹配故障类型和 HRESULT；
-仅声明的故障可豁免。断言由测试线程执行，日志和 callback 不决定测试通过。
-自检 marker 仅确认通路可用，不是完成屏障。同进程共享诊断通道的 case 必须串行执行。
-[GBV 在 GPU 执行后输出](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-d3d12-debug-layer-gpu-based-validation#debug-output)，
-因此必须先等待 GPU 再结算；sleep、连续空队列或 marker 都不能替代等待和生命周期关闭。
-真实 Win10 的计数及自然降级验收见[构建与测试](../guide/build-test.md#d3d12--dxgi-采集验收)。
+#### Fence 等待与不可呈现窗口
 
 Fence 查询把 `std::numeric_limits<uint64_t>::max()` 视为设备移除，禁止上层将其比较为成功完成。
 `Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
@@ -322,9 +318,10 @@ Shader 直接通过 `ShaderDescriptor::Source` 接收原始 DXIL 或 SPIR-V 字�
 `ShaderEntry` 在 PSO 描述中选择 entry。render 不解码 artifact、不解析反射、不链接 shader/compiler；
 调用方可以使用独立 shader/compiler 模块，也可以提供外部工具生成的合法字节码。
 
-编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
+编译期开关在 `cmake/Options.cmake`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
 `modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
-`src/vk/` 的源文件并定义同名宏。**源文件 glob 非递归**，新增 `.cpp` 要重新 configure。
+`src/vk/` 的源文件并定义同名宏。公共 `src/*.cpp` 使用非递归 glob，后端目录使用递归 glob；
+均带 `CONFIGURE_DEPENDS`，目录匹配变化会触发 CMake 重新生成。
 
 运行期探测的是**选哪块 GPU**：D3D12 走 DXGI 1.6 的 `EnumAdapterByGpuPreference(HIGH_PERFORMANCE)`
 并回退到枚举评分，Vulkan 按 `VkPhysicalDeviceType` 打分。
@@ -374,7 +371,6 @@ buffer 布局遵从未开启额外 layout feature 时的规则；render 不反�
 sampler 创建、RHI 校验、间接绘制和 UAV stage 报告读取 Enabled，而非硬件 Supported。
 未启用 `multiDrawIndirect` 时拆成单 draw；未启用 `drawIndirectFirstInstance` 时，间接参数的 firstInstance 必须为零。
 其余可选能力缺失时不能使用依赖它的 view、状态或 shader 操作；sampler 不满足启用能力时返回空。
-未来增加功能时同步更新请求、依赖检查和测试，不以设备版本或支持位代替请求。
 
 查询链和创建链分别由 `FeatureChainVulkan` 持有，使用 Features2 + Vulkan11 + Vulkan12 聚合结构，
 不重复挂接聚合结构覆盖的独立 feature 结构。创建链仅含 Enabled，`pEnabledFeatures=nullptr`；
@@ -388,7 +384,7 @@ VMA 的 requirements2 / bind-memory2 以及 timeline 等待、计数查询入口
 不请求或启用 `VK_GOOGLE_hlsl_functionality1`、`VK_GOOGLE_user_type`，缺少它们不阻止设备创建。
 正式工具链不依赖这两个扩展，外部与旧 shader 的离线兼容边界见 [Shader pipeline](shader-pipeline.md#target-lanes)。
 不再为已提升到 1.2 核心的 properties2、timeline、旧 maintenance1 路径请求冗余扩展。
-超出 1.2 的新功能须检查扩展、对应 feature 与入口；查询属性本身不启用功能。
+查询属性本身不启用功能。
 Vulkan11 / Vulkan12 properties 集中查询并保存，`MaxBufferSize` 统一取 Vulkan11 的 `maxMemoryAllocationSize`，
 不查询 maintenance4 属性，也不依赖 `VK_KHR_maintenance4`。这个值表示单次内存分配上限，
 用于 RHI buffer 大小的预检查，不保证该大小的 buffer 一定可创建；实际创建仍受资源要求和可用内存限制。
@@ -533,10 +529,8 @@ RHI 没有 pipeline layout cache，也没有 Vulkan descriptor set layout cache�
 原生创建，不保留去重 key、hash、cache entry、驱逐表或布局专用引用计数。复用由调用方保存并共享同一个
 RHI 布局对象完成；取消缓存不保证驱动内部不会共享实现。
 
-这项决定取代[历史计划](../history/2026-10-22-explicit-rhi-binding-layout-rationale.md)中保留原生布局缓存的安排。
-先前由 shader active resource 集合定义布局，使 shader 变体、资源裁剪和 compiler metadata 影响参数 ABI，
-并把名称解析、policy modifier、缓存身份和参数集兼容性带进 RHI。显式组布局让 ABI 和复用边界归调用方；
-删除隐式去重可减少所有权链、缓存关闭顺序和跨布局身份依赖。代价是重复创建相同描述会重复支付原生创建与内存成本，
+显式组布局让 ABI 和复用边界归调用方，不受 shader 变体裁剪或 compiler metadata 自动改变。
+布局不参与设备缓存的关闭顺序，也不依赖缓存身份。代价是重复创建相同描述会重复支付原生创建与内存成本，
 调用方必须主动共享布局，必要时在自己的生命周期范围内组织复用。
 
 Destroy 幂等，部分创建失败由局部 owner 释放已创建的资源。没有新增全局共享状态、隐式延迟销毁或异常恢复。
@@ -564,9 +558,7 @@ Begin 不结束旧 epoch，重复借出同一命令前必须 Reset。
 
 D3D12 不为 command buffer 创建或持有空 root signature；`EndRenderPass` 与 `EndComputePass`
 均不额外重置原生 root signature。后续 encoder 在绑定 pipeline 时设置其 layout 的 root signature，
-参数组由该 encoder 显式绑定。使用 `nullptr` 重置签名仍有 GBV 驱动兼容性限制：在 RTX 3060、
-驱动 `32.0.15.9144` 上，结束 compute encoder 并清空签名后，后续录制可触发 `nvwgf2umx.dll`
-的 `0xC0000005` 访问违例；同一录制关闭 GBV 或保留签名后可通过。
+参数组由该 encoder 显式绑定。
 
 graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
 带 `BufferUse::Indirect` 的参数；固定 count 和 count=0 的行为由 RHI 保持，RHI 不提供 GPU count
@@ -576,7 +568,7 @@ buffer。`CommandBuffer::ResolveTexture` 一次处理一个 mip 和连续 array 
 
 D3D12 的 `ResolveTexture` 只允许 Direct command list，并要求格式支持 MULTISAMPLE_RESOLVE。
 当前 timestamp query pool 使用普通 TIMESTAMP heap，仅支持 Direct / Compute，Copy queue 上的查询操作由
-校验层拒绝；若将来支持 copy timestamp，需要单独的 COPY_QUEUE_TIMESTAMP heap 契约。
+校验层拒绝。
 
 `RenderPassBeginDescriptor::AllowUavWrites` 是执行期开关，不属于 render pass/graphics PSO compatibility
 事实。D3D12 将它映射到
@@ -720,9 +712,8 @@ view 维度与层范围也在 RHI 校验层按后端检查：Vulkan 的 1D/2D �
   的既有路径。例如 RGBA8_UNORM image 的 R32_UINT sampled view 可属于 Vulkan 同一兼容类，却不属于
   D3D12 同一 typeless 家族；同一请求允许有不同后端结果。
 
-本路径不接入 `VkImageFormatListCreateInfo`；它可能帮助部分实现优化 mutable image，但不据此宣称已有
-性能问题或保证收益。原生规则见 [Vulkan view usage](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewUsageCreateInfo.html)
-与 [image format list](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_image_format_list.html)。
+本路径不接入 `VkImageFormatListCreateInfo`。view usage 的原生规则见
+[Vulkan view usage](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewUsageCreateInfo.html)。
 
 ## Windows 同 GPU 原生资源互操作
 
@@ -837,12 +828,10 @@ D3D12 句柄的四种后端组合与 opaque Vulkan→Vulkan 都有原生代码�
 
 ### 互操作规范边界
 
-下列约束核对 Vulkan 1.2.198 规范与 KHR Win32 external memory/semaphore 扩展；当前 refpage 的 VUID 可能随版本更名，
+下列引用使用 Vulkan 1.2.198 规范与 KHR Win32 external memory/semaphore 扩展；不同版本 refpage 的 VUID 可能不同，
 不使用仅在 synchronization2、maintenance 或新版扩展启用后成立的规则解释 1.2 路径。
 D3D12 核对 Microsoft Learn 与 DirectX-Specs；其中 Resource Heaps 是整合设计文档，包含历史段落，
 旧 D3D11 资源别名规则不能直接用于 D3D12 shared committed texture。
-版本差异也需单独识别：1.2.198 的 dedicated allocation `image-02964` 要求 size 等于 requirements，当前 refpage 已改为大于等于；
-不能把当前文案冒充该历史版本原文。opaque 的原始 allocationSize / memoryTypeIndex 匹配规则没有因此取消。
 
 | 范围 | 当前契约与官方依据 |
 |---|---|
@@ -857,7 +846,7 @@ D3D12 核对 Microsoft Learn 与 DirectX-Specs；其中 Resource Heaps 是整合
 跨 API 的 DXGI↔VkFormat、usage/flags 和 COMMON↔GENERAL 是本实现使用的对应关系，不能将两个 API 的枚举值或平面物理布局等同。
 Vulkan 的 [External Image Implied Layouts](https://docs.vulkan.org/spec/latest/chapters/resources.html#resources-image-layouts)
 表列出 D3D11 句柄，没有列出 D3D12_RESOURCE；因此该表不足以单独证明所有 D3D12 创建模式的边界布局映射。
-对查询支持却失败的部分 mip 数组和 copy-only DS 组合，仍需厂商的跨 API 对应规则或进一步原生对照，不能以普通 image 的能力替代这项证据。
+当前测试只覆盖前述 buffer 与 2D RGBA8 纹理往返，不构成部分 mip 数组或 copy-only 深度/模板组合的验证证据。
 
 ## 同步
 
@@ -867,7 +856,7 @@ Vulkan 的 [External Image Implied Layouts](https://docs.vulkan.org/spec/latest/
 Vulkan 的 acquire wait 使用 `ALL_COMMANDS`。RHI 不限制 acquired image 的首次访问阶段，
 布局转换、transfer readback 与颜色附件访问都必须在 acquire 完成之后；不能只等待颜色/计算阶段。
 
-**两个后端在这里不对称，这是现状而非设计意图**：Vulkan 完整实现三类；D3D12 的 `Submit`
+两个后端在这里不对称：Vulkan 完整实现三类；D3D12 的 `Submit`
 只处理 fence，忽略两个 swapchain 同步槽，`AcquireNext` 也对它们传 `nullptr`——D3D12 靠
 DXGI 的 frame-latency waitable object 达到同一效果。
 
@@ -917,9 +906,7 @@ semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重�
 [退出时呈现资源回收保证缺口](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html#_vk_ext_swapchain_maintenance1_extension)，
 不能把验证层无报错或普通队列 fence 完成当作补足该保证的证据。
 
-`QueueVulkan::Submit` 始终提交单个 `VkSubmitInfo`，不再为同步验证插入前置空批次。
-多交换链与同队列 timeline 串联的旧校验层问题、当时用例和校验层版本门槛见
-[归档构建快照](../history/2026-10-21-runtime-build-test-snapshot.md#vulkan-多交换链同步验证已知问题)，不属于当前测试覆盖。
+`QueueVulkan::Submit` 始终提交单个 `VkSubmitInfo`，不为同步验证插入前置空批次。
 
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，由 protected `MakeFrame` 创建。
 校验包装用 `ValidateFrame` 检查 owner/token；Present / DiscardAcquiredFrame 按值接收，移动后调用方 frame 失效。
@@ -980,7 +967,7 @@ view 层数；两者均不依赖某个 load/store 版本的 pass 指针。Imagel
 Swapchain image 的 flags/usage 来自实际创建参数，其逻辑 usage 不再宣称未创建的 sampled 用途。
 预算耗尽或原生创建失败仍返回空，不静默切换 framebuffer 模式。
 
-每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、Return、CPU Submit 和取消通知都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶时 BeginRenderPass 返回空。缓存清理不等待 GPU idle。
+每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、EndRenderPass 和 CPU Submit 都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶时 BeginRenderPass 返回空。缓存清理不等待 GPU idle。
 
 view ID 在该 device 内单调且不复用。两种模式均按 command epoch 去重持有附件 view ID，缓存以独立
 使用计数跟踪这些引用；仅在 pass/framebuffer 获取成功后提交。End/Submit 不释放，原生命令池 Reset
@@ -1043,7 +1030,8 @@ device 创建 → 各 `CreateXxx`（buffer/texture/view → shader →
 pipeline layout → parameter set → PSO/sampler）→ queue 与 fence → command buffer 与
 barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
-`d3d12_helper.cpp` 与 `vulkan_helper.cpp` 是纯枚举映射/格式转换库，外加 `format_as` 重载。
+`d3d12_helper.cpp` 与 `vulkan_helper.cpp` 包含枚举映射、格式转换和 `format_as` 重载，
+也包含能力选择、纹理校验及外部资源描述转换等后端辅助逻辑。
 `vulkan_helper.cpp` 顶部还是 `VOLK_IMPLEMENTATION` / `VMA_IMPLEMENTATION` 的单翻译单元
 包含点。
 
@@ -1052,11 +1040,11 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 - **SwapChain 尚不支持 HDR 输出配置**：公共 descriptor 不提供色彩空间或 HDR metadata 设置；选择浮点或高位深格式不能替代完整 HDR 输出契约。
 - **D3D12 的 swapchain 同步槽未接线**：`Submit` 忽略 `WaitToExecute` / `ReadyToPresent`。
 - **D3D12 纹理不带优化 clear value**：`CreateTexture` 的 `clearPtr` 恒为 `nullptr`。
-- **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**，
-  Vulkan 侧有完整实现。upload heap 无需 flush 可以解释，readback 的 invalidate 语义未覆盖。
-- **非 Win32/非 Apple 平台没有 surface 创建**（`vulkan_impl.cpp` 有 TODO 标记），走 `#else`
+- **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**；
+  Vulkan 侧调用 VMA 的对应缓存操作。CPU/GPU 访问的同步仍由调用方完成。
+- **非 Win32/非 Apple 平台没有 surface 创建**，走 `#else`
   后直接报错返回。
-- **Vulkan GPU-based validation 默认关闭**：部分驱动上会崩。
+- **Vulkan GPU-based validation 默认关闭**：`VulkanInstanceDescriptor::IsEnableGpuBasedValid` 默认为 false，由调用方显式开启。
 
 ## 测试
 

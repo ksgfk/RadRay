@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cstring>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <gtest/gtest.h>
 
 namespace radray::shader_compiler {
@@ -388,7 +388,7 @@ TEST(RadRayDxcMetadata, CrossLaneTypePayloadDisagreementFailsClosed) {
 
     for (const Disputed& disputed : cases) {
         SCOPED_TRACE(disputed.Declarations);
-        const string source = fmt::format(R"hlsl(
+        const string source = radray::format(R"hlsl(
 #include <core/platform.hlsli>
 
 struct Pair {{ float A; float B; }};
@@ -402,7 +402,7 @@ VK_BINDING(0, 0) ConstantBuffer<Shared> SharedData : register(b0, space0);
 [shader("vertex")]
 float4 VSMain() : SV_Position {{ return mul(SharedData.Transform, float4(1, 1, 1, 1)) + float({}); }}
 )hlsl",
-                                          disputed.Declarations, disputed.Read);
+                                             disputed.Declarations, disputed.Read);
 
         const auto result = DiscoverAndCompile(client, Source("metadata/cbuffer_disputed.hlsl", source));
 
@@ -931,7 +931,7 @@ TEST(RadRayDxcMetadata, SpirvBytecodeDeclaresNoGoogleExtensions) {
     constexpr uint32_t kOpExtension = 10;
     const Client client;
     for (const uint8_t debugInfo : {uint8_t{0}, uint8_t{1}}) {
-        SCOPED_TRACE(fmt::format("debugInfo={}", debugInfo));
+        SCOPED_TRACE(radray::format("debugInfo={}", debugInfo));
         VariantInput input = Source("metadata/texture_sampler.hlsl", kTextureSamplerSource, ShaderTargetMask::SPIRV);
         input.Policy.DebugInfo = debugInfo;
 

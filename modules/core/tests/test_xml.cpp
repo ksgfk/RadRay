@@ -1,5 +1,7 @@
 #include <radray/xml.h>
 
+#include <radray/logger.h>
+
 #include <filesystem>
 #include <system_error>
 
@@ -13,7 +15,7 @@ constexpr EnumFlags<XmlFormatFlag> CompactFormat = XmlFormatFlag::Raw | XmlForma
 class ScopedTempFile {
 public:
     explicit ScopedTempFile(std::string_view name)
-        : _path(std::filesystem::temp_directory_path() / fmt::format("radray_core_xml_{}", name)) {}
+        : _path(std::filesystem::temp_directory_path() / radray::format("radray_core_xml_{}", name)) {}
     ScopedTempFile(const ScopedTempFile&) = delete;
     ScopedTempFile& operator=(const ScopedTempFile&) = delete;
     ~ScopedTempFile() noexcept {

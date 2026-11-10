@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <radray/window/win32/win32_window.h>
 
 namespace radray {
@@ -57,7 +57,7 @@ TEST_F(NativeEventPumpTest, DispatchPreservesNativeOrder) {
     vector<string> events;
     Window->EventKeyboard().connect([&](KeyCode, Action action) { events.push_back(action == Action::RELEASED ? "key up" : "key down"); });
     Window->EventTextInput().connect([&](std::string_view text) { events.emplace_back(text); });
-    Window->EventMouseWheel().connect([&](int delta) { events.push_back(fmt::format("wheel {}", delta)); });
+    Window->EventMouseWheel().connect([&](int delta) { events.emplace_back(radray::format("wheel {}", delta)); });
     Window->EventFocused().connect([&](bool focused) { events.push_back(focused ? "focus" : "blur"); });
     ::SendMessageW(Hwnd, WM_KEYDOWN, VK_F6, 0);
     ::SendMessageW(Hwnd, WM_CHAR, 'a', 0);

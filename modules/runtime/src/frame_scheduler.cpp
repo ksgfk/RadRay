@@ -3,6 +3,7 @@
 #include <limits>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -32,39 +33,63 @@ FrameScheduler::~FrameScheduler() noexcept { WaitIdle(); }
 
 uint32_t FrameScheduler::GetSlotCount() const noexcept { return static_cast<uint32_t>(_slots.size()); }
 
-void FrameScheduler::RunFrame(Scene& source) noexcept { RunFrameImpl(source, &source); }
-
-void FrameScheduler::RunFrame(const Scene& source) noexcept { RunFrameImpl(source, nullptr); }
-
-void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableSource) noexcept {
+FrameSlot& FrameScheduler::BeginFrame() noexcept {
+    auto& slot = *_slots[_currentSlotIndex];
+    if (_slotBegun) return slot;
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.BeginFrame");
     if (_nextFrameId == std::numeric_limits<uint64_t>::max()) {
         RADRAY_ABORT("FrameScheduler: frame IDs exhausted");
     }
-    auto& slot = *_slots[_currentSlotIndex];
     WaitSlot(slot);
     slot.ResetCommandStorage();
     slot.ResetRetiredResources();
     slot.ResetFrameData();
     slot._frameId = _nextFrameId;
-    if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(_pipeline->GetMeshPassRegistrations());
-    slot._sourceScene = &source;
+    _slotBegun = true;
+#if RADRAY_IS_DEBUG
+    slot._inFrameCallback = true;
+#endif
+    return slot;
+}
+
+Nullable<FrameSlot*> FrameScheduler::GetCurrentSlot() noexcept {
+    return _slotBegun ? Nullable<FrameSlot*>{_slots[_currentSlotIndex].get()} : nullptr;
+}
+
+void FrameScheduler::RunFrame(Scene& source) noexcept { RunFrameImpl(source, &source); }
+
+void FrameScheduler::RunFrame(const Scene& source) noexcept { RunFrameImpl(source, nullptr); }
+
+void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableSource) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.RunFrame");
+    RADRAY_PROFILE_PLOT("RadRay.FrameScheduler.Slot", static_cast<int64_t>(_currentSlotIndex));
+    auto& slot = BeginFrame();
+    const auto passes = _pipeline->GetMeshPassRegistrations();
+    if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(passes);
+    for (const auto& pass : passes) slot.GetPassDrawList(pass.Pass).SetSortMode(pass.SortMode);
     _pipeline->Extract(source, slot);
-    _pipeline->Record(slot);
-    slot._sourceScene = nullptr;
+    _pipeline->Record(source, slot);
+#if RADRAY_IS_DEBUG
+    slot._inFrameCallback = false;
+#endif
     slot._inFlight = true;
+    _slotBegun = false;
     ++_nextFrameId;
     _currentSlotIndex = (_currentSlotIndex + 1) % GetSlotCount();
 }
 
 void FrameScheduler::WaitIdle() noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitIdle");
     for (const auto& slot : _slots) WaitSlot(*slot);
     for (const auto& slot : _slots) slot->ResetCommandStorage();
     for (const auto& slot : _slots) slot->ResetRetiredResources();
     for (const auto& slot : _slots) slot->ResetFrameData();
+    _slotBegun = false;
 }
 
 void FrameScheduler::WaitSlot(FrameSlot& slot) noexcept {
     if (!slot._inFlight) return;
+    RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitSlot");
     _pipeline->Wait(slot);
     slot._inFlight = false;
 }

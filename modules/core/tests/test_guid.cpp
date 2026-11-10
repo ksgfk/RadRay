@@ -1,6 +1,6 @@
 #include <radray/guid.h>
 
-#include <fmt/format.h>
+#include <radray/logger.h>
 #include <gtest/gtest.h>
 
 namespace radray {
@@ -26,7 +26,7 @@ TEST(GuidTest, ToStringSupportsStandardFormats) {
     EXPECT_EQ(kSample.ToString('N'), "00112233445566778899aabbccddeeff");
     EXPECT_EQ(kSample.ToString('b'), "{00112233-4455-6677-8899-aabbccddeeff}");
     EXPECT_EQ(kSample.ToString('P'), "(00112233-4455-6677-8899-aabbccddeeff)");
-    EXPECT_EQ(fmt::format("{}", kSample), kSample.ToString());
+    EXPECT_EQ(radray::format("{}", kSample), kSample.ToString());
 }
 
 TEST(GuidTest, TryParseAcceptsStandardFormatsCaseAndSurroundingWhitespace) {

@@ -6,8 +6,7 @@
 #include <stdexcept>
 #include <memory>
 
-#include <fmt/format.h>
-
+#include <radray/logger.h>
 #include <radray/trait.h>
 
 namespace radray {
@@ -57,14 +56,14 @@ public:
 
     constexpr T Unwrap(std::source_location location = std::source_location::current()) & {
         if (!HasValue()) [[unlikely]] {
-            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
+            throw NullableAccessException(radray::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()).c_str());
         }
         return _value;
     }
 
     constexpr T Unwrap(std::source_location location = std::source_location::current()) && {
         if (!HasValue()) [[unlikely]] {
-            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
+            throw NullableAccessException(radray::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()).c_str());
         }
         return std::move(_value);
     }
@@ -112,7 +111,7 @@ public:
 
     constexpr std::unique_ptr<T, TDeleter> Unwrap(std::source_location location = std::source_location::current()) {
         if (!HasValue()) [[unlikely]] {
-            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
+            throw NullableAccessException(radray::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()).c_str());
         }
         return std::move(_value);
     }
@@ -166,7 +165,7 @@ public:
 
     constexpr std::shared_ptr<T> Unwrap(std::source_location location = std::source_location::current()) {
         if (!HasValue()) [[unlikely]] {
-            throw NullableAccessException(fmt::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()));
+            throw NullableAccessException(radray::format("NullableAccessException\n  at {}:{}", location.file_name(), location.line()).c_str());
         }
         return std::move(_value);
     }

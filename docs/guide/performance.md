@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
 
 # 性能测量
 
@@ -19,7 +19,8 @@
 
 `bench_object_arena` 使用 Google Benchmark，通过 main 显式注册用例，没有全局 fixture 或分配钩子。
 契约见 [Core / ObjectArena](../architecture/core-facilities.md#objectarena-与-arenaallocator)。每批为 256 或
-4096 个对象，Trivial 与 Nontrivial 在本机 64 位构建中均为 64 B；后者析构更新测试侧计数，验证恰好析构一次。
+4096 个对象；Trivial 保存八个 uint64，Nontrivial 保存七个 uint64 和一个计数器指针，在 64 位指针布局下均为 64 B。
+后者析构更新测试侧计数，验证恰好析构一次。
 
 | Family | 计时边界 |
 |---|---|
@@ -38,6 +39,7 @@
 cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
 cmake --build --preset win-x64-release-clangcl --target test_radray_core bench_object_arena --parallel 8
 ctest --preset win-x64-release-clangcl -R '^(ObjectArenaTest|ArenaAllocatorTest)\.' --output-on-failure --timeout 30
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
 $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_object_arena.exe'
 & $bench --benchmark_min_time=1x
 & $bench '--benchmark_filter=ObjectArena/(Cold|Reuse|Heap|Vector)' --benchmark_min_time=0.1s --benchmark_repetitions=5 --benchmark_out=build/object-arena.json --benchmark_out_format=json
@@ -54,9 +56,9 @@ Reset 用例在计时外构造对象，使用固定迭代数限制总运行时�
 不能用纯净提交代替。前后固定机器、编译器、allocator、profiler/validation、flight、视图、材质分布和脏比例；
 交替运行独立进程，区分一次覆盖扫描与多轮配对比较。脚本选项不等于结果已经可比，仍需核对实际匹配的 case。
 
-初始化、JIT、PSO、首次 buffer 扩容与稳态分开；Tracy 用对应 workload 的 warmup complete message 切掉冷区间。
-持续更新必须实际改变值，不能让 setter 的同值短路悄悄降低脏比例。重点同时覆盖静止、单次修改后静止、
-稀疏/密集、随机/顺序、父节点传播、增删和多 flight；仅凭 dirty 百分比不能预测局部性或 GT/RT 重叠收益。
+初始化、首次分配与稳态分开，使用 benchmark 的计时边界和预热配置区分。
+当前三个基准不提供 runtime JIT、父节点传播或 GT/RT 并发测量；不能据它们推断渲染帧率或多线程收益。
+比较修改负载时核对每轮实际执行的操作及数据变化，不把准备阶段算作被测操作。
 
 | 指标 | 可以说明什么 | 不能代替什么 |
 |---|---|---|
@@ -73,7 +75,7 @@ CPU 与 GPU 可以重叠，不把二者相加得到 FPS。短测的百分比、�
 分别检查 CPU、GPU 和尾部延迟，对疑似退化做独立长采样。预算拒绝、skip、error 与成功运行分列，
 不把未运行 case 算作通过。drain 后缓存仍可能保留物理存储，回收正确性应检查使用引用和 owner 时点。
 
-历史设计与实测数据见[架构地图的历史资料](../architecture/overview.md#历史资料)。其中未入库的
+历史设计与实测数据见[历史目录](../history/README.md)。其中未入库的
 `build*/` 日志、trace、源码归档仅是采样时的本机证据；文件缺失时需要重新测量，不能从报告重新生成原始样本。
 
 ## 性能采样（Tracy）
@@ -82,6 +84,45 @@ CPU 与 GPU 可以重叠，不把二者相加得到 FPS。短测的百分比、�
 viewer 版本应与 project_manifest.json 的 Tracy tag 匹配；client 只监听 localhost、按需连接。
 业务插桩只用 radray/profiler.h 宏，详见 [Core](../architecture/core-facilities.md#性能采样宏)。
 CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_ENABLE_PROFILER=OFF`。
+
+### Runtime 分段
+
+Runtime 通过相同开关输出以下 CPU zone。父区间包含子区间，不能把它们直接相加；
+`RDG.Execute` 和各 `Record*` 区间测量主机上的命令录制，不是 GPU 执行时长。
+阶段之间的临时容器初始化/析构仍计入父区间，不保证子区间覆盖父区间的全部耗时。
+
+| 区间前缀 | 计时边界 |
+|---|---|
+| `RadRay.FrameScheduler` | RunFrame、在途槽等待、WaitIdle |
+| `RadRay.FrameSlot` | 命令存储重置、延迟资源回收、帧数据与 arena 回收、命令缓冲获取及首次创建 |
+| `RadRay.FramePipeline` | Extract/Record、应用帧数据提取、SetupGraph、逐 MeshPass 提取、命令 Begin/End 与 SubmitFrame 回调 |
+| `RadRay.Scene` | 持久缓存同步、可见命令收集与缓存直达指针解析（GatherVisibleHandles） |
+| `RadRay.DrawList` | 可见命令稳定排序、可见列表和动态命令清理 |
+| `RadRay.MeshDraw` | 整批命令提交；Debug 另有 Validate 子区间 |
+| `RadRay.RDG.Compile` | 资源检查、访问检查与依赖构造、裁剪、调度与合并 |
+| `RadRay.RDG` | Execute、物理资源获取、逐组屏障、Copy/Upload、Compute、Raster 录制、附件解析、末尾状态提交与屏障 |
+| `RadRay.RDG.Pool` | 每槽池复用标记重置、资源/视图查找；未命中时的 Create 子区间包含创建与池登记 |
+
+RDG 在逻辑 Pass 录制区间使用 Pass 名称作为动态 CPU zone 名称。相同名称的 Pass 在统计中合并，
+实例归属看时间线父区间。`CreateImportedView` 只在导入纹理需要创建当帧视图时出现。
+采样粒度为阶段、Pass、资源获取或整批命令；收集和绘制循环内没有逐 Draw 事件。
+
+Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone 的时间和
+`FrameScheduler.Slot`、`FramePipeline.MeshPassId` 关联，不能把每个样本当作整帧总量：
+
+- `Scene.VisibleBatches`、`DrawList.SortCommands`、`MeshDraw.SubmitCommands`
+  分别表示本次 Gather 的输入 Batch 数、待排序命令数、提交列表长度；最后一项包含零实例而被跳过的项。
+  命令数以 Batch/Pass 为单位；一条命令可按 ElementMask 发出多次 DrawIndexed，不能将列表长度当作 Draw 次数。
+  GatherPrimitives 按 Batch 调用 Gather，不能把单个 VisibleBatches 样本当成该 Primitive 入口的合计。
+- 当前没有 SnapshotCommands、SnapshotCapacityBefore/After 或 ClearSnapshots；缓存命令不再复制到帧槽。
+- `Scene.DirtyBatches` 是缓存同步本次取出的脏 Batch 数，包括随后因失效而跳过的项。
+- `RDG.DeclaredPasses/Textures/Buffers` 是声明数量，`AlivePasses`、`AliveMeshPasses` 和 `ExecutionGroups`
+  是成功编译后的存活数量与合并组数。`Pool.Textures/Buffers/Views` 是槽开始复用时池中保留的条目数量。
+- `RDG.UploadBytes` 是每次 MapUpload 的主机复制量，不含应用自管的上传路径。
+  `GroupBarriers`、`FinalBarriers` 是相应屏障批次的描述符数，不含 Upload 内部额外屏障。
+
+插桩关闭时宏及其参数表达式不参与运行。这些测点没有新增跨帧统计状态；开启时仍会增加采样成本，
+性能比较需固定插桩版本、开关和负载，并将首次扩容/资源创建与稳态分开。
 
 ## OBJ 解析
 
@@ -100,6 +141,7 @@ swap-and-pop 删除、空闲链和 generation 检查设计；数据准备、校�
 cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
 cmake --build --preset win-x64-release-clangcl --target bench_sparse_set test_radray_core --parallel 8
 ctest --preset win-x64-release-clangcl -R SparseSetTest --output-on-failure
+. tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
 $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_sparse_set.exe'
 & $bench --benchmark_list_tests=true
 # 全矩阵只跑一轮，用于确认所有 fixture 与操作合法；不能用其时间做性能结论。

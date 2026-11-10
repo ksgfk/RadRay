@@ -210,5 +210,66 @@ TEST(FirstFitAllocatorTest, RandomWorkloadKeepsRangesDisjointAndRecoversCapacity
     EXPECT_EQ(whole->Start, 0u);
 }
 
+TEST(BestFitAllocator, RejectsEmptyAndOversizedAllocations) {
+    BestFitAllocator allocator{8};
+    EXPECT_FALSE(allocator.Allocate(0));
+    EXPECT_FALSE(allocator.Allocate(9));
+    const auto allocation = allocator.Allocate(8);
+    ASSERT_TRUE(allocation);
+    EXPECT_EQ(allocation->Offset, 0u);
+    EXPECT_EQ(allocation->Count, 8u);
+    EXPECT_FALSE(allocator.Allocate(1));
+    allocator.Destroy(*allocation);
+    EXPECT_EQ(allocator.GetFreeCount(), 8u);
+}
+
+TEST(BestFitAllocator, UsesSmallestFittingHoleAndMergesBothNeighbors) {
+    BestFitAllocator allocator{24};
+    const auto a = allocator.Allocate(8);
+    const auto b = allocator.Allocate(4);
+    const auto c = allocator.Allocate(6);
+    const auto d = allocator.Allocate(6);
+    ASSERT_TRUE(a && b && c && d);
+    allocator.Destroy(*a);
+    allocator.Destroy(*c);
+    const auto best = allocator.Allocate(5);
+    ASSERT_TRUE(best);
+    EXPECT_EQ(best->Offset, c->Offset);
+    allocator.Destroy(*best);
+    allocator.Destroy(*b);
+    const auto merged = allocator.Allocate(18);
+    ASSERT_TRUE(merged);
+    EXPECT_EQ(merged->Offset, 0u);
+    allocator.Destroy(*d);
+    allocator.Destroy(*merged);
+    EXPECT_TRUE(allocator.Allocate(24));
+}
+
+TEST(BestFitAllocator, FragmentedReuseNeverOverlapsLiveRanges) {
+    BestFitAllocator allocator{97};
+    array<bool, 97> occupied{};
+    vector<BestFitAllocator::Allocation> live;
+    std::mt19937 random{42};
+    for (uint32_t step = 0; step < 3000; ++step) {
+        if (!live.empty() && random() % 3 == 0) {
+            const auto index = random() % live.size();
+            const auto allocation = live[index];
+            for (uint32_t i = allocation.Offset; i < allocation.Offset + allocation.Count; ++i) occupied[i] = false;
+            allocator.Destroy(allocation);
+            live.erase(live.begin() + index);
+        } else if (const auto allocation = allocator.Allocate(1 + random() % 12)) {
+            for (uint32_t i = allocation->Offset; i < allocation->Offset + allocation->Count; ++i) {
+                ASSERT_LT(i, occupied.size());
+                ASSERT_FALSE(occupied[i]);
+                occupied[i] = true;
+            }
+            live.push_back(*allocation);
+        }
+    }
+    for (const auto allocation : live) allocator.Destroy(allocation);
+    EXPECT_EQ(allocator.GetFreeCount(), 97u);
+    EXPECT_TRUE(allocator.Allocate(97));
+}
+
 }  // namespace
 }  // namespace radray

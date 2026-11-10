@@ -1,5 +1,7 @@
 #pragma once
 
+// 环境与设备生命周期见 docs/architecture/runtime.md。
+
 #include <string_view>
 #include <thread>
 
@@ -7,7 +9,6 @@
 
 namespace radray {
 
-// See docs/architecture/runtime.md for environment and device lifetimes.
 class Environment final {
 public:
     ~Environment() noexcept;
@@ -16,7 +17,7 @@ public:
     Environment(Environment&&) = delete;
     Environment& operator=(Environment&&) = delete;
 
-    // Logs and returns an empty owner on failure. Creates no GPU device.
+    // 失败时记录日志并返回空所有者；不创建 GPU 设备。
     [[nodiscard]] static Nullable<unique_ptr<Environment>> Create(
         render::RenderBackend backend, bool validation,
         std::string_view appName = "RadRay") noexcept;
@@ -27,7 +28,7 @@ public:
 
 private:
     friend class DeviceContext;
-    // Only use the accessor for the selected backend. Borrowed until environment destruction.
+    // 仅可调用已选后端的访问器；返回的借用在环境销毁时失效。
     render::DXGIFactory& GetFactory() noexcept { return *_factory; }
     render::InstanceVulkan& GetVulkanInstance() noexcept { return *_instance; }
 

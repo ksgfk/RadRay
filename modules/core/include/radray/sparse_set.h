@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <algorithm>
 #include <limits>
 #include <span>
 #include <utility>
@@ -165,6 +166,15 @@ public:
 
     void Reserve(uint32_t capacity) {
         _sparse.reserve(capacity);
+        _denseValues.reserve(capacity);
+        _sparseIndices.reserve(capacity);
+    }
+
+    void ReserveGeometric(uint32_t requiredCapacity) {
+        const auto capacity = std::min({_sparse.capacity(), _denseValues.capacity(), _sparseIndices.capacity()});
+        if (requiredCapacity <= capacity) return;
+        const auto grown = std::min<size_t>(InvalidIndex, capacity + capacity / 2);
+        Reserve(static_cast<uint32_t>(std::max<size_t>(requiredCapacity, grown)));
     }
 
     void Clear() {

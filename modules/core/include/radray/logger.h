@@ -13,6 +13,20 @@
 
 namespace radray {
 
+template <typename... Args>
+string format(fmt::format_string<Args...> pattern, Args&&... args) {
+    string result;
+    fmt::format_to(std::back_inserter(result), pattern, std::forward<Args>(args)...);
+    return result;
+}
+
+template <typename... Args>
+wstring format(fmt::wformat_string<Args...> pattern, Args&&... args) {
+    wstring result;
+    fmt::format_to(std::back_inserter(result), pattern, std::forward<Args>(args)...);
+    return result;
+}
+
 enum class LogLevel {
     Trace,
     Debug,
@@ -42,7 +56,7 @@ void LogFormat(LogLevel lvl, fmt::format_string<Args...> fmt, Args&&... args) no
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = fmt::format(fmt, std::forward<Args>(args)...);
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
     Log({}, lvl, str);
 }
 
@@ -52,7 +66,7 @@ void LogFormat(LogLevel lvl, fmt::wformat_string<Args...> fmt, Args&&... args) n
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = fmt::format(fmt, std::forward<Args>(args)...);
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
     Log({}, lvl, fmt::wstring_view{str.data(), str.size()});
 }
 #endif
@@ -62,7 +76,7 @@ void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::format_string<Arg
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = fmt::format(fmt, std::forward<Args>(args)...);
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
     Log(loc, lvl, str);
 }
 
@@ -81,7 +95,7 @@ void LogFormatLoc(std::source_location loc, LogLevel lvl, fmt::wformat_string<Ar
     if (!ShouldLog(lvl)) {
         return;
     }
-    auto str = fmt::format(fmt, std::forward<Args>(args)...);
+    auto str = radray::format(fmt, std::forward<Args>(args)...);
     Log(loc, lvl, fmt::wstring_view{str.data(), str.size()});
 }
 #endif
@@ -275,8 +289,8 @@ void LogErrorSPrintf(const S& fmt, Args&&... args) noexcept {
 
 #define RADRAY_ASSERT(x) assert(x)
 
-#define RADRAY_THROW(type, fmt, ...)                                 \
-    do {                                                             \
-        auto tmp___ = ::fmt::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
-        throw type(tmp___.c_str());                                  \
+#define RADRAY_THROW(type, fmt, ...)                                    \
+    do {                                                                \
+        auto tmp___ = ::radray::format(fmt __VA_OPT__(, ) __VA_ARGS__); \
+        throw type(tmp___.c_str());                                     \
     } while (0)

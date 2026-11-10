@@ -1,0 +1,321 @@
+#include <radray/image_data.h>
+
+#include <algorithm>
+#include <limits>
+#include <sstream>
+
+#include <gtest/gtest.h>
+
+namespace radray {
+namespace {
+
+string RgbJpeg() {
+    constexpr char encoded[] =
+        "\xff\xd8\xff\xe0\x00\x10\x4a\x46\x49\x46\x00\x01"
+        "\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00\x43"
+        "\x00\x02\x01\x01\x01\x01\x01\x02\x01\x01\x01\x02"
+        "\x02\x02\x02\x02\x04\x03\x02\x02\x02\x02\x05\x04"
+        "\x04\x03\x04\x06\x05\x06\x06\x06\x05\x06\x06\x06"
+        "\x07\x09\x08\x06\x07\x09\x07\x06\x06\x08\x0b\x08"
+        "\x09\x0a\x0a\x0a\x0a\x0a\x06\x08\x0b\x0c\x0b\x0a"
+        "\x0c\x09\x0a\x0a\x0a\xff\xdb\x00\x43\x01\x02\x02"
+        "\x02\x02\x02\x02\x05\x03\x03\x05\x0a\x07\x06\x07"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\xff\xc0\x00\x11\x08\x00\x07\x00\x09\x03"
+        "\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00"
+        "\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x07\xff\xc4\x00\x1f\x10"
+        "\x00\x00\x04\x07\x01\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x01\x03\x05\x04\x07\x08\x11"
+        "\x18\x23\x91\x54\xff\xc4\x00\x15\x01\x01\x01\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x07\x08\xff\xc4\x00\x1f\x11\x00\x00\x05\x04"
+        "\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x01\x07\x22\xa1\x03\x04\x06\x17\x21\x51\x52"
+        "\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00"
+        "\x3f\x00\x1d\x97\x74\x46\xdd\xae\xd0\xa8\x74\x82"
+        "\xf6\x6e\xb4\xdc\x39\xc7\x20\x9d\x35\x53\xab\x33"
+        "\x93\x90\x83\x84\x8d\xde\x54\x3a\x40\x4f\x74\x5c"
+        "\x7a\x39\x14\x8e\xce\xaf\xd9\xc8\xff\xd9";
+    return string{encoded, sizeof(encoded) - 1};
+}
+
+string ProgressiveJpeg() {
+    constexpr char encoded[] =
+        "\xff\xd8\xff\xe0\x00\x10\x4a\x46\x49\x46\x00\x01"
+        "\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00\x43"
+        "\x00\x02\x01\x01\x01\x01\x01\x02\x01\x01\x01\x02"
+        "\x02\x02\x02\x02\x04\x03\x02\x02\x02\x02\x05\x04"
+        "\x04\x03\x04\x06\x05\x06\x06\x06\x05\x06\x06\x06"
+        "\x07\x09\x08\x06\x07\x09\x07\x06\x06\x08\x0b\x08"
+        "\x09\x0a\x0a\x0a\x0a\x0a\x06\x08\x0b\x0c\x0b\x0a"
+        "\x0c\x09\x0a\x0a\x0a\xff\xdb\x00\x43\x01\x02\x02"
+        "\x02\x02\x02\x02\x05\x03\x03\x05\x0a\x07\x06\x07"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a\x0a"
+        "\x0a\x0a\xff\xc2\x00\x11\x08\x00\x07\x00\x09\x03"
+        "\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00"
+        "\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x06\xff\xc4\x00\x15\x01"
+        "\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x06\x07\xff\xda\x00\x0c\x03\x01"
+        "\x00\x02\x10\x03\x10\x00\x00\x01\x1c\xbc\x9a\x01"
+        "\x34\x8f\xff\xc4\x00\x18\x10\x00\x02\x03\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x03\x05\x06\x16\xff\xda\x00\x08\x01\x01\x00\x01"
+        "\x05\x02\x8e\xa4\x2c\xc4\xac\xff\xc4\x00\x18\x11"
+        "\x00\x03\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x02\x06\x16\x21\xff\xda\x00"
+        "\x08\x01\x03\x01\x01\x3f\x01\x9a\xa7\x7e\x1a\x77"
+        "\x3f\xff\xc4\x00\x1a\x11\x00\x02\x02\x03\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03"
+        "\x05\x21\x06\x16\x51\xff\xda\x00\x08\x01\x02\x01"
+        "\x01\x3f\x01\x9b\xcd\x19\x76\x6e\x8c\xe9\xff\xc4"
+        "\x00\x17\x10\x01\x01\x01\x01\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x01\x00\x22\x32\xff"
+        "\xda\x00\x08\x01\x01\x00\x06\x3f\x02\x32\x5c\x97"
+        "\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10\xff\xda"
+        "\x00\x08\x01\x01\x00\x01\x3f\x21\x03\xbf\xff\xda"
+        "\x00\x0c\x03\x01\x00\x02\x00\x03\x00\x00\x00\x10"
+        "\x17\xff\xc4\x00\x18\x11\x00\x03\x01\x01\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
+        "\xa1\x41\x61\xff\xda\x00\x08\x01\x03\x01\x01\x3f"
+        "\x10\xd1\x74\xea\xe9\xff\xc4\x00\x17\x11\x00\x03"
+        "\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x41\xa1\x61\xff\xda\x00\x08\x01\x02"
+        "\x01\x01\x3f\x10\x78\xa6\x8a\x7f\xff\xc4\x00\x18"
+        "\x10\x00\x02\x03\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x01\x31\x91\xf1\xff\xda"
+        "\x00\x08\x01\x01\x00\x01\x3f\x10\x82\xb5\x1b\xa8"
+        "\xff\xd9";
+    return string{encoded, sizeof(encoded) - 1};
+}
+
+string GrayJpeg() {
+    constexpr char encoded[] =
+        "\xff\xd8\xff\xe0\x00\x10\x4a\x46\x49\x46\x00\x01"
+        "\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00\x43"
+        "\x00\x02\x01\x01\x01\x01\x01\x02\x01\x01\x01\x02"
+        "\x02\x02\x02\x02\x04\x03\x02\x02\x02\x02\x05\x04"
+        "\x04\x03\x04\x06\x05\x06\x06\x06\x05\x06\x06\x06"
+        "\x07\x09\x08\x06\x07\x09\x07\x06\x06\x08\x0b\x08"
+        "\x09\x0a\x0a\x0a\x0a\x0a\x06\x08\x0b\x0c\x0b\x0a"
+        "\x0c\x09\x0a\x0a\x0a\xff\xc0\x00\x0b\x08\x00\x03"
+        "\x00\x05\x01\x01\x11\x00\xff\xc4\x00\x14\x00\x01"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x07\xff\xc4\x00\x1f\x10\x00\x00\x03"
+        "\x09\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x01\x07\x03\x04\x09\x17\x26\x42\x43\x52"
+        "\x61\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00\x76"
+        "\x87\x72\x10\x90\x48\xf6\x74\x0b\x86\x3b\x0f\x53"
+        "\xe8\xff\xd9";
+    return string{encoded, sizeof(encoded) - 1};
+}
+
+string CmykJpeg() {
+    constexpr char encoded[] =
+        "\xff\xd8\xff\xee\x00\x0e\x41\x64\x6f\x62\x65\x00"
+        "\x64\x00\x00\x00\x00\x00\xff\xdb\x00\x43\x00\x02"
+        "\x01\x01\x01\x01\x01\x02\x01\x01\x01\x02\x02\x02"
+        "\x02\x02\x04\x03\x02\x02\x02\x02\x05\x04\x04\x03"
+        "\x04\x06\x05\x06\x06\x06\x05\x06\x06\x06\x07\x09"
+        "\x08\x06\x07\x09\x07\x06\x06\x08\x0b\x08\x09\x0a"
+        "\x0a\x0a\x0a\x0a\x06\x08\x0b\x0c\x0b\x0a\x0c\x09"
+        "\x0a\x0a\x0a\xff\xc0\x00\x14\x08\x00\x02\x00\x02"
+        "\x04\x43\x11\x00\x4d\x11\x00\x59\x11\x00\x4b\x11"
+        "\x00\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x09\xff"
+        "\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00"
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00"
+        "\x0e\x04\x43\x00\x4d\x00\x59\x00\x4b\x00\x00\x3f"
+        "\x00\x75\x0d\x61\x84\x2b\x8f\xff\xd9";
+    return string{encoded, sizeof(encoded) - 1};
+}
+
+void ExpectRgbGradient(const ImageData& image, bool flipY = false) {
+    ASSERT_EQ(image.Width, 9u);
+    ASSERT_EQ(image.Height, 7u);
+    ASSERT_TRUE(image.Format == ImageFormat::RGB8_BYTE || image.Format == ImageFormat::RGBA8_BYTE);
+    const size_t channels = ImageData::FormatSize(image.Format);
+    const auto pixels = image.GetSpan();
+    ASSERT_EQ(pixels.size(), 9u * 7u * channels);
+    for (size_t y = 0; y < 7; ++y) {
+        const int sourceY = static_cast<int>(flipY ? 6 - y : y);
+        for (size_t x = 0; x < 9; ++x) {
+            const size_t offset = (y * 9 + x) * channels;
+            const int sourceX = static_cast<int>(x);
+            SCOPED_TRACE(testing::Message() << "pixel " << x << ", " << y);
+            EXPECT_NEAR(std::to_integer<int>(pixels[offset]), 20 + 15 * sourceX, 5);
+            EXPECT_NEAR(std::to_integer<int>(pixels[offset + 1]), 30 + 24 * sourceY, 5);
+            EXPECT_NEAR(std::to_integer<int>(pixels[offset + 2]), 200 - 7 * sourceX - 9 * sourceY, 5);
+        }
+    }
+}
+
+class NonSeekableJpegInput : public std::streambuf {
+public:
+    explicit NonSeekableJpegInput(string& encoded) {
+        setg(encoded.data(), encoded.data(), encoded.data() + encoded.size());
+    }
+};
+
+class JpegAlphaTest : public testing::TestWithParam<uint32_t> {};
+
+TEST(JpegTest, InvalidHeaderReturnsEmpty) {
+    std::istringstream stream{"not a JPEG"};
+
+    EXPECT_FALSE(ImageData::LoadJPEG(stream).has_value());
+}
+
+TEST(JpegTest, EmptyInputReturnsEmpty) {
+    std::istringstream stream;
+
+    EXPECT_FALSE(ImageData::LoadJPEG(stream).has_value());
+}
+
+TEST(JpegTest, TruncatedHeaderReturnsEmpty) {
+    string encoded = RgbJpeg();
+    ASSERT_GT(encoded.size(), 24u);
+    encoded.resize(24);
+    std::istringstream stream{encoded};
+
+    EXPECT_FALSE(ImageData::LoadJPEG(stream).has_value());
+}
+
+TEST(JpegTest, FinishErrorAfterDecodedPixelsReturnsEmpty) {
+    string encoded = RgbJpeg();
+    ASSERT_GT(encoded.size(), 2u);
+    ASSERT_EQ(static_cast<unsigned char>(encoded.back()), 0xd9);
+    encoded.back() = '\xc0';
+    constexpr char duplicateFrame[] =
+        "\x00\x11\x08\x00\x07\x00\x09\x03\x01\x11\x00"
+        "\x02\x11\x00\x03\x11\x00\xff\xd9";
+    encoded.append(duplicateFrame, sizeof(duplicateFrame) - 1);
+    std::istringstream stream{encoded};
+
+    EXPECT_FALSE(ImageData::LoadJPEG(stream).has_value());
+}
+
+TEST(JpegTest, RgbImageLoadsWithExpectedPixels) {
+    std::istringstream stream{RgbJpeg()};
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    EXPECT_EQ(image->Format, ImageFormat::RGB8_BYTE);
+    ExpectRgbGradient(*image);
+}
+
+TEST(JpegTest, ProgressiveImageLoadsWithExpectedPixels) {
+    std::istringstream stream{ProgressiveJpeg()};
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    EXPECT_EQ(image->Format, ImageFormat::RGB8_BYTE);
+    ExpectRgbGradient(*image);
+}
+
+TEST(JpegTest, GrayscaleExpandsToRgb) {
+    std::istringstream stream{GrayJpeg()};
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    ASSERT_EQ(image->Width, 5u);
+    ASSERT_EQ(image->Height, 3u);
+    ASSERT_EQ(image->Format, ImageFormat::RGB8_BYTE);
+    for (size_t y = 0; y < 3; ++y) {
+        for (size_t x = 0; x < 5; ++x) {
+            const size_t offset = (y * 5 + x) * 3;
+            const int expected = 40 + 25 * static_cast<int>(x) + 30 * static_cast<int>(y);
+            EXPECT_NEAR(std::to_integer<int>(image->Data[offset]), expected, 3);
+            EXPECT_EQ(image->Data[offset], image->Data[offset + 1]);
+            EXPECT_EQ(image->Data[offset], image->Data[offset + 2]);
+        }
+    }
+}
+
+TEST(JpegTest, FlipYReversesDestinationRows) {
+    std::istringstream stream{RgbJpeg()};
+
+    const auto image = ImageData::LoadJPEG(stream, JPEGLoadSettings{.IsFlipY = true});
+
+    ASSERT_TRUE(image.has_value());
+    EXPECT_EQ(image->Format, ImageFormat::RGB8_BYTE);
+    ExpectRgbGradient(*image, true);
+}
+
+TEST_P(JpegAlphaTest, AddsClampedAlphaWhileFlippingRows) {
+    std::istringstream stream{RgbJpeg()};
+
+    const auto image = ImageData::LoadJPEG(stream, JPEGLoadSettings{.AddAlphaIfRGB = GetParam(), .IsFlipY = true});
+
+    ASSERT_TRUE(image.has_value());
+    ASSERT_EQ(image->Format, ImageFormat::RGBA8_BYTE);
+    ExpectRgbGradient(*image, true);
+    const byte alpha = static_cast<byte>(std::min(GetParam(), 255u));
+    for (size_t offset = 3; offset < image->GetSize(); offset += 4) {
+        EXPECT_EQ(image->Data[offset], alpha);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    JpegTest,
+    JpegAlphaTest,
+    testing::Values(0u, 77u, 256u, std::numeric_limits<uint32_t>::max()));
+
+TEST(JpegTest, NonSeekableInputWithStreamExceptionsLoads) {
+    string encoded = RgbJpeg();
+    NonSeekableJpegInput source{encoded};
+    std::istream stream{&source};
+    stream.exceptions(std::ios::badbit | std::ios::failbit);
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    ExpectRgbGradient(*image);
+    EXPECT_TRUE(stream.good());
+}
+
+TEST(JpegTest, ReadsCurrentOffsetAndRestoresSeekableStream) {
+    const string prefix{"prefix"};
+    std::istringstream stream{prefix + RgbJpeg()};
+    stream.seekg(static_cast<std::streamoff>(prefix.size()));
+    stream.exceptions(std::ios::badbit | std::ios::failbit);
+    const auto originalPos = stream.tellg();
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    ExpectRgbGradient(*image);
+    EXPECT_EQ(stream.tellg(), originalPos);
+    EXPECT_TRUE(stream.good());
+}
+
+TEST(JpegTest, MissingEndMarkerKeepsDecodedPixels) {
+    string encoded = RgbJpeg();
+    ASSERT_GT(encoded.size(), 2u);
+    encoded.resize(encoded.size() - 2);
+    std::istringstream stream{encoded};
+
+    const auto image = ImageData::LoadJPEG(stream);
+
+    ASSERT_TRUE(image.has_value());
+    ExpectRgbGradient(*image);
+}
+
+TEST(JpegTest, UnsupportedCmykReturnsEmpty) {
+    std::istringstream stream{CmykJpeg()};
+
+    EXPECT_FALSE(ImageData::LoadJPEG(stream).has_value());
+}
+
+}  // namespace
+}  // namespace radray

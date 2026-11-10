@@ -8,10 +8,10 @@
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/gpu_device.h>
 
-// CPU-side stand-ins for the RHI objects runtime touches. Each fake records only what tests observe.
+// runtime 所用 RHI 对象的 CPU 替身；各替身仅记录测试观察的数据。
 namespace radray::test {
 
-class FakeBuffer final : public render::Buffer {
+class FakeBuffer : public render::Buffer {
 public:
     FakeBuffer(uint64_t size, render::BufferUses usage) noexcept : Desc{.Size = size, .Usage = usage} {}
     bool IsValid() const noexcept override { return true; }
@@ -48,6 +48,7 @@ public:
 struct RecordedParameterBind {
     uint32_t Group;
     render::ShaderParameterSet* Set;
+    vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
 };
 
 class RecordingEncoder final : public render::GraphicsCommandEncoder {
@@ -73,9 +74,9 @@ public:
         Order.emplace_back("index");
         IndexBuffers.push_back(value);
     }
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset>) noexcept override {
+    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets) noexcept override {
         Order.emplace_back("parameters");
-        ParameterBinds.push_back({group, set});
+        ParameterBinds.push_back({group, set, {offsets.begin(), offsets.end()}});
     }
     bool SetPushConstants(uint32_t, uint32_t, std::span<const byte> bytes) noexcept override {
         Order.emplace_back("push");
@@ -102,7 +103,7 @@ public:
     vector<render::DrawIndexedIndirectArguments> Draws;
 };
 
-class FakeCommandBuffer final : public render::CommandBuffer {
+class FakeCommandBuffer : public render::CommandBuffer {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -151,8 +152,8 @@ public:
     render::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
 };
 
-// Creates command allocators and buffers; every other factory fails.
-class FakeDevice final : public render::Device {
+// 仅创建命令分配器与命令缓冲；其余工厂接口均返回失败。
+class FakeDevice : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -191,14 +192,14 @@ public:
     bool FailCommandBuffers{false};
 };
 
-// Forwards each stage to an optional test callback.
+// 将各阶段转发到可选的测试回调。
 class CallbackPipeline final : public FramePipeline {
 public:
     void Extract(const Scene& source, FrameSlot& slot) noexcept override {
         if (OnExtract) OnExtract(source, slot);
     }
-    void Record(FrameSlot& slot) noexcept override {
-        if (OnRecord) OnRecord(slot);
+    void Record(const Scene& source, FrameSlot& slot) noexcept override {
+        if (OnRecord) OnRecord(source, slot);
     }
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
@@ -206,7 +207,7 @@ public:
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
     std::function<void(const Scene&, FrameSlot&)> OnExtract;
-    std::function<void(FrameSlot&)> OnRecord;
+    std::function<void(const Scene&, FrameSlot&)> OnRecord;
     std::function<void(FrameSlot&)> OnWait;
     vector<MeshPassRegistration> Passes;
 };
@@ -216,7 +217,7 @@ struct FakeGpu {
     DeviceContext Context{Device, &Device->Queue};
 };
 
-// Returns null when creation fails; pipeline keeps borrowing the scheduler-owned pipeline.
+// 创建失败时返回空值；pipeline 继续借用调度器拥有的流水线。
 inline unique_ptr<FrameScheduler> CreateScheduler(DeviceContext& device, CallbackPipeline*& pipeline, uint32_t slotCount = 2) {
     auto owner = make_unique<CallbackPipeline>();
     pipeline = owner.get();

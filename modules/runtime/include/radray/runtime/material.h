@@ -1,5 +1,7 @@
 #pragma once
 
+// 材质所有权与 UE 对照见 docs/architecture/runtime.md。
+
 #include <optional>
 #include <span>
 #include <string_view>
@@ -12,8 +14,8 @@
 
 namespace radray {
 
-// Material defaults; each Pass explicitly chooses which fields to use or override.
-// Attachment formats, sampling and geometry topology are supplied by the Pass.
+// 材质默认状态；每个 Pass 显式选择沿用或覆盖哪些字段。
+// 附件格式、采样与几何拓扑由 Pass 提供。
 struct MaterialRenderState {
     render::CullMode Cull{render::CullMode::Back};
     std::optional<render::BlendState> Blend;
@@ -23,7 +25,7 @@ struct MaterialRenderState {
     render::DepthBiasState DepthBias{};
     std::optional<render::StencilState> Stencil;
 
-    // Keep byte-sized fields together after the naturally aligned state fields.
+    // 字节大小的字段集中放在自然对齐的状态字段之后。
     bool DepthTestEnable{true};
     bool DepthWriteEnable{true};
     uint8_t StencilReference{0};
@@ -44,10 +46,10 @@ struct MaterialShaderProgram {
     string PixelEntry;
 };
 
-// 材质所有权与 UE 对照见 docs/architecture/runtime.md。
 // 使用前完成准备；被引用期间保持地址稳定、内容不变。
 // 程序名称必须唯一；列表表达可用 shader，不决定 Pass 参与或持有 PSO。
-struct MaterialResource {
+class MaterialResource {
+public:
     MaterialProperties Properties;
     vector<MaterialShaderProgram> Programs;
 

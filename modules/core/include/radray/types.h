@@ -19,6 +19,10 @@
 #include <list>
 #include <forward_list>
 
+#ifdef RADRAY_ENABLE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 namespace radray {
 
 using std::byte;
@@ -32,8 +36,13 @@ using std::uint16_t;
 using std::uint32_t;
 using std::uint64_t;
 
+#ifdef RADRAY_ENABLE_MIMALLOC
+template <class T>
+using allocator = mi_stl_allocator<T>;
+#else
 template <class T>
 using allocator = std::allocator<T>;
+#endif
 
 template <class T>
 using vector = std::vector<T, allocator<T>>;

@@ -12,6 +12,7 @@ set(radray_core_test_sources
     test_image_data.cpp
     test_intrusive_ptr.cpp
     test_json.cpp
+    test_logger.cpp
     test_memory.cpp
     test_nullable.cpp
     test_object_arena.cpp
@@ -25,6 +26,9 @@ set(radray_core_test_sources
     test_xml.cpp)
 if (RADRAY_ENABLE_LIBPNG)
     list(APPEND radray_core_test_sources test_img_rw.cpp)
+endif()
+if (RADRAY_ENABLE_LIBJPEG)
+    list(APPEND radray_core_test_sources test_jpeg.cpp)
 endif()
 if (WIN32 AND RADRAY_ENABLE_MIMALLOC AND RADRAY_DEPENDENCY_TRIPLET MATCHES "-staticcrt$")
     list(APPEND radray_core_test_sources test_memory_override.cpp)

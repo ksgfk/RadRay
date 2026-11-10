@@ -6,9 +6,8 @@
 #include <string_view>
 #include <system_error>
 
-#include <fmt/format.h>
-
 #include <radray/file.h>
+#include <radray/logger.h>
 #include <radray/shader_compiler/client.h>
 #include <radray/types.h>
 
@@ -33,7 +32,7 @@ struct Arguments {
 };
 
 void PrintError(std::string_view message) {
-    std::fputs(fmt::format("radray_shader_compile: {}\n", message).c_str(), stderr);
+    std::fputs(radray::format("radray_shader_compile: {}\n", message).c_str(), stderr);
 }
 
 bool TakeValue(
@@ -43,7 +42,7 @@ bool TakeValue(
     std::string_view option,
     std::string_view& value) {
     if (index + 1 >= argc) {
-        PrintError(fmt::format("option '{}' requires a value", option));
+        PrintError(radray::format("option '{}' requires a value", option));
         return false;
     }
     value = argv[++index];
@@ -98,7 +97,7 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
             }
             const std::optional<shader::ShaderTargetMask> targets = ParseTargets(value);
             if (!targets.has_value()) {
-                PrintError(fmt::format("unknown target '{}'; expected dxil, spirv, or all", value));
+                PrintError(radray::format("unknown target '{}'; expected dxil, spirv, or all", value));
                 return std::nullopt;
             }
             args.Targets = targets.value();
@@ -106,7 +105,7 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
             std::fputs(string{kUsage}.c_str(), stdout);
             return std::nullopt;
         } else {
-            PrintError(fmt::format("unknown option '{}'", option));
+            PrintError(radray::format("unknown option '{}'", option));
             std::fputs(string{kUsage}.c_str(), stderr);
             return std::nullopt;
         }
@@ -118,11 +117,11 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
     }
     std::error_code error;
     if (!std::filesystem::is_directory(args.ShaderRoot, error) || error) {
-        PrintError(fmt::format("'{}' is not a readable shader root", args.ShaderRoot.generic_string()));
+        PrintError(radray::format("'{}' is not a readable shader root", args.ShaderRoot.generic_string()));
         return std::nullopt;
     }
     if (!shader::IsLogicalSourceName(args.Source)) {
-        PrintError(fmt::format("source '{}' is not a logical root-relative name", args.Source));
+        PrintError(radray::format("source '{}' is not a logical root-relative name", args.Source));
         return std::nullopt;
     }
     args.IncludePaths.insert(args.IncludePaths.begin(), args.ShaderRoot);
@@ -159,7 +158,7 @@ int main(int argc, char** argv) {
 
     const std::optional<vector<byte>> source = ReadBinaryFile(args->ShaderRoot / args->Source);
     if (!source.has_value() || source->empty()) {
-        PrintError(fmt::format("source '{}' could not be read", args->Source));
+        PrintError(radray::format("source '{}' could not be read", args->Source));
         return 1;
     }
 
@@ -202,15 +201,15 @@ int main(int argc, char** argv) {
     }
 
     for (const shader::CompileTargetLane& lane : *result.Value) {
-        const std::string suffix = fmt::format(".{}.bin", TargetName(lane.Target));
+        const string suffix = radray::format(".{}.bin", TargetName(lane.Target));
         std::filesystem::path output = args->OutputPrefix;
         output += suffix;
         if (!WriteBinaryFile(output, lane.Metadata)) {
-            PrintError(fmt::format("failed to write '{}'", output.generic_string()));
+            PrintError(radray::format("failed to write '{}'", output.generic_string()));
             return 1;
         }
         std::fputs(
-            fmt::format(
+            radray::format(
                 "radray_shader_compile: wrote {} ({} bytes)\n",
                 output.generic_string(),
                 lane.Metadata.size())
