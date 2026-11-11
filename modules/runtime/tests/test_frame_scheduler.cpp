@@ -5,6 +5,7 @@
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/frame_scheduler.h>
+#include <radray/runtime/scene.h>
 
 #include "test_fakes.h"
 
@@ -26,8 +27,8 @@ protected:
 
     // 为每个流水线阶段记录 "<stage><slot>:<frame>" 格式的日志。
     void LogStages() {
-        Pipeline->OnExtract = [this](const Scene&, FrameSlot& slot) { Log.emplace_back(radray::format("E{}:{}", slot.GetIndex(), slot.GetFrameId())); };
-        Pipeline->OnRecord = [this](const Scene&, FrameSlot& slot) { Log.emplace_back(radray::format("R{}:{}", slot.GetIndex(), slot.GetFrameId())); };
+        Pipeline->OnExtract = [this](FrameSlot& slot) { Log.emplace_back(radray::format("E{}:{}", slot.GetIndex(), slot.GetFrameId())); };
+        Pipeline->OnRecord = [this](FrameSlot& slot) { Log.emplace_back(radray::format("R{}:{}", slot.GetIndex(), slot.GetFrameId())); };
         Pipeline->OnWait = [this](FrameSlot& slot) { Log.emplace_back(radray::format("W{}:{}", slot.GetIndex(), slot.GetFrameId())); };
     }
     // 登记一个由 arena 拥有的对象，槽位回收它时记录 `text`。
@@ -60,15 +61,15 @@ TEST_F(FrameSchedulerTest, FramesRotateThroughSlotsAndWaitBeforeReuse) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
     LogStages();
-    for (int frame = 0; frame < 3; ++frame) scheduler->RunFrame(Source);
+    for (int frame = 0; frame < 3; ++frame) scheduler->RunFrame();
     EXPECT_EQ(Log, (vector<string>{"E0:0", "R0:0", "E1:1", "R1:1", "W0:0", "E0:2", "R0:2"}));
 }
 
 TEST_F(FrameSchedulerTest, BeginFrameReclaimsBeforePreparationAndIsIdempotent) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) { RegisterCleanup(slot, "release"); };
-    scheduler->RunFrame(Source);
+    Pipeline->OnExtract = [&](FrameSlot& slot) { RegisterCleanup(slot, "release"); };
+    scheduler->RunFrame();
     Pipeline->OnWait = [&](FrameSlot&) { Log.push_back("wait"); };
     Gpu.Device->OnAllocatorReset = [&] { Log.push_back("reset"); };
     EXPECT_FALSE(scheduler->GetCurrentSlot());
@@ -85,7 +86,7 @@ TEST_F(FrameSchedulerTest, BeginFrameReclaimsBeforePreparationAndIsIdempotent) {
     EXPECT_EQ(*value, 42);
     EXPECT_FALSE(released);
     slot.RetireResource(unique_ptr<int>{});
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     EXPECT_TRUE(Log.empty());
     EXPECT_FALSE(released);
     EXPECT_FALSE(scheduler->GetCurrentSlot());
@@ -96,15 +97,15 @@ TEST_F(FrameSchedulerTest, BeginFrameReclaimsBeforePreparationAndIsIdempotent) {
 TEST_F(FrameSchedulerTest, PreparationRetirementSurvivesRepeatedBeginAndFullRotation) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     bool released = false;
     auto& slot = scheduler->BeginFrame();
     slot.RetireResource(MakeScopeGuard([&]() noexcept { released = true; }));
     scheduler->BeginFrame();
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     scheduler->BeginFrame();
     EXPECT_FALSE(released);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     scheduler->BeginFrame();
     EXPECT_TRUE(released);
 }
@@ -124,8 +125,8 @@ TEST_F(FrameSchedulerTest, WaitIdleCancelsPreparedFrameWithoutAdvancing) {
 TEST_F(FrameSchedulerTest, WaitIdleWaitsEachInFlightSlotOnce) {
     auto scheduler = Create(3);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     LogStages();
     scheduler->WaitIdle();
     EXPECT_EQ(Log, (vector<string>{"W0:0", "W1:1"}));
@@ -137,16 +138,16 @@ TEST_F(FrameSchedulerTest, WaitIdleWaitsEachInFlightSlotOnce) {
 TEST_F(FrameSchedulerTest, WaitIdleKeepsNextSlotAndFrameNumber) {
     auto scheduler = Create(3);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     scheduler->WaitIdle();
     LogStages();
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     EXPECT_EQ(Log, (vector<string>{"E2:2", "R2:2", "E0:3", "R0:3"}));
 }
 
-TEST_F(FrameSchedulerTest, MutableSceneSyncsDirtyBatchesBeforeExtract) {
+TEST_F(FrameSchedulerTest, CallerExplicitlySynchronizesCurrentRegistrations) {
     CountingProcessor processor;
     MeshBatch batch;
     batch.Material = Source.AddMaterial({});
@@ -155,16 +156,18 @@ TEST_F(FrameSchedulerTest, MutableSceneSyncsDirtyBatchesBeforeExtract) {
     auto scheduler = Create();
     ASSERT_TRUE(scheduler);
     Pipeline->Passes = {{{0}, &processor}};
-    Pipeline->OnExtract = [&](const Scene& source, FrameSlot&) {
-        EXPECT_FALSE(source.HasDirtyBatches());
+    Pipeline->OnExtract = [&](FrameSlot&) {
+        EXPECT_FALSE(Source.HasDirtyBatches());
         EXPECT_EQ(processor.Calls, (vector<MeshBatchHandle>{handle}));
     };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    Source.SyncCachedMeshDrawCommands(Pipeline->GetMeshPassRegistrations());
+    scheduler->RunFrame();
+    Source.SyncCachedMeshDrawCommands(Pipeline->GetMeshPassRegistrations());
+    scheduler->RunFrame();
     EXPECT_EQ(processor.Calls.size(), 1u);
 }
 
-TEST_F(FrameSchedulerTest, ConstSceneIsNotSynchronized) {
+TEST_F(FrameSchedulerTest, SchedulerDoesNotSynchronizeScene) {
     CountingProcessor processor;
     MeshBatch batch;
     batch.Material = Source.AddMaterial({});
@@ -172,9 +175,32 @@ TEST_F(FrameSchedulerTest, ConstSceneIsNotSynchronized) {
     auto scheduler = Create();
     ASSERT_TRUE(scheduler);
     Pipeline->Passes = {{{0}, &processor}};
-    scheduler->RunFrame(std::as_const(Source));
+    scheduler->RunFrame();
     EXPECT_TRUE(processor.Calls.empty());
     EXPECT_TRUE(Source.HasDirtyBatches());
+}
+
+TEST_F(FrameSchedulerTest, CurrentRegistrationsRebuildCleanSceneCaches) {
+    CountingProcessor first, replacement;
+    MeshBatch batch;
+    batch.Material = Source.AddMaterial({});
+    const auto handle = Source.AddMeshBatch(Source.AddPrimitive(), std::move(batch));
+    auto scheduler = Create();
+    ASSERT_TRUE(scheduler);
+    Pipeline->Passes = {{{0}, &first}};
+    Source.SyncCachedMeshDrawCommands(Pipeline->GetMeshPassRegistrations());
+    scheduler->RunFrame();
+    ASSERT_FALSE(Source.HasDirtyBatches());
+    Pipeline->Passes = {{{1}, &replacement, MeshPassSortMode::DepthFirst}};
+    Source.SyncCachedMeshDrawCommands(Pipeline->GetMeshPassRegistrations());
+    scheduler->RunFrame();
+    EXPECT_EQ(replacement.Calls, (vector<MeshBatchHandle>{handle}));
+    EXPECT_FALSE(Source.GetPassCache({0}));
+    ASSERT_TRUE(Source.GetPassCache({1}));
+    EXPECT_EQ(Source.GetPassCache({1})->GetSortMode(), MeshPassSortMode::DepthFirst);
+    Pipeline->Passes = {{{1}, &first}};
+    Source.SyncCachedMeshDrawCommands(Pipeline->GetMeshPassRegistrations());
+    EXPECT_EQ(first.Calls.size(), 2u);
 }
 
 TEST_F(FrameSchedulerTest, ExtractAndRecordBorrowTheCurrentSceneAcrossSlots) {
@@ -184,19 +210,20 @@ TEST_F(FrameSchedulerTest, ExtractAndRecordBorrowTheCurrentSceneAcrossSlots) {
     other.AddPrimitive();
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
-    const array<const Scene*, 3> sources{&Source, &other, &Source};
+    Nullable<const Scene*> selected{nullptr};
     vector<uint32_t> counts;
-    Pipeline->OnExtract = [&](const Scene& source, FrameSlot& slot) {
-        EXPECT_EQ(&source, sources[slot.GetFrameId()]);
+    Pipeline->OnExtract = [&](FrameSlot& slot) {
+        ASSERT_TRUE(selected);
     };
-    Pipeline->OnRecord = [&](const Scene& source, FrameSlot& slot) {
-        EXPECT_EQ(&source, sources[slot.GetFrameId()]);
-        counts.push_back(source.GetPrimitiveCount());
+    Pipeline->OnRecord = [&](FrameSlot& slot) {
+        ASSERT_TRUE(selected);
+        counts.push_back(selected->GetPrimitiveCount());
     };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(std::as_const(other));
+    selected = &Source; scheduler->RunFrame();
+    selected = &other; scheduler->RunFrame();
     Source.AddPrimitive();
-    scheduler->RunFrame(Source);
+    selected = &Source; scheduler->RunFrame();
+    selected = nullptr;
     EXPECT_EQ(counts, (vector<uint32_t>{1, 2, 2}));
     Source.Clear();
     other.Clear();
@@ -206,40 +233,40 @@ TEST_F(FrameSchedulerTest, ExtractAndRecordBorrowTheCurrentSceneAcrossSlots) {
 TEST_F(FrameSchedulerTest, ArenaObjectsLiveUntilTheirSlotIsWaited) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) { RegisterCleanup(slot, radray::format("release {}", slot.GetFrameId())); };
+    Pipeline->OnExtract = [&](FrameSlot& slot) { RegisterCleanup(slot, radray::format("release {}", slot.GetFrameId())); };
     Pipeline->OnWait = [&](FrameSlot& slot) { Log.emplace_back(radray::format("wait {}", slot.GetFrameId())); };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     EXPECT_TRUE(Log.empty());
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     EXPECT_EQ(Log, (vector<string>{"wait 0", "release 0"}));
 }
 
 TEST_F(FrameSchedulerTest, DrawListsAreEmptyWhenSlotIsReused) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnExtract = [](const Scene&, FrameSlot& slot) {
+    Pipeline->OnExtract = [](FrameSlot& slot) {
         auto& list = slot.GetPassDrawList({0});
         EXPECT_TRUE(list.VisibleCommands.empty());
         EXPECT_TRUE(list.DynamicContext.Commands.empty());
         list.VisibleCommands.emplace_back();
         list.DynamicContext.Commands.emplace_back();
     };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
 }
 
 TEST_F(FrameSchedulerTest, RetiredOwnerIsReleasedWhenItsSlotIsReused) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
     bool released = false;
-    Pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
+    Pipeline->OnRecord = [&](FrameSlot& slot) {
         if (slot.GetFrameId() == 0) slot.RetireResource(MakeScopeGuard([&]() noexcept { released = true; }));
     };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     EXPECT_FALSE(released);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     EXPECT_TRUE(released);
 }
 
@@ -247,10 +274,10 @@ TEST_F(FrameSchedulerTest, WaitIdleReleasesRetiredOwners) {
     auto scheduler = Create(3);
     ASSERT_TRUE(scheduler);
     bool released = false;
-    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) {
+    Pipeline->OnExtract = [&](FrameSlot& slot) {
         slot.RetireResource(MakeScopeGuard([&]() noexcept { released = true; }));
     };
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     scheduler->WaitIdle();
     EXPECT_TRUE(released);
 }
@@ -259,7 +286,7 @@ TEST_F(FrameSchedulerTest, RetireResourceRejectsWaitCallback) {
 #if RADRAY_IS_DEBUG
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
     EXPECT_DEATH({
         Pipeline->OnWait = [](FrameSlot& slot) { slot.RetireResource(unique_ptr<int>{}); };
         scheduler->WaitIdle(); }, "");
@@ -273,8 +300,8 @@ TEST_F(FrameSchedulerTest, RetireResourceRejectsCallsOutsideFrame) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
     Nullable<FrameSlot*> used{nullptr};
-    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) { used = &slot; };
-    scheduler->RunFrame(Source);
+    Pipeline->OnExtract = [&](FrameSlot& slot) { used = &slot; };
+    scheduler->RunFrame();
     ASSERT_TRUE(used);
     EXPECT_DEATH(used->RetireResource(unique_ptr<int>{}), "");
 #else
@@ -285,12 +312,12 @@ TEST_F(FrameSchedulerTest, RetireResourceRejectsCallsOutsideFrame) {
 TEST_F(FrameSchedulerTest, WaitIdleResetsEveryAllocatorBeforeReleasingAnyResource) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) {
+    Pipeline->OnExtract = [&](FrameSlot& slot) {
         RegisterCleanup(slot, "release frame object");
         slot.RetireResource(MakeScopeGuard([&]() noexcept { Log.push_back("release retired"); }));
     };
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     Gpu.Device->OnAllocatorReset = [&] { Log.push_back("reset"); };
     scheduler->WaitIdle();
     EXPECT_EQ(Log, (vector<string>{"reset", "reset", "release retired", "release retired", "release frame object", "release frame object"}));
@@ -299,8 +326,8 @@ TEST_F(FrameSchedulerTest, WaitIdleResetsEveryAllocatorBeforeReleasingAnyResourc
 TEST_F(FrameSchedulerTest, DestructionWaitsSlotsBeforeDestroyingPipeline) {
     auto scheduler = Create(2);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(Source);
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
+    scheduler->RunFrame();
     // 仅流水线回调持有此标记，因此流水线销毁时才会执行它的删除器。
     Pipeline->OnWait = [this, marker = shared_ptr<int>{nullptr, [this](int*) { Log.push_back("pipeline destroyed"); }}](FrameSlot& slot) {
         Log.emplace_back(radray::format("wait {}", slot.GetIndex()));

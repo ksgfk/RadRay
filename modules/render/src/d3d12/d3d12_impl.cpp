@@ -892,6 +892,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     }
     auto& caps = result->_capabilities;
     caps.Limits = {
+        .MaxDrawIndirectCount = std::numeric_limits<uint32_t>::max(),
         .MaxColorAttachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
         .MaxTexture1DDimension = D3D12_REQ_TEXTURE1D_U_DIMENSION,
         .MaxTexture2DDimension = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,

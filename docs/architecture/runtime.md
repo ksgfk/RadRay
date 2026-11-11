@@ -66,18 +66,19 @@ DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`G
 开启后重复调用直接返回同一槽，不重复等待、重置 arena 或释放准备期登记的退役对象。
 `GetCurrentSlot()` 仅在 BeginFrame 至 Record 返回之间返回该槽，其他时间为空。
 准备过程未调用 RunFrame 时，下一次 BeginFrame 保留本轮准备；WaitIdle 则清理并取消准备，保留下一槽索引与帧编号。
-`RunFrame(source)` 可直接调用；尚未开启槽时内部自动调用 BeginFrame。完整顺序为：
+`RunFrame()` 可直接调用；尚未开启槽时内部自动调用 BeginFrame。完整顺序为：
 
 ```text
 BeginFrame（只在未开启时执行）：选槽 → 若有在途提交：Pipeline.Wait(slot)，清除在途标记
     → Reset command allocator → Reset 退役 arena → 清理槽内 CPU 数据 → Reset 帧内 arena → 分配当前帧编号
-    → 返回当前槽，调用方可更新 Scene、扩容本槽上传缓冲或登记退役资源
+    → 返回当前槽，调用方准备具体管线输入、扩容本槽上传缓冲或登记退役资源
+    → 使用 Scene 时：显式 SyncCachedMeshDrawCommands(pipeline.GetMeshPassRegistrations())
+    → 将输入设置到具体管线
 RunFrame：复用已开启槽（或先自动 BeginFrame）
-    → 可写 Scene：SyncCachedMeshDrawCommands(GetMeshPassRegistrations())
-    → Extract(source, slot)：按需收集 Pass 的缓存命令借用、动态命令和当帧覆盖项
-    → Record(source, slot)：继续只读借用 Scene，排序可见命令、准备数据、申请 command buffer、Begin/End、自行提交
+    → Extract(slot)：按需收集 Pass 的缓存命令借用、动态命令和当帧覆盖项
+    → Record(slot)：继续只读借用管线输入，排序可见命令、准备数据、申请 command buffer、Begin/End、自行提交
     → 标记在途，下一帧编号递增，当前槽索引 = (当前槽索引 + 1) % slotCount
-    → RunFrame 返回，结束 Scene 借用
+    → RunFrame 返回，结束外部输入借用
 ```
 
 `RunFrame` 返回 `void`，正常返回只表示 Pipeline 已完成本帧录制与提交，不保证异步工作已完成。新槽和已回收的槽不调用 Wait；
@@ -134,7 +135,7 @@ arena 的底层分配、保留预算和 allocator 契约见 [ObjectArena 与 Are
 
 ### 命令录制与 Pipeline 契约
 
-Pipeline 在 `Record(source, slot)` 中通过 `slot.AcquireCommandBuffer()` 申请命令缓冲。
+Pipeline 在 `Record(slot)` 中通过 `slot.AcquireCommandBuffer()` 申请命令缓冲。
 Slot 初始不创建 command buffer，每次申请返回本轮尚未借出的一个 buffer；缓存不足时创建，创建失败返回空。
 同一轮内每次申请返回不同对象，所有权始终留在 Slot。槽重置时 allocator 统一 Reset，借用结束，
 下一轮从池首复用；池保留历史最大数量，不因本轮使用较少而销毁多余对象。
@@ -159,12 +160,14 @@ Pipeline 按槽索引维护完成状态及可复用的上传缓冲、常量等�
 这些资源必须按槽独立分配或使用互不重叠的存储区域，在对应 Wait 返回前不能覆盖。
 同一个 Pipeline 可以被多个槽依次调用，但不能共用一块每帧覆盖的上传数据。
 
-`RunFrame(Scene&)` 在 Extract 前同步脏命令；`RunFrame(const Scene&)` 保留原入口，由调用方负责同步。
-`GetMeshPassRegistrations()` 默认返回空 span，已有不使用网格缓存的 Pipeline 可保持原实现。
-Scene 由调用方持有，是渲染线程侧的场景表示；多个 Scene 各自拥有独立的 Primitive、Mesh、Material 与命令缓存。
-外部对当前 Scene 的增删改和销毁必须在 `RunFrame` 之外完成。Scheduler 开头的缓存同步完成后，
-`Extract(const Scene& source, FrameSlot& slot)` 与 `Record(const Scene& source, FrameSlot& slot)` 共享稳定的只读借用，直到 RunFrame 返回。
-该规则是调用方前置条件，没有运行时锁或跨线程变更队列。FrameSlot 不保存 Scene 指针，也不提供 `GetScene()`。
+帧入口仅有 `RunFrame()`；FramePipeline 及 RDG 扩展钩子不接收 Scene，帧管线头文件也不包含 scene.h。
+具体管线持有自己的内容源；使用 Scene 的调用方在提交前设置管线输入，并显式调用
+`scene.SyncCachedMeshDrawCommands(pipeline.GetMeshPassRegistrations())`。调度器不自动同步缓存。
+每次同步必须传入当前 registrations，不能仅以 `HasDirtyBatches()` 决定是否调用；缺失 pass cache 或 processor/registration/sort mode 变化可以发生在没有脏 batch 的情况下。
+`GetMeshPassRegistrations()` 默认返回空 span，纯 RDG 管线可保留默认值。FrameSlot 的 mesh 绘制列表与排序流程继续可用。
+外部输入在 RunFrame 返回前必须有效且只读，Wait、槽回收、arena 清理及析构不得访问这些借用输入。
+多个 Scene 各自拥有独立容器及缓存；管线可以在帧间切换输入。FrameSlot 不保存 Scene 指针，也不提供 GetScene。
+调用方前置条件不由运行时锁或跨线程变更队列维护。
 
 缓存命令的 CPU 数据只需覆盖本帧 Record；命令编码完成后，帧间可以删除 Batch、重建缓存或销毁 Scene，无需等到 Wait。
 Wait、槽清理以及 arena 对象的析构/清理回调不得解引用留下的 Scene、Batch 或缓存命令借用。
@@ -233,15 +236,16 @@ GetCapacity 返回全部保留页容量，GetStagedByteSize 返回本轮有效�
 
 | 钩子 | 阶段与职责 |
 |---|---|
-| `ExtractFrameData(source, slot)` | 读取 Scene，提取候选可见集、变换及待上传的 CPU 字节；不做逐 Pass 命令收集或 GPU 上传 |
-| `SetupGraph(graph, source, slot)` | 可只读访问 Scene 并按需声明资源、上传、Pass 与输出，不创建 GPU 对象或 Map |
-| `ExtractMeshPass(pass, source, slot, drawList)` | Compile 成功后，仅按首次声明顺序对去重的存活 MeshPassId 调用，收集缓存命令借用和动态命令 |
+| `ExtractFrameData(slot)` | 读取具体管线输入，提取候选可见集、变换及待上传的 CPU 字节；不做逐 Pass 命令收集或 GPU 上传 |
+| `SetupGraph(graph, slot)` | 可只读访问管线输入 并按需声明资源、上传、Pass 与输出，不创建 GPU 对象或 Map |
+| `ExtractMeshPass(pass, slot, drawList)` | Compile 成功后，仅按首次声明顺序对去重的存活 MeshPassId 调用，收集缓存命令借用和动态命令 |
 | `SubmitFrame(slot, commandBuffer)` | Record 已排序存活列表、执行图并 End 命令缓冲后调用；提交到本槽队列并保存供 Wait 使用的完成状态 |
 
 基类的 Record 顺序为：存活 MeshPass 排序 → 本槽池 `BeginFrame` → 申请一条 command buffer 并 Begin → `CompiledRDG::Execute` → End → `SubmitFrame`。
+`ExtractMeshPass` 有带终止诊断的默认实现；纯 RDG 管线无须覆盖，声明了存活 mesh pass 却未实现提取时立即终止并报告 pass ID。
 构图、编译或执行失败由基类带诊断终止，没有部分提交或重试。
-执行回调可借用本次 RunFrame 的 Scene，并在 Record 执行期间只读访问它。**不得捕获 Setup 局部变量的引用或其他槽的可写帧数据。**
-回调对象可能在槽回收时才析构；析构不得访问已经结束的 Scene 借用。
+执行回调可借用本次 RunFrame 的管线输入，并在 Record 执行期间只读访问它。**不得捕获 Setup 局部变量的引用或其他槽的可写帧数据。**
+回调对象可能在槽回收时才析构；析构不得访问已经结束的外部输入借用。
 
 ### 构图、访问与裁剪
 
@@ -290,7 +294,7 @@ Upload / Copy 各自独立成组，Raster / Compute 按以下规则合并：
 - Raster / Compute 每组只开关一次 Encoder，但每个逻辑子 Pass 保留独立 debug group，并且 Context 只允许解析当前子 Pass 声明的资源。回调失败时立即停止后续回调并关闭 Encoder。
 
 被裁剪的 MeshPass 不触发当帧提取或排序；其独占资源不向池借出，其上传不执行 Map 或 Copy。
-Scene 的脏命令缓存同步仍在构图前执行，覆盖全部登记的 Processor，不受当帧裁剪影响。
+使用 Scene 时，调用方在 RunFrame 前显式同步当前全部 registrations，不受当帧图裁剪影响。
 
 ### 上传与资源状态
 
@@ -335,7 +339,7 @@ Device Upload 内部借用的 Staging Buffer 仍单独处理 Map 前与 Copy 前
 Pipeline 按槽持有实例缓冲、两份 Pass UBO/参数组、读回缓冲和独立 fence，颜色/深度附件由基类的每槽瞬态池持有；几何、shader、布局与 PSO 由外部共享。
 Extract 更新当前槽的数据并固化各激活 Pass 的命令；Record 排序槽内列表、申请命令缓冲、完成四个 Pass 和读回拷贝，提交时递增该槽的 fence 值。
 Wait 只等待该槽的 fence；主循环不逐帧等待整个队列，结束时 `WaitIdle()` 等待并重置全部槽，再保存最后一帧的图片。
-Frame 0 后更新绿色材质，Frame 1 的 `RunFrame(Scene&)` 自动增量同步命令，已有在途帧的参数与附件保持独立。
+Frame 0 后更新绿色材质，调用方以当前 registrations 显式同步增量命令，设置管线输入后调用 Frame 1 的 `RunFrame()`；已有在途帧的参数与附件保持独立。
 
 ## Scene 绘制输入
 
@@ -686,6 +690,7 @@ PSO、Buffer、ShaderParameterSet 仍由外部 owner 保活，载荷不再借用
 手动混合缓存/动态命令时须先设置 MeshPassFrameDrawList 的模式，再生成命令；已有输出不能中途更改模式。
 
 `GatherVisibleMeshDrawCommands` 检查 Batch 代次与独立脏位，直接读取 Pass 热表及命令数组，不访问冷 Batch。
+Gather 的脏项检查不能检测所有漏同步：缺失 pass cache 会缺少输出，processor/registration 变化也不一定使已有 batch 变脏；调用方仍须使用当前 registrations 显式同步。
 `ElementMask & ValidElementMask` 非零时仅追加一条可见项；零掩码、空元素位、不存在的位均不输出。
 无效或脏 Batch 回滚本次追加；未注册、撤销或被 Processor 筛选跳过的 Pass 合法产生空输出。
 `GatherVisiblePrimitives` 遍历 Primitive 的 Batch 列表；剔除与 LOD 由应用负责。

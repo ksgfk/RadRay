@@ -17,19 +17,18 @@ protected:
 
     test::FakeGpu Gpu;
     test::CallbackPipeline* Pipeline{nullptr};
-    Scene Source;
 };
 
 TEST_F(FrameSlotTest, AcquireReturnsDistinctBuffersWithinFrame) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnRecord = [](const Scene&, FrameSlot& slot) {
+    Pipeline->OnRecord = [](FrameSlot& slot) {
         const auto first = slot.AcquireCommandBuffer();
         const auto second = slot.AcquireCommandBuffer();
         ASSERT_TRUE(first && second);
         EXPECT_NE(first.Get(), second.Get());
     };
-    scheduler->RunFrame(Source);
+    scheduler->RunFrame();
 }
 
 TEST_F(FrameSlotTest, AcquireReusesBuffersAfterSlotReset) {
@@ -37,11 +36,11 @@ TEST_F(FrameSlotTest, AcquireReusesBuffersAfterSlotReset) {
     ASSERT_TRUE(scheduler);
     const array<size_t, 3> counts{2, 1, 2};
     vector<vector<render::CommandBuffer*>> frames;
-    Pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
+    Pipeline->OnRecord = [&](FrameSlot& slot) {
         auto& acquired = frames.emplace_back();
         for (size_t index = 0; index < counts[frames.size() - 1]; ++index) acquired.push_back(slot.AcquireCommandBuffer().Get());
     };
-    for (size_t frame = 0; frame < counts.size(); ++frame) scheduler->RunFrame(Source);
+    for (size_t frame = 0; frame < counts.size(); ++frame) scheduler->RunFrame();
     EXPECT_EQ(frames[1][0], frames[0][0]);
     EXPECT_EQ(frames[2], frames[0]);
 }
@@ -50,8 +49,8 @@ TEST_F(FrameSlotTest, AcquireReturnsNullWhenBufferCreationFails) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
     Gpu.Device->FailCommandBuffers = true;
-    Pipeline->OnRecord = [](const Scene&, FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
-    scheduler->RunFrame(Source);
+    Pipeline->OnRecord = [](FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
+    scheduler->RunFrame();
 }
 
 VisibleMeshDrawCommand Keyed(uint64_t sortKey, uint32_t firstInstance) {

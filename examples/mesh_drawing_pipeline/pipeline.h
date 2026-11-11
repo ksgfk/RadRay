@@ -89,21 +89,27 @@ private:
 
 class MeshDrawingFramePipeline final : public RenderGraphFramePipeline {
 public:
-    // Shared resources, source scene, candidates and policies must outlive the scheduler.
+    // GPU resources outlive the scheduler; Scene/candidates/policies stay valid through each explicit sync and RunFrame.
     MeshDrawingFramePipeline(GpuResources& gpu, const Scene& scene, const PassContext& view,
                              std::span<const PrimitiveHandle> candidates, std::span<const BatchPassPolicy> policies,
                              MaterialParameterIndices parameters, uint32_t slotCount) noexcept;
     // Call once before transferring ownership to FrameScheduler.
     bool Initialize();
+    // The processors are configured for this sample's fixed Scene; the borrow ends at ClearInput.
+    void SetInput(const Scene& scene) noexcept {
+        if (&scene != &_scene) RADRAY_ABORT("MeshDrawingFramePipeline: unexpected source scene");
+        _input = &scene;
+    }
+    void ClearInput() noexcept { _input = nullptr; }
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override;
     void Wait(FrameSlot& slot) noexcept override;
     // Call after scheduler.WaitIdle(); the pipeline remains owned by the scheduler.
     bool SaveImage(uint32_t slotIndex, const std::filesystem::path& output) const;
 
 private:
-    void ExtractFrameData(const Scene& source, FrameSlot& slot) noexcept override;
-    void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override;
-    void ExtractMeshPass(MeshPassId pass, const Scene& source, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept override;
+    void ExtractFrameData(FrameSlot& slot) noexcept override;
+    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override;
+    void ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept override;
     void SubmitFrame(FrameSlot& slot, render::CommandBuffer& commandBuffer) noexcept override;
     bool RecordPass(render::GraphicsCommandEncoder& encoder, FrameSlot& slot, MeshPassId passId, const GpuFrameResources& resources);
 
@@ -111,6 +117,7 @@ private:
 
     GpuResources& _gpu;
     const Scene& _scene;
+    Nullable<const Scene*> _input{nullptr};
     PassContext _view;
     std::span<const PrimitiveHandle> _candidates;
     std::span<const BatchPassPolicy> _policies;

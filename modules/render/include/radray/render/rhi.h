@@ -1364,6 +1364,8 @@ struct QueueCapabilities {
 };
 
 struct DeviceLimits {
+    // Maximum record count per native indirect draw call: 0 unsupported, 1 single-record only.
+    uint32_t MaxDrawIndirectCount{0};
     uint32_t MaxColorAttachments{0};
     uint32_t MaxTexture1DDimension{0};
     uint32_t MaxTexture2DDimension{0};

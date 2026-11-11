@@ -608,7 +608,7 @@ A/B/C 使用背面剔除不透明材质，D 使用关闭剔除并写模板的不
 应用持有 MaterialTagTable；Processor 通过预先登记的 ID 对筛选材质，再结合 BatchPassPolicy 决定参与。
 缺少或不匹配的标签会跳过；表身份不同则报错，避免将两个表的相同编号误当作相同语义。
 样例还先把绿色实例的 Brightness 同步为 0.5，再改为 1.0：日志先显示实例为 1、Proxy 仍为 0.5，
-显式 Update 后 Proxy 才变为 1。Frame 0 提交后执行 Scene::UpdateMaterial，Frame 1 的 `RunFrame(Scene&)` 自动同步，日志验证仅绿色材质关联的一个 Batch 重建，其余九个 Batch 的驻留状态索引不变，
+显式 Update 后 Proxy 才变为 1。Frame 0 提交后执行 Scene::UpdateMaterial，Frame 1 先显式同步当前 registrations，再设置管线输入并调用 `RunFrame()`；日志验证仅绿色材质关联的一个 Batch 重建，其余九个 Batch 的驻留状态索引不变，
 且该命令对应绑定池载荷的颜色常量 RGB 从 0.5 倍更新为 1.0 倍、alpha 不变。
 可调整参数覆盖观察颜色；调整 Tags / RenderState 需要在 Resource 发布和 PSO 创建之前进行。
 四个 Pass 按以下顺序执行；每个 Pass 仍自行决定采用或覆盖材质状态：
@@ -630,7 +630,7 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 
 | 文件 | 阅读重点 |
 |---|---|
-| [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，连续 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
+| [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，每帧设置管线输入并显式同步当前 registrations，再调用 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
 | [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
 | [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 命令借用与提交/等待 |
 | [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、显式传入的输出 Context、共享状态和返回 void 的构建 helper；单步 AddCommand 发布完整命令。缓存 Context 写入连续命令表与 Batch 槽位；动态 Context 自动追加当帧可见命令 |
@@ -644,7 +644,7 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 材质职责与所有权见 [Runtime 材质核心](../architecture/runtime.md#材质核心)；本例同步的是 CPU 快照，没有稳定 GPU uniform buffer 绑定。
 `BatchPassPolicy` 仅属于样例，通过 Batch 句柄关联记录。
 候选收集不按 Pass 预先分组，Processor 内的条件才决定是否生成命令。
-`MeshDrawingFramePipeline::GetMeshPassRegistrations` 登记四个 Processor，Scheduler 在每次 `RunFrame(Scene&)` 的 Extract 前调用 `Scene::SyncCachedMeshDrawCommands`。
+`MeshDrawingFramePipeline::GetMeshPassRegistrations` 登记四个 Processor。调用方每帧 SetInput，并以当前 registrations 调用 `Scene::SyncCachedMeshDrawCommands`，随后 `RunFrame()`，返回后 ClearInput；Scheduler 不同步 Scene。
 Scene 为脏 Batch 创建缓存 Context 并显式传给 `AddMeshBatch`，Processor 完成 Pass 筛选后调用 runtime 的 `BuildMeshDrawCommands`，
 Debug 下重新检查借用的顶点输入与共享状态，复用 Scene 入库时的 Element 校验；Release 构建信任调用方提供合法输入。
 随后通过单步 `AddCommand` 输出 Batch 命令并记录 Pass 热表槽位。

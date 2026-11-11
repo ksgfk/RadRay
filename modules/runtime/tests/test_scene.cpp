@@ -456,23 +456,25 @@ TEST_F(SceneTest, RecordBorrowsCommandsAndNextFrameReflectsMeshRemoval) {
     auto scheduler = test::CreateScheduler(gpu.Context, callbacks, 1);
     ASSERT_TRUE(scheduler);
     callbacks->Passes = {{Pass, &Processor}};
-    callbacks->OnExtract = [&](const Scene& source, FrameSlot& slot) {
-        ASSERT_TRUE(source.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, slot.GetPassDrawList(Pass)));
+    callbacks->OnExtract = [&](FrameSlot& slot) {
+        ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, std::span{&Primitive, 1}, slot.GetPassDrawList(Pass)));
     };
-    callbacks->OnRecord = [&](const Scene& source, FrameSlot& slot) {
-        EXPECT_EQ(&source, &World);
+    callbacks->OnRecord = [&](FrameSlot& slot) {
         auto& list = slot.GetPassDrawList(Pass);
         list.SortVisibleCommands();
         ASSERT_TRUE(list.Submit(encoder));
     };
-    scheduler->RunFrame(World);
+    World.SyncCachedMeshDrawCommands(callbacks->GetMeshPassRegistrations());
+    scheduler->RunFrame();
     ASSERT_EQ(encoder.Draws.size(), 1u);
     EXPECT_EQ(encoder.Draws[0].IndexCount, 3u);
     ASSERT_TRUE(World.RemoveMeshBatch(Primitive, batch));
-    scheduler->RunFrame(World);
+    World.SyncCachedMeshDrawCommands(callbacks->GetMeshPassRegistrations());
+    scheduler->RunFrame();
     EXPECT_EQ(encoder.Draws.size(), 1u);
     AddBatch(2);
-    scheduler->RunFrame(World);
+    World.SyncCachedMeshDrawCommands(callbacks->GetMeshPassRegistrations());
+    scheduler->RunFrame();
     ASSERT_EQ(encoder.Draws.size(), 3u);
     EXPECT_EQ(encoder.Draws[1].FirstIndex, 0u);
     EXPECT_EQ(encoder.Draws[2].FirstIndex, 3u);

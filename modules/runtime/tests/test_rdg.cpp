@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 
 #include <radray/runtime/rdg.h>
 #include <radray/runtime/render_graph_pipeline.h>
+#include <radray/runtime/scene.h>
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/upload_buffer.h>
 
@@ -153,7 +155,7 @@ class RDGExecutionTest : public testing::Test {
 protected:
     void SetUp() override {
         auto pipeline = make_unique<CallbackPipeline>();
-        pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) {
+        pipeline->OnExtract = [&](FrameSlot& slot) {
             const auto buffers = Trace.BufferAllocations.size();
             const auto textures = Trace.TextureAllocations.size();
             RDGBuilder graph{slot.GetArena()};
@@ -163,7 +165,7 @@ protected:
             EXPECT_EQ(Trace.BufferAllocations.size(), buffers);
             EXPECT_EQ(Trace.TextureAllocations.size(), textures);
         };
-        pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
+        pipeline->OnRecord = [&](FrameSlot& slot) {
             if (!Compiled) return;
             Pool.BeginFrame();
             auto command = slot.AcquireCommandBuffer();
@@ -181,7 +183,7 @@ protected:
         EXPECT_EQ(Trace.OpenEncoders, 0);
         EXPECT_EQ(Trace.DebugDepth, 0);
     }
-    void Run() { Scheduler->RunFrame(Source); }
+    void Run() { Scheduler->RunFrame(); }
     Probe Trace;
     shared_ptr<ProbeDevice> Device{make_shared<ProbeDevice>(Trace)};
     DeviceContext Context{Device, &Device->Queue};
@@ -1038,20 +1040,165 @@ TEST_F(RDGExecutionTest, ComputeSharedReadsMergeButTextureUavWritesSplit) {
     EXPECT_TRUE(std::holds_alternative<BarrierUavDescriptor>(Trace.Barriers.back()));
 }
 
+class RdgOnlyPipeline final : public RenderGraphFramePipeline {
+public:
+    explicit RdgOnlyPipeline(DeviceContext& context) : RenderGraphFramePipeline(context, 2) {}
+    Nullable<const uint32_t*> Input{nullptr};
+    bool DeclareMesh{false};
+    vector<uint32_t> Recorded;
+    void Wait(FrameSlot&) noexcept override { EXPECT_FALSE(Input); }
+private:
+    void ExtractFrameData(FrameSlot& slot) noexcept override {
+        ASSERT_TRUE(Input);
+        _values[slot.GetIndex()] = slot.GetArena().Emplace<uint32_t>(*Input);
+    }
+    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
+        const auto value = *_values[slot.GetIndex()];
+        if (DeclareMesh) {
+            const auto color = graph.CreateTexture(ColorDescriptor());
+            graph.AddRasterPass("missing extraction", [&](RDGRasterPassBuilder& pass) {
+                pass.UseMeshPass({9}).WriteColor(0, color, LoadAction::Clear, StoreAction::Store);
+            }, [](RDGRasterPassContext&) { return true; });
+            graph.MarkOutput(color);
+        } else {
+            graph.AddCopyPass("custom content", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [this, value](RDGCopyPassContext&) {
+                Recorded.push_back(value); return true;
+            });
+        }
+    }
+    void SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override {}
+    array<Nullable<uint32_t*>, 2> _values{nullptr, nullptr};
+};
+
+TEST(RenderGraphFramePipeline, CustomContentNeedsNoSceneOrMeshExtraction) {
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    DeviceContext context{device, &device->Queue};
+    auto owner = make_unique<RdgOnlyPipeline>(context);
+    auto* pipeline = owner.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(owner), 2);
+    ASSERT_TRUE(scheduler);
+    for (uint32_t value : {17u, 29u, 41u}) {
+        scheduler->BeginFrame();
+        pipeline->Input = &value;
+        scheduler->RunFrame();
+        pipeline->Input = nullptr;
+    }
+    EXPECT_EQ(pipeline->Recorded, (vector<uint32_t>{17, 29, 41}));
+    scheduler->WaitIdle();
+    scheduler = nullptr;
+}
+
+TEST(RenderGraphFramePipeline, AliveMeshPassWithoutExtractionTerminatesWithDiagnostic) {
+    EXPECT_DEATH(([] {
+        SetLogCallback([](LogLevel, std::string_view message, void*) {
+            std::fwrite(message.data(), 1, message.size(), stderr);
+            std::fflush(stderr);
+        }, nullptr);
+        Probe trace;
+        auto device = make_shared<ProbeDevice>(trace);
+        DeviceContext context{device, &device->Queue};
+        auto owner = make_unique<RdgOnlyPipeline>(context);
+        uint32_t value = 1;
+        owner->Input = &value;
+        owner->DeclareMesh = true;
+        auto scheduler = FrameScheduler::Create(context, std::move(owner), 2);
+        scheduler->RunFrame();
+    }()), "alive mesh pass 9 requires an ExtractMeshPass implementation");
+}
+
+class SceneRdgPipeline final : public RenderGraphFramePipeline {
+public:
+    SceneRdgPipeline(DeviceContext& context, MeshPassProcessor& processor, Buffer& vertices, Buffer& indices)
+        : RenderGraphFramePipeline(context, 2), Registration{{0}, &processor}, Vertices(vertices), Indices(indices) {}
+    Nullable<const Scene*> Source{nullptr};
+    PrimitiveHandle Candidate;
+    MeshPassRegistration Registration;
+    vector<uint32_t> Recorded;
+    std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return {&Registration, 1}; }
+    void Wait(FrameSlot&) noexcept override { EXPECT_FALSE(Source); }
+private:
+    void ExtractFrameData(FrameSlot&) noexcept override { if (!Source) RADRAY_ABORT("missing test scene input"); }
+    void SetupGraph(RDGBuilder& graph, FrameSlot&) noexcept override {
+        const auto count = Source->GetPrimitiveCount();
+        graph.AddCopyPass("custom RDG content", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [this, count](RDGCopyPassContext&) {
+            Recorded.push_back(count); return true;
+        });
+        const auto vertices = graph.ImportBuffer(&Vertices, BufferState::Vertex);
+        const auto indices = graph.ImportBuffer(&Indices, BufferState::Index);
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        graph.AddRasterPass("cached Scene content", [&](RDGRasterPassBuilder& pass) {
+            pass.UseMeshPass({0}).ReadBuffer(vertices, BufferState::Vertex).ReadBuffer(indices, BufferState::Index)
+                .WriteColor(0, color, LoadAction::Clear, StoreAction::Store);
+        }, [](RDGRasterPassContext& context) { return context.GetSlot().GetPassDrawList({0}).Submit(context.GetEncoder()); });
+        graph.MarkOutput(color);
+    }
+    void ExtractMeshPass(MeshPassId pass, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
+        if (!Source->GatherVisiblePrimitives(pass, std::span{&Candidate, 1}, list)) RADRAY_ABORT("cannot gather test scene");
+    }
+    void SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override {}
+    Buffer& Vertices;
+    Buffer& Indices;
+};
+
+TEST(RenderGraphFramePipeline, ExplicitSceneInputsCoexistWithCustomRdgPassAndMayBeClearedBeforeWait) {
+    class Processor final : public MeshPassProcessor {
+    public:
+        void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
+            BuildMeshDrawCommands(context, {.Pipeline = &Pipeline}, output);
+        }
+        FakePipeline Pipeline;
+    } processor;
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    DeviceContext context{device, &device->Queue};
+    FakeBuffer vertices{48, BufferUse::Vertex}, indices{12, BufferUse::Index};
+    VertexInput input;
+    input.Layouts = {{0, 12, VertexStepMode::Vertex}};
+    input.Attributes = {{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+    input.Streams = {{&vertices, 0, 48, 0}};
+    const auto add = [&](Scene& scene) {
+        const auto primitive = scene.AddPrimitive();
+        MeshBatch batch;
+        batch.VertexInput = &input; batch.Material = scene.AddMaterial({});
+        batch.Elements.push_back({.IndexBuffer = &indices, .IndexStride = 4, .IndexCount = 3});
+        EXPECT_TRUE(scene.AddMeshBatch(primitive, std::move(batch)).IsValid());
+        return primitive;
+    };
+    Scene first, second;
+    auto a = add(first), b = add(second);
+    second.AddPrimitive();
+    auto owner = make_unique<SceneRdgPipeline>(context, processor, vertices, indices);
+    auto* pipeline = owner.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(owner), 2);
+    ASSERT_TRUE(scheduler);
+    const auto run = [&](const Scene& scene, PrimitiveHandle candidate) {
+        scheduler->BeginFrame(); pipeline->Source = &scene; pipeline->Candidate = candidate;
+        scheduler->RunFrame(); pipeline->Source = nullptr;
+    };
+    first.SyncCachedMeshDrawCommands(pipeline->GetMeshPassRegistrations()); run(first, a);
+    first.Clear();
+    second.SyncCachedMeshDrawCommands(pipeline->GetMeshPassRegistrations()); run(second, b);
+    second.Clear();
+    a = add(first); first.SyncCachedMeshDrawCommands(pipeline->GetMeshPassRegistrations()); run(first, a);
+    first.Clear(); scheduler->WaitIdle();
+    EXPECT_EQ(pipeline->Recorded, (vector<uint32_t>{1, 2, 1}));
+}
+
 class FilteringPipeline final : public RenderGraphFramePipeline {
 public:
     explicit FilteringPipeline(DeviceContext& context) : RenderGraphFramePipeline(context, 1) {}
     void Wait(FrameSlot&) noexcept override {}
     vector<string> Events;
     vector<MeshPassId> Extracted;
-    std::function<void(RDGBuilder&, const Scene&)> OnSetup;
+    std::function<void(RDGBuilder&)> OnSetup;
     bool Reorder{false};
 
 protected:
-    void ExtractFrameData(const Scene&, FrameSlot&) noexcept override { Events.push_back("frame"); }
-    void SetupGraph(RDGBuilder& graph, const Scene& source, FrameSlot& slot) noexcept override {
+    void ExtractFrameData(FrameSlot&) noexcept override { Events.push_back("frame"); }
+    void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
         Events.push_back("setup");
-        if (OnSetup) OnSetup(graph, source);
+        if (OnSetup) OnSetup(graph);
         // 被裁剪的列表保持不变，包括其初始顺序。
         slot.GetPassDrawList({7}).VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
         const auto live = graph.CreateTexture(ColorDescriptor());
@@ -1071,7 +1218,7 @@ protected:
         }
         graph.MarkOutput(live);
     }
-    void ExtractMeshPass(MeshPassId pass, const Scene&, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
+    void ExtractMeshPass(MeshPassId pass, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
         Events.push_back("mesh");
         Extracted.push_back(pass);
         list.VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
@@ -1088,7 +1235,7 @@ TEST(RenderGraphFramePipeline, ExtractsAndSortsOnlyAliveMeshPassesBeforeExecutio
     auto scheduler = FrameScheduler::Create(context, std::move(owner), 1);
     ASSERT_TRUE(scheduler);
     Scene scene;
-    scheduler->RunFrame(scene);
+    scheduler->RunFrame();
     EXPECT_EQ(pipeline->Events, (vector<string>{"frame", "setup", "mesh", "execute", "submit"}));
     EXPECT_EQ(pipeline->Extracted, (vector<MeshPassId>{{3}}));
     EXPECT_EQ(trace.TextureAllocations.size(), 1);
@@ -1104,7 +1251,7 @@ TEST(RenderGraphFramePipeline, ExtractionKeepsDeclarationOrderWhenGpuPassesReord
     auto scheduler = FrameScheduler::Create(context, std::move(owner), 1);
     ASSERT_TRUE(scheduler);
     Scene scene;
-    scheduler->RunFrame(scene);
+    scheduler->RunFrame();
     EXPECT_EQ(pipeline->Extracted, (vector<MeshPassId>{{3}, {1}, {2}}));
     EXPECT_EQ(pipeline->Events, (vector<string>{"frame", "setup", "mesh", "mesh", "mesh", "execute", "tail", "other", "submit"}));
     EXPECT_EQ(trace.RasterScopes.size(), 2);
@@ -1118,18 +1265,17 @@ TEST(RenderGraphFramePipeline, SetupAndExecuteBorrowCurrentSceneUntilRecordCompl
     const auto primitive = scene.AddPrimitive();
     auto owner = make_unique<FilteringPipeline>(context);
     vector<uint32_t> recordedCounts;
-    owner->OnSetup = [&](RDGBuilder& graph, const Scene& source) {
-        EXPECT_EQ(&source, &scene);
-        ASSERT_TRUE(source.GetPrimitive(primitive));
-        graph.AddCopyPass("borrow scene", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [&source, &recordedCounts](RDGCopyPassContext&) {
-            recordedCounts.push_back(source.GetPrimitiveCount());
+    owner->OnSetup = [&](RDGBuilder& graph) {
+        ASSERT_TRUE(scene.GetPrimitive(primitive));
+        graph.AddCopyPass("borrow scene", [](RDGCopyPassBuilder& pass) { pass.NeverCull(); }, [&scene, &recordedCounts](RDGCopyPassContext&) {
+            recordedCounts.push_back(scene.GetPrimitiveCount());
             return true; });
     };
     auto scheduler = FrameScheduler::Create(context, std::move(owner), 1);
     ASSERT_TRUE(scheduler);
-    scheduler->RunFrame(scene);
+    scheduler->RunFrame();
     scene.AddPrimitive();
-    scheduler->RunFrame(scene);
+    scheduler->RunFrame();
     EXPECT_EQ(recordedCounts, (vector<uint32_t>{1, 2}));
     scene.Clear();
     scheduler->WaitIdle();

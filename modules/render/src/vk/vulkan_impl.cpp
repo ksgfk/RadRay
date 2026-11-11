@@ -2893,6 +2893,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         auto& caps = deviceR->_capabilities;
         const auto& limits = deviceR->_properties.limits;
         caps.Limits = {
+            .MaxDrawIndirectCount = deviceR->_enabledFeatures.Core.multiDrawIndirect ? limits.maxDrawIndirectCount : 1u,
             .MaxColorAttachments = limits.maxColorAttachments,
             .MaxTexture1DDimension = limits.maxImageDimension1D,
             .MaxTexture2DDimension = limits.maxImageDimension2D,

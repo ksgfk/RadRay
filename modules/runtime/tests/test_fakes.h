@@ -195,19 +195,19 @@ public:
 // 将各阶段转发到可选的测试回调。
 class CallbackPipeline final : public FramePipeline {
 public:
-    void Extract(const Scene& source, FrameSlot& slot) noexcept override {
-        if (OnExtract) OnExtract(source, slot);
+    void Extract(FrameSlot& slot) noexcept override {
+        if (OnExtract) OnExtract(slot);
     }
-    void Record(const Scene& source, FrameSlot& slot) noexcept override {
-        if (OnRecord) OnRecord(source, slot);
+    void Record(FrameSlot& slot) noexcept override {
+        if (OnRecord) OnRecord(slot);
     }
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
     }
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
-    std::function<void(const Scene&, FrameSlot&)> OnExtract;
-    std::function<void(const Scene&, FrameSlot&)> OnRecord;
+    std::function<void(FrameSlot&)> OnExtract;
+    std::function<void(FrameSlot&)> OnRecord;
     std::function<void(FrameSlot&)> OnWait;
     vector<MeshPassRegistration> Passes;
 };

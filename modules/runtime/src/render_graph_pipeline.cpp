@@ -22,29 +22,33 @@ RenderGraphFramePipeline::RenderGraphFramePipeline(DeviceContext& device, uint32
 
 RenderGraphFramePipeline::~RenderGraphFramePipeline() noexcept = default;
 
-void RenderGraphFramePipeline::Extract(const Scene& source, FrameSlot& slot) noexcept {
+void RenderGraphFramePipeline::Extract(FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Extract");
     if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
     auto& state = *_slotStates[slot.GetIndex()];
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractFrameData");
-        ExtractFrameData(source, slot);
+        ExtractFrameData(slot);
     }
     RDGBuilder graph{slot.GetArena()};
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.SetupGraph");
-        SetupGraph(graph, source, slot);
+        SetupGraph(graph, slot);
     }
     state.CompiledGraph = graph.Compile();
     if (!state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: RDG compile failed");
     for (const auto pass : state.CompiledGraph->GetAliveMeshPasses()) {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractMeshPass");
         RADRAY_PROFILE_PLOT("RadRay.FramePipeline.MeshPassId", static_cast<int64_t>(pass.Value));
-        ExtractMeshPass(pass, source, slot, slot.GetPassDrawList(pass));
+        ExtractMeshPass(pass, slot, slot.GetPassDrawList(pass));
     }
 }
 
-void RenderGraphFramePipeline::Record(const Scene&, FrameSlot& slot) noexcept {
+void RenderGraphFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot&, MeshPassFrameDrawList&) noexcept {
+    RADRAY_ABORT("RenderGraphFramePipeline: alive mesh pass {} requires an ExtractMeshPass implementation", pass.Value);
+}
+
+void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Record");
     if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
     auto& state = *_slotStates[slot.GetIndex()];

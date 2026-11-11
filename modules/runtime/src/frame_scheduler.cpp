@@ -56,19 +56,14 @@ Nullable<FrameSlot*> FrameScheduler::GetCurrentSlot() noexcept {
     return _slotBegun ? Nullable<FrameSlot*>{_slots[_currentSlotIndex].get()} : nullptr;
 }
 
-void FrameScheduler::RunFrame(Scene& source) noexcept { RunFrameImpl(source, &source); }
-
-void FrameScheduler::RunFrame(const Scene& source) noexcept { RunFrameImpl(source, nullptr); }
-
-void FrameScheduler::RunFrameImpl(const Scene& source, Nullable<Scene*> mutableSource) noexcept {
+void FrameScheduler::RunFrame() noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.RunFrame");
     RADRAY_PROFILE_PLOT("RadRay.FrameScheduler.Slot", static_cast<int64_t>(_currentSlotIndex));
     auto& slot = BeginFrame();
     const auto passes = _pipeline->GetMeshPassRegistrations();
-    if (mutableSource) mutableSource->SyncCachedMeshDrawCommands(passes);
     for (const auto& pass : passes) slot.GetPassDrawList(pass.Pass).SetSortMode(pass.SortMode);
-    _pipeline->Extract(source, slot);
-    _pipeline->Record(source, slot);
+    _pipeline->Extract(slot);
+    _pipeline->Record(slot);
 #if RADRAY_IS_DEBUG
     slot._inFrameCallback = false;
 #endif

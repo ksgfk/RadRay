@@ -560,6 +560,10 @@ D3D12 不为 command buffer 创建或持有空 root signature；`EndRenderPass` 
 均不额外重置原生 root signature。后续 encoder 在绑定 pipeline 时设置其 layout 的 root signature，
 参数组由该 encoder 显式绑定。
 
+`DeviceLimits::MaxDrawIndirectCount` 是一次原生 draw indirect 调用可消费的最大记录数：0 表示不支持，1 表示只能单条。
+D3D12 按 ExecuteIndirect 的 uint32 参数范围报告；Vulkan 根据已启用的 multiDrawIndirect 与设备 maxDrawIndirectCount 报告，多记录未启用时为 1。
+RHI 保留超限拆分语义；调用方可按该限制估计或主动拆分实际 API 调用数。非零 firstInstance 另查 `IndirectFirstInstance`。
+
 graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
 带 `BufferUse::Indirect` 的参数；固定 count 和 count=0 的行为由 RHI 保持，RHI 不提供 GPU count
 buffer。`CommandBuffer::ResolveTexture` 一次处理一个 mip 和连续 array layers，两个后端都要求同格式、

@@ -231,17 +231,17 @@ bool MeshDrawingFramePipeline::Initialize() {
 
 std::span<const MeshPassRegistration> MeshDrawingFramePipeline::GetMeshPassRegistrations() noexcept { return _passes; }
 
-void MeshDrawingFramePipeline::ExtractFrameData(const Scene& source, FrameSlot& slot) noexcept {
-    if (&source != &_scene) RADRAY_ABORT("MeshDrawingFramePipeline: unexpected source scene");
+void MeshDrawingFramePipeline::ExtractFrameData(FrameSlot& slot) noexcept {
+    if (!_input) RADRAY_ABORT("MeshDrawingFramePipeline: missing input");
     if (slot.GetIndex() >= _frames.size()) RADRAY_ABORT("MeshDrawingFramePipeline: slot index exceeds frame resources");
-    if (source.HasDirtyBatches()) RADRAY_ABORT("MeshDrawingFramePipeline: mesh command synchronization failed");
+    if (_input->HasDirtyBatches()) RADRAY_ABORT("MeshDrawingFramePipeline: mesh command synchronization failed");
     const auto& resources = *_frames[slot.GetIndex()];
     auto* payload = slot.GetArena().Emplace<ExtractedFramePayload>();
     _payloads[slot.GetIndex()] = payload;
     payload->Instances.reserve(_candidates.size());
     for (const auto handle : _candidates) {
-        if (!source.GetPrimitive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
-        const Eigen::Matrix4f matrix = (*source.GetPrimitive(handle)).LocalToWorld.ToMatrix();
+        if (!_input->GetPrimitive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
+        const Eigen::Matrix4f matrix = (*_input->GetPrimitive(handle)).LocalToWorld.ToMatrix();
         auto& instance = payload->Instances.emplace_back();
         std::memcpy(instance.LocalToWorld.data(), matrix.data(), sizeof(InstanceData));
     }
@@ -255,7 +255,7 @@ void MeshDrawingFramePipeline::ExtractFrameData(const Scene& source, FrameSlot& 
     }
 }
 
-void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, const Scene&, FrameSlot& slot) noexcept {
+void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept {
     const auto slotIndex = slot.GetIndex();
     auto& resources = *_frames[slotIndex];
     const auto& payload = *_payloads[slotIndex];
@@ -303,8 +303,8 @@ void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, const Scene&, Frame
     graph.MarkOutput(readback);
 }
 
-void MeshDrawingFramePipeline::ExtractMeshPass(MeshPassId pass, const Scene& source, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept {
-    if (!PreparePassDrawCommands(pass, source, _candidates, _policies, drawList)) RADRAY_ABORT("MeshDrawingFramePipeline: cannot prepare pass {}", pass.Value);
+void MeshDrawingFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept {
+    if (!PreparePassDrawCommands(pass, *_input, _candidates, _policies, drawList)) RADRAY_ABORT("MeshDrawingFramePipeline: cannot prepare pass {}", pass.Value);
     RADRAY_INFO_LOG("步骤 6：Frame={} Slot={} MeshPass={}，{} 条单实例 Draw", slot.GetFrameId(), slot.GetIndex(), pass.Value, drawList.VisibleCommands.size());
 }
 

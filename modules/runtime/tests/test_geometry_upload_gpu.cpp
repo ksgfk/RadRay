@@ -62,7 +62,7 @@ protected:
         auto pipeline = make_unique<radray::test::CallbackPipeline>();
         bool drawFrame = !separateUploadFrame;
         bool uploadFrame = true;
-        pipeline->OnExtract = [&](const Scene&, FrameSlot& slot) {
+        pipeline->OnExtract = [&](FrameSlot& slot) {
             RDGBuilder graph{slot.GetArena()};
             if (uploadFrame) EXPECT_TRUE(upload->CommitToGraph(graph));
             if (drawFrame) {
@@ -86,7 +86,7 @@ protected:
             compiled = graph.Compile();
             ASSERT_TRUE(compiled);
         };
-        pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
+        pipeline->OnRecord = [&](FrameSlot& slot) {
             ASSERT_TRUE(compiled);
             transient.BeginFrame();
             auto command = slot.AcquireCommandBuffer();
@@ -99,12 +99,11 @@ protected:
         };
         pipeline->OnWait = [&](FrameSlot&) { queue.Wait(); };
         auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
-        Scene scene;
-        scheduler->RunFrame(scene);
+        scheduler->RunFrame();
         if (separateUploadFrame) {
             drawFrame = true;
             uploadFrame = false;
-            scheduler->RunFrame(scene);
+            scheduler->RunFrame();
         }
         scheduler->WaitIdle();
         EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::ReadTexture(device, *target, TextureState::Common)), vector<uint32_t>(16, 0xff0000ff));
@@ -124,7 +123,7 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeMappedBufferGrowth
     auto mapped = MappedUploadBuffer::Create(device, 16).Unwrap();
     auto destination = device.CreateBuffer({.Size = 16, .Usage = BufferUse::CopyDestination}).Unwrap();
     auto pipeline = make_unique<radray::test::CallbackPipeline>();
-    pipeline->OnRecord = [&](const Scene&, FrameSlot& slot) {
+    pipeline->OnRecord = [&](FrameSlot& slot) {
         auto command = slot.AcquireCommandBuffer().Unwrap();
         command->Begin();
         render::test::Barrier(*command, {BarrierBufferDescriptor{mapped->Get(), BufferState::HostWrite, BufferState::CopySource},
@@ -135,8 +134,7 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeMappedBufferGrowth
     };
     pipeline->OnWait = [&](FrameSlot&) { queue.Wait(); };
     auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
-    Scene source;
-    scheduler->RunFrame(source);
+    scheduler->RunFrame();
     scheduler->BeginFrame();
     ASSERT_TRUE(mapped->Reserve(device, 64));
     EXPECT_EQ(mapped->GetCapacity(), 64u);

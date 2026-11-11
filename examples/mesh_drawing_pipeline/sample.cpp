@@ -161,7 +161,10 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     auto scheduler = FrameScheduler::Create(*gpu.Device, std::move(pipeline), slotCount);
     if (!scheduler) return 3;
     RADRAY_INFO_LOG("多槽帧循环：{} 个 Slot，连续渲染 {} 帧；Frame 1 更新绿色材质，结束后保存最后一帧", slotCount, frameCount);
-    scheduler->RunFrame(scene);
+    drawing->SetInput(scene);
+    scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
+    scheduler->RunFrame();
+    drawing->ClearInput();
 
     vector<array<std::optional<MeshDrawCommand>, 4>> originalCommands;
     MaterialConstants originalGreen;
@@ -189,7 +192,10 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     editedProxy.Update(instances[2]);
     if (!scene.UpdateMaterial(materials[2], std::move(editedProxy))) return 4;
     RADRAY_INFO_LOG("材质同步后：{} 个 Batch 标脏，八个实例共享三份 Resource 和六个 PSO", scene.GetDirtyBatches().size());
-    scheduler->RunFrame(scene);
+    drawing->SetInput(scene);
+    scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
+    scheduler->RunFrame();
+    drawing->ClearInput();
     if (scene.HasDirtyBatches()) return 4;
     size_t rebuiltBatches = 0;
     for (size_t index = 0; index < policies.size(); ++index) {
@@ -221,7 +227,10 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     RADRAY_INFO_LOG("命令颜色验证：绿色材质 Brightness 从 0.5 更新为 1.0，缓存 PushConstants 的 RGB 已翻倍，alpha 保持不变");
 
     for (uint32_t frame = 2; frame < frameCount; ++frame) {
-        scheduler->RunFrame(scene);
+        drawing->SetInput(scene);
+        scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
+        scheduler->RunFrame();
+        drawing->ClearInput();
     }
     scheduler->WaitIdle();
     if (!drawing->SaveImage((frameCount - 1) % slotCount, output)) return 6;
