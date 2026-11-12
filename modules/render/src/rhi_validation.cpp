@@ -1586,6 +1586,11 @@ public:
         Syncs.emplace(native.Get(), std::move(wrapper));
         return result;
     }
+    Texture* WrapImage(Texture* native) {
+        auto found = Images.find(native);
+        if (found == Images.end()) found = Images.emplace(native, make_unique<TextureValidation>(Context, native)).first;
+        return found->second.get();
+    }
     SwapChainAcquireResult AcquireNext(uint64_t timeout) noexcept override {
         if (!Alive("AcquireNext")) return {};
         if (NativeFrame && NativeFrame->IsValid()) {
@@ -1596,11 +1601,8 @@ public:
         if (!result.Frame) return result;
         NativeFrame = std::move(result.Frame);
         Open = true;
-        auto* image = NativeFrame->GetBackBuffer();
-        auto found = Images.find(image);
-        if (found == Images.end()) found = Images.emplace(image, make_unique<TextureValidation>(Context, image)).first;
         ++Token;
-        result.Frame = MakeFrame(this, Token, found->second.get(), NativeFrame->GetBackBufferIndex(), WrapSync(NativeFrame->GetWaitToDraw()).Get(), WrapSync(NativeFrame->GetReadyToPresent()).Get());
+        result.Frame = MakeFrame(this, Token, WrapImage(NativeFrame->GetBackBuffer()), NativeFrame->GetBackBufferIndex(), WrapSync(NativeFrame->GetWaitToDraw()).Get(), WrapSync(NativeFrame->GetReadyToPresent()).Get());
         return result;
     }
     SwapChainPresentResult Finish(SwapChainFrame frame, bool discard) noexcept {

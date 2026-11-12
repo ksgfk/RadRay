@@ -816,6 +816,12 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
             wstring name{adapDesc.Description};
             detail.GpuName = ToMultiByte(name).value_or("???");
+            detail.VendorId = adapDesc.VendorId;
+            detail.IsSoftware = (adapDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+            LARGE_INTEGER version{};
+            if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &version))) {
+                detail.DriverVersion = fmt::format("{}.{}.{}.{}", HIWORD(version.HighPart), LOWORD(version.HighPart), HIWORD(version.LowPart), LOWORD(version.LowPart));
+            }
         }
     }
     {

@@ -916,6 +916,10 @@ semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重�
 校验包装用 `ValidateFrame` 检查 owner/token；Present / DiscardAcquiredFrame 按值接收，移动后调用方 frame 失效。
 外来、已消费或失效的 frame 在开启校验时立即 ABORT；关闭校验时由调用方保证契约。
 
+后备缓冲仅通过成功获取的 `SwapChainFrame::GetBackBuffer()` 借用，GPU 使用须遵守 Acquire/Present 同步协议。
+调用方可为该帧创建 attachment view；GPU 完成且引用它的命令存储重置后释放 view。
+调用方不得销毁借用图像；Recreate 或关闭前须释放全部 view 和命令引用，并完成呈现队列等待。
+
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
 D3D12 消费 outstanding frame，返回既有 result 的 Success，之后必须 Recreate 或关闭；
 `DiscardAcquiredFrame` 是纯虚接口，Vulkan 当前不支持该操作，调用立即 ABORT。析构不是 token 取消。
@@ -1061,8 +1065,11 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 | `test_texture_view.cpp` | `TextureViewTest` |
 | `test_external_resource.cpp` | `ExternalResourceTest`（实例名 `Routes`） |
 | `test_vulkan_device_features.cpp` | `VulkanDeviceFeaturePolicy` |
+| `test_swapchain.cpp` | `SwapChainBackBufferTest`：D3D12/Vulkan 获取前准备视图、图像身份、越界与重建后重新准备 |
 | `test_vulkan_swapchain.cpp` | `VulkanSwapChainRetirement`、`VulkanSwapChainWindowTest` |
 
 各 suite 的覆盖内容、GPU 测试环境变量与跳过规则见[render 测试](../guide/build-test.md#render-测试)。
 GPU 用例以读回内容断言行为，使用 `modules/render/tests/data/` 中的 HLSL 编译出的 stage 字节码和手写布局；
 artifact/contract 测试归 shader 模块。生产对象不添加测试计数。
+
+`DeviceDetail` 的 `GpuName`、`VendorId`、`DriverVersion` 和 `IsSoftware` 来自已选设备，查询不要求启用外部资源共享。驱动版本字符串由后端提供，Vulkan 使用原生版本整数的十进制表示。

@@ -1348,6 +1348,9 @@ static_assert(sizeof(DispatchIndirectArguments) == 12);
 
 struct DeviceDetail {
     string GpuName{};
+    string DriverVersion{};
+    uint32_t VendorId{};
+    bool IsSoftware{};
     uint64_t BufferCopyOffsetAlignment{1};
     uint64_t TextureDataPlacementAlignment{1};
     uint64_t VramBudget{0};
@@ -1686,6 +1689,12 @@ public:
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;
+
+    /// Borrows an image for view preparation without acquiring presentation ownership.
+    /// The same index in an acquired frame has the same image identity. GPU use still
+    /// requires AcquireNext and its synchronization. Release all views/references
+    /// before Recreate or destruction; a recreate attempt may invalidate the image.
+    /// Returns null when index is outside GetBackBufferCount().
 
     virtual SwapChainDescriptor GetDesc() const noexcept = 0;
 

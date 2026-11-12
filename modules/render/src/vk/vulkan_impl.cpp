@@ -2949,6 +2949,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         DeviceDetail& detail = deviceR->_capabilities.Detail;
         const auto& props = selectPhyDevice.properties;
         detail.GpuName = props.deviceName;
+        detail.VendorId = props.vendorID;
+        detail.DriverVersion = fmt::format("{}", props.driverVersion);
+        detail.IsSoftware = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
         detail.BufferCopyOffsetAlignment = 1;
         detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;

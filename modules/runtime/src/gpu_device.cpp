@@ -5,36 +5,6 @@
 
 namespace radray {
 
-namespace {
-template <class Infos, class CreateDevice>
-uint32_t MatchHost(
-    shared_ptr<render::Device>& device,
-    const Infos& infos,
-    uint32_t preferred,
-    CreateDevice create,
-    const std::optional<render::ExternalDeviceIdentity>& host) {
-    if (!host) return preferred;
-    const auto matches = [&](render::Device& candidate) {
-        auto extension = candidate.GetExternalResourceExtension();
-        if (!extension) return false;
-        auto identity = extension->GetDeviceIdentity();
-        auto* value = std::get_if<render::ExternalDeviceIdentity>(&identity);
-        return value && *value == *host;
-    };
-    if (matches(*device)) return preferred;
-    for (const auto& info : infos) {
-        if (info.Index == preferred) continue;
-        auto candidate = create(info.Index);
-        if (candidate && matches(*candidate.Get())) {
-            device = candidate.Release();
-            return info.Index;
-        }
-    }
-    RADRAY_WARN_LOG("No external-resource adapter matches the requested identity; using the preferred device");
-    return preferred;
-}
-}  // 匿名命名空间
-
 DeviceContext::DeviceContext(
     shared_ptr<render::Device> device,
     render::CommandQueue* directQueue) noexcept
@@ -53,8 +23,7 @@ bool DeviceContext::SupportsIndirect() const noexcept {
 }
 
 Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
-    Environment& environment,
-    const std::optional<render::ExternalDeviceIdentity>& host) noexcept {
+    Environment& environment) noexcept {
     const auto backend = environment.GetBackend();
     shared_ptr<render::Device> device;
     RADRAY_INFO_LOG("DeviceContext: creating {}", backend);
@@ -72,7 +41,6 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
             desc.Factory = factory;
             desc.AdapterIndex = adapter;
             desc.QueueCounts = {1, 0, 0};
-            desc.EnableExternalResource = true;
             RADRAY_INFO_LOG("DeviceContext: creating D3D12 device on adapter {}", *adapter);
             auto createdDevice = render::Device::Create(render::DeviceDescriptor{desc});
             if (!createdDevice) {
@@ -80,9 +48,6 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
                 return nullptr;
             }
             device = createdDevice.Release();
-            MatchHost(device, factory->GetAdapters(), *adapter, [&](uint32_t index) {
-                desc.AdapterIndex = index;
-                return render::Device::Create(render::DeviceDescriptor{desc}); }, host);
             break;
         }
 #endif
@@ -98,7 +63,6 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
             render::VulkanDeviceDescriptor desc{};
             desc.PhysicalDeviceIndex = adapter;
             desc.Queues = queues;
-            desc.EnableExternalResource = true;
             RADRAY_INFO_LOG("DeviceContext: creating Vulkan device on adapter {}", *adapter);
             auto createdDevice = render::Device::Create(render::DeviceDescriptor{desc});
             if (!createdDevice) {
@@ -106,9 +70,6 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
                 return nullptr;
             }
             device = createdDevice.Release();
-            MatchHost(device, instance->GetPhysicalDevices(), *adapter, [&](uint32_t index) {
-                desc.PhysicalDeviceIndex = index;
-                return render::Device::Create(render::DeviceDescriptor{desc}); }, host);
             break;
         }
 #endif

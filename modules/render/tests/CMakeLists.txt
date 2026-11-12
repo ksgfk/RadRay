@@ -7,6 +7,7 @@ add_executable(test_radray_render
     test_texture_view.cpp
     test_external_resource.cpp
     test_vulkan_device_features.cpp
+    test_swapchain.cpp
     test_vulkan_swapchain.cpp)
 target_link_libraries(test_radray_render PRIVATE radrayrender GTest::gtest_main)
 radray_default_compile_flags(test_radray_render)

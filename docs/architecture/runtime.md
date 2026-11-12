@@ -753,9 +753,9 @@ Environment 拥有 D3D12 factory，或负责 Vulkan environment 的初始化与�
 
 ## 设备与队列
 
-`DeviceContext::Create(environment, host)` 借用环境，优先选择高性能适配器，创建 GPU Device 和一条 Direct 队列，
-启用外部资源扩展。提供可选 `ExternalDeviceIdentity` 时尝试匹配宿主设备；没有匹配项则记录警告并使用优选设备，
-不保证返回的设备身份一定等于 host。底层互操作契约见 [RHI 与后端](render-rhi.md)。
+`DeviceContext::Create(environment)` 借用环境，选择高性能适配器，创建 GPU Device 和一条 Direct 队列。
+默认设备不启用外部资源共享，也不接收宿主 GPU 身份；需要外部共享的调用方自行创建设备并使用现有 owner 构造函数。
+创建失败记录日志并返回空 owner。
 
 DeviceContext 也提供接收 `shared_ptr<render::Device>` 与非空 Direct 队列指针的构造函数。
 调用方须保证队列属于传入设备，且底层环境寿命满足设备要求。
