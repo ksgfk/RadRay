@@ -2,28 +2,67 @@
 
 #include <gtest/gtest.h>
 
+#include <latch>
+#include <thread>
+
+namespace intrusive_ptr_test {
+
+class Incomplete;
+
+}  // namespace intrusive_ptr_test
+
+namespace radray {
+
+template <>
+struct IntrusivePtrTraits<intrusive_ptr_test::Incomplete> {
+    static void Retain(intrusive_ptr_test::Incomplete* object) noexcept;
+    static void Release(intrusive_ptr_test::Incomplete* object) noexcept;
+};
+
+}  // namespace radray
+
+namespace intrusive_ptr_test {
+
+radray::IntrusivePtr<Incomplete> CopyIncomplete(const radray::IntrusivePtr<Incomplete>& source) {
+    return source;
+}
+
+void ResetIncomplete(radray::IntrusivePtr<Incomplete>& pointer) noexcept {
+    pointer.Reset();
+}
+
+class Incomplete final {
+public:
+    explicit Incomplete(int& destroyed) noexcept : _destroyed(destroyed) {}
+    ~Incomplete() noexcept { ++_destroyed; }
+    void Hold() noexcept { ++_references; }
+    void Drop() noexcept {
+        if (--_references == 0) delete this;
+    }
+
+private:
+    int& _destroyed;
+    uint32_t _references{0};
+};
+
+}  // namespace intrusive_ptr_test
+
+void radray::IntrusivePtrTraits<intrusive_ptr_test::Incomplete>::Retain(intrusive_ptr_test::Incomplete* object) noexcept { object->Hold(); }
+void radray::IntrusivePtrTraits<intrusive_ptr_test::Incomplete>::Release(intrusive_ptr_test::Incomplete* object) noexcept { object->Drop(); }
+
 namespace {
 
 struct Probe {
     int Destroyed{0};
 };
 
-// The count starts at one so a new object is handed over with AdoptRef.
-class Counted {
+class Counted : public radray::RefCountedBase<Counted> {
 public:
     explicit Counted(Probe& probe) noexcept : _probe(probe) {}
-    virtual ~Counted() noexcept { ++_probe.Destroyed; }
-
-    uint32_t RefCount() const noexcept { return _refCount; }
+    ~Counted() noexcept override { ++_probe.Destroyed; }
 
 private:
-    friend void IntrusivePtrAddRef(const Counted* object) noexcept { ++object->_refCount; }
-    friend void IntrusivePtrRelease(Counted* object) noexcept {
-        if (--object->_refCount == 0) delete object;
-    }
-
     Probe& _probe;
-    mutable uint32_t _refCount{1};
 };
 
 class Derived final : public Counted {
@@ -31,12 +70,10 @@ public:
     using Counted::Counted;
 };
 
-using radray::AdoptRef;
 using radray::IntrusivePtr;
-using radray::RetainRef;
 
 IntrusivePtr<Counted> MakeCounted(Probe& probe) {
-    return AdoptRef(new Counted{probe});
+    return IntrusivePtr<Counted>{new Counted{probe}};
 }
 
 TEST(IntrusivePtrTest, DefaultIsNull) {
@@ -47,24 +84,25 @@ TEST(IntrusivePtrTest, DefaultIsNull) {
     EXPECT_TRUE(ptr == nullptr);
 }
 
-TEST(IntrusivePtrTest, AdoptRefTakesExistingReference) {
+TEST(IntrusivePtrTest, ConstructionAcquiresFirstReference) {
     Probe probe;
-
-    const auto ptr = MakeCounted(probe);
+    auto* raw = new Counted{probe};
+    EXPECT_EQ(raw->UseCount(), 0u);
+    const IntrusivePtr<Counted> ptr{raw};
 
     ASSERT_TRUE(ptr);
-    EXPECT_EQ(ptr->RefCount(), 1u);
+    EXPECT_EQ(ptr->UseCount(), 1u);
 }
 
-TEST(IntrusivePtrTest, RetainRefAddsReference) {
+TEST(IntrusivePtrTest, ConstructionFromBorrowedPointerAddsReference) {
     Probe probe;
     const auto owner = MakeCounted(probe);
     {
-        const auto retained = RetainRef(owner.Get());
-        EXPECT_EQ(owner->RefCount(), 2u);
+        const IntrusivePtr<Counted> retained{owner.Get()};
+        EXPECT_EQ(owner->UseCount(), 2u);
     }
 
-    EXPECT_EQ(owner->RefCount(), 1u);
+    EXPECT_EQ(owner->UseCount(), 1u);
     EXPECT_EQ(probe.Destroyed, 0);
 }
 
@@ -74,10 +112,10 @@ TEST(IntrusivePtrTest, CopyAddsReferenceAndDestructionReleasesIt) {
     {
         const auto second = first;
         EXPECT_EQ(second.Get(), first.Get());
-        EXPECT_EQ(first->RefCount(), 2u);
+        EXPECT_EQ(first->UseCount(), 2u);
     }
 
-    EXPECT_EQ(first->RefCount(), 1u);
+    EXPECT_EQ(first->UseCount(), 1u);
 }
 
 TEST(IntrusivePtrTest, MoveTransfersReferenceWithoutCounting) {
@@ -89,7 +127,7 @@ TEST(IntrusivePtrTest, MoveTransfersReferenceWithoutCounting) {
 
     EXPECT_FALSE(source);  // NOLINT(bugprone-use-after-move)
     EXPECT_EQ(target.Get(), raw);
-    EXPECT_EQ(target->RefCount(), 1u);
+    EXPECT_EQ(target->UseCount(), 1u);
 }
 
 TEST(IntrusivePtrTest, LastReleaseDestroysObject) {
@@ -116,16 +154,13 @@ TEST(IntrusivePtrTest, ResetAndNullAssignmentReleaseOnce) {
     EXPECT_EQ(probe.Destroyed, 2);
 }
 
-TEST(IntrusivePtrTest, ReleaseHandsReferenceToCaller) {
-    Probe probe;
-    auto ptr = MakeCounted(probe);
-
-    Counted* raw = ptr.Release();
-    ptr.Reset();
-    EXPECT_EQ(probe.Destroyed, 0);
-
-    { const auto reclaimed = AdoptRef(raw); }
-    EXPECT_EQ(probe.Destroyed, 1);
+TEST(IntrusivePtrTest, NullableConstructionAndEmptyCopiesRemainEmpty) {
+    const IntrusivePtr<Counted> ptr{radray::Nullable<Counted*>{nullptr}};
+    auto copy = ptr;
+    IntrusivePtr<Counted> moved{std::move(copy)};
+    EXPECT_FALSE(ptr);
+    EXPECT_FALSE(copy);  // NOLINT(bugprone-use-after-move)
+    EXPECT_FALSE(moved);
 }
 
 TEST(IntrusivePtrTest, SelfAssignmentKeepsObjectAlive) {
@@ -136,21 +171,21 @@ TEST(IntrusivePtrTest, SelfAssignmentKeepsObjectAlive) {
     ptr = alias;
 
     ASSERT_TRUE(ptr);
-    EXPECT_EQ(ptr->RefCount(), 1u);
+    EXPECT_EQ(ptr->UseCount(), 1u);
     EXPECT_EQ(probe.Destroyed, 0);
 }
 
 TEST(IntrusivePtrTest, ConvertsToBaseSharingTheSameCount) {
     Probe probe;
-    IntrusivePtr<Derived> derived = AdoptRef(new Derived{probe});
+    IntrusivePtr<Derived> derived{new Derived{probe}};
 
     IntrusivePtr<Counted> copied = derived;
     EXPECT_EQ(copied.Get(), derived.Get());
-    EXPECT_EQ(derived->RefCount(), 2u);
+    EXPECT_EQ(derived->UseCount(), 2u);
 
     IntrusivePtr<Counted> moved = std::move(derived);
     EXPECT_FALSE(derived);  // NOLINT(bugprone-use-after-move)
-    EXPECT_EQ(moved->RefCount(), 2u);
+    EXPECT_EQ(moved->UseCount(), 2u);
 
     copied.Reset();
     moved.Reset();
@@ -182,6 +217,105 @@ TEST(IntrusivePtrTest, SwapExchangesObjects) {
 
     EXPECT_EQ(first.Get(), secondRaw);
     EXPECT_EQ(second.Get(), firstRaw);
+}
+
+TEST(IntrusivePtrTest, TraitsAllowReferenceOperationsBeforeTypeDefinition) {
+    int destroyed = 0;
+    IntrusivePtr<intrusive_ptr_test::Incomplete> pointer{new intrusive_ptr_test::Incomplete{destroyed}};
+    auto copy = intrusive_ptr_test::CopyIncomplete(pointer);
+    intrusive_ptr_test::ResetIncomplete(pointer);
+    EXPECT_EQ(destroyed, 0);
+    intrusive_ptr_test::ResetIncomplete(copy);
+    EXPECT_EQ(destroyed, 1);
+}
+
+TEST(IntrusivePtrTest, ConstConversionKeepsTheSameObjectAlive) {
+    Probe probe;
+    auto pointer = MakeCounted(probe);
+    IntrusivePtr<const Counted> constant = pointer;
+    pointer.Reset();
+    EXPECT_EQ(probe.Destroyed, 0);
+    EXPECT_EQ(constant->UseCount(), 1u);
+    constant.Reset();
+    EXPECT_EQ(probe.Destroyed, 1);
+}
+
+TEST(IntrusivePtrTest, SelfMoveKeepsObjectAlive) {
+    Probe probe;
+    auto pointer = MakeCounted(probe);
+    auto& alias = pointer;
+    pointer = std::move(alias);
+    ASSERT_TRUE(pointer);
+    EXPECT_EQ(pointer->UseCount(), 1u);
+    EXPECT_EQ(probe.Destroyed, 0);
+}
+
+class Reentrant final : public radray::RefCountedBase<Reentrant> {
+public:
+    Reentrant(IntrusivePtr<Reentrant>& owner, Probe& probe) noexcept : _owner(owner), _probe(probe) {}
+    ~Reentrant() noexcept override {
+        EXPECT_FALSE(_owner);
+        _owner.Reset();
+        ++_probe.Destroyed;
+    }
+
+private:
+    IntrusivePtr<Reentrant>& _owner;
+    Probe& _probe;
+};
+
+TEST(IntrusivePtrTest, ResetClearsPointerBeforeReentrantDestruction) {
+    Probe probe;
+    IntrusivePtr<Reentrant> pointer;
+    pointer = IntrusivePtr<Reentrant>{new Reentrant{pointer, probe}};
+    pointer.Reset();
+    EXPECT_EQ(probe.Destroyed, 1);
+}
+
+class ThreadCounted final : public radray::ThreadSafeRefCountedBase<ThreadCounted> {
+public:
+    explicit ThreadCounted(Probe& probe) noexcept : _probe(probe) {}
+    ~ThreadCounted() noexcept override { ++_probe.Destroyed; }
+
+private:
+    Probe& _probe;
+};
+
+TEST(IntrusivePtrTest, ConcurrentOwnersReleaseExactlyOnce) {
+    Probe probe;
+    auto* raw = new ThreadCounted{probe};
+    EXPECT_EQ(raw->UseCount(), 0u);
+    IntrusivePtr<ThreadCounted> owner{raw};
+    std::latch start{1};
+    radray::vector<std::jthread> threads;
+    for (uint32_t i = 0; i < 8; ++i) {
+        threads.emplace_back([pointer = owner, &start]() mutable {
+            start.wait();
+            for (uint32_t iteration = 0; iteration < 1000; ++iteration) {
+                auto copy = pointer;
+                copy.Reset();
+            }
+            pointer.Reset();
+        });
+    }
+    owner.Reset();
+    start.count_down();
+    for (auto& thread : threads) thread.join();
+    EXPECT_EQ(probe.Destroyed, 1);
+}
+
+TEST(IntrusivePtrDeathTest, RejectsReleaseWithoutAReference) {
+    Probe probe;
+    Counted counted{probe};
+    ThreadCounted threaded{probe};
+    EXPECT_DEATH(counted.Release(), "");
+    EXPECT_DEATH(threaded.Release(), "");
+}
+
+TEST(IntrusivePtrDeathTest, RejectsDestructionWithOutstandingReferences) {
+    Probe probe;
+    EXPECT_DEATH({ Counted counted{probe}; counted.Retain(); }, "");
+    EXPECT_DEATH({ ThreadCounted counted{probe}; counted.Retain(); }, "");
 }
 
 }  // namespace

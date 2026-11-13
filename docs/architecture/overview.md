@@ -14,7 +14,7 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
 | `shaderlib/` | HLSL 数学、BSDF、光照共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 raw shader compile CLI |
-| `benchmarks/` | OBJ 解析、SparseSet 压力与 ObjectArena 内存复用基准 |
+| `benchmarks/` | OBJ 解析、SparseSet 压力与 RDG 上传及帧回收基准 |
 | `examples/` | 独立教学程序；[Mesh Drawing Pipeline 样例](../guide/build-test.md#mesh-drawing-pipeline-教学样例) 展示 Scene 输入到离屏 GPU 绘制与 PNG 读回 |
 | `cmake/` | 功能与依赖清单、包发现、独立依赖适配、安装导出与构建辅助 |
 | `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |

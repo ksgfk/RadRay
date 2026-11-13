@@ -8,17 +8,138 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
-#include <radray/object_arena.h>
+#include <radray/intrusive_ptr.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/frame_slot.h>
+#include <radray/runtime/upload_arena.h>
 
 namespace radray {
+
+class GpuBuffer;
+class GpuTexture;
+
+struct RDGDeviceConstraints {
+    uint64_t BufferCopyAlignment{1};
+    uint64_t TexturePlacementAlignment{1};
+    uint64_t TexturePitchAlignment{1};
+    uint64_t CBufferSizeAlignment{1};
+    uint64_t CBufferOffsetAlignment{1};
+    uint64_t StorageOffsetAlignment{1};
+    uint64_t TexelOffsetAlignment{1};
+    uint64_t MaxBufferSize{0};
+    uint64_t MaxCBufferRange{0};
+    uint64_t MaxStorageRange{0};
+};
+
+struct RDGCompileOptions {
+    bool FullValidation{true};
+};
+
+struct RDGBufferSlice {
+    Nullable<render::Buffer*> Buffer{nullptr};
+    uint64_t Offset{0};
+    uint64_t Size{0};
+};
+
+struct RDGDynamicBufferDescriptor {
+    uint64_t MaxSize{0};
+    render::BufferUses Usage{render::BufferUse::CBuffer};
+    uint64_t Alignment{1};
+};
+
+class RDGUploadPrepareContext final {
+public:
+    RDGUploadPrepareContext(FrameSlot& slot, std::span<const MeshPassId> passes) noexcept;
+    std::span<const MeshPassId> GetAliveMeshPasses() const noexcept;
+    MeshPassFrameDrawList& GetPassDrawList(MeshPassId pass) noexcept;
+    uint64_t GetFrameId() const noexcept;
+    uint32_t GetSlotIndex() const noexcept;
+
+private:
+    FrameSlot& _slot;
+    std::span<const MeshPassId> _passes;
+};
+
+struct RDGUploadWriteContext {
+    std::span<byte> Bytes;
+    uint64_t Size;
+    uint64_t RowPitch{0};
+    uint64_t RowBytes{0};
+    uint32_t Rows{1};
+};
+
+class RDGUploadSource final {
+public:
+    RDGUploadSource() noexcept = default;
+    RDGUploadSource(RDGUploadSource&&) noexcept = default;
+    RDGUploadSource& operator=(RDGUploadSource&&) noexcept = default;
+    RDGUploadSource(const RDGUploadSource&) = delete;
+    RDGUploadSource& operator=(const RDGUploadSource&) = delete;
+    // 借用到 Prepare 消费结束；SnapshotBytes 是唯一立即复制 payload 的入口。
+    static RDGUploadSource BorrowedBytes(std::span<const byte> bytes) noexcept;
+    static RDGUploadSource OwnedBytes(vector<byte>&& bytes) noexcept;
+    static RDGUploadSource SnapshotBytes(std::span<const byte> bytes);
+
+    template <class T>
+    static RDGUploadSource Generated(uint64_t maxSize, T context,
+                                     bool (*write)(const T&, RDGUploadWriteContext&) noexcept,
+                                     std::type_identity_t<Nullable<uint64_t (*)(T&, RDGUploadPrepareContext&) noexcept>> layout = nullptr) {
+        class Generator {
+        public:
+            T Context;
+            bool (*Write)(const T&, RDGUploadWriteContext&) noexcept;
+            Nullable<uint64_t (*)(T&, RDGUploadPrepareContext&) noexcept> Layout;
+        };
+        RDGUploadSource result;
+        result._maxSize = maxSize;
+        auto owner = unique_ptr<void, void (*)(void*) noexcept>{
+            new Generator{std::move(context), write, layout},
+            [](void* ptr) noexcept { delete static_cast<Generator*>(ptr); }};
+        auto& source = result._storage.emplace<GeneratedSource>(GeneratedSource{std::move(owner)});
+        source.Layout = [](void* ptr, RDGUploadPrepareContext& ctx, uint64_t maximum) noexcept {
+            auto& generator = *static_cast<Generator*>(ptr);
+            return generator.Layout ? generator.Layout.Get()(generator.Context, ctx) : maximum;
+        };
+        source.Write = [](const void* ptr, RDGUploadWriteContext& ctx) noexcept {
+            const auto& generator = *static_cast<const Generator*>(ptr);
+            return generator.Write(generator.Context, ctx);
+        };
+        return result;
+    }
+    uint64_t GetMaxSize() const noexcept;
+    uint64_t PrepareLayout(RDGUploadPrepareContext& context) noexcept;
+    bool Write(RDGUploadWriteContext& context, uint64_t sourceRowPitch = 0) const noexcept;
+    void ReleaseSource() noexcept;
+
+private:
+    struct GeneratedSource {
+        unique_ptr<void, void (*)(void*) noexcept> Context;
+        Nullable<uint64_t (*)(void*, RDGUploadPrepareContext&, uint64_t) noexcept> Layout{nullptr};
+        Nullable<bool (*)(const void*, RDGUploadWriteContext&) noexcept> Write{nullptr};
+    };
+    std::variant<std::span<const byte>, vector<byte>, GeneratedSource> _storage;
+    uint64_t _maxSize{0};
+};
+
+class RDGTextureUploadSource final {
+public:
+    static RDGTextureUploadSource BorrowedBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0) noexcept;
+    static RDGTextureUploadSource OwnedBytes(vector<byte>&& bytes, uint64_t sourceRowPitch = 0) noexcept;
+    static RDGTextureUploadSource SnapshotBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0);
+    template <class T>
+    static RDGTextureUploadSource Generated(uint64_t size, T data, bool (*write)(const T&, RDGUploadWriteContext&) noexcept) {
+        return {RDGUploadSource::Generated(size, std::move(data), write), 0};
+    }
+    RDGUploadSource Source;
+    uint64_t SourceRowPitch;
+};
 
 namespace detail {
 struct RDGData;
 struct RDGExecution;
-}  // 命名空间 detail
+}  // namespace detail
 
 class RDGTextureHandle {
 public:
@@ -66,13 +187,27 @@ private:
     unique_ptr<Impl> _impl;
 };
 
+class RDGPrepareContext final {
+public:
+    explicit RDGPrepareContext(detail::RDGExecution& execution) noexcept;
+    FrameSlot& GetSlot() noexcept;
+    RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
+    render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
+    Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
+
+private:
+    detail::RDGExecution& _execution;
+};
+
 class RDGRasterPassContext final {
 public:
     render::GraphicsCommandEncoder& GetEncoder() noexcept;
-    FrameSlot& GetSlot() noexcept;
+    uint64_t GetFrameId() const noexcept;
+    uint32_t GetSlotIndex() const noexcept;
+    std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
     // 仅可解析本 Pass 已声明的资源；借用随命令 epoch 结束而失效。
     render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
-    render::Buffer& Resolve(RDGBufferHandle handle) const noexcept;
+    RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
     Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
 
 private:
@@ -85,9 +220,11 @@ private:
 class RDGComputePassContext final {
 public:
     render::ComputeCommandEncoder& GetEncoder() noexcept;
-    FrameSlot& GetSlot() noexcept;
+    uint64_t GetFrameId() const noexcept;
+    uint32_t GetSlotIndex() const noexcept;
+    std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
     render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
-    render::Buffer& Resolve(RDGBufferHandle handle) const noexcept;
+    RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
     Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
 
 private:
@@ -100,9 +237,11 @@ private:
 class RDGCopyPassContext final {
 public:
     render::CommandBuffer& GetCommandBuffer() noexcept;
-    FrameSlot& GetSlot() noexcept;
+    uint64_t GetFrameId() const noexcept;
+    uint32_t GetSlotIndex() const noexcept;
+    std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
     render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
-    render::Buffer& Resolve(RDGBufferHandle handle) const noexcept;
+    RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
 
 private:
     friend class CompiledRDG;
@@ -171,15 +310,22 @@ class CompiledRDG final {
 public:
     explicit CompiledRDG(detail::RDGData& data) noexcept;
     std::span<const MeshPassId> GetAliveMeshPasses() const noexcept;
-    // 在 Record 期间、已开启录制的命令缓冲内执行一次；不负责提交。
+    // Prepare、Record、CommitSubmittedStates 各一次；Record 要求命令已 Begin。
     // 失败使本帧不可恢复；不支持重试、状态回滚或部分提交。
-    bool Execute(FrameSlot& slot, RDGTransientResourcePool& transientPool, render::CommandBuffer& commandBuffer) noexcept;
+    ~CompiledRDG() noexcept;
+    bool Prepare(FrameSlot& slot, RDGTransientResourcePool& transientPool, UploadArena& uploadArena) noexcept;
+    bool Record(render::CommandBuffer& commandBuffer) noexcept;
+    void CommitSubmittedStates() noexcept;
 
 private:
     friend class RDGBuilder;
-    friend class ObjectArena;
+    class ExecutionDeleter {
+    public:
+        void operator()(detail::RDGExecution* execution) const noexcept;
+    };
     detail::RDGData& _data;
-    bool _executed{false};
+    unique_ptr<detail::RDGExecution, ExecutionDeleter> _execution;
+    bool _prepareAttempted{false}, _prepared{false}, _recordAttempted{false}, _recorded{false}, _committed{false};
 };
 
 // 外部同步由调用方负责；这些标志记录所有权屏障。
@@ -190,12 +336,12 @@ public:
     friend bool operator==(const RDGExternalOwnership&, const RDGExternalOwnership&) = default;
 };
 
-// 构图器和编译后的图借用 arena 存储，直到槽位回收。
-// 设置回调立即执行；执行回调由 arena 持有，仅可捕获帧内有效的数据，
-// 不得捕获设置阶段的局部引用。
+// 构图器和编译后的图借用槽内存储，直到槽位回收。
+// PassData 随图清理；Prepare 可修改，Record 只读；借用输入保持到消费完成。
 class RDGBuilder final {
 public:
-    explicit RDGBuilder(ObjectArena& arena) noexcept;
+    // 要求当前槽已 BeginFrame；图声明、编译和 Prepare 使用同一槽。
+    explicit RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints = {}, RDGCompileOptions options = {}) noexcept;
     RDGBuilder(const RDGBuilder&) = delete;
     RDGBuilder& operator=(const RDGBuilder&) = delete;
 
@@ -205,49 +351,81 @@ public:
                                  std::optional<render::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGTextureHandle CreateTexture(const render::TextureDescriptor& desc);
     RDGBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
-    // 立即复制字节；上传内存的写入区间不得重叠，且写入必须先于 GPU 使用。
-    void UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, std::span<const byte> data);
+    RDGBufferHandle CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
+    RDGBufferHandle ImportPersistentBorrowed(GpuBuffer& buffer);
+    RDGTextureHandle ImportPersistentBorrowed(GpuTexture& texture);
+    RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuBuffer>& buffer);
+    RDGTextureHandle ImportPersistentOwned(const IntrusivePtr<GpuTexture>& texture);
+    void UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGUploadSource source);
+    void UploadTexture(RDGTextureHandle dst, const render::TextureRegion2D& region, RDGTextureUploadSource source);
     void MarkOutput(RDGTextureHandle texture);
     void MarkOutput(RDGBufferHandle buffer);
 
-    template <typename SetupFn, typename ExecuteFn>
-    void AddRasterPass(std::string_view name, SetupFn&& setup, ExecuteFn&& execute) {
-        auto* callback = _arena.Emplace<std::decay_t<ExecuteFn>>(std::forward<ExecuteFn>(execute));
-        const uint32_t pass = AddRasterPassImpl(name, callback, [](void* value, RDGRasterPassContext& ctx) {
-            return (*static_cast<std::decay_t<ExecuteFn>*>(value))(ctx);
-        });
-        RDGRasterPassBuilder builder{_data, pass};
-        std::forward<SetupFn>(setup)(builder);
+    template <class T>
+    RDGRasterPassBuilder AddRasterPass(std::string_view name, T data,
+                                       bool (*record)(const T&, RDGRasterPassContext&) noexcept,
+                                       std::type_identity_t<Nullable<bool (*)(T&, RDGPrepareContext&) noexcept>> prepare = nullptr) {
+        class Callback {
+        public:
+            T Data;
+            bool (*Record)(const T&, RDGRasterPassContext&) noexcept;
+            Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
+        };
+        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        const auto index = AddRasterPassImpl(name, std::move(callback), [](const void* value, RDGRasterPassContext& context) noexcept {
+                const auto& callback = *static_cast<const Callback*>(value);
+                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& callback = *static_cast<Callback*>(value);
+                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+        return {_data, index};
     }
 
-    template <typename SetupFn, typename ExecuteFn>
-    void AddComputePass(std::string_view name, SetupFn&& setup, ExecuteFn&& execute) {
-        auto* callback = _arena.Emplace<std::decay_t<ExecuteFn>>(std::forward<ExecuteFn>(execute));
-        const uint32_t pass = AddComputePassImpl(name, callback, [](void* value, RDGComputePassContext& ctx) {
-            return (*static_cast<std::decay_t<ExecuteFn>*>(value))(ctx);
-        });
-        RDGComputePassBuilder builder{_data, pass};
-        std::forward<SetupFn>(setup)(builder);
+    template <class T>
+    RDGComputePassBuilder AddComputePass(std::string_view name, T data,
+                                         bool (*record)(const T&, RDGComputePassContext&) noexcept,
+                                         std::type_identity_t<Nullable<bool (*)(T&, RDGPrepareContext&) noexcept>> prepare = nullptr) {
+        class Callback {
+        public:
+            T Data;
+            bool (*Record)(const T&, RDGComputePassContext&) noexcept;
+            Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
+        };
+        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        const auto index = AddComputePassImpl(name, std::move(callback), [](const void* value, RDGComputePassContext& context) noexcept {
+                const auto& callback = *static_cast<const Callback*>(value);
+                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& callback = *static_cast<Callback*>(value);
+                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+        return {_data, index};
     }
 
-    template <typename SetupFn, typename ExecuteFn>
-    void AddCopyPass(std::string_view name, SetupFn&& setup, ExecuteFn&& execute) {
-        auto* callback = _arena.Emplace<std::decay_t<ExecuteFn>>(std::forward<ExecuteFn>(execute));
-        const uint32_t pass = AddCopyPassImpl(name, callback, [](void* value, RDGCopyPassContext& ctx) {
-            return (*static_cast<std::decay_t<ExecuteFn>*>(value))(ctx);
-        });
-        RDGCopyPassBuilder builder{_data, pass};
-        std::forward<SetupFn>(setup)(builder);
+    template <class T>
+    RDGCopyPassBuilder AddCopyPass(std::string_view name, T data,
+                                   bool (*record)(const T&, RDGCopyPassContext&) noexcept,
+                                   std::type_identity_t<Nullable<bool (*)(T&, RDGPrepareContext&) noexcept>> prepare = nullptr) {
+        class Callback {
+        public:
+            T Data;
+            bool (*Record)(const T&, RDGCopyPassContext&) noexcept;
+            Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
+        };
+        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        const auto index = AddCopyPassImpl(name, std::move(callback), [](const void* value, RDGCopyPassContext& context) noexcept {
+                const auto& callback = *static_cast<const Callback*>(value);
+                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& callback = *static_cast<Callback*>(value);
+                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+        return {_data, index};
     }
 
     // 执行一次 CPU 校验与裁剪；声明无效时记录日志并返回空值。
     Nullable<CompiledRDG*> Compile();
 
 private:
-    uint32_t AddRasterPassImpl(std::string_view name, void* callback, bool (*execute)(void*, RDGRasterPassContext&));
-    uint32_t AddComputePassImpl(std::string_view name, void* callback, bool (*execute)(void*, RDGComputePassContext&));
-    uint32_t AddCopyPassImpl(std::string_view name, void* callback, bool (*execute)(void*, RDGCopyPassContext&));
-    ObjectArena& _arena;
+    uint32_t AddRasterPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGRasterPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    uint32_t AddComputePassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGComputePassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    uint32_t AddCopyPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGCopyPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    FrameSlot& _slot;
     detail::RDGData& _data;
 };
 

@@ -400,23 +400,24 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept {
 std::pair<bool, string> ValidateBufferTextureCopyRegion(
     const BufferDescriptor& source, const TextureDescriptor& destination,
     const BufferTextureCopyRegion& r, const DeviceDetail& detail) {
+    const auto& target = r.Destination;
     const auto bpp = GetTextureFormatBytesPerPixel(destination.Format);
     if ((destination.Dim != TextureDimension::Dim2D && destination.Dim != TextureDimension::Dim2DArray) || destination.SampleCount != 1 || bpp == 0 ||
         IsDepthStencilFormat(destination.Format) || !source.Usage.HasFlag(BufferUse::CopySource) ||
         !destination.Usage.HasFlag(TextureUse::CopyDestination))
         return {false, "Region upload requires an uncompressed color 2D texture, single sample and copy usages"};
-    if (r.MipLevel >= destination.MipLevels || r.MipLevel >= 32 || r.ArrayLayer >= destination.DepthOrArraySize || r.Width == 0 || r.Height == 0)
+    if (target.MipLevel >= destination.MipLevels || target.MipLevel >= 32 || target.ArrayLayer >= destination.DepthOrArraySize || target.Width == 0 || target.Height == 0)
         return {false, "Region upload subresource or extent is invalid"};
-    const auto width = std::max(1u, destination.Width >> r.MipLevel);
-    const auto height = std::max(1u, destination.Height >> r.MipLevel);
-    if (r.X > width || r.Width > width - r.X || r.Y > height || r.Height > height - r.Y)
+    const auto width = std::max(1u, destination.Width >> target.MipLevel);
+    const auto height = std::max(1u, destination.Height >> target.MipLevel);
+    if (target.X > width || target.Width > width - target.X || target.Y > height || target.Height > height - target.Y)
         return {false, "Region upload exceeds the destination mip"};
-    const uint64_t rowBytes = uint64_t{r.Width} * bpp;
+    const uint64_t rowBytes = uint64_t{target.Width} * bpp;
     if (r.SourceOffset % std::max(uint64_t{1}, detail.TextureDataPlacementAlignment) != 0 ||
         r.SourceOffset % bpp != 0 || r.RowPitch < rowBytes || r.RowPitch % bpp != 0 ||
         r.RowPitch % std::max(1u, detail.TextureDataPitchAlignment) != 0)
         return {false, "Region upload source offset or row pitch is not aligned"};
-    const uint64_t size = uint64_t{r.RowPitch} * (r.Height - 1) + rowBytes;
+    const uint64_t size = uint64_t{r.RowPitch} * (target.Height - 1) + rowBytes;
     if (r.SourceOffset > source.Size || size > source.Size - r.SourceOffset)
         return {false, "Region upload exceeds the source buffer"};
     return {true, {}};

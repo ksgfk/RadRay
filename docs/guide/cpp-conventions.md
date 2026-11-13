@@ -78,7 +78,7 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 
 错误处理按已有接口返回结果：RHI 工厂使用 `RADRAY_ERR_LOG` + 空值，shader 使用
 `DiagnosticResult<T>`，外部资源扩展使用 `ExternalResult<T>`。不可恢复的不变量违反用 `RADRAY_ABORT`。
-已有异常还包括 `Nullable::Unwrap()` 的误用检测与 ObjectArena 的分配失败。
+已有异常还包括 `Nullable::Unwrap()` 的误用检测与 PMR 存储的分配失败。
 新增 `try`/`catch`/`throw` **要先问用户**（`AGENTS.md`）。
 
 访问器、析构和 RHI 虚接口广泛使用 `noexcept`；会分配的接口按实际失败契约决定，例如 `Material::Create` 不声明它。

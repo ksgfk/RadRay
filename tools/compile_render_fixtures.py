@@ -1,4 +1,4 @@
-"""Compile the render test shaders in modules/render/tests/data to raw DXIL and SPIR-V.
+"""Compile registered render/runtime test shaders to raw DXIL and SPIR-V.
 
 Each entry point becomes shader_bytecode/<source>.<entry>.<dxil|spirv>.bin. The render
 tests read only these files, so a test process never loads DXC.
@@ -8,14 +8,15 @@ from pathlib import Path
 import subprocess
 
 FIXTURES = (
-    ("compute", "TransformInput", "cs_6_0"),
-    ("compute", "ReadConstants", "cs_6_0"),
-    ("compute", "ReadPushConstants", "cs_6_0"),
-    ("compute", "SampleImage", "cs_6_0"),
-    ("compute", "CombineGroups", "cs_6_0"),
-    ("graphics", "FullscreenVS", "vs_6_0"),
-    ("graphics", "SolidPS", "ps_6_0"),
-    ("geometry", "VSMain", "vs_6_0"),
+    ("render", "compute", "TransformInput", "cs_6_0"),
+    ("render", "compute", "ReadConstants", "cs_6_0"),
+    ("render", "compute", "ReadPushConstants", "cs_6_0"),
+    ("render", "compute", "SampleImage", "cs_6_0"),
+    ("render", "compute", "CombineGroups", "cs_6_0"),
+    ("render", "graphics", "FullscreenVS", "vs_6_0"),
+    ("render", "graphics", "SolidPS", "ps_6_0"),
+    ("render", "geometry", "VSMain", "vs_6_0"),
+    ("runtime", "texture_upload", "LoadUploadedTexture", "cs_6_0"),
 )
 
 TARGETS = (
@@ -26,8 +27,8 @@ TARGETS = (
 
 def compile_fixtures(root, dxc, output_dir, environment=None):
     output_dir.mkdir(parents=True, exist_ok=True)
-    data = root / "modules/render/tests/data"
-    for source, entry, profile in FIXTURES:
+    for module, source, entry, profile in FIXTURES:
+        data = root / "modules" / module / "tests/data"
         for suffix, options in TARGETS:
             output = output_dir / f"{source}.{entry}.{suffix}.bin"
             result = subprocess.run([str(dxc), "-I", str(root / "shaderlib"), "-E", entry, "-T", profile,

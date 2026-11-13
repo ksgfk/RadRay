@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_object_arena/`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_rdg_upload/`, `tools/measure_rdg_upload_gpu.py`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
 
 # 性能测量
 
@@ -13,51 +13,90 @@
 |---|---|
 | `bench_read_obj` | 内存 OBJ 文本解析，不含磁盘 IO |
 | `bench_sparse_set` | SparseSet 的扩容、访问、删除、复用与历史高水位压力；无需外部资产 |
-| `bench_object_arena` | 对象批量构造/回收、存储复用及 STL vector 扩容；无需外部资产 |
+| `bench_rdg_upload` | runtime 的声明、编译、准备、录制及上传页复用；fake 只记录 GPU Copy 命令 |
+| `bench_rdg_upload_gpu` | 真实 D3D12/Vulkan 上传与中间消费者；独立外围 timestamp 及 CPU Prepare/Record |
 
-## Object arena
+## RDG 上传
 
-`bench_object_arena` 使用 Google Benchmark，通过 main 显式注册用例，没有全局 fixture 或分配钩子。
-契约见 [Core / ObjectArena](../architecture/core-facilities.md#objectarena-与-arenaallocator)。每批为 256 或
-4096 个对象；Trivial 保存八个 uint64，Nontrivial 保存七个 uint64 和一个计数器指针，在 64 位指针布局下均为 64 B。
-后者析构更新测试侧计数，验证恰好析构一次。
+`bench_rdg_upload` 随 runtime 与 benchmarks 开关启用，无需 shader 或真实 GPU。
+`RDGUpload/<负载>/<阶段>` 分别测 Build、Compile、Prepare、Record、Frame（Build 至状态发布）和 Recycle。
+每个阶段仅对目标区间计时，fixture 以及非目标阶段暂停计时；Frame 不包含槽等待或回收。
+Recycle 单独测下一次 BeginFrame 的 fake 等待、命令重置、帧对象析构和线性存储重置，不代表真实 GPU 等待成本。
+Prepare 包含布局、物化、分配、填充与 Flush，真实参数组更新成本应结合样例的 PrepareBindings Tracy 区间观察。
+`RDGUploadComponent/PrepareLayout|AllocateFill|Flush` 独立测 64 个 80 字节来源的组件调用；
+这些微基准不包含图调度和真实驱动绑定，不能相加代替完整 Prepare。
 
-| Family | 计时边界 |
-|---|---|
-| `ObjectArena/Cold` | 构造全部对象并 Release；下一批重新申请存储 |
-| `ObjectArena/Reuse` | 预热后构造全部对象并 Reset，复用保留的普通块和析构表 |
-| `ObjectArena/Reset` | 构造置于计时外，仅测 Reset 与一次计数校验 |
-| `ObjectArena/Heap` | 逐对象 new/delete；保存待销毁指针的表在计时前预分配，表写入包含在计时中 |
-| `ObjectArena/Vector` | 分别使用 arena allocator 和默认 allocator；比较自动扩容与提前 reserve，包含容器销毁和 arena Reset |
-
-为使复用用例覆盖完整工作集，基准显式使用 64 KiB 普通块、8 MiB 保留预算；这不同于生产默认的
-256 KiB 预算。`Time` 为整批墙钟时间，`items_per_second` 按对象/元素数归一化；`retained_bytes`
-在循环结束后读取，表示 arena 动态存储，不是进程 working set。Heap 用例不报告系统分配器保留量。
-不得把纯 Reset 与整批构造/销毁的时间直接比较。峰值后的预算收敛由正确性测试覆盖。
+负载覆盖 1 MiB Borrow/Snapshot、固定总量 64/1024/4096 块、0/10/100% 存活、固定生成、
+按可见命令数量决定大小的动态切片（声明上界为 16 个元素，实际 1/8 个）、不重叠与重叠写入、中间消费者及首次分配。
+Snapshot 单独列出；Fresh 每轮在计时外释放池/页，首次创建计入被测准备阶段；其他负载先预热并保留页。
+图对象与跨阶段容器使用FrameSlot 的线性 PMR，阶段局部工作容器使用独立 scratch pool，与 Pipeline 配置一致。
+每帧先析构帧对象，再重置线性存储；临时容器在作用域结束时归还 pool 单元。
+Fresh 只重置 GPU 池/页，CPU arena 与 pool 仍按正常槽规则复用，不代表整个进程的冷分配。
+常规负载的来源创建不生成完整中间 payload；性能 fake 的 Copy 只记录次数和字节数，不用 memcpy 模拟 GPU 执行。
 
 ```powershell
-cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_BENCHMARKS=ON
-cmake --build --preset win-x64-release-clangcl --target test_radray_core bench_object_arena --parallel 8
-ctest --preset win-x64-release-clangcl -R '^(ObjectArenaTest|ArenaAllocatorTest)\.' --output-on-failure --timeout 30
+cmake --preset win-x64-release-clangcl -DRADRAY_BUILD_RUNTIME=ON -DRADRAY_BUILD_BENCHMARKS=ON -DRADRAY_ENABLE_PROFILER=OFF
+cmake --build --preset win-x64-release-clangcl --target bench_rdg_upload --parallel 8
 . tools/dev_env.ps1 -Triplet windows-x64-clangcl -Config Release
-$bench = './build/windows-x64-clangcl/Release/_build/Release/bench_object_arena.exe'
+$bench = './build/windows-x64-clangcl/Release/_build/Release/bench_rdg_upload.exe'
 & $bench --benchmark_min_time=1x
-& $bench '--benchmark_filter=ObjectArena/(Cold|Reuse|Heap|Vector)' --benchmark_min_time=0.1s --benchmark_repetitions=5 --benchmark_out=build/object-arena.json --benchmark_out_format=json
-& $bench '--benchmark_filter=ObjectArena/Reset/' --benchmark_min_time=1000x --benchmark_repetitions=5 --benchmark_out=build/object-arena-reset.json --benchmark_out_format=json
+& $bench '--benchmark_filter=RDGUpload/(LargeBorrow|Chunks64|Chunks1024)/(Build|Compile|Frame)' --benchmark_min_time=0.15s --benchmark_repetitions=5 --benchmark_out=build/rdg-upload.json --benchmark_out_format=json
 ```
 
-先运行全矩阵单轮验证，再进行重复采样；错误用例使用 SkipWithError 并使进程返回非零。
-Reset 用例在计时外构造对象，使用固定迭代数限制总运行时间；分析短时回收结果时同时检查重复采样的波动。
-原始结果留在 build/，不自动写入开发历史。
+基准固定 FullValidation=true；fake 不启用 RHI validation，两者与真实后端测量分别说明。
+`logical_uploads` 是声明数，`physical_copies` / `copy_bytes` 是录制数与有效字节，
+`barrier_descriptors` 是 RHI 屏障描述数；这些不能代替原生 GPU 时间。
+`resource_creates`、`maps` 统计每轮资源创建/映射，`retained_upload_capacity` 是缓存页容量。
+`--rdg_memory_probe` 只注册 Frame 用例，通过 FrameScheduler 的自定义上游入口观测槽内全部 CPU PMR 存储，
+上游继续使用 HeapMemoryResource；普通计时模式使用默认上游，不经过 probe。
+采样模式的时间包含 probe 开销，不能与普通模式时间比较。
+`peak_storage_bytes` / `retained_storage_bytes` 为上游峰值 / 最终槽回收后的保留量，包含堆对齐取整、
+线性 arena 的初始缓冲和额外块、scratch pool 缓存；`upstream_allocations` 为每个被测帧的上游分配次数。
+峰值包含预热首次分配，次数只计算被测帧；保留量不是对象和容器的有效数据量，也不单独区分 arena 与 pool。
+这些指标不包含 arena/pool 外的来源 payload、Context、PassData、Pass 名称字符串、GPU 池、内联对象或系统分配器内部开销。
+测量结束销毁 Scheduler 后，probe 检查全部槽的上游存储均已归还。
+
+```powershell
+& $bench --rdg_memory_probe --benchmark_min_time=32x --benchmark_out=build/rdg-memory.json --benchmark_out_format=json
+```
+
+比较性能使用普通模式，固定 CPU affinity（尤其混合核心 CPU）、构建/校验/profiler 配置，并交替运行改前改后版本。
+复用时创建/映射为零不表示缓存内存已经释放；裁剪工作不包含外部 owner 已创建资源的成本。
 
 ## 比较与证据口径
+
+`bench_rdg_upload_gpu` 每帧固定 512 个 4 B buffer 上传、512 个 1×1 RGBA8 texture 上传，以及一个中间 buffer
+读回消费者；共 4096 B 上传、两个 Upload execution group。使用 Release、一个槽、Direct queue、默认高性能适配器，
+关闭 driver/RHI validation，RDG FullValidation 保持开启。每帧提交并等待完成；这是小上传压力基准，不代表游戏的帧并行或 Present。
+正确性与 validation 由 runtime 的 GPU 读回测试单独检查。
+
+两个独立 RHI timestamp 包围完整 Record（含入口/出口屏障、拷贝和 Tracy scope 的结束），每帧只做一次外围 resolve。
+计时包含外围 Tracy `RDG benchmark frame` scope 的开销，不使用子 zone 求和；三个 profiler 状态均使用同一外围计时。
+Prepare/Record 用 CPU steady clock 测量，不含图声明、Compile、提交或等待。默认预热 200 帧，再测 1000 帧，输出各阶段
+p50/p95/p99（排序后的向下取整分位点）；`--rdg_raw=<path>` 可保存逐帧 CSV。Google Benchmark 的 Time 列为 GPU 区间均值。
+
+```powershell
+& $gpuBench --rdg_backend=d3d12 --rdg_warmup=200 --rdg_samples=1000 --rdg_raw=build/upload-samples.csv
+& $gpuBench --rdg_backend=vulkan --rdg_capture_wait
+```
+
+`--rdg_capture_wait` 在 GPU 初始化前等待 stdin 换行，供外部 capture 连接。
+`tools/measure_rdg_upload_gpu.py` 接收 `--baseline-off`、`--baseline-on`、`--fixed-off`、`--fixed-on` 四个同负载
+二进制，以及匹配 client 协议的 `--capture`、`--csvexport` 工具和 `--output` 目录。
+它固定进程 affinity（默认 `0xff`，可通过 `--affinity` 修改），按后端和 profiler 关闭／未连接／已连接分组，
+每组交替执行三轮独立进程。保存命令、二进制 SHA-256、逐帧 CSV、Tracy trace、导出的 GPU zone、各轮 JSON 与分位数中位值。
+连接状态通过导出的外围 GPU zone 数检查；Tracy 最后一帧可能尚未回收，因此允许比执行帧数少一帧。
+Tracy 0.14 的常规 GPU CSV 只含正时长 zone，行数是数量下界；需要精确数量时，`--timeline-export` 接受一个
+读取原始 GPU timeline 的离线工具（参数为 trace 路径，输出 `name,complete,gpu_ns` CSV），包含零时长和未回收时间戳的 zone。
+脚本分别保存三种计数，并核对完整 timeline 的上传、消费者与外围 zone 数。
+该脚本不提供原生 API 拦截计数；由 zone 数换算的 timestamp/resolve 数必须标为按后端实现推导，不能当作原生抓帧实测。
 
 基线记录提交、未提交补丁、负载源码、构建配置、完整命令及二进制 SHA-256。基线带工作树修改时明确说明，
 不能用纯净提交代替。前后固定机器、编译器、allocator、profiler/validation、flight、视图、材质分布和脏比例；
 交替运行独立进程，区分一次覆盖扫描与多轮配对比较。脚本选项不等于结果已经可比，仍需核对实际匹配的 case。
 
 初始化、首次分配与稳态分开，使用 benchmark 的计时边界和预热配置区分。
-当前三个基准不提供 runtime JIT、父节点传播或 GT/RT 并发测量；不能据它们推断渲染帧率或多线程收益。
+当前基准不提供 runtime JIT、父节点传播或 GT/RT 并发测量；不能据它们推断渲染帧率或多线程收益。
 比较修改负载时核对每轮实际执行的操作及数据变化，不把准备阶段算作被测操作。
 
 | 指标 | 可以说明什么 | 不能代替什么 |
@@ -88,23 +127,24 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 ### Runtime 分段
 
 Runtime 通过相同开关输出以下 CPU zone。父区间包含子区间，不能把它们直接相加；
-`RDG.Execute` 和各 `Record*` 区间测量主机上的命令录制，不是 GPU 执行时长。
+`RDG.Record` 和各 `Record*` 区间测量主机上的命令录制，不是 GPU 执行时长。
 阶段之间的临时容器初始化/析构仍计入父区间，不保证子区间覆盖父区间的全部耗时。
 
 | 区间前缀 | 计时边界 |
 |---|---|
 | `RadRay.FrameScheduler` | RunFrame、在途槽等待、WaitIdle |
-| `RadRay.FrameSlot` | 命令存储重置、延迟资源回收、帧数据与 arena 回收、命令缓冲获取及首次创建 |
-| `RadRay.FramePipeline` | Extract/Record、应用帧数据提取、SetupGraph、逐 MeshPass 提取、命令 Begin/End 与 SubmitFrame 回调 |
+| `RadRay.FrameSlot` | 命令存储重置、帧数据清理与登记对象析构、命令缓冲获取及首次创建 |
+| `RadRay.FramePipeline` | Extract/Prepare/Record/Submit、应用帧数据提取、SetupGraph、逐 MeshPass 提取；Record 包含命令 Begin/End，Submit 包含提交钩子与状态发布 |
 | `RadRay.Scene` | 持久缓存同步、可见命令收集与缓存直达指针解析（GatherVisibleHandles） |
 | `RadRay.DrawList` | 可见命令稳定排序、可见列表和动态命令清理 |
 | `RadRay.MeshDraw` | 整批命令提交；Debug 另有 Validate 子区间 |
 | `RadRay.RDG.Compile` | 资源检查、访问检查与依赖构造、裁剪、调度与合并 |
-| `RadRay.RDG` | Execute、物理资源获取、逐组屏障、Copy/Upload、Compute、Raster 录制、附件解析、末尾状态提交与屏障 |
+| `RadRay.RDG` | Prepare、PrepareLayout、AcquireResources、FillUploads、PrepareBindings、Record/RecordGroup 和提交后的 CommitSubmittedStates |
+| `RadRay.UploadArena` | 最终映射页 Allocate 和集中 Flush |
 | `RadRay.RDG.Pool` | 每槽池复用标记重置、资源/视图查找；未命中时的 Create 子区间包含创建与池登记 |
 
 RDG 在逻辑 Pass 录制区间使用 Pass 名称作为动态 CPU zone 名称。相同名称的 Pass 在统计中合并，
-实例归属看时间线父区间。`CreateImportedView` 只在导入纹理需要创建当帧视图时出现。
+实例归属看时间线父区间。当帧视图创建包含在 Prepare，Record 不再创建视图。
 采样粒度为阶段、Pass、资源获取或整批命令；收集和绘制循环内没有逐 Draw 事件。
 
 Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone 的时间和
@@ -118,8 +158,8 @@ Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone
 - `Scene.DirtyBatches` 是缓存同步本次取出的脏 Batch 数，包括随后因失效而跳过的项。
 - `RDG.DeclaredPasses/Textures/Buffers` 是声明数量，`AlivePasses`、`AliveMeshPasses` 和 `ExecutionGroups`
   是成功编译后的存活数量与合并组数。`Pool.Textures/Buffers/Views` 是槽开始复用时池中保留的条目数量。
-- `RDG.UploadBytes` 是每次 MapUpload 的主机复制量，不含应用自管的上传路径。
-  `GroupBarriers`、`FinalBarriers` 是相应屏障批次的描述符数，不含 Upload 内部额外屏障。
+- `RDG.UploadBytes` 是每个存活来源的实际有效大小，不含源行 padding 和绑定保留空间；Generated 同样计入。
+  `GroupBarriers`、`FinalBarriers` 是对应批次的 RHI 描述符数，不含页起始同步及上传组内重叠写屏障；它们不是原生 GPU barrier 成本。
 
 插桩关闭时宏及其参数表达式不参与运行。这些测点没有新增跨帧统计状态；开启时仍会增加采样成本，
 性能比较需固定插桩版本、开关和负载，并将首次扩容/资源创建与稳态分开。

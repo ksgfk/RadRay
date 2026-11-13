@@ -18,7 +18,6 @@ third_party/
 
 cmake_test_discovery**
 opencode.json
-project_manifest.lock.json
 artifacts
 .kimix_cache
 .opencode

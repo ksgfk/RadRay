@@ -26,7 +26,8 @@ ctest --preset win-x64-debug
 配置、构建和安装均不自动恢复或构建依赖。shader compiler 开启时需要匹配的 fork
 package，stock DXC 不能替代。包的 ABI 与部署边界见 [Shader pipeline](../architecture/shader-pipeline.md)。
 
-`fetch_third_party.py restore` 优先恢复已有 `project_manifest.lock.json` 中的提交；没有 lockfile
+仓库交付 `project_manifest.lock.json`，以完整提交号固定 Git 依赖；`project_manifest.json` 以版本和 EnforceHash 固定 DXC SDK 归档。
+锁文件与 manifest 一起保存和分发。`fetch_third_party.py restore` 优先恢复已有 `project_manifest.lock.json` 中的提交；没有 lockfile
 时按 manifest 恢复，已安装的默认分支或显式 `Branch` 不会自动检查远端更新。需要更新这些可变引用时运行：
 
 ```powershell
@@ -37,6 +38,9 @@ python tools/fetch_third_party.py restore --apply
 `Tag` / `Commit` 保持不变。已有 lockfile 的对应条目在安装成功后同步更新；没有 lockfile 时不会
 自动生成。`--only xxHash` 可限定依赖，`--no-lock` 可跳过 lockfile；默认分支更新支持 detached HEAD，
 并重新读取远端 HEAD，远端切换默认分支后也能跟随。升级固定版本使用 `upgrade --apply`。
+
+显式重新解析 manifest 的固定版本记录使用 `python tools/fetch_third_party.py lock`；更新依赖时检查并一同提交锁文件。
+恢复、依赖包准备和主工程构建仍是三个独立的手动步骤；生成或消费锁文件不改变这一边界。
 
 十个 configure/build/test preset 使用相同名称；构建目录统一为 `build/<三元组>/<Debug|Release>/`。
 Windows MSVC 使用 `windows-x64-msvc` 与 Ninja，ClangCL 使用 `windows-x64-clangcl` 与
@@ -386,12 +390,12 @@ ctest --preset win-x64-debug-clangcl
 
 | 目标 | suite |
 |---|---|
-| `test_radray_core` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BasicMathTest`、`BinaryIoTest`、`ChannelTest`、`ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest`、`EnumFlagsTest`、`FileTest`、`FormatTest`、`GuidTest`、`HashTest`、`ImageDataTest`、`IntrusivePtrTest`、`JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest`、`MemoryTest`、`NullableTest`、`ObjectArenaTest`、`ArenaAllocatorTest`、`RuntimeTypeIdTest`、`ScopeGuardTest`、`SparseSetTest`、`BestFitAllocator`、`StructuredBufferTest`、`TextEncodingTest`、`UtilityTest`、`WavefrontObjTest`、`XmlTest`；libpng 开启时另有 `PngTest`、`PngTest/PngRoundTripTest`；静态 CRT 且启用 mimalloc 时另有 `MimallocOverrideTest` |
+| `test_radray_core` | `BuddyAllocatorTest`、`FirstFitAllocatorTest`、`BasicMathTest`、`BinaryIoTest`、`ChannelTest`、`ManualCoroutineSchedulerTest`、`TaskScopeTest`、`AwaitWithStopTokenTest`、`GetCoroutineStopTokenTest`、`EnumFlagsTest`、`FileTest`、`FormatTest`、`GuidTest`、`HashTest`、`ImageDataTest`、`IntrusivePtrTest`、`IntrusivePtrDeathTest`、`JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest`、`MemoryTest`、`NullableTest`、`RuntimeTypeIdTest`、`ScopeGuardTest`、`SparseSetTest`、`BestFitAllocator`、`StructuredBufferTest`、`TextEncodingTest`、`UtilityTest`、`WavefrontObjTest`、`XmlTest`；libpng 开启时另有 `PngTest`、`PngTest/PngRoundTripTest`；静态 CRT 且启用 mimalloc 时另有 `MimallocOverrideTest` |
 | `test_inline_vector` | `InlineVectorTest` |
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_render` | 见下文 [render 测试](#render-测试) |
-| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`MappedUploadBuffer`、`BatchedBufferUpload`（CPU fake）；`Backends/GeometryUploadGpuTest`（D3D12/Vulkan GPU 与预编译 shader） |
+| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -442,8 +446,8 @@ Git 只保存测试 HLSL，不保存生成的 `.bin`。统一入口 `tools/compi
 
 - `shader_artifacts/`：先增量构建 compiler 侧的 `radray_shader_fixture_generator`（`EXCLUDE_FROM_ALL`），
   由它编译 `modules/shader/tests/data/shader_sources/*.hlsl`，输出 DXIL / SPIR-V 的 metadata artifact，供 `test_radray_shader` 解码。
-- `shader_bytecode/`：`tools/compile_render_fixtures.py` 用 DXC 把 `modules/render/tests/data/*.hlsl` 的各 entry
-  编译为 `<source>.<entry>.<dxil|spirv>.bin`，供 `test_radray_render` 创建 shader。
+- `shader_bytecode/`：`tools/compile_render_fixtures.py` 用 DXC 把 render 与 runtime 的 `modules/<module>/tests/data/*.hlsl` 中登记的 entry
+  编译为 `<source>.<entry>.<dxil|spirv>.bin`，供对应模块的 GPU 测试创建 shader。
 
 测试进程只读取这些文件，运行时不加载 DXC。干净检出先恢复并准备依赖、配置 compiler 与 tests 都开启的构建，
 再运行脚本，最后构建和运行测试：
@@ -561,14 +565,14 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 
 安装消费继续使用 `find_package(RadRay CONFIG REQUIRED COMPONENTS runtime)` 和 `RadRay::runtime`，
 传递加载 render/core，不要求 shader 或 DXC。`RADRAY_BUILD_TESTS=ON` 时提供
-`test_radray_runtime`。CPU 用例使用 `modules/runtime/tests/test_fakes.h` 的 RHI fake；GeometryUploadGpuTest 共用 render 的 GPU fixture，验证分页上传、池间绘制和 BeginFrame 后扩容，需预先生成本地测试 shader。
+`test_radray_runtime`。CPU 用例使用 `modules/runtime/tests/test_fakes.h` 的 RHI fake；GeometryUploadGpuTest 共用 render 的 GPU fixture，验证分页上传、池间绘制和 BeginFrame 后释放上传缓冲，需预先生成本地测试 shader。
 它覆盖材质标签、材质参数与快照、MeshDrawCommand 校验与录制、Processor 构建、Scene 增量缓存，
 以及 FrameScheduler 的槽位轮转、等待、Scene 借用、退役资源与析构顺序；RDG 覆盖裁剪、上传、同槽物理状态复用、原地 Compute、UAV 与附件屏障及管线钩子顺序。suite 列表见[测试](#测试)：
 
 ```powershell
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|MappedUploadBuffer|BatchedBufferUpload|Backends/GeometryUploadGpuTest)' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|UploadArena|Backends/(Geometry|Buffer|Texture)UploadGpuTest)' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -655,17 +659,18 @@ Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Bri
 经 runtime 构建 helper 复制为绑定池自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
 绑定池自持有颜色字节，源栈数据在构建后即可失效。
 `GpuResources::PrepareGeometry` 创建共享的 Device VB / IB 空壳并保存 CPU 字节，Scene 可在上传前引用这些合法缓冲。
-每个 `GpuFrameResources` 独立创建 Binding 1 的实例缓冲、Group 0 / Binding 0 的两份 Pass UBO、参数组、读回缓冲和 completion fence。
-初始化参数组时 Set 后调用 FlushWrites，后续不重写已绑定的描述符；颜色/深度附件及其 View 由基类每槽的 RDG 瞬态池拥有。
-`ExtractFrameData` 按候选 Primitive 顺序把五个 64 字节 `LocalToWorld` 矩阵及两份 Pass UBO 的 CPU 字节保存到当前槽 arena，
-UBO 按设备要求对齐并补零，LocalScale 分别为 1.0 / 1.12。此时不 Map GPU 缓冲，也不收集逐 Pass 命令。
+每个 GpuFrameResources 持有可复用的两组 Pass 参数组、读回缓冲和 completion fence。
+实例流与两份 Pass 常量通过 RDG 动态 Upload buffer 声明，Prepare 从本槽 UploadArena 分配最终切片。
+参数组绑定的页或范围变化时，在 Prepare 中 ResetBindingsForReuse、Set 并 FlushWrites；附件及 View 由每槽 RDG 瞬态池拥有。
+ExtractFrameData 校验当前帧输入，不构造完整实例或常量字节数组；LocalScale 分别为 1.0 / 1.12 的常量在 Prepare 中直接生成。
 `SetupGraph` 接收只读 Scene，本例使用已准备的共享几何资源声明上传、瞬态深度/颜色附件、四个 Raster Pass 与 Readback Copy。
 首帧共享几何经 RDG 的 Device Staging Copy 上传，并通过 MarkOutput 保活，终态为 Vertex / Index；后续帧沿用该状态。
-实例/常量缓冲上传只由消费者保活，图末恢复 HostWrite；读回缓冲终态为 HostRead。
+实例/常量来源只由消费者保活，直接填写映射切片，不录制额外 GPU Copy；上传页汇总只读用途，读回缓冲终态为 HostRead。
 
 Compile 先裁剪，再通过 `ExtractMeshPass` 调用 `PreparePassDrawCommands` 收集存活 Pass 的缓存命令只读指针，
 并把候选 Primitive 下标写入 `FirstInstance`，不访问材质参数。持久缓存的脏同步仍覆盖全部登记的 Processor。
-基类 Record 先稳定排序存活列表，再通过本槽命令缓冲执行图，按存活访问自动生成转换及同状态写屏障。
+基类 Prepare 固定并稳定排序存活列表；实例生成源收集各存活 Pass 的可见实例并集，将本帧 FirstInstance 改写为紧凑索引，
+只计算和写入一次每个可见实例的矩阵，不修改持久缓存命令。屏障在 Prepare 冻结，Record 通过本槽命令缓冲消费准备结果。
 `RecordPass` 只设置 viewport/scissor，将本槽 Pass 参数组和实例流通过 `MeshPassSubmitArgs` 交给列表的 `Submit(encoder, submitArgs)`，在帧内 Scene 借用有效期内直接解析缓存命令。
 Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数组；runtime 先绑定 PSO，再在首次绑定或切换 PSO 后重绑 Pass 参数组，
 最后完成几何、模板、命令参数和 DrawIndexed。相机、局部缩放或变换变化不需要重新调用 Processor，材质变化则重建关联命令的颜色副本。
@@ -740,7 +745,7 @@ Depth 与 Color 之间仍保留跨组 `DepthWrite → DepthWrite` barrier；组�
 读回逐行去除 padding，日志打印实际 GPU row pitch；Vulkan 使用负 viewport 高度统一输出方向。
 
 指定后端失败时直接报错，不切换后端。退出码 `2` 表示参数或输出目录错误，`3` 表示 GPU/资源/shader
-准备失败，`4` 表示材质/场景初始化、帧间材质更新或增量校验失败，`6` 表示图片读回/写入失败；Pass 登记与帧 Extract/Record 检查到的违约带诊断终止程序，不返回退出码 `5`。可将 `--shader-dir`
+准备失败，`4` 表示材质/场景初始化、帧间材质更新或增量校验失败，`6` 表示图片读回/写入失败；Pass 登记与帧 Extract/Prepare/Record/Submit 检查到的违约带诊断终止程序，不返回退出码 `5`。可将 `--shader-dir`
 设为不存在的目录检查缺失 shader 提示，将 `--output` 指向已有目录检查路径错误；不会生成伪造图片。
 正常退出及帧外返回错误的路径在 GPU 完成后才读取或释放资源；帧执行中的致命错误直接终止，不承诺执行清理回调。
 

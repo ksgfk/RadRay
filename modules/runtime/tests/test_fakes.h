@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <limits>
 #include <string_view>
 
 #include <radray/types.h>
@@ -32,6 +33,60 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
+};
+
+class FakeMappedBuffer final : public FakeBuffer {
+public:
+    FakeMappedBuffer(const render::BufferDescriptor& desc, bool failMap, std::function<void()>& onMap, std::function<void(render::BufferRange)>& onFlush)
+        : FakeBuffer(desc.Size, desc.Usage), Bytes(static_cast<size_t>(desc.Size)), _failMap(failMap), _onMap(onMap), _onFlush(onFlush) { Desc = desc; }
+    void* Map(uint64_t offset, uint64_t size) noexcept override {
+        if (_onMap) _onMap();
+        return !_failMap && offset <= Bytes.size() && size <= Bytes.size() - offset ? Bytes.data() + offset : nullptr;
+    }
+    void FlushMappedRange(render::BufferRange range) noexcept override {
+        if (_onFlush) _onFlush(range);
+    }
+    vector<byte> Bytes;
+
+private:
+    bool _failMap;
+    std::function<void()>& _onMap;
+    std::function<void(render::BufferRange)>& _onFlush;
+};
+
+class FakeTexture final : public render::Texture {
+public:
+    FakeTexture(render::Device& device, render::TextureDescriptor desc, std::function<void()>& onDestroy) noexcept
+        : Desc(desc), _device(device), _onDestroy(onDestroy) {}
+    ~FakeTexture() noexcept override {
+        if (_onDestroy) _onDestroy();
+    }
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    render::TextureDescriptor GetDesc() const noexcept override { return Desc; }
+    render::Device* GetDevice() const noexcept override { return &_device; }
+    render::TextureDescriptor Desc;
+
+private:
+    render::Device& _device;
+    std::function<void()>& _onDestroy;
+};
+
+class FakeTextureView final : public render::TextureView {
+public:
+    FakeTextureView(render::TextureViewDescriptor desc, std::function<void()>& onDestroy) noexcept : Desc(desc), _onDestroy(onDestroy) {}
+    ~FakeTextureView() noexcept override {
+        if (_onDestroy) _onDestroy();
+    }
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    render::TextureViewDescriptor GetDesc() const noexcept override { return Desc; }
+    render::TextureViewDescriptor Desc;
+
+private:
+    std::function<void()>& _onDestroy;
 };
 
 class FakeParameterSet final : public render::ShaderParameterSet {
@@ -152,7 +207,7 @@ public:
     render::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
 };
 
-// 仅创建命令分配器与命令缓冲；其余工厂接口均返回失败。
+// 默认仅创建命令对象；上传测试可显式开启 host buffer 和纹理支持。
 class FakeDevice : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
@@ -161,7 +216,10 @@ public:
     Nullable<render::ExternalResourceExtension*> GetExternalResourceExtension() noexcept override { return nullptr; }
     render::DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
     const render::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
-    render::TextureSupport QueryTextureSupport(const render::TextureSupportQuery&) const noexcept override { return {}; }
+    render::TextureSupport QueryTextureSupport(const render::TextureSupportQuery&) const noexcept override {
+        if (!EnableTextures) return {};
+        return {.MaxResourceSize = std::numeric_limits<uint64_t>::max(), .MaxWidth = 16384, .MaxHeight = 16384, .MaxDepth = 1, .MaxArrayLayers = 2048, .MaxMipLevels = 15, .SampleCounts = render::SampleCount::X1, .Supported = true};
+    }
     render::AttachmentResolveSupport QueryAttachmentResolveSupport(render::TextureFormat, uint32_t) const noexcept override { return {}; }
     Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t) noexcept override { return &Queue; }
     Nullable<unique_ptr<render::CommandAllocator>> CreateCommandAllocator(render::CommandQueue*) noexcept override {
@@ -174,9 +232,20 @@ public:
     Nullable<unique_ptr<render::Fence>> CreateFence() noexcept override { return nullptr; }
     Nullable<unique_ptr<render::QueryPool>> CreateQueryPool(const render::QueryPoolDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::SwapChain>> CreateSwapChain(const render::SwapChainDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override {
+        if (!EnableHostBuffers || BuffersUntilFailure == 0) return nullptr;
+        if (BuffersUntilFailure > 0) --BuffersUntilFailure;
+        if (OnCreateBuffer) OnCreateBuffer(desc);
+        return make_unique<FakeMappedBuffer>(desc, FailMaps, OnMap, OnFlush);
+    }
+    Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor& desc) noexcept override {
+        if (!EnableTextures || FailTextures) return nullptr;
+        return make_unique<FakeTexture>(*this, desc, OnTextureDestroyed);
+    }
+    Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor& desc) noexcept override {
+        if (!EnableTextures || FailViews) return nullptr;
+        return make_unique<FakeTextureView>(desc, OnViewDestroyed);
+    }
     Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::BindingGroupLayout>> CreateBindingGroupLayout(const render::BindingGroupLayoutDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(const render::PipelineLayoutDescriptor&) noexcept override { return nullptr; }
@@ -190,6 +259,12 @@ public:
     render::RenderDeviceCapabilities Capabilities{};
     std::function<void()> OnAllocatorReset;
     bool FailCommandBuffers{false};
+    int32_t BuffersUntilFailure{-1};
+    bool EnableHostBuffers{false}, EnableTextures{false};
+    bool FailMaps{false}, FailTextures{false}, FailViews{false};
+    std::function<void()> OnMap, OnTextureDestroyed, OnViewDestroyed;
+    std::function<void(render::BufferRange)> OnFlush;
+    std::function<void(const render::BufferDescriptor&)> OnCreateBuffer;
 };
 
 // 将各阶段转发到可选的测试回调。
@@ -197,6 +272,12 @@ class CallbackPipeline final : public FramePipeline {
 public:
     void Extract(FrameSlot& slot) noexcept override {
         if (OnExtract) OnExtract(slot);
+    }
+    void Prepare(FrameSlot& slot) noexcept override {
+        if (OnPrepare) OnPrepare(slot);
+    }
+    void Submit(FrameSlot& slot) noexcept override {
+        if (OnSubmit) OnSubmit(slot);
     }
     void Record(FrameSlot& slot) noexcept override {
         if (OnRecord) OnRecord(slot);
@@ -207,6 +288,7 @@ public:
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
     std::function<void(FrameSlot&)> OnExtract;
+    std::function<void(FrameSlot&)> OnPrepare, OnSubmit;
     std::function<void(FrameSlot&)> OnRecord;
     std::function<void(FrameSlot&)> OnWait;
     vector<MeshPassRegistration> Passes;

@@ -7,6 +7,7 @@
 namespace radray {
 
 class Environment;
+struct RDGDeviceConstraints;
 
 class DeviceContext final {
 public:
@@ -28,6 +29,7 @@ public:
     render::Device& GetDevice() noexcept { return *_device; }
     render::CommandQueue& GetQueue() noexcept { return *_directQueue; }
     bool SupportsIndirect() const noexcept;
+    RDGDeviceConstraints GetRDGConstraints() const noexcept;
 
 private:
     shared_ptr<render::Device> _device;

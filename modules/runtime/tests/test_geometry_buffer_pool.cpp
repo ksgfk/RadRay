@@ -31,6 +31,8 @@ TEST(GeometryBufferPool, VertexPagesKeepInputsStableShareBindingsAndRecycleRange
     ASSERT_TRUE(a && b);
     const auto* input = &a->GetVertexInput();
     EXPECT_EQ(input, &b->GetVertexInput());
+    EXPECT_EQ(a->GetGpuBuffer(), b->GetGpuBuffer());
+    EXPECT_EQ(a->GetGpuBuffer()->GetBuffer(), a->GetBuffer());
     EXPECT_TRUE(ValidateVertexInput(*input, true));
     EXPECT_FALSE(ValidateVertexInput(*input, false));
     EXPECT_EQ(b->GetFirstVertex(), 3u);
@@ -70,6 +72,8 @@ TEST(GeometryBufferPool, IndexAllocationsExposeSharedViewsAndMoveOwnership) {
         EXPECT_EQ(b->GetByteOffset(), 2u * stride);
         EXPECT_EQ(b->GetByteSize(), 6u * stride);
         EXPECT_EQ(a->GetIndexBufferView().Target, b->GetIndexBufferView().Target);
+        EXPECT_EQ(a->GetGpuBuffer(), b->GetGpuBuffer());
+        EXPECT_EQ(a->GetGpuBuffer()->GetBuffer(), a->GetBuffer());
         EXPECT_EQ(b->GetIndexBufferView().Offset, 0u);
         auto moved = std::move(*b);
         b.reset();
@@ -81,4 +85,19 @@ TEST(GeometryBufferPool, IndexAllocationsExposeSharedViewsAndMoveOwnership) {
     }
 }
 
-}  // 匿名命名空间
+TEST(GeometryBufferPool, PageStrongReferenceSurvivesPoolAfterSuballocationsAreReleased) {
+    PoolDevice device;
+    auto pool = IndexBufferPool::Create(device, {.PageIndexCapacity = 8, .AdditionalUsage = BufferUse::Common}).Release();
+    ASSERT_TRUE(pool);
+    auto allocation = pool->Allocate(3);
+    ASSERT_TRUE(allocation);
+    auto owner = allocation->GetGpuBuffer();
+    auto* native = allocation->GetBuffer();
+    allocation.reset();
+    pool.reset();
+    EXPECT_EQ(owner->UseCount(), 1u);
+    EXPECT_EQ(owner->GetBuffer(), native);
+    EXPECT_EQ(native->GetDesc().Size, 32u);
+}
+
+}  // namespace

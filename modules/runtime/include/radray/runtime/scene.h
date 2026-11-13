@@ -32,7 +32,7 @@ public:
 };
 
 // 由渲染线程拥有的存储；每个 Scene 拥有独立缓存；外部修改必须发生在 RunFrame 之外。
-// 缓存同步后，Extract/Record 仅借用只读数据。
+// 缓存同步后，Extract/Prepare/Record 仅借用只读数据。
 class Scene {
 public:
     void Reserve(uint32_t primitives, uint32_t batches, uint32_t materials);

@@ -22,7 +22,7 @@ def source_hash(root):
     for directory in ("shaderlib", "modules/shader/include", "modules/shader/src",
                       "modules/shader_compiler/include", "modules/shader_compiler/src",
                       "modules/shader/tests/data/shader_sources",
-                      "modules/shader_compiler/tests/data", "modules/render/tests/data"):
+                      "modules/shader_compiler/tests/data", "modules/render/tests/data", "modules/runtime/tests/data"):
         files.extend(path for path in (root / directory).rglob("*")
                      if path.suffix in (".h", ".cpp", ".hlsl", ".hlsli"))
     digest = hashlib.sha256()

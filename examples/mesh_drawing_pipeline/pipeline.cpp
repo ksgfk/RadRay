@@ -202,10 +202,79 @@ bool PreparePassDrawCommands(MeshPassId passId, const Scene& scene,
     return true;
 }
 
-struct MeshDrawingFramePipeline::ExtractedFramePayload {
-    vector<InstanceData> Instances;
-    array<vector<byte>, 2> PassBytes;
+struct MeshDrawingFramePipeline::InstanceGenerator {
+    const Scene* Source;
+    std::span<const PrimitiveHandle> Candidates;
+    vector<uint32_t> Visible;
 };
+struct MeshDrawingFramePipeline::ConstantGenerator {
+    const PassContext* View;
+    float Scale;
+};
+struct MeshDrawingFramePipeline::PassData {
+    GpuFrameResources* Resources;
+    PassContext View;
+    MeshPassId Pass;
+    RDGBufferHandle Instances;
+    RDGBufferHandle Constants;
+    RDGBufferSlice InstanceSlice{};
+};
+
+uint64_t MeshDrawingFramePipeline::PrepareInstances(InstanceGenerator& data, RDGUploadPrepareContext& context) noexcept {
+    vector<uint32_t> mapping(data.Candidates.size(), std::numeric_limits<uint32_t>::max());
+    for (const auto pass : context.GetAliveMeshPasses()) {
+        for (auto& command : context.GetPassDrawList(pass).VisibleCommands) {
+            const auto candidate = command.FirstInstance;
+            if (candidate >= mapping.size()) RADRAY_ABORT("invalid candidate instance");
+            auto& compact = mapping[candidate];
+            if (compact == std::numeric_limits<uint32_t>::max()) {
+                compact = static_cast<uint32_t>(data.Visible.size());
+                data.Visible.push_back(candidate);
+            }
+            command.FirstInstance = compact;
+        }
+    }
+    return data.Visible.size() * sizeof(InstanceData);
+}
+bool MeshDrawingFramePipeline::WriteInstances(const InstanceGenerator& data, RDGUploadWriteContext& context) noexcept {
+    for (size_t i = 0; i < data.Visible.size(); ++i) {
+        const auto primitive = data.Source->GetPrimitive(data.Candidates[data.Visible[i]]);
+        if (!primitive) return false;
+        const Eigen::Matrix4f matrix = primitive->LocalToWorld.ToMatrix();
+        std::memcpy(context.Bytes.data() + i * sizeof(InstanceData), matrix.data(), sizeof(InstanceData));
+    }
+    return true;
+}
+bool MeshDrawingFramePipeline::WriteConstants(const ConstantGenerator& data, RDGUploadWriteContext& context) noexcept {
+    PassConstants constants;
+    std::memcpy(constants.ViewProjection.data(), data.View->ViewProjection.data(), sizeof(constants.ViewProjection));
+    constants.LocalScale = data.Scale;
+    std::memcpy(context.Bytes.data(), &constants, sizeof(constants));
+    return true;
+}
+bool MeshDrawingFramePipeline::PreparePass(PassData& data, RDGPrepareContext& context) noexcept {
+    data.InstanceSlice = context.ResolveBuffer(data.Instances);
+    const auto constants = context.ResolveBuffer(data.Constants);
+    const auto index = data.Pass.Value == 2 ? 1 : 0;
+    auto& bound = data.Resources->BoundConstants[index];
+    if (bound.Buffer != constants.Buffer || bound.Offset != constants.Offset || bound.Size != constants.Size) {
+        auto& parameters = *data.Resources->PassParameterSets[index];
+        parameters.ResetBindingsForReuse();
+        if (!parameters.Set(0, 0, render::ShaderBufferBinding{constants.Buffer.Get(), {constants.Offset, constants.Size}, 0}) || !parameters.FlushWrites()) return false;
+        bound = constants;
+    }
+    return true;
+}
+bool MeshDrawingFramePipeline::RecordPass(const PassData& data, RDGRasterPassContext& context) noexcept {
+    if (!data.InstanceSlice.Size) return true;
+    auto& encoder = context.GetEncoder();
+    encoder.SetViewport(data.View.ViewportRect);
+    encoder.SetScissor(data.View.Scissor);
+    const MeshShaderParameterBinding binding{0, data.Resources->PassParameterSets[data.Pass.Value == 2 ? 1 : 0].Get(), {}};
+    const MeshPassSubmitArgs args{.ParameterSets = std::span{&binding, 1},
+                                  .InstanceStream = render::VertexBufferBinding{1, {data.InstanceSlice.Buffer.Get(), data.InstanceSlice.Offset, data.InstanceSlice.Size}}};
+    return SubmitMeshDrawCommands(encoder, context.GetVisibleCommands(data.Pass), args);
+}
 
 MeshDrawingFramePipeline::MeshDrawingFramePipeline(GpuResources& gpu, const Scene& scene, const PassContext& view,
                                                    std::span<const PrimitiveHandle> candidates, std::span<const BatchPassPolicy> policies,
@@ -217,13 +286,13 @@ MeshDrawingFramePipeline::MeshDrawingFramePipeline(GpuResources& gpu, const Scen
                         {&gpu.MaterialTags, gpu.OutlineTag, "材质缺少或不匹配 Outline=Enabled"}),
       _transparentProcessor(scene, gpu.Pipelines, policies, {&gpu.MaterialTags, gpu.TransparentTag, "材质缺少或不匹配 Surface=Transparent"}, parameters),
       _passes{{{{0}, &_depthProcessor}, {{1}, &_colorProcessor}, {{2}, &_outlineProcessor}, {{3}, &_transparentProcessor, MeshPassSortMode::DepthFirst}}},
-      _payloads(slotCount) {}
+      _slotCount(slotCount) {}
 
 bool MeshDrawingFramePipeline::Initialize() {
-    if (_payloads.empty() || !_frames.empty() || _candidates.empty() || _candidates.size() > std::numeric_limits<uint32_t>::max()) return false;
-    for (uint32_t index = 0; index < _payloads.size(); ++index) {
+    if (_slotCount == 0 || !_frames.empty() || _candidates.size() > std::numeric_limits<uint32_t>::max()) return false;
+    for (uint32_t index = 0; index < _slotCount; ++index) {
         auto frame = make_unique<GpuFrameResources>();
-        if (!frame->Initialize(_gpu, static_cast<uint32_t>(_candidates.size()))) return false;
+        if (!frame->Initialize(_gpu)) return false;
         _frames.push_back(std::move(frame));
     }
     return true;
@@ -235,46 +304,27 @@ void MeshDrawingFramePipeline::ExtractFrameData(FrameSlot& slot) noexcept {
     if (!_input) RADRAY_ABORT("MeshDrawingFramePipeline: missing input");
     if (slot.GetIndex() >= _frames.size()) RADRAY_ABORT("MeshDrawingFramePipeline: slot index exceeds frame resources");
     if (_input->HasDirtyBatches()) RADRAY_ABORT("MeshDrawingFramePipeline: mesh command synchronization failed");
-    const auto& resources = *_frames[slot.GetIndex()];
-    auto* payload = slot.GetArena().Emplace<ExtractedFramePayload>();
-    _payloads[slot.GetIndex()] = payload;
-    payload->Instances.reserve(_candidates.size());
-    for (const auto handle : _candidates) {
-        if (!_input->GetPrimitive(handle)) RADRAY_ABORT("MeshDrawingFramePipeline: stale primitive handle");
-        const Eigen::Matrix4f matrix = (*_input->GetPrimitive(handle)).LocalToWorld.ToMatrix();
-        auto& instance = payload->Instances.emplace_back();
-        std::memcpy(instance.LocalToWorld.data(), matrix.data(), sizeof(InstanceData));
-    }
-    for (size_t index = 0; index < payload->PassBytes.size(); ++index) {
-        PassConstants constants;
-        std::memcpy(constants.ViewProjection.data(), _view.ViewProjection.data(), sizeof(constants.ViewProjection));
-        constants.LocalScale = index == 0 ? 1.0f : 1.12f;
-        auto& bytes = payload->PassBytes[index];
-        bytes.resize(resources.PassBuffers[index]->GetDesc().Size, byte{0});
-        std::memcpy(bytes.data(), &constants, sizeof(constants));
-    }
 }
 
 void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept {
     const auto slotIndex = slot.GetIndex();
     auto& resources = *_frames[slotIndex];
-    const auto& payload = *_payloads[slotIndex];
     const auto vb = graph.ImportBuffer(_gpu.VertexBuffer.Get(), _geometrySubmitted ? render::BufferState::Vertex : render::BufferState::Undefined,
                                        render::BufferState::Vertex);
     const auto ib = graph.ImportBuffer(_gpu.IndexBuffer.Get(), _geometrySubmitted ? render::BufferState::Index : render::BufferState::Undefined,
                                        render::BufferState::Index);
     if (!_geometrySubmitted) {
-        graph.UploadBuffer(vb, 0, _gpu.PendingVertexBytes);
-        graph.UploadBuffer(ib, 0, _gpu.PendingIndexBytes);
+        graph.UploadBuffer(vb, 0, RDGUploadSource::BorrowedBytes(_gpu.PendingVertexBytes));
+        graph.UploadBuffer(ib, 0, RDGUploadSource::BorrowedBytes(_gpu.PendingIndexBytes));
         graph.MarkOutput(vb);
         graph.MarkOutput(ib);
     }
-    const auto instances = graph.ImportBuffer(resources.InstanceBuffer.Get(), render::BufferState::HostWrite, render::BufferState::HostWrite);
-    graph.UploadBuffer(instances, 0, std::as_bytes(std::span{payload.Instances}));
+    const auto instances = graph.CreateBuffer(RDGDynamicBufferDescriptor{_candidates.size() * sizeof(InstanceData), render::BufferUse::Vertex},
+                                              RDGUploadSource::Generated(_candidates.size() * sizeof(InstanceData), InstanceGenerator{_input.Get(), _candidates, {}}, &WriteInstances, &PrepareInstances));
     array<RDGBufferHandle, 2> constants;
-    for (size_t index = 0; index < constants.size(); ++index) {
-        constants[index] = graph.ImportBuffer(resources.PassBuffers[index].Get(), render::BufferState::HostWrite, render::BufferState::HostWrite);
-        graph.UploadBuffer(constants[index], 0, payload.PassBytes[index]);
+    for (size_t i = 0; i < constants.size(); ++i) {
+        constants[i] = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(PassConstants), render::BufferUse::CBuffer},
+                                          RDGUploadSource::Generated(sizeof(PassConstants), ConstantGenerator{&_view, i == 0 ? 1.0f : 1.12f}, &WriteConstants));
     }
     const auto depth = graph.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::D32_FLOAT_S8_UINT, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::DepthStencilWrite});
     const auto color = graph.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource});
@@ -282,42 +332,26 @@ void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) no
                                              render::BufferState::HostRead);
     const array<std::string_view, 4> names{"Tutorial Depth", "Tutorial Color", "Tutorial Outline", "Tutorial Transparent"};
     for (uint32_t index = 0; index < names.size(); ++index) {
-        graph.AddRasterPass(names[index], [&, index](RDGRasterPassBuilder& pass) {
-            const auto load = index == 0 ? render::LoadAction::Clear : render::LoadAction::Load;
-            pass.UseMeshPass({index})
-                .ReadBuffer(vb, render::BufferState::Vertex)
-                .ReadBuffer(ib, render::BufferState::Index)
-                .ReadBuffer(instances, render::BufferState::Vertex)
-                .ReadBuffer(constants[index == 2 ? 1 : 0], render::BufferState::CBuffer)
-                .SetDepthStencil(depth, render::TextureState::DepthWrite, load, render::StoreAction::Store, load, render::StoreAction::Store, {1.0f, 0});
-            if (index != 0) {
-                pass.WriteColor(0, color, index == 1 ? render::LoadAction::Clear : render::LoadAction::Load,
-                                render::StoreAction::Store, {{0.035f, 0.055f, 0.085f, 1.0f}});
-            } }, [this, index, slotIndex](RDGRasterPassContext& ctx) {
-            RADRAY_INFO_LOG("步骤 7：RDG 录制 MeshPass={}", index);
-            return RecordPass(ctx.GetEncoder(), ctx.GetSlot(), {index}, *_frames[slotIndex]); });
+        auto pass = graph.AddRasterPass(names[index], PassData{&resources, _view, {index}, instances, constants[index == 2 ? 1 : 0]}, &RecordPass, &PreparePass);
+        const auto load = index == 0 ? render::LoadAction::Clear : render::LoadAction::Load;
+        pass.UseMeshPass({index}).ReadBuffer(vb, render::BufferState::Vertex).ReadBuffer(ib, render::BufferState::Index).ReadBuffer(instances, render::BufferState::Vertex).ReadBuffer(constants[index == 2 ? 1 : 0], render::BufferState::CBuffer).SetDepthStencil(depth, render::TextureState::DepthWrite, load, render::StoreAction::Store, load, render::StoreAction::Store, {1.0f, 0});
+        if (index != 0) pass.WriteColor(0, color, index == 1 ? render::LoadAction::Clear : render::LoadAction::Load,
+                                        render::StoreAction::Store, {{0.035f, 0.055f, 0.085f, 1.0f}});
     }
-    graph.AddCopyPass("Tutorial Readback", [&](RDGCopyPassBuilder& pass) { pass.ReadTexture(color).WriteBuffer(readback); }, [color, readback](RDGCopyPassContext& ctx) {
-        ctx.GetCommandBuffer().CopyTextureToBuffer(&ctx.Resolve(readback), 0, &ctx.Resolve(color), {0, 1, 0, 1});
-        return true; });
+    struct ReadbackData {
+        RDGTextureHandle Color;
+        RDGBufferHandle Buffer;
+    };
+    graph.AddCopyPass("Tutorial Readback", ReadbackData{color, readback}, +[](const ReadbackData& data, RDGCopyPassContext& context) noexcept {
+        const auto target = context.ResolveBuffer(data.Buffer);
+        context.GetCommandBuffer().CopyTextureToBuffer(target.Buffer.Get(), target.Offset, &context.Resolve(data.Color), {0, 1, 0, 1});
+        return true; }).ReadTexture(color).WriteBuffer(readback);
     graph.MarkOutput(readback);
 }
 
 void MeshDrawingFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept {
     if (!PreparePassDrawCommands(pass, *_input, _candidates, _policies, drawList)) RADRAY_ABORT("MeshDrawingFramePipeline: cannot prepare pass {}", pass.Value);
     RADRAY_INFO_LOG("步骤 6：Frame={} Slot={} MeshPass={}，{} 条单实例 Draw", slot.GetFrameId(), slot.GetIndex(), pass.Value, drawList.VisibleCommands.size());
-}
-
-bool MeshDrawingFramePipeline::RecordPass(render::GraphicsCommandEncoder& encoder, FrameSlot& slot,
-                                          MeshPassId passId, const GpuFrameResources& resources) {
-    encoder.SetViewport(_view.ViewportRect);
-    encoder.SetScissor(_view.Scissor);
-    const MeshShaderParameterBinding passBinding{0, resources.PassParameterSets[passId == MeshPassId{2} ? 1 : 0].Get(), {}};
-    const MeshPassSubmitArgs submitArgs{
-        .ParameterSets = std::span{&passBinding, 1},
-        .InstanceStream = render::VertexBufferBinding{1, {resources.InstanceBuffer.Get(), 0, resources.InstanceBuffer->GetDesc().Size}}};
-    auto& drawList = slot.GetPassDrawList(passId);
-    return drawList.Submit(encoder, submitArgs);
 }
 
 void MeshDrawingFramePipeline::SubmitFrame(FrameSlot& slot, render::CommandBuffer& command) noexcept {

@@ -28,7 +28,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 ## 硬规则
 
 - C++ 的 `.h` 与 `.cpp` 默认按同名文件一一对应，头文件声明的非内联函数实现在对应 `.cpp` 中；确需采用不同命名或非一一对应的文件组织时，必须先说明原因、询问用户并获得同意。
-- STL 容器使用 `radray/types.h` 的别名；协程使用 `radray/coroutine.h` 的别名，不直接用 `exec::task` / `stdexec::*`。
+- 普通 STL 容器使用 `radray/types.h` 的别名；PMR 容器直接使用 `std::pmr`，不在 `radray` 或 `types.h` 中另设别名；协程使用 `radray/coroutine.h` 的别名，不直接用 `exec::task` / `stdexec::*`。
 - 可空接口指针使用 `Nullable<T>`，裸指针表示非空；Debug 判断使用 `RADRAY_IS_DEBUG`。
 - 字符串格式化使用 `fmt`，先查已有 formatter；标志枚举使用 `enum_flags.h` 的 `EnumFlags<T>`、`is_flags<T>`、`format_as`。
 - 性能插桩只用 `radray/profiler.h` 的 `RADRAY_PROFILE_*` 宏，不直接 include `tracy/*`；仅 render 后端为 GPU 时间戳例外。

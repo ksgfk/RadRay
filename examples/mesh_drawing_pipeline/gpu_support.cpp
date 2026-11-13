@@ -115,27 +115,16 @@ bool GpuResources::PrepareGeometry(std::span<const byte> vertices, std::span<con
     return VertexBuffer && IndexBuffer;
 }
 
-bool GpuFrameResources::Initialize(const GpuResources& shared, uint32_t instanceCount) {
-    if (instanceCount == 0) return false;
+bool GpuFrameResources::Initialize(const GpuResources& shared) {
     Width = shared.Width;
     Height = shared.Height;
     auto& device = shared.Device->GetDevice();
     RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
     Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
     if (!Readback) return false;
-    InstanceBuffer = device.CreateBuffer({.Size = uint64_t{instanceCount} * sizeof(InstanceData),
-                                          .Memory = render::MemoryType::Upload,
-                                          .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite});
-    if (!InstanceBuffer) return false;
-    const uint64_t alignment = std::max<uint64_t>(1, std::max<uint64_t>(device.GetDetail().CBufferAlignment, device.GetCapabilities().Limits.CBufferOffsetAlignment));
-    const uint64_t cbufferSize = Align(uint64_t{sizeof(PassConstants)}, alignment);
-    for (size_t index = 0; index < PassBuffers.size(); ++index) {
-        PassBuffers[index] = device.CreateBuffer({.Size = cbufferSize, .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CBuffer | render::BufferUse::MapWrite});
-        if (!PassBuffers[index]) return false;
-        PassParameterSets[index] = device.CreateShaderParameterSet({shared.PassGroupLayout.Get()});
-        if (!PassParameterSets[index] ||
-            !PassParameterSets[index]->Set(0, 0, render::ShaderBufferBinding{PassBuffers[index].Get(), {0, cbufferSize}, 0}) ||
-            !PassParameterSets[index]->FlushWrites()) return false;
+    for (auto& parameters : PassParameterSets) {
+        parameters = device.CreateShaderParameterSet({shared.PassGroupLayout.Get()});
+        if (!parameters) return false;
     }
     CompletionFence = device.CreateFence();
     return CompletionFence.HasValue();

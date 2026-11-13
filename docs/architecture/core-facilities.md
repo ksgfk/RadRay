@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/allocator.h`, `modules/core/src/allocator.cpp`, `modules/core/include/radray/object_arena.h`, `modules/core/src/object_arena.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`, `modules/core/src/image_data.cpp`, `modules/core/src/png_codec.h`, `modules/core/src/png_codec.c`, `modules/core/src/jpeg_codec.h`, `modules/core/src/jpeg_codec.c`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/allocator.h`, `modules/core/src/allocator.cpp`, `modules/core/include/radray/memory.h`, `modules/core/src/memory.cpp`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`, `modules/core/src/image_data.cpp`, `modules/core/src/png_codec.h`, `modules/core/src/png_codec.c`, `modules/core/src/jpeg_codec.h`, `modules/core/src/jpeg_codec.c`
 
 # core 基础设施
 
@@ -12,7 +12,7 @@
 
 | 头文件 | 提供 |
 |---|---|
-| `types.h` | 全部容器与字符串别名的唯一出口 |
+| `types.h` | 项目普通容器与字符串别名的唯一出口 |
 | `logger.h` | `radray::format`、日志宏、`RADRAY_ABORT`、`RADRAY_ASSERT` |
 | `nullable.h` | `Nullable<T>` |
 | `enum_flags.h` | `EnumFlags<T>` + `magic_enum` 的唯一出口 |
@@ -34,11 +34,19 @@
 template <class T> using vector = std::vector<T, allocator<T>>;
 ```
 
-**这些别名的底层是标准容器，不接受自定义分配器参数。** 没有 EASTL。
+**普通别名的底层是标准容器，不接受自定义分配器参数。** 没有 EASTL。
 `radray::allocator<T>` 在启用 `RADRAY_ENABLE_MIMALLOC` 时使用 `mi_stl_allocator<T>`，
 关闭时使用 `std::allocator<T>`；容器与字符串别名统一使用该分配器。
 `unique_ptr` / `shared_ptr` / `weak_ptr` / `make_unique` / `make_shared` /
 `enable_shared_from_this` 也都被 `using` 拉进 `radray` 命名空间。
+
+PMR 容器直接使用 `std::pmr::vector`、`std::pmr::map` 等标准名称，不在 `radray` 或 `types.h` 中另设别名；
+运行时显式传入 memory_resource。
+`memory.h/.cpp` 中的 `HeapMemoryResource` 将 PMR 上游连接到 RadRay 的 AlignedAlloc/AlignedFree，启用 mimalloc 时沿用该堆；
+它把字节数向对齐要求取整，支持零字节请求，分配失败或大小溢出抛出 std::bad_alloc。资源按实例地址比较相等。
+该适配器不缓存、不拥有其下游容器，也不改变进程默认 PMR resource；下游 pool 必须先于上游销毁。
+PMR 容器普通复制构造选择默认资源，指定目标域时必须显式提供 allocator；赋值保留目标资源，
+不同资源间移动可能逐元素移动，不能 swap 分配器不相等的容器。
 
 `RADRAY_ENABLE_MIMALLOC`（默认 ON）在 Windows `/MD[d]` 下链接动态库 target `mimalloc`，
 在 `/MT` 和其他平台下通过 whole-archive 链接 `mimalloc-static`。
@@ -51,12 +59,12 @@ Windows 动态覆盖由最终程序负责部署 DLL 和安排加载；RadRay 不
 
 `memory.h` 的 `Malloc/Free`、`AlignedAlloc/AlignedFree` 在启用 mimalloc 时由 `memory.cpp`
 直接调用 `mi_malloc/mi_free`、`mi_malloc_aligned/mi_free`，不依赖 CRT 符号覆盖；Windows `/MD[d]`
-也使用这条路径。ObjectArena 的底层块因此随该选项使用 mimalloc。关闭选项时保留标准 C 分配，
+也使用这条路径。HeapMemoryResource 因此随该选项使用 mimalloc。关闭选项时保留标准 C 分配，
 Windows 对齐分配使用 `_aligned_malloc/_aligned_free`，其他平台使用 `std::aligned_alloc/std::free`。
 这些接口返回的内存必须通过对应 RadRay 释放接口配对释放，不能与调用方 CRT 的 free 混用。
 
-普通 STL 容器按 `AGENTS.md` 使用这些别名。需要显式配置下文 `ArenaAllocator<T>` 的用法直接
-实例化标准容器模板；本设施不增加容器别名，也不改变 `types.h` 的默认分配器。
+普通 STL 容器按 `AGENTS.md` 使用这些别名；PMR 容器直接使用 `std::pmr` 名称并显式传入资源，
+不增加 RadRay 容器别名，也不改变 `types.h` 的默认分配器。
 
 ### InlineVector
 
@@ -77,78 +85,6 @@ data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不�
 允许参数引用已有元素及其子对象；`assign(first, last)` 也接受自身的子范围和输入迭代器。
 重定位优先使用不抛异常的移动，否则在可复制时复制。临时存储通过 RAII 清理；不可复制且移动可能失败的
 元素不保证在失败后保留原值。超过 `max_size()` 的容量请求通过 `RADRAY_ABORT` 拒绝。
-
-## ObjectArena 与 ArenaAllocator
-
-`object_arena.h` 提供独立的 `ObjectArena` 和 `ArenaAllocator<T>`，非模板实现位于同名 `.cpp`。
-它们不涉及 GPU 或帧调度；调用方负责确定所有使用已经完成。
-runtime 的 [FrameSlot](runtime.md#帧内分配与资源释放) 为每槽持有独立 arena，将回收接在帧完成与命令存储重置之后。
-arena 不可复制、不可移动，操作必须由调用方串行化。没有锁、TLS、全局池或 PMR 适配。
-
-### 存储和对象生命周期
-
-`ObjectArenaOptions` 默认普通块可用容量 `BlockSize = 64 KiB`，重置后保留预算
-`MaxRetainedBytes = 256 KiB`。BlockSize 必须大于零，违反时终止；预算允许为零。
-普通块使用线性游标分配，对象地址在扩容时不变。超出普通块容量的大请求或对齐需求单独分块，
-不消耗普通块的当前游标。所有块通过 `AlignedAlloc` / `AlignedFree` 配对管理，底层申请大小
-向分配对齐取整，并在加法、取整及地址跨度计算前验证溢出。
-
-| API | 契约 |
-|---|---|
-| `TryAllocateBytes(bytes, alignment)` | 只分配原始存储，不构造对象、不登记析构；无效对齐、大小溢出或分配失败返回空 |
-| `AllocateBytes(bytes, alignment)` | 同上，失败抛 `std::bad_alloc` |
-| `Emplace<T>(args...)` | 原样转发构造参数，返回 `T*`；允许构造异常传播，要求 T 可无异常析构 |
-| `Reset()` | 析构所有已登记对象，复位保留块并按预算归还动态存储；不申请新内存 |
-| `Release()` / 析构 | 析构所有已登记对象并归还全部动态存储；Release 后仍可重新使用 |
-| `GetReservedBytes()` | 遍历块计算保留字节，复杂度 O(块数)，用于预算诊断 |
-
-零字节请求按一字节处理；alignment 必须为非零的二次幂。返回的存储在下一次 Reset、Release
-或 arena 析构时失效，即使其地址随后被复用。原始存储中手动构造的对象由调用方管理析构。
-
-平凡析构类型没有析构记录。其他类型使用 `InlineVector<CleanupRecord, 16>` 保存对象指针与
-`noexcept` 析构函数，按**成功构造完成的逆序**销毁。构造前预留记录容量，包含嵌套未完成构造
-的需求；对象构造成功后登记不会再申请内存。构造失败时通过 RAII 撤销预留计数，不登记失败对象，
-已消耗字节和已成功构造的嵌套对象保留到回收时处理。不使用 catch，也不提供失败后的游标回滚。
-
-【已登记对象不得手动析构或 delete。】可以 Emplace 移入的 unique_ptr 等 RAII owner，或移入
-`ScopeGuard` 来保存清理回调；没有单独的 Retain/Defer 接口。构造期间不得调用该 arena 的
-Reset/Release，析构及清理回调不得重入同一 arena；Debug 对这些误用断言。
-
-Reset 先完成全部析构，再优先保留预算容纳的析构表堆容量；若表自身超过预算则全部释放其堆存储。
-剩余预算按创建顺序保留普通块，超额普通块及全部大块归还。预算包含块头、对齐填充和析构表堆容量，
-不包含 arena 本体的内联空间及系统分配器内部开销。因此默认预算不代表固定保留四个普通块。
-Reset/Release 可重复调用，不会重复执行已回收对象的析构；Release 后 GetReservedBytes 为零。
-
-### 标准容器适配
-
-`ArenaAllocator<T>` 非拥有地引用 arena，没有默认构造。allocate 检查元素数量乘法溢出并抛
-`std::bad_array_new_length`，底层存储失败抛 `std::bad_alloc`；deallocate 不单独回收存储。
-construct 使用 C++20 `std::uninitialized_construct_using_allocator`，可向兼容的嵌套容器和
-pair 元素传递同一个 arena，但不会改写普通业务对象内部成员的分配器。
-
-```cpp
-radray::ObjectArena arena;
-{
-    std::vector<int, radray::ArenaAllocator<int>> values{
-        radray::ArenaAllocator<int>{arena}};
-    values.reserve(256);
-    values.push_back(42);
-} // 容器先销毁元素，存储仍由 arena 持有。
-arena.Reset();
-```
-
-【容器元素的构造和析构由容器负责，不能逐元素登记到 arena。】通过 Emplace 创建顶层容器时，
-显式传入 allocator，仅登记容器本体的析构。外部持有的容器必须在 arena 重置前销毁；clear()
-仍保留 capacity，不能替代销毁。arena 必须比所有借用它的 allocator 和容器活得更久。
-扩容后弃用的旧存储要等到 arena 回收才可复用，因此可预测容量时优先 reserve。
-
-allocator 相等性按 arena 地址判断，跨类型转换保留同一 arena；is_always_equal 与复制赋值、
-移动赋值、swap 的传播标志均为 false。普通容器复制构造沿用来源 arena，赋值保留目标 arena；
-跨 arena 移动赋值可能逐元素移动，不能直接 swap 不同 arena 的容器。复制或移动不延长 arena 的生命期。
-
-正确性测试位于 `modules/core/tests/test_object_arena.cpp`，使用 `ObjectArenaTest` 和
-`ArenaAllocatorTest` suite，计数与事件顺序由测试 probe 保存。基准入口见
-[性能测量 / Object arena](../guide/performance.md#object-arena)。
 
 ## SparseSet
 
@@ -424,8 +360,17 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
   工具、样例与 benchmark 都必须显式调用该函数。core 不通过链接接口
   传播 RTTI 选项，仓库外使用公共对象查询的 consumer 需自行开启 RTTI。把开关放在现有的
   工程编译函数中，可以统一自有目标而不改变第三方配置，也不把工程策略挂在 core 的公共接口上。
-- **`intrusive_ptr.h`** — `IntrusivePtr` + `AdoptRef` / `RetainRef`，依赖 ADL 的
-  `IntrusivePtrAddRef` / `IntrusivePtrRelease`。
+- **`intrusive_ptr.h`** — `IntrusivePtr<T>` 通过 `IntrusivePtrTraits<T>` 调用对象的 `Retain()` / `Release()`；
+  traits 可特化以适配其他引用协议，或将不完整类型的引用操作移到其定义可见的位置。
+  `RefCountedBase<T>` 与 `ThreadSafeRefCountedBase<T>` 初始计数均为 0，对象本身不可复制、移动，
+  通过虚析构和归零时的 `delete static_cast<const T*>(this)` 完成销毁；溢出、下溢及带引用析构均常驻检查。
+  调用方或工厂负责分配和构造，显式 `IntrusivePtr<T>{pointer}` 取得首个或新增强引用；
+  构造参数使用 `Nullable<T*>` 表达可空输入。复制增引用，移动（包括派生到基类转换）只转移引用。
+  `Reset()` 先清空自身，再释放旧引用；没有 ADL 钩子、adopt 接口或裸指针所有权释放接口。
+  非原子基类要求串行操作；原子基类使用 relaxed 增引用、acq_rel 减引用，`UseCount()` 仅提供计数快照，
+  不同步对象数据或同一个智能指针变量。跨线程传递引用仍须同步，裸指针只有在存活保证下才能取得强引用。
+  该组织参考 [LLVM IntrusiveRefCntPtr](https://llvm.org/doxygen/IntrusiveRefCntPtr_8h_source.html)，不依赖 LLVM；
+  上传目标的强引用交接与帧槽保活见 [Runtime GPU 资源上传](runtime.md#gpu-资源与批量上传)。
 - **`structured_buffer.h`** — CPU 侧反射式结构化缓冲。新代码用 `TrySetValue`（fail-fast），
   `SetValue` 是旧接口。
 - **`text_encoding.h`** — Windows 使用 `MultiByteToWideChar` / `WideCharToMultiByte` 的 `CP_UTF8` 模式转换。
@@ -477,13 +422,12 @@ CPU 测试位于 `modules/core/tests/test_basic_math.cpp` 的 `BasicMathTest`，
 | `test_img_rw.cpp` | `PngTest`、`PngTest/PngRoundTripTest`（仅 `RADRAY_ENABLE_LIBPNG`） |
 | `test_jpeg.cpp` | `JpegTest`、`JpegTest/JpegAlphaTest`（仅 `RADRAY_ENABLE_LIBJPEG`） |
 | `test_inline_vector.cpp` | `InlineVectorTest`（独立 exe `test_inline_vector`） |
-| `test_intrusive_ptr.cpp` | `IntrusivePtrTest` |
+| `test_intrusive_ptr.cpp` | `IntrusivePtrTest`、`IntrusivePtrDeathTest` |
 | `test_json.cpp` | `JsonTest`、`JsonSerializerTest`、`JsonDeserializerTest` |
 | `test_logger.cpp` | `FormatTest` |
 | `test_memory.cpp` | `MemoryTest` |
 | `test_memory_override.cpp` | `MimallocOverrideTest`（仅 Windows 静态 CRT 且启用 mimalloc） |
 | `test_nullable.cpp` | `NullableTest` |
-| `test_object_arena.cpp` | `ObjectArenaTest`、`ArenaAllocatorTest` |
 | `test_runtime_type.cpp` | `RuntimeTypeIdTest` |
 | `test_scope_guard.cpp` | `ScopeGuardTest` |
 | `test_sparse_set.cpp` | `SparseSetTest` |

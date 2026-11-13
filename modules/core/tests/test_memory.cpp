@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -53,6 +54,26 @@ TEST(MemoryTest, AllocationsComeFromMimallocWhenEnabled) {
 TEST(MemoryTest, FreeAcceptsNull) {
     Free(nullptr);
     AlignedFree(nullptr);
+}
+
+TEST(MemoryTest, HeapResourceSupportsPmrAlignmentAndZeroSize) {
+    HeapMemoryResource resource;
+    for (size_t alignment : {size_t{1}, size_t{64}, size_t{4096}}) {
+        for (size_t size : {size_t{0}, size_t{3}, size_t{4097}}) {
+            auto* block = resource.allocate(size, alignment);
+            EXPECT_EQ(reinterpret_cast<std::uintptr_t>(block) % alignment, 0u);
+            std::memset(block, 0x5a, size);
+            EXPECT_TRUE(IsFilledWith(block, size, 0x5a));
+#ifdef RADRAY_ENABLE_MIMALLOC
+            EXPECT_TRUE(mi_any_heap_contains(block));
+#endif
+            resource.deallocate(block, size, alignment);
+        }
+    }
+    EXPECT_THROW((void)resource.allocate(std::numeric_limits<size_t>::max(), 4096), std::bad_alloc);
+    HeapMemoryResource other;
+    EXPECT_TRUE(resource.is_equal(resource));
+    EXPECT_FALSE(resource.is_equal(other));
 }
 
 }  // namespace

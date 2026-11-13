@@ -111,9 +111,14 @@ private:
     void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override;
     void ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept override;
     void SubmitFrame(FrameSlot& slot, render::CommandBuffer& commandBuffer) noexcept override;
-    bool RecordPass(render::GraphicsCommandEncoder& encoder, FrameSlot& slot, MeshPassId passId, const GpuFrameResources& resources);
-
-    struct ExtractedFramePayload;
+    struct InstanceGenerator;
+    struct ConstantGenerator;
+    struct PassData;
+    static uint64_t PrepareInstances(InstanceGenerator& data, RDGUploadPrepareContext& context) noexcept;
+    static bool WriteInstances(const InstanceGenerator& data, RDGUploadWriteContext& context) noexcept;
+    static bool WriteConstants(const ConstantGenerator& data, RDGUploadWriteContext& context) noexcept;
+    static bool PreparePass(PassData& data, RDGPrepareContext& context) noexcept;
+    static bool RecordPass(const PassData& data, RDGRasterPassContext& context) noexcept;
 
     GpuResources& _gpu;
     const Scene& _scene;
@@ -127,7 +132,7 @@ private:
     TransparentPassProcessor _transparentProcessor;
     array<MeshPassRegistration, 4> _passes;
     vector<unique_ptr<GpuFrameResources>> _frames;
-    vector<Nullable<ExtractedFramePayload*>> _payloads;
+    uint32_t _slotCount;
     bool _geometrySubmitted{false};
 };
 

@@ -1,0 +1,13 @@
+add_executable(bench_rdg_upload bench_rdg_upload.cpp)
+target_link_libraries(bench_rdg_upload PRIVATE RadRay::runtime benchmark::benchmark)
+radray_default_compile_flags(bench_rdg_upload)
+radray_optimize_flags_binary(bench_rdg_upload)
+radray_set_build_path(bench_rdg_upload)
+radray_load_mimalloc_early(bench_rdg_upload)
+
+add_executable(bench_rdg_upload_gpu bench_rdg_upload_gpu.cpp)
+target_link_libraries(bench_rdg_upload_gpu PRIVATE RadRay::runtime benchmark::benchmark)
+radray_default_compile_flags(bench_rdg_upload_gpu)
+radray_optimize_flags_binary(bench_rdg_upload_gpu)
+radray_set_build_path(bench_rdg_upload_gpu)
+radray_load_mimalloc_early(bench_rdg_upload_gpu)

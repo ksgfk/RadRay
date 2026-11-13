@@ -22,7 +22,7 @@ protected:
 TEST_F(FrameSlotTest, AcquireReturnsDistinctBuffersWithinFrame) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
-    Pipeline->OnRecord = [](FrameSlot& slot) {
+    Pipeline->OnPrepare = [](FrameSlot& slot) {
         const auto first = slot.AcquireCommandBuffer();
         const auto second = slot.AcquireCommandBuffer();
         ASSERT_TRUE(first && second);
@@ -36,7 +36,7 @@ TEST_F(FrameSlotTest, AcquireReusesBuffersAfterSlotReset) {
     ASSERT_TRUE(scheduler);
     const array<size_t, 3> counts{2, 1, 2};
     vector<vector<render::CommandBuffer*>> frames;
-    Pipeline->OnRecord = [&](FrameSlot& slot) {
+    Pipeline->OnPrepare = [&](FrameSlot& slot) {
         auto& acquired = frames.emplace_back();
         for (size_t index = 0; index < counts[frames.size() - 1]; ++index) acquired.push_back(slot.AcquireCommandBuffer().Get());
     };
@@ -49,7 +49,7 @@ TEST_F(FrameSlotTest, AcquireReturnsNullWhenBufferCreationFails) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
     Gpu.Device->FailCommandBuffers = true;
-    Pipeline->OnRecord = [](FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
+    Pipeline->OnPrepare = [](FrameSlot& slot) { EXPECT_FALSE(slot.AcquireCommandBuffer()); };
     scheduler->RunFrame();
 }
 
@@ -206,7 +206,7 @@ TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings
     EXPECT_EQ(encoder.VertexCalls[0][0].View.Target, &instances);
 }
 
-TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndClearAllowsNextFrame) {
+TEST(MeshPassFrameDrawListTest, SortFreezesDynamicPointersForReadOnlySubmitAndClearAllowsNextFrame) {
     FakePipeline pipeline;
     FakeBuffer indices{1024, render::BufferUse::Index};
     const PrimitiveSceneInfo primitive;
@@ -225,6 +225,7 @@ TEST(MeshPassFrameDrawListTest, SubmitFinalizesDynamicPointersWithoutSortingAndC
             list.VisibleCommands.back().FirstInstance = frame + index;
             list.VisibleCommands.back().InstanceCount = 2;
         }
+        list.SortVisibleCommands();
         RecordingEncoder encoder;
         ASSERT_TRUE(list.Submit(encoder));
         ASSERT_EQ(encoder.Draws.size(), 64u);
@@ -284,5 +285,5 @@ TEST(MeshPassFrameDrawListTest, RadixSortMatchesStableOrderAcrossAllKeyBytesAndR
     }
 }
 
-}  // 匿名命名空间
+}  // namespace
 }  // namespace radray

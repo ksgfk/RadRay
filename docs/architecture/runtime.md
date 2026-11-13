@@ -35,8 +35,9 @@
 | `rdg.h` | `RDGBuilder`、`CompiledRDG`、`RDGTransientResourcePool`、Texture/Buffer 句柄、Raster/Compute/Copy Builder 与 Context | 有 |
 | `render_graph_pipeline.h` | `RenderGraphFramePipeline` | 有 |
 | `frame_scheduler.h` | `FrameScheduler` | 有 |
+| `gpu_resource.h` | `GpuBuffer`、`GpuTexture`、资源描述与 `ImportPersistent` 重载 | 有 |
+| `upload_arena.h` | `UploadArena`、按槽分页映射、对齐分配和聚合 Flush | 有 |
 | `geometry_buffer_pool.h` | `VertexBufferPool` / `IndexBufferPool`、descriptor 与只移动子分配句柄 | 有 |
-| `upload_buffer.h` | `MappedUploadBuffer`、`BatchedBufferUpload` | 有 |
 
 `ValidateVertexInput` 与命令校验共用缓冲视图检查，因此和命令校验一起放在 `mesh_draw_command.h`；
 `MeshBatch` 只描述输入，与命令缓存独立；Scene 私有表维护归属、脏状态与 Pass 缓存。
@@ -51,41 +52,45 @@ Scene 管理关联与缓存同步，runtime 提供通用命令构建、校验和
 
 | 文件对 | 职责 |
 |---|---|
-| `frame_slot.h/.cpp` | `FrameSlot` 拥有按 Pass 的 VisibleCommands/DynamicContext、帧内和退役 ObjectArena、command allocator、可复用的 command buffer 池；不保存源 Scene 指针 |
-| `frame_pipeline.h/.cpp` | `FramePipeline` 定义 Pass 登记、`Extract`、`Record` 和 `Wait`；Record 负责 Pass 调度、申请命令、录制与提交 |
+| `frame_slot.h/.cpp` | `FrameSlot` 拥有按 Pass 的 VisibleCommands/DynamicContext、线性 PMR 与对象清理链、临时 PMR pool、command allocator、可复用的 command buffer 池；不保存源 Scene 指针 |
+| `frame_pipeline.h/.cpp` | `FramePipeline` 定义 Pass 登记及 `Extract`、`Prepare`、`Record`、`Submit`、`Wait` 五个串行阶段 |
 | `frame_scheduler.h/.cpp` | `FrameScheduler` 独占一个 Pipeline 和多个 Slot，负责选槽、调用等待、重置、阶段调用与轮转 |
 
-`FrameScheduler::Create(device, pipeline, slotCount = 2)` 按值消费 Pipeline 的 owner，失败返回空。
+`FrameScheduler::Create(device, pipeline, slotCount = 2)` 按值消费 Pipeline 的 owner，创建失败返回空。
 槽数必须大于 0，创建后固定；`GetSlotCount()` 返回槽数，`FrameSlot::GetIndex()` 返回稳定的 `[0, slotCount)` 索引。
 `FrameSlot::GetFrameId()` 返回 `uint64_t` 帧编号，在各 Scheduler 内从 0 独立递增，与循环使用的槽索引无关。
 Scheduler 在 BeginFrame 中等待槽的旧帧完成并写入新编号，因此准备、Extract、Record 和对应的 Wait 看到同一个编号。
-每次 Record 正常返回后递增编号，空帧也会递增；帧执行错误带诊断终止程序，不提供回滚或重试。
+每次 Submit 正常返回后递增编号，空帧也会递增；帧执行错误带诊断终止程序，不提供回滚或重试。
 WaitIdle 不重置计数，槽清理后仍保留最后分配的编号。计数到达 `uint64_t` 最大值时带诊断终止，不回绕。
 DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`GetQueue()` 返回所属设备和队列的借用引用。
-`BeginFrame() -> FrameSlot&` 开启下一槽，在场景更新和上传准备之前完成等待、allocator Reset、退役清理和帧数据清理。
-开启后重复调用直接返回同一槽，不重复等待、重置 arena 或释放准备期登记的退役对象。
-`GetCurrentSlot()` 仅在 BeginFrame 至 Record 返回之间返回该槽，其他时间为空。
+`BeginFrame() -> FrameSlot&` 开启下一槽，在场景更新和上传准备之前完成等待、allocator Reset、帧数据清理和退役清理。
+开启后重复调用直接返回同一槽，不重复等待、析构帧对象或释放准备期登记的退役对象。
+`GetCurrentSlot()` 仅在 BeginFrame 至 Submit 返回之间返回该槽，其他时间为空。
 准备过程未调用 RunFrame 时，下一次 BeginFrame 保留本轮准备；WaitIdle 则清理并取消准备，保留下一槽索引与帧编号。
 `RunFrame()` 可直接调用；尚未开启槽时内部自动调用 BeginFrame。完整顺序为：
 
 ```text
 BeginFrame（只在未开启时执行）：选槽 → 若有在途提交：Pipeline.Wait(slot)，清除在途标记
-    → Reset command allocator → Reset 退役 arena → 清理槽内 CPU 数据 → Reset 帧内 arena → 分配当前帧编号
+    → Reset command allocator → 清理槽内 CPU 数据 → 析构帧内对象 → 析构退役 owner → 分配当前帧编号
     → 返回当前槽，调用方准备具体管线输入、扩容本槽上传缓冲或登记退役资源
     → 使用 Scene 时：显式 SyncCachedMeshDrawCommands(pipeline.GetMeshPassRegistrations())
     → 将输入设置到具体管线
 RunFrame：复用已开启槽（或先自动 BeginFrame）
     → Extract(slot)：按需收集 Pass 的缓存命令借用、动态命令和当帧覆盖项
-    → Record(slot)：继续只读借用管线输入，排序可见命令、准备数据、申请 command buffer、Begin/End、自行提交
+    → Prepare(slot)：排序和固定可见命令，确定尺寸、物化资源、填充上传、准备绑定、取得 command buffer
+    → Record(slot)：只消费冻结的数据，Begin、编码命令、End
+    → Submit(slot)：提交命令，发布已提交状态并保存完成信息
     → 标记在途，下一帧编号递增，当前槽索引 = (当前槽索引 + 1) % slotCount
     → RunFrame 返回，结束外部输入借用
 ```
 
 `RunFrame` 返回 `void`，正常返回只表示 Pipeline 已完成本帧录制与提交，不保证异步工作已完成。新槽和已回收的槽不调用 Wait；
-在途标记表示存在尚未由 Scheduler 回收的 Record；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
-`WaitIdle()` 先等待所有在途槽，再按三个全槽循环清理：先对**全部槽**调用 `ResetCommandStorage()`，
-解除 command allocator 所有 epoch 引用，然后对全部槽调用 `ResetRetiredResources()`，最后对全部槽调用 `ResetFrameData()`，清空 CPU 数据和帧内 ObjectArena。
-不能逐槽完成全部清理，否则 Slot 0 的 arena 可能释放仍被 Slot 1 旧录制引用的 Buffer；
+在途标记表示存在尚未由 Scheduler 回收的 Submit；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
+`WaitIdle()` 先等待所有在途槽，再对**全部槽**调用 `ResetCommandStorage()`，
+解除 command allocator 所有 epoch 引用。随后关闭准备窗口，按帧从旧到新对各槽调用 `ResetFrameData()`，
+清空 CPU 数据并析构登记的对象；已开始但尚未提交的当前槽最后清理。
+这一顺序使旧帧的绑定和 view 先于移交到较新帧的旧 owner 销毁。同槽依赖仍须遵守下述登记顺序。
+不能逐槽完成等待、命令重置和对象清理，否则可能释放仍被其他槽旧录制引用的 Buffer；
 它保留当前索引，重复调用不会重复等待已回收提交。Scheduler 析构先执行 WaitIdle，
 再销毁全部 Slot，最后销毁 Pipeline，确保 Pipeline 拥有的资源晚于命令存储释放。
 Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
@@ -93,70 +98,91 @@ Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
 
 ### 帧内分配与资源释放
 
-每个 Slot 独占一个使用默认 `ObjectArenaOptions` 的 arena，`GetArena()` 返回其借用引用。
-FramePipeline 通过各阶段的 `FrameSlot&` 访问当前槽的 arena。同一个 Pipeline 服务多个在途槽，
-因此帧内存储的所有权归各 Slot，回收时机由 Scheduler 控制。
-调用方在 BeginFrame 之后、Pipeline 在 Extract / Record 中通过它分配临时存储、`Emplace<T>` 构造帧内对象，或登记拥有资源的 RAII 对象。
-对象和存储一直有效到对应 Wait 返回，随后在槽重置时统一回收。
-帧内分配不跨槽共享，CPU 写入仍须遵守各槽数据隔离要求。
+每个 Slot 直接拥有 `std::pmr::monotonic_buffer_resource`、一条对象清理链和一个 `std::pmr::unsynchronized_pool_resource`。
+`GetMemoryResource()` 返回线性 resource，供帧对象和 RDG 跨阶段数据使用；
+`GetScratchMemoryResource()` 返回临时 pool，供 Compile／Prepare 的局部工作容器使用。
+线性存储的初始缓冲为 128 KiB，首次使用时分配；回收保留初始缓冲，归还额外块。
+二者只供本槽串行 CPU 阶段使用，不提供并发保证，也不跨槽共享。默认直接使用槽内 `HeapMemoryResource`；
+`FrameScheduler::Create` 可传入自定义 memoryUpstream，借用的上游必须晚于调度器销毁。
+
+调用方在当前槽 BeginFrame 后至 Submit 返回前，用 `slot.Emplace<T>(args...)` 创建帧内对象。
+构造参数原样转发，对象地址与对齐保持有效直到槽回收，调用方不得手动析构或 delete 返回的对象。
+平凡可析构对象只分配本体；非平凡对象和清理节点合并分配，构造成功后才挂入清理链，按构造完成的逆序析构。
+分配和构造异常原样传播，失败对象不登记，其存储留到槽回收；成功的嵌套对象仍由该槽清理。
+对象析构必须 noexcept；构造和清理期间不得重入槽回收或调度器。
 
 转移 `unique_ptr` 所有权即可延迟释放 GPU 资源，例如已成功创建的 `unique_ptr<render::Buffer> buffer`：
 
 ```cpp
-auto* owner = slot.GetArena().Emplace<unique_ptr<render::Buffer>>(std::move(buffer));
+auto* owner = slot.Emplace<unique_ptr<render::Buffer>>(std::move(buffer));
 auto* borrowedBuffer = owner->get();
 ```
 
-后续录制可借用 `borrowedBuffer`，资源 owner 在槽回收时析构。槽内 owner 默认只供该槽使用；
-若其他槽也引用它，必须在 owner 槽再次复用前调用上述 `WaitIdle()`，或将共享 owner 交给下述 `RetireResource`。`shared_ptr` 可同样保活共享资源；
-自定义清理通过 `MakeScopeGuard` 创建回调，再以 `Emplace<decltype(cleanup)>(std::move(cleanup))` 登记。
-非平凡对象按构造完成的逆序析构，因此有依赖的资源应先登记被依赖者、后登记引用者。
-arena 的底层分配、保留预算和 allocator 契约见 [ObjectArena 与 ArenaAllocator](core-facilities.md#objectarena-与-arenaallocator)。
+后续录制可借用 borrowedBuffer，owner 在槽回收时析构。槽内 owner 默认只供该槽使用；
+若其他槽也引用它，必须在 owner 槽再次复用前调用上述 WaitIdle，或由外部 owner／各使用槽的共享引用保活。
+shared_ptr 可同样保活共享资源；自定义清理通过 Emplace 移入 MakeScopeGuard 的结果。
+有依赖的资源应先登记被依赖者、后登记引用者，或归入同一个 RAII 对象。
 
-回收先 Reset command allocator，解除全部旧录制的资源引用，再 Reset 退役 arena，随后清空各 Pass 的可见/动态命令，最后 Reset 帧内 arena。
-帧内 arena 的清理回调执行时 CPU 记录已为空；退役回调发生在 CPU 记录清理之前，不得假定记录已为空。
-两类回调执行时 Pipeline 和 DeviceContext 仍有效，回调不得重入 Slot、arena 或 Scheduler。
-正常槽复用与 Slot 析构沿用这一清理顺序，arena 成员析构归还全部保留内存。正常槽复用和 WaitIdle 使用 Reset，按默认预算保留存储。
-【调用方不得手动 Reset / Release 槽内 arena，不得手动销毁已登记对象；借用指针在回收后失效。】
-使用 `ArenaAllocator` 的外部容器必须在槽回收前销毁，clear 不足以结束存储借用；也可将容器本体登记到 arena，
-由它先销毁容器再回收存储。按 Pass 列表自身继续使用现有容器分配方式。
+回收先 Reset command allocator，解除全部旧录制引用，再清空各 Pass 的可见/动态命令并统一析构登记对象。
+清理回调执行时，当前槽的 CPU 可见/动态命令记录均已清空，Pipeline 和 DeviceContext 仍有效。
 
-`slot.RetireResource(std::move(owner))` 接收 RAII owner，存入该 Slot 私有的 `_retiredArena`。
-仅允许在当前槽 BeginFrame 返回后至 Record 返回前调用；Wait、清理回调和未开启帧时通过保存的槽引用登记均违反调用前置条件。
+【槽回收与 WaitIdle 先析构对象，再重置线性存储。】重置在原位置重建标准 monotonic resource，
+重新传入保留缓冲，不依赖不同 STL 的 release 对初始缓冲及增长尺寸的恢复行为。
+临时容器在局部作用域结束时向 scratch pool 归还单元，不调用 pool.release，缓存跨帧复用。
+FrameSlot 析构清理全部对象后释放线性存储与 pool 的保留存储，最后销毁默认上游。
+使用帧线性 resource 的外部 PMR 容器必须在帧对象清理前销毁；clear 仍保留 capacity，不能替代销毁。
+将容器本体通过 Emplace 登记到槽时，须显式传入分配器；不得把它的借用带到下一帧或其他槽，
+也不得手动 release 槽的 resource。下一帧重新获取帧 resource 引用；临时容器不得被录制结果引用。
+可见命令、动态命令外层列表、排序暂存数组和命令缓冲列表继续保留自身 capacity，不迁入每帧重置的 arena。
+线性存储不单独回收容器扩容后的旧容量；可预测大小时一次 reserve 或 resize，不逐次 reserve(size + 1)。
+对象构造参数原样转发，PMR 容器必须显式选择 resource，例如：
+
+```cpp
+auto* values = slot.Emplace<std::pmr::vector<int>>(&slot.GetMemoryResource());
+values->reserve(256);
+values->push_back(42);
+```
+
+当前 pool_options 为每 chunk 最多 4096 个单元、最大池化请求 64 KiB；更大请求直接经过上游。
+这些是标准库的调节参数，实际块策略由实现决定，不是总保留容量上限。
+统计 CPU 存储时须同时计入线性 arena 的保留缓冲、额外块和 scratch pool 缓存，不把保留量称为有效数据量。
+
+旧资源也直接用 `slot.Emplace<decltype(owner)>(std::move(owner))` 移交 RAII owner，共用上述存储和清理链。
+仅允许在当前槽 BeginFrame 返回后至 Submit 返回前登记；Wait、清理回调和未开启帧时通过保存的槽引用登记均违反调用前置条件。
 `RADRAY_IS_DEBUG` 下用槽内回调活动标记检查这一窗口，违规时带诊断终止；Release 不保存该标记，也不执行窗口检查。
-准备、Extract / Record 共用同一登记窗口，无需借用 Scene。重复 BeginFrame 不缩短已登记资源的寿命。
-调用前必须停止对旧资源的新使用；已有录制可以继续提交和执行。参数组等依赖对象应与底层 Buffer/布局组合为具有正确析构顺序的一个 owner。
+准备及 Extract / Prepare / Record / Submit 共用同一登记窗口，无需借用 Scene。重复 BeginFrame 不缩短已登记资源的寿命。
+移交旧 owner 前必须停止对旧资源的新使用；已有录制可以继续提交和执行。
+当前槽已有依赖对象时，不能再单独晚登记其底层 owner；应提前登记 owner，或把依赖对象与底层资源组合为具有正确析构顺序的一个 owner。
 登记时当前槽已完成本轮清理；下一次复用该槽前，固定轮转已使其他槽在登记后重置过 allocator，
-再等待并重置当前槽 allocator，即可安全释放其全部退役 owner。没有批次、槽完成掩码或额外调度状态。
-退役 arena 使用 1 KiB 块、4 KiB 动态存储保留上限，空 arena 不分配堆内存；同一队列内按登记完成的逆序析构，不承诺跨槽析构顺序。
-`WaitIdle()` 在全部 allocator 重置后清空所有退役队列，因此不需要先轮转完未使用槽。Slot 析构最终释放 arena 的保留存储。
+并清理旧帧对象，再等待并重置当前槽 allocator 后释放移入的 owner。没有单独的退役队列、批次或槽完成掩码。
+`WaitIdle()` 遵守前述从旧到新的清理顺序，不需要先轮转完未使用槽。
 未开启帧时产生的旧 owner 可在下一次 BeginFrame 返回后直接转交，或在 `WaitIdle()` 后释放。
 这只覆盖本 Scheduler 的单队列槽，不等待外部录制或其他队列。
 
 ### 命令录制与 Pipeline 契约
 
-Pipeline 在 `Record(slot)` 中通过 `slot.AcquireCommandBuffer()` 申请命令缓冲。
+Pipeline 在 `Prepare(slot)` 中通过 `slot.AcquireCommandBuffer()` 申请命令缓冲。
 Slot 初始不创建 command buffer，每次申请返回本轮尚未借出的一个 buffer；缓存不足时创建，创建失败返回空。
 同一轮内每次申请返回不同对象，所有权始终留在 Slot。槽重置时 allocator 统一 Reset，借用结束，
 下一轮从池首复用；池保留历史最大数量，不因本轮使用较少而销毁多余对象。
 Pipeline 不得跨槽复用保存的借用，每条命令在本轮最多 Begin/End 一次、提交一次。
 同槽共享一个 allocator，为满足 D3D12 契约，同一时间只允许一条命令处于 Begin/End 区间。
 
-Record 自行决定申请数量（可以为 0）、Begin/End、提交批次和时机，通过 `slot.GetQueue()` 提交。
+Prepare 确定命令缓冲数量（可以为 0），Record 完成 Begin/End，Submit 通过 `slot.GetQueue()` 提交。
 Scheduler 不接收或操作单条 command buffer；BeginFrame 仅开启准备窗口，具体准备和提交由调用方及 Pipeline 执行。
-Record 正常返回前，Pipeline 必须保存足够的按槽完成状态，供 `Wait(slot)` 等待本槽全部提交。
+Submit 正常返回前，Pipeline 必须保存足够的按槽完成状态，供 `Wait(slot)` 等待本槽全部提交。
 `Wait` 是同步 `void` 接口，
 返回即保证全部槽内工作完成、录制存储和帧数据可重置或销毁；不允许将超时当作完成返回。
-具体实现可以使用 fence、事件或其他机制；无提交或同步完成的 Record 可搭配空操作 Wait。
+具体实现可以使用 fence、事件或其他机制；无提交或同步完成的 Submit 可搭配空操作 Wait。
 
-Extract / Record 均为 `void noexcept`，只允许正常完成或在发现错误的位置带诊断终止程序。
+五个阶段均为 `void noexcept`，只允许正常完成或在发现错误的位置带诊断终止程序。
 无效输入、资源准备或录制失败由 Pipeline 使用 `RADRAY_ABORT` 处理，不依赖仅在 Debug 生效的断言；
 Scheduler 没有失败回滚、部分提交恢复或重试分支，不捕获异常恢复执行。
 Record 正常返回前必须关闭全部 encoder 并 End 全部已开启的 command buffer；Extract 不得提交异步工作。
 没有可见物体或没有绘制命令是正常空帧，不属于失败。
 
 Pipeline 按槽索引维护完成状态及可复用的上传缓冲、常量等可写帧资源；可以预分配或首次使用时创建。
-仅供当前帧使用的资源可交由槽内 arena 持有并释放。
+仅供当前帧使用的资源可交由槽内对象清理链持有并释放。
 这些资源必须按槽独立分配或使用互不重叠的存储区域，在对应 Wait 返回前不能覆盖。
 同一个 Pipeline 可以被多个槽依次调用，但不能共用一块每帧覆盖的上传数据。
 
@@ -165,14 +191,14 @@ Pipeline 按槽索引维护完成状态及可复用的上传缓冲、常量等�
 `scene.SyncCachedMeshDrawCommands(pipeline.GetMeshPassRegistrations())`。调度器不自动同步缓存。
 每次同步必须传入当前 registrations，不能仅以 `HasDirtyBatches()` 决定是否调用；缺失 pass cache 或 processor/registration/sort mode 变化可以发生在没有脏 batch 的情况下。
 `GetMeshPassRegistrations()` 默认返回空 span，纯 RDG 管线可保留默认值。FrameSlot 的 mesh 绘制列表与排序流程继续可用。
-外部输入在 RunFrame 返回前必须有效且只读，Wait、槽回收、arena 清理及析构不得访问这些借用输入。
+外部输入在 RunFrame 返回前必须有效且只读，Wait、槽回收及对象析构不得访问这些借用输入。
 多个 Scene 各自拥有独立容器及缓存；管线可以在帧间切换输入。FrameSlot 不保存 Scene 指针，也不提供 GetScene。
 调用方前置条件不由运行时锁或跨线程变更队列维护。
 
 缓存命令的 CPU 数据只需覆盖本帧 Record；命令编码完成后，帧间可以删除 Batch、重建缓存或销毁 Scene，无需等到 Wait。
-Wait、槽清理以及 arena 对象的析构/清理回调不得解引用留下的 Scene、Batch 或缓存命令借用。
-需要在 Wait 使用的 CPU 数据应保存到槽内 arena 或 Pipeline 的对应槽状态。
-底层 GPU 资源寿命独立于 CPU 命令：外部资源必须保持有效至最后一次引用它的 command allocator 重置，或通过 `RetireResource` 保活。
+Wait、槽清理以及 槽内对象的析构/清理回调不得解引用留下的 Scene、Batch 或缓存命令借用。
+需要在 Wait 使用的 CPU 数据应保存到槽内对象或 Pipeline 的对应槽状态。
+底层 GPU 资源寿命独立于 CPU 命令：外部资源必须保持有效至最后一次引用它的 command allocator 重置，或将 owner 移入 `FrameSlot::Emplace` 保活。
 
 `slot.GetPassDrawList(pass)` 按紧凑 `MeshPassId::Value` 取得槽内列表；不能跨后续列表扩容保存其引用。
 `MeshPassFrameDrawList` 包含 `VisibleCommands` 和自动绑定到该列表的 `DynamicContext`，不拥有缓存命令副本。
@@ -180,19 +206,115 @@ Wait、槽清理以及 arena 对象的析构/清理回调不得解引用留下�
 Extract 按本帧激活的 Pass 调用 `Scene::GatherVisibleMeshDrawCommands(..., drawList)` 或 `GatherVisiblePrimitives(..., drawList)`，
 保存命中缓存命令的只读指针；也可调用 `processor.AddMeshBatch(context, drawList.DynamicContext)` 生成当帧命令。
 未请求的 Pass 不进行当帧提取；持久缓存同步仍独立处理全部登记 Pass 的脏 Batch。
-Record 中的 `SortVisibleCommands()` 与非 const 的 `Submit(encoder, submitArgs)` 都先调用 DynamicContext 的 `FinalizeVisibleCommands()`，
-完成动态命令指针填充并冻结命令存储；两者执行前必须完成全部动态命令生成。
+Prepare 中的 `SortVisibleCommands()` 先调用 DynamicContext 的 `FinalizeVisibleCommands()`，
+完成动态命令指针填充；排序前必须完成全部动态命令生成。`Submit(encoder, submitArgs)` 是 const，只读消费冻结列表。
 排序按 SortKey 稳定升序进行；Submit 统一使用可见项的命令指针，并转发 Pass 级参数组与实例流。
 不需要这些绑定时可省略 `submitArgs`；提交入口不再接收缓存列表或动态命令数组。
 槽清理只清空可见列表、动态命令与动态绑定池并保留容量，不解引用缓存指针；没有缓存命令复制和快照析构。
 
-当前仍串行执行 Extract / Record，没有独立渲染线程或额外的业务 RenderPass 抽象。
+当前五个阶段仍串行执行，没有独立渲染线程或额外的业务 RenderPass 抽象。
+
+## GPU 资源与批量上传
+
+`gpu_resource.h/.cpp` 集中定义 `GpuBuffer` 和 `GpuTexture`，两者分别继承非原子的 `RefCountedBase<T>`。
+初始引用数为 0；工厂分配并构造对象，
+使用显式 `IntrusivePtr` 构造取得首个强引用。计数基类统一检查溢出、下溢和带引用析构，并在归零时立即销毁对象。
+引用计数只表达 CPU 所有权，不等待 GPU；调用方须保活资源至 GPU 使用完成且相关命令存储引用解除。
+跨帧持有资源的资源表、待上传请求和拥有参数集的对象保存强引用；需要延迟释放时，把 owner 交给当前槽的
+`FrameSlot::Emplace`。几何子分配和材质绑定对象本身的所有权保持各自契约。
+runtime 不登记全部资源、不绑定资源域，也不在最后一个引用释放时自动退役。
+
+### 提交边界状态
+
+`GpuBuffer` / `GpuTexture` 的 `GetSubmittedState()` 返回已提交工作按单队列顺序执行至末尾时的整资源交接状态，
+包含图末收尾屏障，不一定等于最后一个 Pass 的使用状态。首次相关提交前保存创建初态：buffer 为 Common，texture 为 Undefined。
+它不表示 GPU 当前执行位置、工作已完成、内容全部初始化或资源可以回收，也不包含跨队列同步和所有权信息。
+纹理全部 mip / array layer 使用同一交接状态；局部上传不会因此初始化其他区域。
+
+`CommitSubmittedState(state)` 是公开的元数据更新接口，只能在对应命令实际提交后，按提交顺序发布与命令一致的终态。
+它不录制屏障、不提交命令、不等待 GPU，也不通过 fence、版本或队列查询验证调用时点。
+直接使用 RHI 的调用者须自己建立状态转换与同步，提交后通过此接口发布，再交给 RDG；状态更新本身不建立 GPU 依赖。
+调用和对象生命周期遵守 RHI 的串行化契约。
+
+持久导入在 Build 读取初态快照。依赖前一提交的新图须在前一提交和状态发布之后导入；
+取得快照后不能插入使其失效的其他提交。后续发布不会修正已构建图的快照，当前没有提前构图后的状态重算。
+被裁剪、失败或放弃而未提交的工作不发布状态；资源保活与回收仍按命令存储和 GPU 完成的独立契约处理。
+
+### 缓冲与持久状态
+
+`GpuBuffer::Create(device, descriptor)` 创建固定 Device 内存的缓冲。`GpuBufferDescriptor` 包含 Size 和 Usage，
+Usage 默认 Resource，原生用途自动增加 CopyDestination；支持 vertex、index、constant、shader resource、UAV、indirect 和 copy 用途。
+零容量、超出设备已知 MaxBufferSize、映射用途或未知用途位返回空值；原生创建失败也返回空值。
+`GetDesc` 返回创建时的描述，`GetBuffer` 借用原生缓冲；设备须晚于缓冲销毁。
+
+`ImportPersistentBorrowed(graph, buffer)` 借用 wrapper；`ImportPersistentOwned(graph, owner)` 立即去重持有强引用。
+两者读取 `GetSubmittedState()` 初态并以 Common 收尾。同一图中的持久导入都使用这些入口，
+具体 Pass 声明 CopySource、Vertex、Index、ShaderRead 等实际用途，RDG 负责图内转换并恢复 Common。
+上传只初始化指定区间，调用方须先初始化随后读取的内容；该包装不提供映射、自动扩容或默认 shader 参数绑定。
+
+### 纹理与持久状态
+
+`GpuTexture::Create(device, descriptor)` 借用设备，验证格式和设备能力，再依次创建纹理与覆盖全部 mip／数组层的默认采样 view。
+描述包含 Dim、Width、Height、ArrayLayers、MipLevels、Format；仅支持 RHI 区域上传允许的非压缩 color 2D／2DArray。
+内存固定 Device、单采样、用途固定 CopyDestination | Resource，不提供通用 RT／UAV 纹理。
+全部创建成功后才交付对象；销毁时 view 先于 texture，设备须晚于纹理销毁。`GetTexture`、`GetDefaultView`、`GetDesc` 提供只读访问入口。
+
+`ImportPersistentBorrowed` 与 `ImportPersistentOwned` 对纹理采用相同的状态关联与所有权规则。
+初态来自 `GetSubmittedState()`（新纹理为 Undefined），图末恢复 ShaderRead。
+普通 CopyPass、自动上传和其他存活 Pass 都由 `CommitSubmittedStates()` 在实际提交后统一发布终态；
+Build、Prepare、Record 不修改已提交状态。状态不表示全部区域已初始化，读取区域仍由调用方保证有效。
+原生 RHI Import 只借用，不关联 wrapper 状态。拥有式导入在登记时保活，以物理对象去重；
+被裁剪的 owner 也保留到槽位安全清理，不在 Compile 触发 GPU 对象析构。
+
+### RDG 上传来源
+
+| 来源 | Build | Prepare | 生命周期 |
+|---|---|---|---|
+| `RDGUploadSource::BorrowedBytes` | 保存 span，不复制 payload | 一次写入最终映射区间 | 调用方保活到 Prepare 消费结束 |
+| `OwnedBytes` | 移入已有 `vector<byte>` | 一次写入最终映射区间，随后释放源存储 | 图接管源所有权 |
+| `SnapshotBytes` | 立即复制为 OwnedBytes | 按 OwnedBytes 处理 | 原数据可在调用返回后失效 |
+| `Generated` | 保存显式数据和函数指针 | 可选 PrepareLayout 决定实际尺寸，Write 直接填最终区间 | 上下文保持到生成完成 |
+
+源 CPU 所有权与目标 GPU owner 分别表达。Build/Compile 不申请、Map 或 Flush 上传页，
+常规 Borrow/Owned/Generate 不复制 payload；Snapshot 是调用方显式选择的付费例外。
+被裁剪来源不计算布局、不写映射、不产生 Copy。CPU 消费结束、命令提交、GPU 完成是三个独立时间点。
+
+`UploadBuffer(handle, offset, source)` 声明 Device 目标的 GPU Copy 或 Upload 目标的 HostWrite。
+`UploadTexture(handle, region, RDGTextureUploadSource)` 支持非压缩颜色 2D/2DArray 的 mip、array layer 和局部区域。
+region 直接使用 `render::TextureRegion2D`；Prepare 确定 staging offset/pitch 后，Record 将它与目标区域组合成 RHI 复制描述。
+CPU 源 pitch 与 staging pitch 独立；Borrow/Owned 逐行只复制有效像素，Generated 的 WriteContext 提供最终 RowPitch、RowBytes、Rows。
+源 pitch 不需要满足设备对齐，staging 的 pitch/placement 按设备约束与像素大小的公倍数对齐。
+上传默认不是图根；必须完成的初始化显式 MarkOutput。裁剪不会将请求自动排回下一帧。
+
+`CreateBuffer(RDGDynamicBufferDescriptor{MaxSize, Usage, Alignment}, source)` 声明动态 Upload 切片。
+PrepareLayout 在可见命令固定并排序后执行，返回实际字节数；可建立索引，但不得创建 RHI 资源或生成完整 payload。
+Write 接收最终映射区间，不能改变尺寸、图拓扑或登记新上传；生成器之间没有隐式执行依赖。
+声明上界、逻辑有效大小和对齐保留大小分别处理；RHI BufferDescriptor::Size 始终是物理 buffer 容量。
+实际大小为零时不分配、不 Flush、不 Copy，ResolveBuffer 返回空 slice，消费者跳过绑定及 draw/dispatch；已存活的 Raster Clear 仍执行。
+
+### 每槽 UploadArena
+
+Pipeline 每槽独占 UploadArena，页首次存活分配时才创建并持久 Map；页大小默认 1 MiB，可由 Pipeline 构造参数指定。
+页直接持有 `render::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
+Reset 保留映射；Clear 和析构先 Unmap 再释放页。新增页创建或映射失败时，已有页及返回的切片保持有效。
+一次分配不跨页，空间不足追加页，本帧已使用的 buffer、offset、写指针不搬移，不复制旧页。
+页同时考虑 copy、CBuffer、storage/texel、index 对齐；CBuffer 的物理保留范围覆盖后端描述符 padding。
+GPU 只读共享页，Prepare 汇总实际读取用途并集，集中 Flush 后按物理页生成同步，不逐逻辑切片反复转换。
+页不支持 UAV 或 CopyDestination。已提交页状态同样只在 Submit 后发布。
+
+槽完成 Wait、命令存储 Reset、帧内对象清理后才能 Reset 页游标。稳定参数组可继续引用缓存页，
+页面或范围改变时在 Prepare 更新；引用帧内 view 的参数组须在 view 销毁前解除绑定或销毁。
+图持有的 PassData 先销毁，再释放帧内 view，最后释放底层 owner。
+UploadArena 保留峰值页；GetCapacity 表示保留容量，不是有效数据量。Clear 要求 GPU、命令和参数组引用均已解除，不自动缩页。
+
+CPU 验证在 `test_rdg.cpp`、`test_upload_arena.cpp`；GPU 验证在 `test_rdg_upload_gpu.cpp`，
+覆盖上传时序、部分更新、源 pitch、普通 CopyPass 纹理初始化、切片偏移、参数组复用和槽轮转。
 
 ## 几何子分配池与持久映射上传
 
 `geometry_buffer_pool.h/.cpp` 提供对称的 VertexBufferPool 与 IndexBufferPool。Create 借用设备并复制布局、属性和调试名前缀；
-Allocate 才按需创建 Device 页，页在池寿命内保留，空闲区间由 [BestFitAllocator](core-facilities.md#bestfitallocator) 管理。
-池与设备必须晚于所有子分配句柄销毁；释放区间前须完成 GPU 使用并重置相关 command allocator，可将旧 mesh owner 交给 FrameSlot::RetireResource。
+Allocate 才按需创建 GpuBuffer Device 页，池持有页面强引用，空闲区间由 [BestFitAllocator](core-facilities.md#bestfitallocator) 管理。
+池与设备必须晚于所有子分配句柄销毁；释放区间前须完成 GPU 使用并重置相关 command allocator，可将旧 mesh owner 移入 FrameSlot::Emplace。
 分配零元素或创建页失败返回空值；超过默认页容量的请求创建可容纳整段的大页，不跨页切分一次分配。
 GetPageCount / GetFreeBytes 分别返回保留页数和可重用空闲字节。所有操作串行调用。
 
@@ -207,52 +329,55 @@ IndexBufferPoolDescriptor 指定 IndexStride（2 或 4，默认 4）、PageIndex
 GetIndexBufferView 返回 Offset=0 的整页视图，应配合 GetFirstIndex 使用，不能再叠加 GetByteOffset。
 构造 MeshBatchElement 时，可设 IndexBufferOffset=0、FirstIndex=GetFirstIndex()+局部索引起点，并显式限定范围不超过该子分配。
 两类句柄仅可移动，空句柄不释放区间；读取资源和字节视图要求句柄非空。
+两类句柄均提供 `GetGpuBuffer()`，返回所属整页的强引用，用于 RDG 的 ImportPersistentOwned 与 UploadBuffer；
+GetBuffer 仍返回绘制所需的原生缓冲。页面强引用不保留子分配区间，不能据此提前释放或复用子分配；
+子分配句柄仍须活到相关 GPU 使用与命令引用结束，池仍须晚于子分配句柄销毁。
 
-两池的 AddPassReadAccess 遍历保留页，以 `(Common, Common)` 导入 RDG 并声明读取，默认状态分别为 Vertex 和 Index。
-可传 Vertex | ShaderRead 等合法只读组合（须通过 AdditionalUsage 增加相应用途）；多次导入与上传器共享同一物理句柄。
+两池的 AddPassReadAccess 遍历保留页，以 ImportPersistentOwned 保活并关联 Common 边界状态，声明读取，默认状态分别为 Vertex 和 Index。
+可传 Vertex | ShaderRead 等合法只读组合（须通过 AdditionalUsage 增加相应用途）；多次导入与上传声明共享同一物理句柄。
 依赖以整页表达，不需要逐 Primitive 收集几何资源；未使用的页也会参加存活 Pass 的整页状态转换。
 
-`upload_buffer.h/.cpp` 的 MappedUploadBuffer::Create(device, capacity, usage=CopySource) 创建 Upload 内存，
-自动增加 MapWrite 和 PersistentMap 并持久映射。Get / GetData / GetCapacity 返回缓冲、映射地址和容量；Flush 验证范围并刷新写入。
-Reserve 在容量不足时按 2 的幂创建新缓冲，再释放旧映射，不保留旧内容；失败保留旧对象，溢出请求返回 false。
-调用者须先等待旧 GPU 使用并重置所有引用该资源的 allocator，且使用同一设备；槽独占的实例/常量流可在 BeginFrame 之后安全扩容。
-
-BatchedBufferUpload 按槽独立创建，默认页大小 1 MiB。Acquire(dst, offset, bytes, alignment=16) 直接返回持久映射页内的写指针，
-Stage 使用同一分配路径复制 CPU 字节。目标须为 Device CopyDestination Buffer，范围非空且合法，对齐须为非零 2 的幂（对齐页内源偏移）。
-现有页不足时追加 `max(defaultPageSize, bit_ceil(bytes))` 的新页，已用页不重分配、不取消映射、不复制旧映射内容。
-所有 Acquire 返回的指针跨后续 Acquire 保持有效；必须在 CommitToGraph 之前完成写入，不能在提交后继续 Acquire 或 Stage。
-Reset 仅在槽已完成 GPU 使用并重置录制存储后调用，清空区间和页游标，保留所有页供后续使用。
-
-CommitToGraph 刷新活动页，以 `(HostWrite, HostWrite)` 导入源页，以 `(Common, Common)` 导入去重目标并 MarkOutput，
-将全部复制记录自持有地捕获到一个 Copy Pass。空批次直接成功；每次 Reset 后只能 Commit 一次。
-目标在仅上传帧也恢复 Common，因此可在后续帧直接由两池 AddPassReadAccess 声明读取。
-GetCapacity 返回全部保留页容量，GetStagedByteSize 返回本轮有效数据字节，不包括对齐空隙。
+几何上传通过 RDG 的显式来源入口。目标在仅上传帧也恢复 Common，后续帧可直接由两池 AddPassReadAccess 声明读取。
+`test_geometry_upload_gpu.cpp` 在 D3D12／Vulkan 上通过 BorrowedBytes 声明索引与顶点上传，覆盖跨页增长、同帧绘制和后续帧绘制。
 
 ## RDG 与 RenderGraphFramePipeline
 
-`rdg.h/.cpp` 在 runtime 内实现纯 CPU 构图/裁剪与 Record 期执行，不改动 RHI。
-`RenderGraphFramePipeline` 是可派生的模板方法基类；构造参数为 `DeviceContext&` 与正的槽数，必须与 Scheduler 的设备、槽数一致。
-它将 `Extract` / `Record` 声明为 `final`，每槽保存独立的瞬态资源池和本帧编译图。子类实现以下钩子，并继续实现 `Wait` 和按需覆盖 `GetMeshPassRegistrations`：
-
-| 钩子 | 阶段与职责 |
-|---|---|
-| `ExtractFrameData(slot)` | 读取具体管线输入，提取候选可见集、变换及待上传的 CPU 字节；不做逐 Pass 命令收集或 GPU 上传 |
-| `SetupGraph(graph, slot)` | 可只读访问管线输入 并按需声明资源、上传、Pass 与输出，不创建 GPU 对象或 Map |
-| `ExtractMeshPass(pass, slot, drawList)` | Compile 成功后，仅按首次声明顺序对去重的存活 MeshPassId 调用，收集缓存命令借用和动态命令 |
-| `SubmitFrame(slot, commandBuffer)` | Record 已排序存活列表、执行图并 End 命令缓冲后调用；提交到本槽队列并保存供 Wait 使用的完成状态 |
-
-基类的 Record 顺序为：存活 MeshPass 排序 → 本槽池 `BeginFrame` → 申请一条 command buffer 并 Begin → `CompiledRDG::Execute` → End → `SubmitFrame`。
-`ExtractMeshPass` 有带终止诊断的默认实现；纯 RDG 管线无须覆盖，声明了存活 mesh pass 却未实现提取时立即终止并报告 pass ID。
-构图、编译或执行失败由基类带诊断终止，没有部分提交或重试。
-执行回调可借用本次 RunFrame 的管线输入，并在 Record 执行期间只读访问它。**不得捕获 Setup 局部变量的引用或其他槽的可写帧数据。**
-回调对象可能在槽回收时才析构；析构不得访问已经结束的外部输入借用。
+`RenderGraphFramePipeline` 固定 Extract、Prepare、Record、Submit；每槽保存瞬态池、UploadArena、编译图和命令缓冲引用。
+构造参数为 DeviceContext、正槽数及可选页大小；设备和槽数须与 Scheduler 一致。
+Extract 调用 ExtractFrameData → SetupGraph → Compile → ExtractMeshPass，仅提取存活且去重的 MeshPass。
+ExtractFrameData 保存稳定输入、候选集合和描述信息，不要求生成完整 payload。
+Prepare 固定/排序可见命令 → 来源实际布局 → 物化资源 → 分配与填充 → 存活 Pass Prepare → Flush/屏障准备 → 获取命令缓冲。
+Record 只 Begin、编码已准备命令和 End。Submit 调用派生的 SubmitFrame，返回后发布图状态；派生类仍实现 Wait。
+未实现 ExtractMeshPass 却声明了存活 mesh pass 时带诊断终止。阶段失败不可恢复，不提供重试或部分提交。
 
 ### 构图、访问与裁剪
 
-`RDGBuilder(ObjectArena&)` 将图记录与回调对象登记到 arena；上传字节立即复制到 arena，Pass 名称也由图自持有。
-Setup 回调立即执行，Execute 回调直到 Record 才执行，支持持有 move-only 数据的闭包。Builder 不拥有 arena；
-`Compile()` 单次调用，冻结声明并返回 arena 中的 `CompiledRDG*`，失败记录诊断并返回空值。冻结后继续改图违反前置条件。
-图、回调、句柄及其 CPU 数据在该槽回收后失效；不能手动清理槽内 arena。
+`RDGBuilder(slot, constraints, options)` 借用已 BeginFrame 的槽保存图；constraints 可由 DeviceContext::GetRDGConstraints() 提供，
+只包含不可变设备约束，不持有设备 owner。Compile 单次冻结声明并返回 CompiledRDG；失败返回空值。
+FullValidation 控制访问用途/Pass 兼容性完整诊断，句柄、依赖、范围、溢出及调度必需的结构检查始终保留；RHI validation 独立配置。
+
+RDGData 与 CompiledRDG 通过 slot.Emplace 创建并登记清理；声明表、嵌套访问/依赖列表、导入表、
+调度结果、物理状态表、切片及屏障计划使用 std::pmr 容器，显式传入 slot.GetMemoryResource() 的线性 resource。
+RDGExecution 同样从该 resource 分配，由 CompiledRDG 的独占 owner 持有。
+Compile 的局部索引数组、ready 集合，以及 Prepare 的尺寸/用途数组和上传区间 map 使用独立 scratch pool，
+作用域结束即归还单元；其内容不被 Record 借用。嵌在图记录中的 Readers、依赖列表与导入表仍随图回收。
+Build/Compile 使用槽的 CPU 存储，不创建原生 GPU 资源；Prepare 必须使用构图时的同一个槽。
+
+槽回收先销毁 CompiledRDG 的 PassData，随后销毁执行数据与帧内 view，再销毁 RDGData，释放来源和 GPU owner。
+未 Compile、Compile 失败和裁剪后的图也持续由槽保活至清理，不依赖 Builder 的栈生命周期。
+图容器每帧重建，先析构再统一重置线性存储；临时 pool 复用阶段局部容器归还的单元。
+PMR 容器的普通复制构造会选择默认资源，跨域复制必须显式传入目标资源；当前 RDG 以原域移动和显式构造维持归属。
+
+自动 Upload/HostWrite 使用独立的连续声明表，每条记录内嵌一个目标访问；图节点通过索引关联声明，保持独立裁剪和时序。
+用户 Pass 的附件、回调和访问列表放在另一张表中。来源以 Borrow、Owned、Generated 互斥存储，不为 Borrow 额外分配 owner。
+Generated 的 Context 使用带类型擦除 deleter 的独占 owner，保留具体上下文的析构方式；上下文仍单独堆分配，消费后释放，裁剪后的来源随帧清理释放。
+实际大小、staging 和上传屏障记录仅在 Prepare 为存活上传分配，不参与 Build 的节点初始化与搬移。
+
+`AddRasterPass(name, data, record, prepare)` 返回声明 Builder，Compute/Copy 同形。
+PassData 显式持有，Record 是 `bool(const T&, Context&) noexcept` 函数指针；可选 Prepare 是 `bool(T&, RDGPrepareContext&) noexcept`。
+不接受捕获执行闭包。PrepareContext 可以访问槽以准备绑定；RecordContext 只提供 encoder/command、准备好的资源与视图、
+frame/slot id 和只读可见命令，不提供可变 GetSlot。
+借用输入保持到消费完成，PassData 析构不得访问已结束的外部借用。
 
 资源分为导入的 `render::Texture*` / `Buffer*` 与按完整描述符声明的瞬态资源。导入需要真实 `initialState`，可选 `finalState`；
 同一物理对象重复导入会合并句柄，初态和显式终态冲突时编译失败。GPU 对象的 owner 仍由调用方持有，必须活到引用它的命令存储重置；
@@ -260,7 +385,7 @@ Setup 回调立即执行，Execute 回调直到 Record 才执行，支持持有 
 状态与依赖按整个资源追踪，Texture barrier 使用 `SubresourceRange::AllSub()`，Pass 访问接口不接受子资源范围。
 
 `AddRasterPass`、`AddComputePass`、`AddCopyPass` 分别提供 Encoder 或 CommandBuffer Context。
-Context 只允许 Resolve 当前 Pass 已声明的资源；`ResolveView` 在状态与 View 用途不匹配时返回空。
+调用方只可查询当前 Pass 已声明的资源；`ResolveView` 在状态与 View 用途不匹配时返回空。
 Raster 通过 `WriteColor` / `SetDepthStencil` 声明附件，颜色槽从 0 连续排列，至少有一个附件，各附件有效尺寸、层数和采样数一致。
 自动 View 使用首个 mip；显式 View 可选择附件子资源，但状态仍按整个资源同步。
 只读深度/模板 aspect 必须 Load / Store；丢弃 Store 使用 `StoreAction::Discard`。
@@ -284,7 +409,8 @@ Texture 的状态冲突、Buffer 不兼容的读写/混合状态、无效句柄�
 Compile 对存活子图执行 Kahn 拓扑调度，同时遵守数据依赖与顺序依赖。就绪候选优先延续当前 Raster / Compute 合并组；
 无法延续时关闭该组，优先选 Upload / Copy，再选其他 Pass；同优先级始终取原始声明下标最小者。
 因此无依赖 Pass 的 GPU 执行顺序可能变化，`NeverCull` 仅保活，不建立顺序；需要先后关系时必须声明资源依赖。
-Upload / Copy 各自独立成组，Raster / Compute 按以下规则合并：
+HostWrite 保留逻辑依赖但不产生 GPU 组。连续就绪 Upload 合批，用户 CopyPass 保持独立。
+就绪上传使用有序集合，不逐上传遍历全图；Raster / Compute 按以下规则合并：
 
 - Raster 的颜色槽、附件句柄、显式 View 指针和深度状态必须相同；上一子 Pass 的附件 Store 必须为 Store，下一子 Pass 的 Load 必须为 Load。深度/模板只检查纹理实际具有的 aspect。
 - 组内共享附件的同状态访问按绘制顺序保序，省略中间附件屏障。其他资源若已被组内任一前序子 Pass 访问，两次访问必须都是相同状态的只读，否则切组。
@@ -298,24 +424,31 @@ Upload / Copy 各自独立成组，Raster / Compute 按以下规则合并：
 
 ### 上传与资源状态
 
-`UploadBuffer(dst, offset, bytes)` 支持带偏移的分段更新。Device 目标必须声明 `CopyDestination`，执行时从本槽池借出独立的 Upload Staging Buffer，
-Map / 复制 / Flush / Unmap 后录制 `CopyBufferToBuffer`。每次 Staging 借用都保留到本槽完成，后续 GPU 消费由图自动转换状态。
-Upload 目标必须声明 `MapWrite`，执行时直接写目标内存。ReadBack 目标、越界范围与不支持的用途会被拒绝；空字节上传不生成节点。
-**同一 Upload 目标的所有上传必须在首次 GPU 访问前声明，且区间不重叠**，包括最后被裁剪的声明也参加校验。
-CPU Map 在提交前发生，不能表达同一地址在命令流中的多个版本；中途更新应使用 Device 缓冲或不同的 Upload 缓冲。
+Device 上传的 staging 在 Prepare 写好，Copy 仍在图内对应位置执行，不跨越中间消费者。
+上传组执行所有成员；已知不重叠区间省略组内 WAW，重叠写按顺序同步。纹理区间优化使用包含行间空隙的保守范围。
+每个 Upload execution group 只开启一个名为 `RDG UploadBatch` 的 GPU debug/timing scope，包含组内 Copy 与重叠写屏障，
+不包含组入口屏障；逐上传节点保留动态 CPU zone。空数据不执行 Copy，组内录制失败时先关闭 scope 再返回失败。
+用户 CopyPass 仍使用自己的名称；HostWrite 不生成 GPU scope。底层 debug group 与 GPU timing 的对应关系见
+[RHI 调试标记](render-rhi.md#调试标记与-gpu-profiling)。
+依赖仍是整资源版本链，消费者未声明区间时不保证裁剪同一资源内无用的部分写入。
+Upload 目标的 HostWrite 必须全部位于 GPU 使用前，且声明区间不重叠；Compile 按资源汇总并排序区间检查。
+需要两次 GPU 消费间更新时使用不同动态切片或 Device 复制路径。
 
-帧内按需数据只上传，不标记 Output，最后消费者被裁剪时上传也被裁剪。
-通过 UploadBuffer 初始化持久资产时应同时 `MarkOutput` 并设置正确终态（例如 Vertex / Index，或几何池约定的 Common），即使本帧不绘制该资产也能完成初始化。
-Scene 只要求几何缓冲对象及描述符合法，允许先注册尚未写入的 Device Buffer，再交给图执行上传。
+`ResolveBuffer(handle)` 返回 RDGBufferSlice，含 Buffer、Offset、逻辑 Size。独立资源 Offset 为零；
+所有 Copy、Vertex/Index、ShaderParameterSet、动态 offset、Indirect 使用者须加上 slice.Offset。
+不提供丢弃基址的 Buffer 引用解析重载。未初始化固定资源不能用零字节写入冒充初始化。
 
-执行按调度后的存活组推导 `(currentState, pendingWrite)`，被裁剪的 Pass 不会在状态链中留下缺口。
-初态来自导入声明或池条目的真实物理终态；写类型初态保守地视为有待同步写入，槽复用后的首次同状态写也会同步。
-组入口同状态连续只读省略 barrier；连续 UAV 访问中前次或本次为写时发 `BarrierUavDescriptor`；
-其他状态变化或前次存在待同步写入时发 Buffer / Texture barrier，包括跨组的 `DepthWrite → DepthWrite` 和 `RenderTarget → RenderTarget`。
-组内共享附件只累积写标记，第一次离开该组时仍需同步；同状态共享只读不重复发屏障。
-图末对全部存活导入资源的 `finalState` 收尾屏障再批量下发一次，并将存活瞬态资源的实际终态提交回池。
-Device Upload 内部借用的 Staging Buffer 仍单独处理 Map 前与 Copy 前的状态转换。
-`CompiledRDG::Execute` 只允许一次，调用方提供已 Begin 的命令缓冲，负责 End / Submit；执行失败返回 false，仍关闭已开启的 encoder，帧不可重试或提交。
+CompiledRDG::Prepare(slot, pool, uploads)、Record(command)、CommitSubmittedStates 各执行一次。
+Prepare 和 Record 返回 false 时不可继续录制或提交，提交状态保持不变；Record 要求命令缓冲已 Begin，调用者负责 End。
+Prepare 中的内部 `detail::RDGStateTracker` 借用物理资源，按初态/池 LastState 推导并冻结屏障和预期终态；Record 只编码。
+tracker 是 RDGExecution 的成员，物理状态表使用稠密资源索引和图的 PMR resource，不接管资源 owner，也不维护全局注册表。
+它集中组织 HostWrite / 上传页的开始屏障、组入口与上传成员间屏障、结束转换和外部 release；
+共享上传页继续由 UploadArena 汇总只读用途并提供页屏障，逻辑切片不各自转换该物理页。
+组内规划沿用访问列表和组标记，不为每组遍历全部资源；已知上传区间优化不改变整资源依赖模型。
+初态为可写状态时保守设置 PendingWrite，同状态 UAV、写后读、附件与外部转移继续生成必要同步。
+实际队列提交正常返回后调用 CommitSubmittedStates，统一发布持久 wrapper、瞬态池和上传页终态，不等待 fence。
+持久 wrapper 通过公开 CommitSubmittedState 接口更新；tracker 自身只保存图内预期状态，不提前修改持久状态。
+直接使用 CompiledRDG 的调用者同样负责这一边界；被裁剪或未提交的图不发布状态。
 
 `ImportTexture` / `ImportBuffer` 的可选 `RDGExternalOwnership{Acquire, Release}` 声明外部所有权边界。
 重复导入同一资源时所有权声明必须一致。执行按资源维护待 Acquire 与待 Release 标记：
@@ -328,16 +461,18 @@ Device Upload 内部借用的 Staging Buffer 仍单独处理 Map 前与 Copy 前
 
 `RDGTransientResourcePool` 独占 Texture、Buffer 及其 View owner。进入槽前必须已完成 Wait 和 allocator Reset，随后 `BeginFrame()` 仅重置借出标记，
 按描述符全部字段匹配复用，保留真实 `LastState`；同一执行内相同描述符的多次资源申请仍获得不同物理对象，不做别名复用。
-新 Texture / Device Buffer 初态为 Undefined，新 Upload Buffer 为 HostWrite。Execute 结束时记录真实终态，不能在 Fence 完成后假定纹理自动回到 Undefined。
+新 Texture / Device Buffer 初态为 Undefined，新 Upload Buffer 为 HostWrite。实际 Submit 后记录真实终态，不能在 Fence 完成后假定纹理自动回到 Undefined。
 池保留历史峰值对象，`Clear()` / 析构前所有引用它们的命令存储必须重置，View 先于资源销毁。
-瞬态 View 缓存在池内；导入资源的自动 View 由本帧 arena 持有，避免池把外部资源借用延长到后续帧。
+瞬态 View 缓存在池内；导入资源的自动 View 由本帧编译图准备结果持有，避免池把外部资源借用延长到后续帧。
 直接使用池的 `AcquireTextureView` 时，目标资源必须活到该缓存 View 释放。
 
 当前不提供子资源状态拆分、异步队列、资源内存别名、跨槽共享池、显式资源版本节点或自动 PSO/参数组构建。
 
 教学样例的 `MeshDrawingFramePipeline` 使用同一流程，默认双槽连续六帧。
-Pipeline 按槽持有实例缓冲、两份 Pass UBO/参数组、读回缓冲和独立 fence，颜色/深度附件由基类的每槽瞬态池持有；几何、shader、布局与 PSO 由外部共享。
-Extract 更新当前槽的数据并固化各激活 Pass 的命令；Record 排序槽内列表、申请命令缓冲、完成四个 Pass 和读回拷贝，提交时递增该槽的 fence 值。
+Pipeline 按槽持有可复用参数组、读回缓冲和独立 fence；动态实例/常量由 RDG Create 分配最终 Upload 切片。
+唯一实例生成器在 PrepareLayout 遍历存活 Pass 的可见并集，建立 candidate → 紧凑实例映射并改写帧内 FirstInstance，
+Write 每个可见实例只计算一次矩阵；持久 MeshDrawCommand 不变。常量直接生成，两份显式来源分别供普通 Pass 与描边共享。
+空实例不分配和 draw，已存活附件 Clear 和 readback 保留。颜色/深度附件由每槽池持有；几何、shader、布局与 PSO 由外部共享。
 Wait 只等待该槽的 fence；主循环不逐帧等待整个队列，结束时 `WaitIdle()` 等待并重置全部槽，再保存最后一帧的图片。
 Frame 0 后更新绿色材质，调用方以当前 registrations 显式同步增量命令，设置管线输入后调用 Frame 1 的 `RunFrame()`；已有在途帧的参数与附件保持独立。
 
@@ -769,8 +904,8 @@ Environment 必须晚于 DeviceContext 及所有依赖它的 GPU 资源销毁。
 如果外部仍持有同一 Device 的共享引用，Environment 也必须继续存活。
 
 调用方在环境的创建线程串行组织生命周期，RHI 的 CPU 调用遵守其串行化契约。
-应用可使用上述多槽帧循环，或直接通过 RHI 组织 Pass、录制、同步和提交；帧资源释放由 Slot 的 ObjectArena 承担，
-共享旧资源可通过当前 Slot 的 `RetireResource` 保活；跨 Scheduler 或跨队列的通用退役仍由应用组织。
+应用可使用上述多槽帧循环，或直接通过 RHI 组织 Pass、录制、同步和提交；帧资源释放由 Slot 的对象清理链承担，
+共享旧资源可将 owner 移入当前 Slot 的 `Emplace` 保活；跨 Scheduler 或跨队列的通用退役仍由应用组织。
 
 可失败工厂返回 `Nullable<unique_ptr<T>>`，失败处记录日志，调用方检查返回值；不通过接口传递错误字符串。
 Vulkan instance 和 D3D12 factory 的底层环境约束仍由 RHI 管理。

@@ -1,9 +1,18 @@
 #include <radray/runtime/gpu_device.h>
+#include <radray/runtime/rdg.h>
 
 #include <radray/logger.h>
 #include <radray/runtime/gpu_env.h>
 
 namespace radray {
+
+RDGDeviceConstraints DeviceContext::GetRDGConstraints() const noexcept {
+    const auto detail = _device->GetDetail();
+    const auto& limits = _device->GetCapabilities().Limits;
+    return {detail.BufferCopyOffsetAlignment, detail.TextureDataPlacementAlignment, detail.TextureDataPitchAlignment,
+            detail.CBufferAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment,
+            limits.TexelBufferOffsetAlignment, limits.MaxBufferSize, limits.MaxUniformBufferRange, limits.MaxStorageBufferRange};
+}
 
 DeviceContext::DeviceContext(
     shared_ptr<render::Device> device,

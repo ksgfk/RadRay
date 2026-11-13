@@ -1,6 +1,11 @@
 #include <radray/memory.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <limits>
+#include <new>
+
+#include <radray/nullable.h>
 
 #ifdef RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
@@ -51,5 +56,25 @@ void AlignedFree(void* ptr) noexcept {
 }
 #endif
 #endif
+
+void* HeapMemoryResource::do_allocate(size_t bytes, size_t alignment) {
+    alignment = std::max(alignment, alignof(std::max_align_t));
+    bytes = std::max(bytes, size_t{1});
+    Nullable<void*> storage{nullptr};
+    if (bytes <= std::numeric_limits<size_t>::max() - (alignment - 1)) {
+        const size_t alignedBytes = (bytes + alignment - 1) & ~(alignment - 1);
+        storage = AlignedAlloc(alignment, alignedBytes);
+    }
+    if (!storage) throw std::bad_alloc{};
+    return storage.Get();
+}
+
+void HeapMemoryResource::do_deallocate(void* storage, size_t, size_t) {
+    AlignedFree(storage);
+}
+
+bool HeapMemoryResource::do_is_equal(const std::pmr::memory_resource& other) const noexcept {
+    return this == &other;
+}
 
 }  // namespace radray

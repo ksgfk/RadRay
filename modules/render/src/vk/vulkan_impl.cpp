@@ -838,7 +838,7 @@ void VulkanRenderPassCache::UnpinViews(std::span<const uint64_t> views) noexcept
     }
 }
 IntrusivePtr<NativeRenderPassVulkan> VulkanRenderPassCache::Acquire(const RenderPassExecutionKeyVulkan& key, std::string_view name) {
-    std::lock_guard lock{_mutex};
+    std::unique_lock lock{_mutex};
     auto found = _passes.find(key);
     if (found == _passes.end()) {
         while (_passes.size() >= _budget.RenderPasses && !_idlePasses.empty()) ErasePass(_idlePasses.front());
@@ -861,10 +861,14 @@ IntrusivePtr<NativeRenderPassVulkan> VulkanRenderPassCache::Acquire(const Render
         entry->Idle.reset();
     }
     ++entry->Uses;
-    return AdoptRef(entry);
+    // Keep a reference across unlocking until the returned pointer has retained it.
+    lock.unlock();
+    IntrusivePtr<NativeRenderPassVulkan> owner{entry};
+    Release(entry);
+    return owner;
 }
 IntrusivePtr<NativeFramebufferVulkan> VulkanRenderPassCache::Acquire(const FramebufferKeyVulkan& key, VkRenderPass pass, std::span<const VkImageView> views, std::string_view name) {
-    std::lock_guard lock{_mutex};
+    std::unique_lock lock{_mutex};
     auto found = _framebuffers.find(key);
     if (found == _framebuffers.end()) {
         while (_framebuffers.size() >= _budget.Framebuffers && !_idleFramebuffers.empty()) EraseFramebuffer(_idleFramebuffers.front());
@@ -922,7 +926,11 @@ IntrusivePtr<NativeFramebufferVulkan> VulkanRenderPassCache::Acquire(const Frame
         entry->Idle.reset();
     }
     ++entry->Uses;
-    return AdoptRef(entry);
+    // Keep a reference across unlocking until the returned pointer has retained it.
+    lock.unlock();
+    IntrusivePtr<NativeFramebufferVulkan> owner{entry};
+    Release(entry);
+    return owner;
 }
 void VulkanRenderPassCache::AddRef(NativeRenderPassVulkan* entry) noexcept {
     std::lock_guard lock{_mutex};
@@ -950,10 +958,10 @@ void VulkanRenderPassCache::Release(NativeFramebufferVulkan* entry) noexcept {
     }
     TrimLocked();
 }
-void IntrusivePtrAddRef(NativeRenderPassVulkan* e) noexcept { e->Cache->AddRef(e); }
-void IntrusivePtrRelease(NativeRenderPassVulkan* e) noexcept { e->Cache->Release(e); }
-void IntrusivePtrAddRef(NativeFramebufferVulkan* e) noexcept { e->Cache->AddRef(e); }
-void IntrusivePtrRelease(NativeFramebufferVulkan* e) noexcept { e->Cache->Release(e); }
+void NativeRenderPassVulkan::Retain() noexcept { Cache->AddRef(this); }
+void NativeRenderPassVulkan::Release() noexcept { Cache->Release(this); }
+void NativeFramebufferVulkan::Retain() noexcept { Cache->AddRef(this); }
+void NativeFramebufferVulkan::Release() noexcept { Cache->Release(this); }
 void VulkanRenderPassCache::ErasePass(NativeRenderPassVulkan* entry) {
     if (entry->Uses) RADRAY_ABORT("cannot evict a pinned Vulkan render pass");
     if (entry->Idle) _idlePasses.erase(*entry->Idle);
@@ -3547,13 +3555,14 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
     auto src = CastVkObject(desc.Source);
     auto dst = CastVkObject(desc.Destination);
     const auto& r = desc.Region;
+    const auto& target = r.Destination;
     VkBufferImageCopy copy{};
     copy.bufferOffset = r.SourceOffset;
     copy.bufferRowLength = r.RowPitch / GetTextureFormatBytesPerPixel(dst->_format);
-    copy.bufferImageHeight = r.Height;
-    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, r.MipLevel, r.ArrayLayer, 1};
-    copy.imageOffset = {static_cast<int32_t>(r.X), static_cast<int32_t>(r.Y), 0};
-    copy.imageExtent = {r.Width, r.Height, 1};
+    copy.bufferImageHeight = target.Height;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, target.MipLevel, target.ArrayLayer, 1};
+    copy.imageOffset = {static_cast<int32_t>(target.X), static_cast<int32_t>(target.Y), 0};
+    copy.imageExtent = {target.Width, target.Height, 1};
     _device->_ftb.vkCmdCopyBufferToImage(_cmdBuffer, src->_buffer, dst->_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
     return true;
 }

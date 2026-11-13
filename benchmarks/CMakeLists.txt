@@ -1,3 +1,5 @@
 add_subdirectory(bench_read_obj)
 add_subdirectory(bench_sparse_set)
-add_subdirectory(bench_object_arena)
+if (RADRAY_BUILD_RUNTIME)
+    add_subdirectory(bench_rdg_upload)
+endif()

@@ -7,7 +7,8 @@ add_executable(test_radray_runtime
     test_frame_slot.cpp
     test_frame_scheduler.cpp
     test_geometry_buffer_pool.cpp
-    test_upload_buffer.cpp
+    test_upload_arena.cpp
+    test_rdg_upload_gpu.cpp
     test_geometry_upload_gpu.cpp
     ../../render/tests/gpu_test_fixture.cpp
     test_rdg.cpp

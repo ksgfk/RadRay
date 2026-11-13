@@ -1,6 +1,6 @@
 #pragma once
 
-// 固定的 Extract/Record 执行顺序见 docs/architecture/runtime.md。
+// 固定的 Extract/Prepare/Record/Submit 执行顺序见 docs/architecture/runtime.md。
 
 #include <radray/runtime/frame_pipeline.h>
 #include <radray/runtime/rdg.h>
@@ -11,10 +11,12 @@ class DeviceContext;
 
 class RenderGraphFramePipeline : public FramePipeline {
 public:
-    explicit RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount);
+    explicit RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount, uint64_t uploadPageSize = 1024 * 1024);
     ~RenderGraphFramePipeline() noexcept override;
     void Extract(FrameSlot& slot) noexcept final;
+    void Prepare(FrameSlot& slot) noexcept final;
     void Record(FrameSlot& slot) noexcept final;
+    void Submit(FrameSlot& slot) noexcept final;
 
 protected:
     virtual void ExtractFrameData(FrameSlot& slot) noexcept = 0;
@@ -25,6 +27,7 @@ protected:
 
 private:
     class SlotState;
+    RDGDeviceConstraints _constraints;
     vector<unique_ptr<SlotState>> _slotStates;
 };
 

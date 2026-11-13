@@ -68,8 +68,7 @@ void MeshPassFrameDrawList::SortVisibleCommands() {
     if (source != VisibleCommands.data()) std::copy_n(source, VisibleCommands.size(), VisibleCommands.data());
 }
 
-bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) noexcept {
-    DynamicContext.FinalizeVisibleCommands();
+bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
     return SubmitMeshDrawCommands(encoder, VisibleCommands, submitArgs);
 }
 
@@ -82,22 +81,25 @@ void MeshPassFrameDrawList::Clear() noexcept {
     }
 }
 
-Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_t index) {
+Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_t index, Nullable<std::pmr::memory_resource*> memoryUpstream) {
     auto allocator = device.GetDevice().CreateCommandAllocator(&device.GetQueue());
     if (!allocator) {
         RADRAY_ERR_LOG("FrameSlot: cannot create command allocator");
         return nullptr;
     }
-    return unique_ptr<FrameSlot>{new FrameSlot{device, index, allocator.Release()}};
+    return unique_ptr<FrameSlot>{new FrameSlot{device, index, allocator.Release(), memoryUpstream}};
 }
 
-FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<render::CommandAllocator> allocator) noexcept
-    : _device(device), _allocator(std::move(allocator)), _index(index) {}
+FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<render::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream)
+    : _device(device), _allocator(std::move(allocator)),
+      _memoryUpstream(memoryUpstream ? *memoryUpstream : _memoryHeap),
+      _scratchPool(std::pmr::pool_options{.max_blocks_per_chunk = 4096, .largest_required_pool_block = 64 * 1024}, &_memoryUpstream), _index(index) {}
 
 FrameSlot::~FrameSlot() noexcept {
     ResetCommandStorage();
-    ResetRetiredResources();
     ResetFrameData();
+    _memory.reset();
+    if (_initialBuffer) _memoryUpstream.deallocate(_initialBuffer.Get(), _initialCapacity, alignof(std::max_align_t));
 }
 
 render::Device& FrameSlot::GetDevice() noexcept { return _device.GetDevice(); }
@@ -114,7 +116,22 @@ MeshPassFrameDrawList& FrameSlot::GetPassDrawList(MeshPassId pass) {
     return _passDrawLists[pass.Value];
 }
 
-ObjectArena& FrameSlot::GetArena() noexcept { return _arena; }
+const MeshPassFrameDrawList& FrameSlot::GetPassDrawList(MeshPassId pass) const noexcept {
+    if (pass.Value >= _passDrawLists.size()) RADRAY_ABORT("FrameSlot: no prepared draw list");
+    return _passDrawLists[pass.Value];
+}
+
+std::pmr::memory_resource& FrameSlot::GetMemoryResource() {
+    if (!_memory) {
+        auto* buffer = _memoryUpstream.allocate(_initialCapacity, alignof(std::max_align_t));
+        auto cleanup = MakeScopeGuard([&]() noexcept { _memoryUpstream.deallocate(buffer, _initialCapacity, alignof(std::max_align_t)); });
+        _memory.emplace(buffer, _initialCapacity, &_memoryUpstream);
+        _initialBuffer = buffer;
+        cleanup.Dismiss();
+    }
+    return *_memory;
+}
+std::pmr::memory_resource& FrameSlot::GetScratchMemoryResource() noexcept { return _scratchPool; }
 
 Nullable<render::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.AcquireCommandBuffer");
@@ -136,21 +153,22 @@ void FrameSlot::ResetCommandStorage() noexcept {
     _nextCommandIndex = 0;
 }
 
-void FrameSlot::ResetRetiredResources() noexcept {
-    RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetRetiredResources");
-    _retiredArena.Reset();
-}
-
 void FrameSlot::ResetFrameData() noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetFrameData");
 #if RADRAY_IS_DEBUG
+    RADRAY_ASSERT(_constructionDepth == 0);
     _inFrameCallback = false;
 #endif
     for (auto& drawList : _passDrawLists) drawList.Clear();
     {
-        RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetArena");
-        _arena.Reset();
+        RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.DestroyObjects");
+        while (_objects) {
+            auto* object = _objects.Get();
+            _objects = object->Previous;
+            object->Destroy(object);
+        }
     }
+    if (_memory) _memory.emplace(_initialBuffer.Get(), _initialCapacity, &_memoryUpstream);
 }
 
 }  // namespace radray

@@ -218,6 +218,9 @@ struct FramebufferKeyHashVulkan {
 };
 
 struct NativeRenderPassVulkan {
+    void Retain() noexcept;
+    void Release() noexcept;
+
     VulkanRenderPassCache* Cache;
     RenderPassExecutionKeyVulkan Key;
     VkRenderPass Native{VK_NULL_HANDLE};
@@ -227,6 +230,9 @@ struct NativeRenderPassVulkan {
 };
 
 struct NativeFramebufferVulkan {
+    void Retain() noexcept;
+    void Release() noexcept;
+
     VulkanRenderPassCache* Cache;
     FramebufferKeyVulkan Key;
     VkFramebuffer Native{VK_NULL_HANDLE};
@@ -234,11 +240,6 @@ struct NativeFramebufferVulkan {
     uint32_t Uses{0};
     std::optional<list<NativeFramebufferVulkan*>::iterator> Idle;
 };
-
-void IntrusivePtrAddRef(NativeRenderPassVulkan* entry) noexcept;
-void IntrusivePtrRelease(NativeRenderPassVulkan* entry) noexcept;
-void IntrusivePtrAddRef(NativeFramebufferVulkan* entry) noexcept;
-void IntrusivePtrRelease(NativeFramebufferVulkan* entry) noexcept;
 
 /// Owns native storage; command references count use, independently of cache residency.
 class VulkanRenderPassCache {

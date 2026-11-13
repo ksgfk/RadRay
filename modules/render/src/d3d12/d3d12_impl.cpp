@@ -2877,16 +2877,17 @@ bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor
     auto src = CastD3D12Object(desc.Source);
     auto dst = CastD3D12Object(desc.Destination);
     const auto& r = desc.Region;
+    const auto& target = r.Destination;
     D3D12_TEXTURE_COPY_LOCATION from{};
     from.pResource = src->_buf.Get();
     from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     from.PlacedFootprint.Offset = r.SourceOffset;
-    from.PlacedFootprint.Footprint = {dst->_rawDesc.Format, r.Width, r.Height, 1, r.RowPitch};
+    from.PlacedFootprint.Footprint = {dst->_rawDesc.Format, target.Width, target.Height, 1, r.RowPitch};
     D3D12_TEXTURE_COPY_LOCATION to{};
     to.pResource = dst->_tex.Get();
     to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    to.SubresourceIndex = D3D12CalcSubresource(r.MipLevel, r.ArrayLayer, 0, dst->_rawDesc.MipLevels, dst->_rawDesc.DepthOrArraySize);
-    _cmdList->CopyTextureRegion(&to, r.X, r.Y, 0, &from, nullptr);
+    to.SubresourceIndex = D3D12CalcSubresource(target.MipLevel, target.ArrayLayer, 0, dst->_rawDesc.MipLevels, dst->_rawDesc.DepthOrArraySize);
+    _cmdList->CopyTextureRegion(&to, target.X, target.Y, 0, &from, nullptr);
     return true;
 }
 

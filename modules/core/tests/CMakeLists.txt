@@ -15,7 +15,6 @@ set(radray_core_test_sources
     test_logger.cpp
     test_memory.cpp
     test_nullable.cpp
-    test_object_arena.cpp
     test_runtime_type.cpp
     test_scope_guard.cpp
     test_sparse_set.cpp

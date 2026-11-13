@@ -12,9 +12,9 @@ namespace radray {
 namespace {
 
 struct GeometryPage {
-    GeometryPage(unique_ptr<render::Buffer> buffer, uint32_t capacity)
+    GeometryPage(IntrusivePtr<GpuBuffer> buffer, uint32_t capacity)
         : Buffer(std::move(buffer)), Allocator(capacity) {}
-    unique_ptr<render::Buffer> Buffer;
+    IntrusivePtr<GpuBuffer> Buffer;
     BestFitAllocator Allocator;
     VertexInput Input;
 };
@@ -51,14 +51,14 @@ std::optional<std::pair<uint32_t, BestFitAllocator::Allocation>> AllocateRange(G
     const auto capacity = std::max(storage.PageCapacity, count);
     const uint64_t bytes = uint64_t{capacity} * storage.Stride;
     if ((input && bytes > std::numeric_limits<uint32_t>::max()) || storage.Pages.size() >= std::numeric_limits<uint32_t>::max()) return std::nullopt;
-    auto buffer = storage.Device.CreateBuffer({.Size = bytes, .Memory = render::MemoryType::Device, .Usage = storage.Usage});
+    auto buffer = GpuBuffer::Create(storage.Device, {.Size = bytes, .Usage = storage.Usage});
     if (!buffer) return std::nullopt;
-    buffer->SetDebugName(radray::format("{}[{}]", storage.Name, storage.Pages.size()));
+    buffer->GetBuffer()->SetDebugName(radray::format("{}[{}]", storage.Name, storage.Pages.size()));
     auto page = make_unique<GeometryPage>(buffer.Release(), capacity);
     if (input) {
         page->Input = *input;
         const auto vertex = std::find_if(input->Layouts.begin(), input->Layouts.end(), [](const auto& layout) { return layout.StepMode == render::VertexStepMode::Vertex; });
-        page->Input.Streams = {{page->Buffer.get(), 0, bytes, vertex->Binding}};
+        page->Input.Streams = {{page->Buffer->GetBuffer(), 0, bytes, vertex->Binding}};
         if (!ValidateVertexInput(page->Input, true)) return std::nullopt;
     }
     const auto allocation = page->Allocator.Allocate(count);
@@ -75,11 +75,11 @@ uint64_t FreeBytes(const GeometryPoolStorage& storage) noexcept {
 
 void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state) {
     for (const auto& page : storage.Pages) {
-        pass.ReadBuffer(graph.ImportBuffer(page->Buffer.get(), render::BufferState::Common, render::BufferState::Common), state);
+        pass.ReadBuffer(ImportPersistentOwned(graph, page->Buffer), state);
     }
 }
 
-}  // 匿名命名空间
+}  // namespace
 
 class VertexBufferPool::Impl : public GeometryPoolStorage {
 public:
@@ -171,7 +171,8 @@ void VertexBufferSubAllocation::Reset() noexcept {
 }
 VertexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
 const VertexInput& VertexBufferSubAllocation::GetVertexInput() const noexcept { return _pool->_impl->Pages[_page]->Input; }
-render::Buffer* VertexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer.get(); }
+render::Buffer* VertexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
+IntrusivePtr<GpuBuffer> VertexBufferSubAllocation::GetGpuBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer; }
 uint32_t VertexBufferSubAllocation::GetVertexStride() const noexcept { return _pool->_impl->Stride; }
 uint32_t VertexBufferSubAllocation::GetFirstVertex() const noexcept { return _allocation.Offset; }
 uint32_t VertexBufferSubAllocation::GetVertexCount() const noexcept { return _allocation.Count; }
@@ -197,7 +198,8 @@ void IndexBufferSubAllocation::Reset() noexcept {
     _pool = nullptr;
 }
 IndexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
-render::Buffer* IndexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer.get(); }
+render::Buffer* IndexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
+IntrusivePtr<GpuBuffer> IndexBufferSubAllocation::GetGpuBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer; }
 uint32_t IndexBufferSubAllocation::GetIndexStride() const noexcept { return _pool->_impl->Stride; }
 uint32_t IndexBufferSubAllocation::GetFirstIndex() const noexcept { return _allocation.Offset; }
 uint32_t IndexBufferSubAllocation::GetIndexCount() const noexcept { return _allocation.Count; }

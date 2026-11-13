@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include <radray/allocator.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/rdg.h>
 #include <radray/runtime/vertex_input.h>
 
@@ -29,6 +30,8 @@ public:
     explicit operator bool() const noexcept;
     const VertexInput& GetVertexInput() const noexcept;
     render::Buffer* GetBuffer() const noexcept;
+    // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
+    IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetVertexStride() const noexcept;
     uint32_t GetFirstVertex() const noexcept;
     uint32_t GetVertexCount() const noexcept;
@@ -55,6 +58,8 @@ public:
 
     explicit operator bool() const noexcept;
     render::Buffer* GetBuffer() const noexcept;
+    // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
+    IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetIndexStride() const noexcept;
     uint32_t GetFirstIndex() const noexcept;
     uint32_t GetIndexCount() const noexcept;

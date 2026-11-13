@@ -746,11 +746,15 @@ struct QueryResolveDescriptor {
     uint64_t DestinationOffset{0};
 };
 
+struct TextureRegion2D {
+    uint32_t MipLevel{0}, ArrayLayer{0};
+    uint32_t X{0}, Y{0}, Width{0}, Height{0};
+};
+
 struct BufferTextureCopyRegion {
     uint64_t SourceOffset{0};
     uint32_t RowPitch{0};
-    uint32_t MipLevel{0}, ArrayLayer{0};
-    uint32_t X{0}, Y{0}, Width{0}, Height{0};
+    TextureRegion2D Destination{};
 };
 
 struct BufferToTextureCopyDescriptor {

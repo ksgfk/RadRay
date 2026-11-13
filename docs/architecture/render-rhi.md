@@ -228,7 +228,9 @@ DXGI_ERROR_WAS_STILL_DRAWING 返回 RetryLater，保留未排入呈现的 readin
 ## 区域纹理上传
 
 `CommandBuffer::CopyBufferToTextureRegion` 接受 `BufferToTextureCopyDescriptor`，其中
-`BufferTextureCopyRegion` 明确源 byte offset、row pitch 和目标 mip、array layer、X/Y、宽高。
+`BufferTextureCopyRegion` 通过 SourceOffset、RowPitch 表达源 buffer 的字节偏移和行距，
+Destination 使用 `TextureRegion2D` 表达目标 mip、array layer 及以 texel 为单位的 X/Y、宽高。
+`TextureRegion2D` 只描述目标区域，也由 runtime 的 RDG 上传声明复用。
 `ValidateBufferTextureCopyRegion` 验证单采样、非压缩 color 2D/2DArray、copy usage、子资源与区域边界、
 设备 pitch/placement 对齐及源 buffer 范围。源内容从指定 offset 开始，只上传区域的行；
 目标区域外的 texel 保持原值。D3D12 映射到 placed footprint + CopyTextureRegion，Vulkan
@@ -636,6 +638,8 @@ D3D12 ShaderRead 的 UNKNOWN stages 在 Compute command list 上只生成 NON_PI
 Direct 默认覆盖 pixel / non-pixel，显式 stages 可收窄范围。校验层拒绝队列不支持的状态、显式 shader stages、
 Copy queue UAV barrier，以及写状态与其他读写状态混用；转换不自动增加队列之间的 GPU 同步。
 
+## 调试标记与 GPU profiling
+
 `PushDebugGroup` / `PopDebugGroup` 必须平衡，分别映射 D3D12 command-list Unicode event 与
 Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 
@@ -650,6 +654,9 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 | D3D12 | render pass 外的 group 一个 zone；render pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
 
 因此 D3D12 同一原生 render pass 内的嵌套 group 不产生独立 GPU zone；`Submit()` 后收集已完成的时间戳。
+Tracy on-demand 未连接时不发出 zone timestamp；连接时每个 zone 发出两个 timestamp，D3D12 另有一次
+`ResolveQueryData`。Vulkan 通过 `vkGetQueryPoolResults` 批量收集，并重置已回收的 query 区间，不逐 zone 录制 resolve。
+RDG 上传按 execution group 记录 zone，逐节点 CPU 诊断仍保留，见 [RDG 上传](runtime.md#上传与资源状态)。
 宏入口与开关见 [Core](core-facilities.md#性能采样宏)。
 
 ## 设备能力与纹理支持
@@ -965,6 +972,8 @@ pass 只覆盖 view 的部分 layers 时使用局部 RTV/DSV，避免清除其�
 只有 pass 和 framebuffer 均获取成功后才加入命令的去重引用。
 
 VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、view 权限、resolve 槽位与模式；depth-only 格式规范化无 stencil 的操作。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
+缓存条目通过成员 `Retain/Release` 接入 `IntrusivePtr`，使用计数仍由缓存 mutex 保护。
+Acquire 在锁内预留一个引用，解锁后构造智能指针取得引用，再释放预留引用；交接期间条目始终被保活，且不递归获取同一 mutex。
 
 实际附件顺序固定为颜色源、可选 DS 源、按颜色槽顺序排列的 resolve 目标、可选 DS resolve 目标。
 传统 framebuffer key 包含所有源/目标的有序稳定 view ID、实际附件格式、光栅化签名及 extent/layers。Imageless key 不含 view ID，

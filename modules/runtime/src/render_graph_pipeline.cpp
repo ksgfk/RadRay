@@ -7,16 +7,18 @@ namespace radray {
 
 class RenderGraphFramePipeline::SlotState {
 public:
-    explicit SlotState(render::Device& device) noexcept : TransientPool(device) {}
+    SlotState(render::Device& device, uint64_t pageSize) noexcept : TransientPool(device), Uploads(device, pageSize) {}
     RDGTransientResourcePool TransientPool;
+    UploadArena Uploads;
+    Nullable<render::CommandBuffer*> Command{nullptr};
     Nullable<CompiledRDG*> CompiledGraph{nullptr};
 };
 
-RenderGraphFramePipeline::RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount) {
-    if (slotCount == 0) RADRAY_ABORT("RenderGraphFramePipeline: slot count must be positive");
+RenderGraphFramePipeline::RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount, uint64_t uploadPageSize) : _constraints(device.GetRDGConstraints()) {
+    if (slotCount == 0 || uploadPageSize == 0) RADRAY_ABORT("RenderGraphFramePipeline: slot count and upload page size must be positive");
     _slotStates.reserve(slotCount);
     for (uint32_t index = 0; index < slotCount; ++index) {
-        _slotStates.push_back(make_unique<SlotState>(device.GetDevice()));
+        _slotStates.push_back(make_unique<SlotState>(device.GetDevice(), uploadPageSize));
     }
 }
 
@@ -30,7 +32,7 @@ void RenderGraphFramePipeline::Extract(FrameSlot& slot) noexcept {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractFrameData");
         ExtractFrameData(slot);
     }
-    RDGBuilder graph{slot.GetArena()};
+    RDGBuilder graph{slot, _constraints};
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.SetupGraph");
         SetupGraph(graph, slot);
@@ -48,33 +50,34 @@ void RenderGraphFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot&, Mesh
     RADRAY_ABORT("RenderGraphFramePipeline: alive mesh pass {} requires an ExtractMeshPass implementation", pass.Value);
 }
 
-void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
-    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Record");
-    if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
+void RenderGraphFramePipeline::Prepare(FrameSlot& slot) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Prepare");
     auto& state = *_slotStates[slot.GetIndex()];
     if (!state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: no extracted graph");
-    for (const auto pass : state.CompiledGraph->GetAliveMeshPasses()) {
-        slot.GetPassDrawList(pass).SortVisibleCommands();
-    }
+    for (const auto pass : state.CompiledGraph->GetAliveMeshPasses()) slot.GetPassDrawList(pass).SortVisibleCommands();
     state.TransientPool.BeginFrame();
-    auto command = slot.AcquireCommandBuffer();
-    if (!command) RADRAY_ABORT("RenderGraphFramePipeline: cannot acquire command buffer");
-    {
-        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.CommandBegin");
-        command->Begin();
-    }
-    if (!state.CompiledGraph->Execute(slot, state.TransientPool, *command)) {
-        RADRAY_ABORT("RenderGraphFramePipeline: RDG execute failed");
-    }
-    {
-        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.CommandEnd");
-        command->End();
-    }
-    {
-        RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.SubmitFrame");
-        SubmitFrame(slot, *command);
-    }
+    state.Uploads.Reset();
+    if (!state.CompiledGraph->Prepare(slot, state.TransientPool, state.Uploads)) RADRAY_ABORT("RenderGraphFramePipeline: RDG Prepare failed");
+    state.Command = slot.AcquireCommandBuffer();
+    if (!state.Command) RADRAY_ABORT("RenderGraphFramePipeline: cannot acquire command buffer");
+}
+
+void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Record");
+    auto& state = *_slotStates[slot.GetIndex()];
+    if (!state.Command || !state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: graph not prepared");
+    state.Command->Begin();
+    if (!state.CompiledGraph->Record(*state.Command)) RADRAY_ABORT("RenderGraphFramePipeline: RDG Record failed");
+    state.Command->End();
+}
+
+void RenderGraphFramePipeline::Submit(FrameSlot& slot) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Submit");
+    auto& state = *_slotStates[slot.GetIndex()];
+    SubmitFrame(slot, *state.Command);
+    state.CompiledGraph->CommitSubmittedStates();
     state.CompiledGraph = nullptr;
+    state.Command = nullptr;
 }
 
 }  // namespace radray

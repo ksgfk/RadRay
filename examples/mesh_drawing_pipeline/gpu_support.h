@@ -10,6 +10,7 @@
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/vertex_input.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/rdg.h>
 
 namespace radray::examples::mesh_drawing {
 
@@ -81,15 +82,14 @@ struct GpuResources {
 
 // Each slot owns distinct writable resources; release only after its allocator has reset.
 struct GpuFrameResources {
-    bool Initialize(const GpuResources& shared, uint32_t instanceCount);
+    bool Initialize(const GpuResources& shared);
     // Requires the corresponding completion fence; saves the latest frame recorded into this slot.
     bool SaveImage(const std::filesystem::path& output) const;
 
     uint32_t Width{0};
     uint32_t Height{0};
     uint64_t RowPitch{0};
-    Nullable<unique_ptr<render::Buffer>> InstanceBuffer{nullptr};
-    array<Nullable<unique_ptr<render::Buffer>>, 2> PassBuffers{};
+    array<RDGBufferSlice, 2> BoundConstants{};
     Nullable<unique_ptr<render::Buffer>> Readback{nullptr};
     array<Nullable<unique_ptr<render::ShaderParameterSet>>, 2> PassParameterSets{};
     Nullable<unique_ptr<render::Fence>> CompletionFence{nullptr};
