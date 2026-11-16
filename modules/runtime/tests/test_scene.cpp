@@ -18,19 +18,19 @@ using test::FakePipeline;
 // Scene 查询仅接受对应类型的句柄，拒绝其他元素类型与底层原始句柄。
 static_assert(std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, PrimitiveHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, MeshBatchHandle> &&
-              !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, MaterialHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, MaterialProxyHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetPrimitive), const Scene&, SparseSetHandle>);
 static_assert(std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, MeshBatchHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, PrimitiveHandle> &&
-              !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, MaterialHandle> &&
+              !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, MaterialProxyHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetMeshBatch), const Scene&, SparseSetHandle>);
-static_assert(std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, MaterialHandle> &&
+static_assert(std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, MaterialProxyHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, PrimitiveHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, MeshBatchHandle> &&
               !std::is_invocable_v<decltype(&Scene::GetMaterial), const Scene&, SparseSetHandle>);
 static_assert(!std::is_constructible_v<PrimitiveHandle, SparseSetHandle> &&
               !std::is_constructible_v<MeshBatchHandle, SparseSetHandle> &&
-              !std::is_constructible_v<MaterialHandle, SparseSetHandle>);
+              !std::is_constructible_v<MaterialProxyHandle, SparseSetHandle>);
 
 class RecordingProcessor final : public MeshPassProcessor {
 public:
@@ -55,7 +55,7 @@ class SceneTest : public testing::Test {
 protected:
     SceneTest() {
         Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
         Material = World.AddMaterial({});
         Primitive = World.AddPrimitive();
@@ -87,7 +87,7 @@ protected:
     VertexInput Input;
     RecordingProcessor Processor{Pipeline};
     Scene World;
-    MaterialHandle Material;
+    MaterialProxyHandle Material;
     PrimitiveHandle Primitive;
 };
 

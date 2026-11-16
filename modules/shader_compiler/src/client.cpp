@@ -189,7 +189,7 @@ bool PopulateForkStages(
     shader::WireMetadataEnvelope envelope{};
     std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
     if (envelope.Target != static_cast<uint8_t>(lane.Target) ||
-        envelope.EntryRecords.Size != contract.EntryPoints.size() * sizeof(shader::WireEntryRecord) ||
+        envelope.EntryRecords.Size != contract.EntryPoints.size() * sizeof(shader::ShaderArtifactEntryRecord) ||
         !envelope.EntryRecords.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
         !envelope.VertexInputRecords.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
         !envelope.RootSignature.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
@@ -199,12 +199,12 @@ bool PopulateForkStages(
         AppendDiagnostic(diagnostics, "RadRay metadata entry or bytecode range is invalid");
         return false;
     }
-    const auto* entries = reinterpret_cast<const shader::WireEntryRecord*>(
+    const auto* entries = reinterpret_cast<const shader::ShaderArtifactEntryRecord*>(
         lane.Metadata.data() + envelope.EntryRecords.Offset);
     lane.Stages.clear();
     lane.Stages.reserve(contract.EntryPoints.size());
     for (size_t index = 0; index < contract.EntryPoints.size(); ++index) {
-        const shader::WireEntryRecord& record = entries[index];
+        const shader::ShaderArtifactEntryRecord& record = entries[index];
         const shader::EntryPoint& expected = contract.EntryPoints[index];
         if (record.Stage != static_cast<uint8_t>(expected.Stage) ||
             !record.Name.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||

@@ -9,7 +9,8 @@
 #include <radray/runtime/gpu_env.h>
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/vertex_input.h>
-#include <radray/runtime/material.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/pipeline_layout_cache.h>
 #include <radray/runtime/rdg.h>
 
 namespace radray::examples::mesh_drawing {
@@ -41,7 +42,8 @@ struct MaterialTagFilter {
 
 // 同一材质资源仍需结合顶点输入、Pass 附件和深度状态生成不同 PSO。
 struct MaterialPipelines {
-    const MaterialResource* Resource;
+    AssetHandle<MaterialAsset> Material;
+    render::PipelineLayout* Layout;
     Nullable<unique_ptr<render::GraphicsPipelineState>> Depth{nullptr};
     Nullable<unique_ptr<render::GraphicsPipelineState>> Color{nullptr};
     Nullable<unique_ptr<render::GraphicsPipelineState>> Outline{nullptr};
@@ -56,7 +58,7 @@ struct GpuResources {
     bool Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory);
     // Creates Device buffers and retains CPU bytes for the first frame's graph upload.
     bool PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
-    bool CreatePipelines(const VertexInput& input, const MaterialResource& resource);
+    bool CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
 
     uint32_t Width{800};
     uint32_t Height{600};
@@ -66,17 +68,17 @@ struct GpuResources {
     Nullable<unique_ptr<render::Buffer>> IndexBuffer{nullptr};
     vector<byte> PendingVertexBytes;
     vector<byte> PendingIndexBytes;
-    Nullable<unique_ptr<render::Shader>> VertexShader{nullptr};
-    Nullable<unique_ptr<render::Shader>> PixelShader{nullptr};
-    Nullable<unique_ptr<render::BindingGroupLayout>> PassGroupLayout{nullptr};
-    Nullable<unique_ptr<render::PipelineLayout>> Layout{nullptr};
     MaterialTagTable MaterialTags;
+    unique_ptr<PipelineLayoutCache> LayoutCache;
+    unique_ptr<AssetManager> Assets;
+    AssetHandle<ShaderAsset> Shader;
+    Nullable<render::BindingGroupLayout*> PassGroupLayout{nullptr};
     MaterialTag OpaqueTag;
     MaterialTag TransparentTag;
     MaterialTag OutlineTag;
-    MaterialResource OpaqueResource;
-    MaterialResource TwoSidedResource;
-    MaterialResource TransparentResource;
+    AssetHandle<MaterialAsset> OpaqueMaterial;
+    AssetHandle<MaterialAsset> TwoSidedMaterial;
+    AssetHandle<MaterialAsset> TransparentMaterial;
     vector<MaterialPipelines> Pipelines;
 };
 

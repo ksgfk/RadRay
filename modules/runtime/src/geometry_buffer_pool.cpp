@@ -109,13 +109,9 @@ Nullable<unique_ptr<VertexBufferPool>> VertexBufferPool::Create(render::Device& 
         }
     }
     if (vertices != 1 || instances > 1) return nullptr;
-    vector<render::VertexAttribute> attributes;
-    attributes.reserve(desc.Attributes.size());
-    for (const auto& attribute : desc.Attributes) {
-        attributes.push_back({attribute.BufferBinding, attribute.Offset, attribute.Semantic, attribute.SemanticIndex, attribute.Format, attribute.Location});
-    }
-    if (!render::ValidateVertexInputState({desc.Layouts, attributes})) return nullptr;
-    return unique_ptr<VertexBufferPool>{new VertexBufferPool{make_unique<Impl>(device, desc)}};
+    auto impl = make_unique<Impl>(device, desc);
+    if (!ValidateVertexInputLayout(impl->Input)) return nullptr;
+    return unique_ptr<VertexBufferPool>{new VertexBufferPool{std::move(impl)}};
 }
 
 VertexBufferPool::VertexBufferPool(unique_ptr<Impl> impl) noexcept : _impl(std::move(impl)) {}

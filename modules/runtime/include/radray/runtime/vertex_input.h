@@ -3,6 +3,7 @@
 #include <radray/nullable.h>
 #include <radray/types.h>
 #include <radray/render/rhi.h>
+#include <radray/runtime/shader_layout.h>
 
 namespace radray {
 
@@ -12,7 +13,6 @@ struct VertexInputAttribute {
     string Semantic{};
     uint32_t SemanticIndex{0};
     render::VertexFormat Format{render::VertexFormat::UNKNOWN};
-    uint32_t Location{0};
 };
 
 struct VertexInputStream {
@@ -28,5 +28,15 @@ struct VertexInput {
     vector<VertexInputAttribute> Attributes;
     vector<VertexInputStream> Streams;
 };
+
+struct ResolvedVertexInputState {
+    vector<render::VertexBufferLayout> Layouts;
+    // Semantic 借用源 VertexInput；创建 PSO 完成前源对象不得销毁或搬移。
+    vector<render::VertexAttribute> Attributes;
+};
+
+// 只验证几何布局；不读取 Streams，Location 由 shader 变体接口提供。
+bool ValidateVertexInputLayout(const VertexInput& input) noexcept;
+bool ResolveVertexInputState(const VertexInput& meshInput, std::span<const ShaderVertexAttributeSignatureDesc> shaderInputs, ResolvedVertexInputState& output);
 
 }  // namespace radray

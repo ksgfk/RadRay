@@ -11,9 +11,9 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 
 | 目录 | 内容 |
 |---|---|
-| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
+| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client 和 reflector |
 | `shaderlib/` | HLSL 数学、BSDF、光照共享库，目录本身是 include 根 |
-| `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 raw shader compile CLI |
+| `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 shader compile / reflect CLI |
 | `benchmarks/` | OBJ 解析、SparseSet 压力与 RDG 上传及帧回收基准 |
 | `examples/` | 独立教学程序；[Mesh Drawing Pipeline 样例](../guide/build-test.md#mesh-drawing-pipeline-教学样例) 展示 Scene 输入到离屏 GPU 绘制与 PNG 读回 |
 | `cmake/` | 功能与依赖清单、包发现、独立依赖适配、安装导出与构建辅助 |
@@ -35,10 +35,11 @@ shader         → core
 window         → core
 shadercompiler → shader, core                 可选
 render         → core
-runtime        → render, core
+runtime        → render, shader, core
+shaderreflector → runtime, shader              可选
 ```
 
-`radrayshader` 提供 shader wire contract 与 artifact decoder，不依赖 DXC 或 render。
+`radrayshader` 提供 shader wire contract、artifact decoder 与拥有型类型树，不依赖 DXC 或 render。
 可选 `radrayshadercompiler` 通过 RadRay DXC fork extension ABI 提供 discovery 与 typed variant
 compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)。render 接收原始字节码与显式布局，不依赖 shader 或 compiler。
 
@@ -67,7 +68,7 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | Runtime 设备与队列 | `modules/runtime/include/radray/runtime/gpu_device.h` |
 | Runtime 多槽帧循环与 RDG | `modules/runtime/include/radray/runtime/frame_scheduler.h`、`frame_pipeline.h`、`frame_slot.h`、`render_graph_pipeline.h`、`rdg.h` |
 | Runtime 场景存储 | `modules/runtime/include/radray/runtime/scene.h` |
-| Runtime 材质资源、定义、实例与渲染快照 | `modules/runtime/include/radray/runtime/material.h` |
+| Runtime 材质资产、实例与渲染快照 | `modules/runtime/include/radray/runtime/material.h` |
 | Runtime 材质标签表 / 集合 | `modules/runtime/include/radray/runtime/material_tag.h` |
 | Runtime Primitive、MeshBatch 与顶点输入 | `modules/runtime/include/radray/runtime/mesh_batch.h`、`vertex_input.h` |
 | Runtime 绘制命令数据 | `modules/runtime/include/radray/runtime/mesh_draw_command.h` |
@@ -75,6 +76,10 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | Mesh Drawing Pipeline 教学主流程 | `examples/mesh_drawing_pipeline/sample.cpp` |
 | GPU 设备与 RHI | `modules/render/src/rhi.cpp` |
 | Shader artifact 解码 | `modules/shader/include/radray/shader/shader_artifact.h` |
+| Shader 家族反射 | `modules/shader_reflector/include/radray/shader_reflector/shader_reflector.h` |
+| Runtime 布局文件、Shader 资产与布局缓存 | `modules/runtime/include/radray/runtime/shader_layout.h`、`shader_asset.h`、`pipeline_layout_cache.h` |
+| Runtime 资产句柄与管理 | `modules/runtime/include/radray/runtime/asset_handle.h`、`asset_manager.h` |
+| Shader 类型树与成员寻址 | `modules/shader/include/radray/shader/shader_type_tree.h` |
 | Compiler client | `modules/shader_compiler/include/radray/shader_compiler/client.h` |
 
 当前能力与限制在各子系统页面说明。

@@ -2,14 +2,14 @@
     "Artifacts": [
         {
             "Name": "radray_dxc",
-            "Version": "1.9.2609.radray.2",
+            "Version": "1.9.2609.radray.4",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/latest/dxc-{Platform}-{Arch}-{Version}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "a4b18ab7c5328dff7f3f3f45368d5ece81ad03777bd5e7d3de0447895715fbe1"
+                    "Hash": "0fb0e06126abf0032b246768ca388cfd36980d4ed8d9f37db1d5010cd50d4379"
                 }
             ]
         }

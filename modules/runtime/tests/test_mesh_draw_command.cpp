@@ -18,12 +18,12 @@ class VertexInputTest : public testing::Test {
 protected:
     VertexInputTest() {
         Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
     }
     void AddInstanceLayout(uint32_t binding, uint32_t location) {
         Input.Layouts.push_back({binding, 16, render::VertexStepMode::Instance});
-        Input.Attributes.push_back({binding, 0, "INSTANCE", location, render::VertexFormat::FLOAT32X4, location});
+        Input.Attributes.push_back({binding, 0, "INSTANCE", location, render::VertexFormat::FLOAT32X4});
     }
 
     FakeBuffer Vertices{128, render::BufferUse::Vertex};

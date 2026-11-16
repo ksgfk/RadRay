@@ -4,8 +4,8 @@
 
 # Rendering runtime
 
-`RadRay::runtime` 是 C++20 静态库，实际 target 为 `radrayruntime`，公共依赖 `RadRay::render`，
-并通过它依赖 core。公共类型位于 `namespace radray`，RHI 类型位于 `radray::render`。
+`RadRay::runtime` 是 C++20 静态库，实际 target 为 `radrayruntime`，公共依赖 `RadRay::render`、`RadRay::shader`，
+并通过它们依赖 core。公共类型位于 `namespace radray`，RHI 类型位于 `radray::render`。
 构建开关与包消费见[构建与测试](../guide/build-test.md#runtime-构建)。
 
 当前模块包含 `gpu_env.h/.cpp` 中的 `Environment`、`gpu_device.h/.cpp` 中的 `DeviceContext`，
@@ -22,10 +22,16 @@
 |---|---|---|
 | `gpu_env.h` | `Environment` | 有 |
 | `gpu_device.h` | `DeviceContext` | 有 |
-| `scene_handle.h` | `SceneHandle<T>`、`MeshBatchHandle`、`PrimitiveHandle`、`MaterialHandle` | 无 |
+| `scene_handle.h` | `SceneHandle<T>`、`MeshBatchHandle`、`PrimitiveHandle`、`MaterialProxyHandle` | 无 |
 | `material_tag.h` | `MaterialTagId`、`MaterialTag`、`MaterialTagTable`、`MaterialTagSet` | 有 |
-| `material.h` | `MaterialRenderState`、`MaterialProperties`、`MaterialShaderProgram`、`MaterialResource`、`MaterialParameterValue`、`MaterialParameter`、`Material`、`MaterialInstance`、`MaterialRenderProxy` | 有 |
-| `vertex_input.h` | `VertexInputAttribute`、`VertexInputStream`、`VertexInput` | 无 |
+| `material.h` | `MaterialRenderState`、`MaterialProperties`、`MaterialShaderProgram`、`MaterialAsset`、`MaterialAssetDesc`、`MaterialParameterValue`、`MaterialParameter`、`MaterialInstance`、`MaterialRenderProxy` | 有 |
+| `vertex_input.h` | 几何描述、`ValidateVertexInputLayout`、`ResolveVertexInputState` | 有 |
+| `shader_layout.h` | CPU 布局与变体接口描述、校验、JSON/Binary | 有 |
+| `shader_asset.h` | `ShaderAsset`、内存与离线索引加载 | 有 |
+| `pipeline_layout_cache.h` | `PipelineLayoutCache`、原生组和完整布局缓存 | 有 |
+| `asset_handle.h` | `AssetHandle<T>` | 无 |
+| `asset_manager.h` | `AssetManager`、Shader/Material 资产登记与查询 | 有 |
+| `material_parameter_binding_map.h` | `MaterialParameterBindingMap`、常量写入与资源绑定 | 有 |
 | `mesh_draw_command.h` | `MeshPassId`、命令绑定、`MeshDrawCommand`、`PassBatchCacheSlot`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`；`ValidateVertexInput`、`ValidateMeshDrawCommand`、`SubmitMeshDrawCommands` | 有 |
 | `mesh_batch.h` | `MeshSection`、`MeshBatchElement`、`MeshBatch`、`PrimitiveSceneInfo` | 无 |
 | `mesh_pass_processor.h` | `MeshBatchContext`、`MeshDrawCommandSharedState`、`MeshPassDrawListContext` 及缓存/动态两个实现、`MeshPassProcessor`、`MeshPassRegistration` | 有 |
@@ -319,7 +325,7 @@ Allocate 才按需创建 GpuBuffer Device 页，池持有页面强引用，空�
 GetPageCount / GetFreeBytes 分别返回保留页数和可重用空闲字节。所有操作串行调用。
 
 VertexBufferPoolDescriptor 指定 VertexStride、VertexStreamBinding、PageVertexCapacity（默认 150,000）、AdditionalUsage 和布局/属性。
-布局必须恰有一个 Vertex 流，binding/stride 与描述符一致，另可有一个 Instance 流；所有布局和属性通过 RHI 顶点输入校验。
+布局必须恰有一个 Vertex 流，binding/stride 与描述符一致，另可有一个 Instance 流；所有布局和属性通过纯几何校验，不依赖 shader Location。
 顶点页字节数不超过 uint32 上限；Usage 至少含 Vertex | CopyDestination。
 每页的 VertexInput 地址稳定，同页句柄的 GetVertexInput 返回同一对象，仅绑定页顶点流，实例流由 MeshPassSubmitArgs::InstanceStream 延迟注入。
 VertexBufferSubAllocation 提供 GetBuffer、GetVertexStride、GetFirstVertex、GetVertexCount、GetByteOffset、GetByteSize。
@@ -486,7 +492,7 @@ Frame 0 后更新绿色材质，调用方以当前 registrations 显式同步增
 | `MeshBatchElement` | `mesh_batch.h` | 借用的索引缓冲、索引范围和默认实例范围 |
 | `VertexInput` | `vertex_input.h` | 顶点布局、属性和借用的顶点缓冲流 |
 | `MeshSection` | `mesh_batch.h` | 几何资源的 submesh 分段：材质槽和索引范围；Scene 不存储它 |
-| `MaterialRenderProxy` | `material.h` | 借用 MaterialResource，拥有已解析的 CPU 参数快照；见下文材质核心 |
+| `MaterialRenderProxy` | `material.h` | 持有 MaterialAsset 句柄，拥有已解析的 CPU 参数快照；见下文材质核心 |
 
 这些类型是渲染线程持有的 CPU 绘制记录，遵守上述 RunFrame 借用边界。Scene 不存储用户侧网格和材质资产。
 Scene 直接持有 `SparseSet<PrimitiveSceneInfo>`、`SparseSet<MeshBatch>` 和 `SparseSet<MaterialRenderProxy>`，
@@ -525,7 +531,7 @@ Scene 公共接口与关联数据使用 `scene_handle.h` 中的强类型句柄�
 |---|---|
 | `MeshBatch` | `MeshBatchHandle = SceneHandle<MeshBatch>` |
 | `PrimitiveSceneInfo` | `PrimitiveHandle = SceneHandle<PrimitiveSceneInfo>` |
-| `MaterialRenderProxy` | `MaterialHandle = SceneHandle<MaterialRenderProxy>` |
+| `MaterialRenderProxy` | `MaterialProxyHandle = SceneHandle<MaterialRenderProxy>` |
 
 三种句柄是不同的模板实例，不能相互传参、赋值或比较。每个实例仅保存一个 `SparseSetHandle`，
 底层 `SparseSet` 保持不变；原始句柄的包装与解包仅由 Scene 内部执行，外部不能用原始句柄构造它们。
@@ -583,12 +589,12 @@ Scene 入口在所有配置下检查关联与几何；Processor helper 与提交
 #include <radray/runtime/mesh_batch.h>
 
 // scene must stop referencing cubeVertices and cubeIndices before they are destroyed.
-void AddCube(Scene& scene, const VertexInput& cubeVertices, render::Buffer& cubeIndices,
+void AddCube(Scene& scene, const AssetManager& assets, const VertexInput& cubeVertices, render::Buffer& cubeIndices,
              const MaterialInstance& wood, const MaterialInstance& metal) {
     MaterialRenderProxy woodProxy, metalProxy;
-    woodProxy.Update(wood);
-    metalProxy.Update(metal);
-    const array<MaterialHandle, 2> materials{
+    if (!woodProxy.Update(assets, wood)) return;
+    if (!metalProxy.Update(assets, metal)) return;
+    const array<MaterialProxyHandle, 2> materials{
         scene.AddMaterial(std::move(woodProxy)),
         scene.AddMaterial(std::move(metalProxy))
     };
@@ -617,55 +623,120 @@ void AddCube(Scene& scene, const VertexInput& cubeVertices, render::Buffer& cube
 
 示例在 `namespace radray` 内使用。Scene 接口自动维护关联与脏标记；材质/Pass 筛选策略、可见性和资源 owner 的退役仍由调用方组织。
 
+## Shader 资产、布局与缓存
+
+`shader_layout.h/.cpp` 提供纯 CPU 的 `ShaderPipelineLayoutDesc`、`ShaderProgramInterfaceDesc` 和
+`ShaderFamilyLayoutDesc`。绑定与 push constant 使用 RHI 描述，拥有型类型表使用
+`shader::ShaderTypeRecord`；顶点签名使用 `shader::ShaderVertexComponentType`。
+类型校验和 `FindShaderTypeMember` 位于 shader 的 `shader_type_tree.h/.cpp`，不依赖 render 或 DXC。
+成员路径支持 `a.b[i].c`，返回绝对偏移、数组和矩阵步长及 padding 信息。
+
+三类布局描述保留版本 1 的 JSON/Binary 读写，失败不改变输出；二进制显式编码小端字段。
+原有顶点类型编号 Float=0、Sint=1、Uint=2 和 JSON 的 Sint/Uint 名称保持不变，读写时显式映射到 shader 枚举。
+校验覆盖名称/ID 唯一、原生映射冲突、数量、溢出、类型引用和跨度及变体引用。
+绑定和 push constant 共用全局名称空间；结构体成员仅在所属结构内唯一。
+类型跨度见 [Shader pipeline](shader-pipeline.md#artifact-wire)。
+
+### ShaderAsset 与离线加载
+
+`ShaderAsset` 拥有不可变 family 描述、变体接口、入口名及当前设备后端的 Shader owner。
+`Create(device, ShaderAssetDesc)` 接受内存描述与 stage 字节码；`Load(device, indexPath)` 读取 reflect CLI
+生成的版本 1 `.index.json`，以索引目录为基准加载 `.layout.bin` 和当前后端的独立 stage 文件。
+另一个后端的 stage 文件不必部署。非法索引、重复 stage、缺少当前后端必需 stage 或创建 Shader 失败时不发布资产。
+runtime 不调用 DXC，也不在加载时重新反射 artifact。离线产物入口见 [家族反射](shader-pipeline.md#家族反射)。
+
+ShaderAsset 不引用布局缓存，也不保存原生 PipelineLayout/BindingGroupLayout。
+`GetVariantInterface` 返回当前后端接口，`GetStage` 返回包含 Shader 指针和入口视图的 `render::ShaderEntry`。
+`FindBinding`、`FindPushConstant`、`FindBufferMember` 查询 CPU 描述；前两者提供 ActiveOnDevice。
+借用的指针和入口字符串不得跨所属资产的搬移或销毁保存。
+
+### PipelineLayoutCache
+
+`PipelineLayoutCache` 显式借用一台 Device，单线程串行调用，无全局状态。
+创建 PSO 的调用方使用 `cache.Acquire(shader.GetLayoutDesc())` 获取原生布局，按
+`layout->GetDesc().Groups` 取得各 GroupSlot 的组布局并创建参数集；Shader 加载不触发该操作。
+
+组 key 按 BindingId 排序，只包含当前后端映射的 BindingDescriptor，不含名称、类型树或块成员信息。
+完整布局 key 为排序后的 `(GroupSlot, 组布局对象)` 与 push constant 描述。
+两级缓存均先按内容哈希分桶，再比较全部字段；同内容跨 family 复用同一组对象和完整布局。
+Stages 属于 key，不同阶段可见性会生成不同条目。共享组的 CPU 参数 ABI 兼容性由调用方保证。
+GroupSlot 独立于 space/set；过滤后空组不创建。
+
+缓存拥有条目，地址稳定，无驱逐或 Clear，不做引用计数。
+Device 必须晚于缓存销毁；缓存必须晚于借用布局的 PSO、参数集和在途命令销毁。
+缓存析构不等待 GPU，先销毁完整布局再销毁组布局。
+
+### 资产登记与生命周期
+
+`AssetManager` 仅借用 Device，按类型用 SparseSet 登记 `ShaderAsset` 和 `MaterialAsset`。
+`CreateShader` / `LoadShader` / `CreateMaterial` 返回 8 字节 `AssetHandle<T>`（索引与代次）；
+失败不发布句柄。句柄只属于创建它的 manager，不可跨 manager 解析。
+`Get(handle)` 返回只读指针，最多有效到下一次同类型资产登记；不要长期保存该地址。
+Scene 同步、帧录制期间不得登记资产。
+
+当前登记后只读，没有卸载、替换、Clear、热重载、资产间引用计数或纹理资产。
+材质引用 Shader 的句柄；参数资源及标签表仍由外部持有。
+所有资产 owner 保留到 manager 析构，manager 不隐式等待 GPU。
+关闭时先由 Scheduler 等待所有 frame slot 并重置命令存储，再销毁 CPU 命令缓存、PSO 与参数集，
+最后销毁资产与布局缓存，Device 最后释放；不能只等待其中一个使用过该资源的槽。
+
+### 顶点接口解析
+
+VertexInput 保存几何 layout、semantic、格式、步长与偏移，不保存 shader Location。
+`ValidateVertexInputLayout` 校验纯几何，不要求 GPU streams 已上传。
+`ResolveVertexInputState(meshInput, shaderInputs, output)` 按 Semantic/SemanticIndex 匹配，
+要求浮点/整数类别及分量数相等，归一化格式属于浮点类别；只输出变体所需属性，使用其后端签名的 Location。
+合法重叠属性允许存在。结果经过 RHI 顶点状态校验，失败保留输出；semantic 视图借用 mesh 字符串，
+直到 PSO 创建完成 mesh 都须保持存活且不搬移。完整 ValidateVertexInput 继续验证 stream 范围、用途和延迟实例流。
+`PrepareMaterialVertexInput(interface, meshInput, output)` 只接受带 vertex 阶段的反射接口，零顶点输入合法。
+
 ## 材质核心
 
-材质描述表面使用的 shader、固定性质和可变参数；具体 Pass 结合这些信息、几何与本次渲染状态决定如何绘制。
-runtime 当前保留四个角色，均声明在 `material.h`，实现在 `material.cpp`：
+`MaterialAsset` 合并材质性质、具名程序、参数声明与默认值，并拥有每个所引用 Shader family 的参数映射。
+实例和渲染快照使用资产句柄，无独立共享 Schema 身份。
 
 | 类型 | 职责 |
 |---|---|
-| `MaterialResource` | 材质性质，以及已加载 shader/布局的具名程序列表 |
-| `Material` | 借用一份 Resource，拥有参数名称、类型、顺序和默认值 |
-| `MaterialInstance` | 借用一个 Material，按声明索引保存可选参数覆盖；未覆盖时使用默认值 |
-| `MaterialRenderProxy` | 借用 Resource，拥有同步时解析后的完整参数副本 |
-
-```text
-应用持有 MaterialResource（性质、可用 shader 程序）
-          ↑ 借用
-应用持有 Material（参数声明与默认值）
-          ↑ 借用
-应用持有 MaterialInstance（参数覆盖）
-          │ 显式 Proxy.Update(instance)，解析并复制参数
-Scene 私有材质存储 → MaterialRenderProxy（借用 Resource + 自有参数快照）
-          ↑ MeshBatch.Material 句柄
-Pass Processor → 结合 Resource 选择 PSO；调用方把快照适配为 shader bindings
-```
+| `MaterialAsset` | 不可变材质性质、Shader 程序、参数定义与预解析映射 |
+| `MaterialInstance` | MaterialAsset 句柄和按声明索引保存的可选覆盖，值对象 |
+| `MaterialRenderProxy` | MaterialAsset 句柄和显式同步的完整参数快照 |
 
 ### 定义、实例与同步
 
-`Material::Create(resource, parameters)` 复制声明，拒绝空名称、重复名称；允许零参数。
-参数值 `MaterialParameterValue` 使用 variant 表达 `float`、`array<float, 4>`、
-可空 `TextureView*` 和可空 `Sampler*`，空资源表示尚未赋值。参数名称拥有字符串，区分大小写。
-`FindParameter` 返回声明顺序中的索引，`GetDefaultParameter` 读取默认值。
-索引属于该 Material 的声明顺序；即使两个 Material 共享 Resource，也不能假设其索引含义相同。
-当前没有 shader 反射或 ABI 校验，调用方负责保证声明与所选 shader 的实际输入契约匹配。
+`AssetManager::CreateMaterial(desc)` 校验非空且唯一的参数/程序名、Shader 句柄、变体和入口。
+每个被程序引用的 ShaderAsset 必须恰好提供一份 `MaterialFamilyParameters`，显式指定常量块名与参数名子集。
+子集允许为空；未知/重复参数、额外或缺失 family、与 shader 类型不兼容的映射拒绝创建。
+不同 family 可使用不同子集，未参与某个 family 的参数可以继续用于 CPU 逻辑。
 
-`MaterialInstance::SetParameter(index, value)` 拒绝越界或类型改变，失败不改变现有覆盖。
-`ResetParameter` 恢复默认值，`GetParameter` 返回覆盖或默认值；不存在的索引返回空。
-`Material` 的定义在实例使用期间不可修改、搬移、替换或销毁。
-实例不支持父实例链、静态开关或由参数触发的 shader 编译；固定性质来自所引用的 Resource。
+`MaterialParameterValue` 保留 `float`、`array<float, 4>`、可空 `TextureView*` 和可空 `Sampler*`。
+参数名称区分大小写；索引属于该资产声明顺序。资源参数只复制指针，不增加引用计数；
+外部 owner 必须覆盖相关 CPU/GPU 使用期间。
 
-默认 Proxy 未准备，Resource 为空。`Update(material)` 复制默认值，`Update(instance)` 复制解析后的值，
-二者均替换整个快照。之后修改实例不会自动影响 Proxy，必须再次 Update。
-Proxy 不保留 Material/Instance 引用，同步后用户侧对象可以在无人借用时销毁。
-Proxy 的参数引用不能跨 Update、对象移动或 Scene 的 SparseSet 搬移保存。
-Update 与读取由调用方串行组织；`Scene::UpdateMaterial(handle, proxy)` 会标脏所有引用该 Proxy 的 Batch，
-也可在直接 Update 后调用 `Scene::MarkMaterialDirty`。没有渲染线程或自动 GPU 上传。
+`MaterialInstance` 通过 `GetParameter(assets, index)` 读取覆盖或默认值；
+`SetParameter(assets, index, value)` 拒绝越界和类型改变，`ResetParameter(assets, index)` 恢复默认值。
+实例没有父链、静态开关或运行时 shader 编译。
 
-Resource 及其借用的 Shader、PipelineLayout、TextureView、Sampler 仍由外部持有。
-Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且内容不变；具名程序名称须唯一。
-`FindProgram` / `GetProgram` 只做查找，不校验 shader 阶段、布局兼容性或 GPU 对象有效性。
-资源参数仅复制指针，不增加引用计数；外部所有者须维持资源有效直至相关 CPU/GPU 使用结束。
+默认 Proxy 没有有效资产。`Update(assets, handle)` 复制默认值，`Update(assets, instance)` 复制解析后的参数；
+失败保留原快照。实例后续变化必须再次显式同步。
+Proxy 不保留实例地址，其参数引用不能跨 Update、对象移动或 Scene 的 SparseSet 搬移保存。
+`Scene::UpdateMaterial(MaterialProxyHandle, proxy)` 标脏引用该快照的所有 Batch；
+同步和读取由调用方串行组织，没有自动 GPU 上传。
+需要材质性质的 Processor 借用 `const AssetManager&`，通过 Proxy 的句柄解析资产。
+
+### 材质参数映射
+
+`MaterialParameterBindingMap` 在创建资产时预解析，只保存数值位置和材质句柄身份，不借用 ShaderAsset、
+布局缓存或原生布局。通过 `MaterialAsset::GetBindingMap(shaderHandle)` 查询。
+常量子集只映射到指定 CBuffer/PushConstant；参数名作为成员路径，可定位单个数组元素。
+float 只接受 4 字节 float 标量，array<float,4> 只接受 16 字节 float4；不转换类型或复制带空隙的矩阵。
+TextureView 只映射 Texture/RWTexture，Sampler 只映射动态 Sampler，数量必须为 1；资源数组和 immutable sampler 拒绝。
+资源目标在当前后端不存在时标记 inactive 并跳过；包含常量参数但常量块在当前后端不可用时创建失败。
+
+WriteConstants / BindResources 在 Debug 下断言 Proxy 的 8 字节材质句柄一致；Release 由调用方保证身份。
+WriteConstants 先检查全部类型、块大小和范围，再写入映射字节，保留其他字节。
+BindResources 先检查该组全部适用参数和非空资源，再调用 Set；参数集所属组由调用方保证。
+底层 Set 失败可能已经写入部分资源，调用方应重置或丢弃该集。
+映射不执行 Reset、Flush、提交或 GPU 等待，family 超集中其他必需绑定仍由调用方填写。
 
 ### 材质与 Pass 的边界
 
@@ -689,21 +760,22 @@ Resource 必须在被 Material/Proxy/样例 PSO 表引用期间地址稳定且�
 
 没有直接保存整个 RHI `DepthStencilState`，因为其中的附件格式属于本次 Pass。
 附件格式、采样数、清除值、几何拓扑和资源同步仍由渲染流程提供。
-这些属性与 Resource 一样在被引用期间不可修改；MaterialInstance 目前只覆盖参数。
+这些属性随 MaterialAsset 创建后不可修改；MaterialInstance 目前只覆盖参数。
 
-`MaterialShaderProgram` 保存程序名称、借用的 Layout、VS/PS 和拥有的入口名称，PS 为空可表达纯顶点程序。
+`MaterialShaderProgram` 保存程序名、ShaderAsset 句柄、VariantIndex 和拥有的 VS/PS 入口名称，PS 空字符串表示纯顶点程序。
+创建材质时校验当前后端接口和入口，不保存裸 Shader 或 PipelineLayout 指针。
 具名程序列表只保存当前可用程序，不表示材质自动参加同名 Pass。
 
 PSO 还需要顶点输入、附件格式和经 Pass 确定的最终状态。runtime 材质不持有 PSO，不安排 Pass，
-也不定义参数在 uniform buffer、descriptor 或 push constant 中的 GPU 布局。
+可使用独立布局和参数映射明确参数的 GPU 位置，但不自动创建参数集或执行上传。
 `MeshDrawCommand` 保存 PSO、索引几何、模板参考值与绑定池句柄；顶点流、静态参数组和命令级 push constants 由列表的绑定池持有。
-修改材质参数不要求重新创建 Resource/PSO；样例通过 `Scene::UpdateMaterial` 标脏关联缓存，
+修改材质参数不要求重新创建 MaterialAsset/PSO；样例通过 `Scene::UpdateMaterial` 标脏关联缓存，
 Processor 重建时读取新 Proxy，将 `BaseColor * Brightness` 的 RGB 和原 alpha 复制进命令的 16 字节颜色常量。
 相机与局部缩放使用 Pass 级参数组，物体变换使用 Pass 级延迟实例流，均在提交时提供。
 这些每帧数据变化无需重建命令；材质的稳定 GPU uniform buffer 更新路径尚未实现。
 
 样例的 M1～M5 注释串起资源准备、定义/实例、Proxy 同步、PSO 准备和参数适配。
-八个实例使用三份参数声明相同的 Material/Resource：普通不透明、双面描边不透明和 alpha 混合透明材质；
+八个实例使用三份参数声明相同的 MaterialAsset：普通不透明、双面描边不透明和 alpha 混合透明材质；
 共享加载的 shader，由样例准备各 Pass 的六个 PSO。具体场景、筛选矩阵和状态见
 [教学样例](../guide/build-test.md#mesh-drawing-pipeline-教学样例)。
 Depth Pass 沿用材质剔除与深度偏移，显式选择 Less、开启深度测试/写入、关闭模板；
@@ -732,7 +804,7 @@ uniform expression 求值、GPU 参数缓存或热重载。
 `Set(key, value)` 验证编号并替换同 Key 的已有值，失败不修改集合。
 `Find`、`Matches` 和 `GetTags` 只读；集合使用 `InlineVector<MaterialTag, 4>`，超过四项才使用堆存储，
 复制集合拥有独立的标签对但仍借用同一张表。绘制期间查找只比较 ID，不访问字符串或分配内存。
-表及集合的读写由调用方串行组织；Resource 发布后不修改标签。
+表及集合的读写由调用方串行组织；MaterialAsset 发布后不修改标签。
 shader 程序名和参数名维持已有准备阶段解析方式，不使用标签表。
 
 ## Mesh Drawing Pipeline 基础接口

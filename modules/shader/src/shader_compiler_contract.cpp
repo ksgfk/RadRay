@@ -1,4 +1,5 @@
 #include <radray/shader/shader_compiler_contract.h>
+#include <radray/shader/shader_metadata_wire.h>
 
 #include <algorithm>
 #include <cstring>
@@ -27,20 +28,14 @@ bool ValidateWireMetadataEnvelope(
         return false;
     }
 
-    uint32_t magic = 0;
-    uint16_t schema = 0;
-    std::memcpy(&magic, blob.data(), sizeof(magic));
-    std::memcpy(&schema, blob.data() + sizeof(magic), sizeof(schema));
-    // Schema 8 replaced 4 through 7 atomically: older records cannot express
-    // scalar kind, matrix shape, or non-struct array elements, so an artifact
-    // from an older toolchain is rejected rather than translated.
-    if (magic != kShaderWireMagic || schema != kShaderMetadataSchemaVersion) {
+    WireMetadataEnvelope envelope{};
+    DecodeShaderMetadataEnvelope(blob.first(152), envelope);
+    if (envelope.Magic != kShaderWireMagic || envelope.SchemaVersion != kShaderMetadataSchemaVersion) {
         return false;
     }
 
-    WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, blob.data(), sizeof(envelope));
     if (envelope.HeaderSize < sizeof(WireMetadataEnvelope) ||
+        envelope.Flags != 0 || (envelope.StageMask & ~uint8_t{7}) != 0 || envelope.StageMask == 0 ||
         envelope.TotalSize != blob.size() ||
         envelope.Target != static_cast<uint8_t>(expectedTarget) ||
         envelope.GpuArtifact != expectedGpuArtifact ||

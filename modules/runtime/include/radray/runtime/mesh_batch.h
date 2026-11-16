@@ -34,7 +34,7 @@ struct MeshBatchElement {
 // 共享绘制条件的一组网格
 struct MeshBatch {
     // 句柄仅在所属 Scene 的材质容器中解析。
-    MaterialHandle Material{};
+    MaterialProxyHandle Material{};
     // 借用顶点输入；被任何 Batch 引用期间都必须保持地址稳定。
     Nullable<const radray::VertexInput*> VertexInput{nullptr};
     // 最多 32 项；掩码的第 i 位始终对应源索引，不因前面的空项改变。

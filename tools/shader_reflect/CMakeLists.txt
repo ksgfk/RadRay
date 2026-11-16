@@ -1,0 +1,8 @@
+add_executable(radray_shader_reflect shader_reflect.cpp)
+target_link_libraries(radray_shader_reflect PRIVATE RadRay::shaderreflector)
+radray_default_compile_flags(radray_shader_reflect)
+radray_optimize_flags_binary(radray_shader_reflect)
+radray_set_build_path(radray_shader_reflect)
+radray_load_mimalloc_early(radray_shader_reflect)
+add_executable(RadRay::shader_reflect ALIAS radray_shader_reflect)
+set_target_properties(radray_shader_reflect PROPERTIES EXPORT_NAME shader_reflect)

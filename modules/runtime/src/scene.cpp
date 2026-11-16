@@ -44,22 +44,22 @@ void Scene::Reserve(uint32_t primitives, uint32_t batches, uint32_t materials) {
 
 Nullable<const PrimitiveSceneInfo*> Scene::GetPrimitive(PrimitiveHandle handle) const noexcept { return _primitives.TryGet(handle._handle); }
 Nullable<const MeshBatch*> Scene::GetMeshBatch(MeshBatchHandle handle) const noexcept { return _meshes.TryGet(handle._handle); }
-Nullable<const MaterialRenderProxy*> Scene::GetMaterial(MaterialHandle handle) const noexcept { return _materials.TryGet(handle._handle); }
+Nullable<const MaterialRenderProxy*> Scene::GetMaterial(MaterialProxyHandle handle) const noexcept { return _materials.TryGet(handle._handle); }
 bool Scene::IsBatchDirty(MeshBatchHandle handle) const noexcept { return _meshes.IsAlive(handle._handle) && _batchDirty[handle.GetIndex()]; }
 PrimitiveHandle Scene::GetOwningPrimitive(MeshBatchHandle handle) const noexcept { return _meshes.IsAlive(handle._handle) ? _batchOwners[handle.GetIndex()] : PrimitiveHandle{}; }
 
-MaterialHandle Scene::AddMaterial(MaterialRenderProxy proxy) {
-    const MaterialHandle handle{_materials.Emplace(std::move(proxy))};
+MaterialProxyHandle Scene::AddMaterial(MaterialRenderProxy proxy) {
+    const MaterialProxyHandle handle{_materials.Emplace(std::move(proxy))};
     if (_materialBatches.size() <= handle.GetIndex()) _materialBatches.resize(size_t{handle.GetIndex()} + 1);
     return handle;
 }
-bool Scene::UpdateMaterial(MaterialHandle handle, MaterialRenderProxy proxy) {
+bool Scene::UpdateMaterial(MaterialProxyHandle handle, MaterialRenderProxy proxy) {
     if (!_materials.IsAlive(handle._handle)) return false;
     _materials.Get(handle._handle) = std::move(proxy);
     MarkMaterialDirty(handle);
     return true;
 }
-bool Scene::RemoveMaterial(MaterialHandle handle) {
+bool Scene::RemoveMaterial(MaterialProxyHandle handle) {
     if (!_materials.IsAlive(handle._handle) || !_materialBatches[handle.GetIndex()].empty()) return false;
     _materials.Destroy(handle._handle);
     return true;
@@ -150,7 +150,7 @@ void Scene::AddUniqueDirtyBatch(MeshBatchHandle handle) {
     _dirtyBatches.push_back(handle);
 }
 void Scene::MarkBatchDirty(MeshBatchHandle handle) { AddUniqueDirtyBatch(handle); }
-void Scene::MarkMaterialDirty(MaterialHandle handle) {
+void Scene::MarkMaterialDirty(MaterialProxyHandle handle) {
     if (!_materials.IsAlive(handle._handle)) return;
     for (const auto batch : _materialBatches[handle.GetIndex()]) AddUniqueDirtyBatch(batch);
 }

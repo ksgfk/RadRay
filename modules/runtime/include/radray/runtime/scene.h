@@ -38,17 +38,17 @@ public:
     void Reserve(uint32_t primitives, uint32_t batches, uint32_t materials);
     Nullable<const PrimitiveSceneInfo*> GetPrimitive(PrimitiveHandle handle) const noexcept;
     Nullable<const MeshBatch*> GetMeshBatch(MeshBatchHandle handle) const noexcept;
-    Nullable<const MaterialRenderProxy*> GetMaterial(MaterialHandle handle) const noexcept;
+    Nullable<const MaterialRenderProxy*> GetMaterial(MaterialProxyHandle handle) const noexcept;
     uint32_t GetPrimitiveCount() const noexcept { return _primitives.Count(); }
     uint32_t GetMeshBatchCount() const noexcept { return _meshes.Count(); }
     uint32_t GetMaterialCount() const noexcept { return _materials.Count(); }
     bool IsBatchDirty(MeshBatchHandle handle) const noexcept;
     PrimitiveHandle GetOwningPrimitive(MeshBatchHandle handle) const noexcept;
 
-    MaterialHandle AddMaterial(MaterialRenderProxy proxy);
-    bool UpdateMaterial(MaterialHandle materialHandle, MaterialRenderProxy proxy);
+    MaterialProxyHandle AddMaterial(MaterialRenderProxy proxy);
+    bool UpdateMaterial(MaterialProxyHandle materialHandle, MaterialRenderProxy proxy);
     // 被引用的材质不可删除；须先删除引用它的 Batch，或改为引用其他材质。
-    bool RemoveMaterial(MaterialHandle materialHandle);
+    bool RemoveMaterial(MaterialProxyHandle materialHandle);
 
     PrimitiveHandle AddPrimitive(PrimitiveSceneInfo primitive = {});
     bool RemovePrimitive(PrimitiveHandle primitiveHandle);
@@ -60,7 +60,7 @@ public:
     bool RemoveMeshBatch(PrimitiveHandle primitiveHandle, MeshBatchHandle batchHandle);
 
     void MarkBatchDirty(MeshBatchHandle batchHandle);
-    void MarkMaterialDirty(MaterialHandle materialHandle);
+    void MarkMaterialDirty(MaterialProxyHandle materialHandle);
     bool HasDirtyBatches() const noexcept { return _dirtyCount != 0; }
     // 同步之前，队列中可能仍包含已删除的句柄。
     std::span<const MeshBatchHandle> GetDirtyBatches() const noexcept { return _dirtyBatches; }

@@ -22,8 +22,8 @@ public:
 TEST(GeometryBufferPool, VertexPagesKeepInputsStableShareBindingsAndRecycleRanges) {
     PoolDevice device;
     const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}, VertexBufferLayout{1, 16, VertexStepMode::Instance}};
-    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0},
-                           VertexInputAttribute{1, 0, "TEXCOORD", 0, VertexFormat::FLOAT32X4, 1}};
+    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3},
+                           VertexInputAttribute{1, 0, "TEXCOORD", 0, VertexFormat::FLOAT32X4}};
     auto pool = VertexBufferPool::Create(device, {.VertexStride = 12, .PageVertexCapacity = 8, .Layouts = layouts, .Attributes = attributes});
     ASSERT_TRUE(pool);
     auto a = pool->Allocate(3);
@@ -51,13 +51,27 @@ TEST(GeometryBufferPool, VertexPagesKeepInputsStableShareBindingsAndRecycleRange
 TEST(GeometryBufferPool, RejectsInvalidLayoutsAndIndexStrides) {
     PoolDevice device;
     const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}, VertexBufferLayout{1, 12, VertexStepMode::Vertex}};
-    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
     EXPECT_FALSE(VertexBufferPool::Create(device, {.VertexStride = 12, .Layouts = layouts, .Attributes = attributes}));
     EXPECT_FALSE(VertexBufferPool::Create(device, {.VertexStride = 16, .Layouts = std::span{layouts}.first(1), .Attributes = attributes}));
     const array threeLayouts{layouts[0], VertexBufferLayout{1, 16, VertexStepMode::Instance}, VertexBufferLayout{2, 16, VertexStepMode::Instance}};
     EXPECT_FALSE(VertexBufferPool::Create(device, {.VertexStride = 12, .Layouts = threeLayouts, .Attributes = attributes}));
     EXPECT_FALSE(IndexBufferPool::Create(device, {.IndexStride = 3}));
     EXPECT_FALSE(IndexBufferPool::Create(device, {.PageIndexCapacity = 0}));
+}
+
+TEST(GeometryBufferPool, GeometryDoesNotRequireShaderLocations) {
+    PoolDevice device;
+    const array layouts{VertexBufferLayout{0, 28, VertexStepMode::Vertex}};
+    array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3},
+                     VertexInputAttribute{0, 12, "COLOR", 0, VertexFormat::FLOAT32X4}};
+    auto pool = VertexBufferPool::Create(device, {.VertexStride = 28, .PageVertexCapacity = 8, .Layouts = layouts, .Attributes = attributes});
+    ASSERT_TRUE(pool);
+    auto allocation = pool->Allocate(3);
+    ASSERT_TRUE(allocation);
+    EXPECT_TRUE(ValidateVertexInput(allocation->GetVertexInput()));
+    attributes[1].Semantic = "POSITION";
+    EXPECT_FALSE(VertexBufferPool::Create(device, {.VertexStride = 28, .Layouts = layouts, .Attributes = attributes}));
 }
 
 TEST(GeometryBufferPool, IndexAllocationsExposeSharedViewsAndMoveOwnership) {

@@ -1478,8 +1478,10 @@ class SdkArtifactFetcher:
         stamp_file = artifact_root / ".done"
 
         note(f"{name}: resolving v{version}")
-        if not self.force and stamp_file.exists() and extract_dir.exists():
-            if archive_path.exists() and expected_hash:
+        state = read_json(artifact_root / ".radray-sdk.json")
+        if (not self.force and stamp_file.exists() and extract_dir.exists() and archive_path.exists()
+                and state == self.expected_state(info, archive_name, url)):
+            if expected_hash:
                 self.verify_hash(archive_path, expected_hash)
             self.validate_files(extract_dir, info)
             self.write_state(artifact_root, info, archive_name, url)
@@ -1530,6 +1532,8 @@ class SdkArtifactFetcher:
         detail = f"v{version}"
         if not stamp_file.exists() or not extract_dir.exists():
             return "missing", f"{detail} is not installed", True
+        if read_json(artifact_root / ".radray-sdk.json") != self.expected_state(info, archive_name, url):
+            return "version-mismatch", f"{detail} extraction identity differs; run restore", True
         if not archive_path.exists():
             return "archive-missing", f"{detail} archive is missing: {archive_name}", True
         if expected_hash:
@@ -1558,8 +1562,8 @@ class SdkArtifactFetcher:
             if not path.exists():
                 raise FetchError(f"{info['Name']}: extracted package is missing {value}")
 
-    def write_state(self, artifact_root: Path, info: dict[str, Any], archive_name: str, url: str) -> None:
-        state = {
+    def expected_state(self, info: dict[str, Any], archive_name: str, url: str) -> dict[str, Any]:
+        return {
             "schema_version": 1,
             "manager": "radray-fetch",
             "name": str(info["Name"]),
@@ -1570,7 +1574,9 @@ class SdkArtifactFetcher:
             "archive_name": archive_name,
             "hash": str(info.get("Hash") or "").lower(),
         }
-        write_json_if_changed(artifact_root / ".radray-sdk.json", state)
+
+    def write_state(self, artifact_root: Path, info: dict[str, Any], archive_name: str, url: str) -> None:
+        write_json_if_changed(artifact_root / ".radray-sdk.json", self.expected_state(info, archive_name, url))
 
     def prune_legacy_version_roots(self, artifact_root: Path) -> None:
         for child in artifact_root.iterdir():

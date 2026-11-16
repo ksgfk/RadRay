@@ -21,6 +21,7 @@ struct VSInput {
     VK_LOCATION(4) float4 InstCol3 : INST_COL3;
 };
 
+[RootSignature("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT),DescriptorTable(CBV(b0)),RootConstants(num32BitConstants=4,b1)")]
 [shader("vertex")]
 float4 VSMain(VSInput input) : SV_Position {
     float3 scaled = input.Position * Pass.LocalScale;
@@ -28,6 +29,7 @@ float4 VSMain(VSInput input) : SV_Position {
     return mul(Pass.ViewProjection, worldPosition);
 }
 
+[RootSignature("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT),DescriptorTable(CBV(b0)),RootConstants(num32BitConstants=4,b1)")]
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
     return MaterialPush.Color;

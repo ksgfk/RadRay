@@ -1,5 +1,5 @@
 > - 适用: 新增或修改 HLSL 根 `.hlsl` pass、keyword domain、binding 或 target gate
-> - 权威: 本文是 schema 8 当前 HLSL authoring 契约；wire 与 compiler/RHI 边界见 shader pipeline 架构文档
+> - 权威: 本文是 schema 10 当前 HLSL authoring 契约；wire 与 compiler/RHI 边界见 shader pipeline 架构文档
 > - 锚点: `shaderlib/core/platform.hlsli`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
@@ -138,7 +138,7 @@ BindingId 和完整布局的 GroupSlot 可以另外选值。数字命名空间�
 
 ## 调用方定义绑定 ABI
 
-编写 shader 时同步维护调用方的显式组布局和 push 描述。布局可以是覆盖多个变体的稳定超集，
+编写 shader 时维护显式组布局和 push 描述，或通过离线 reflector 生成 runtime 布局文件。布局可以是覆盖多个变体的稳定超集，
 不能因某次编译裁掉未使用资源而自动收缩。RootSignature policy 和 metadata 都不会自动写入 RHI；
 原始字节码与显式布局匹配、跨 pipeline 参数集兼容由调用方保证。
 
@@ -149,8 +149,8 @@ Vulkan push 为一个逻辑块；D3D12 可有多个 root constant 块，按 Push
 group 的语义属于具体调用方，不是 shaderlib 全局规则。
 数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
 
-cbuffer 里避开非方阵、`bool` 和元素大小非 16 字节整数倍的 struct 数组：这三类构造两个 lane 的
-type payload 不一致，编译会 fail closed。原因见
+32 位 float 的 2–4 行列矩阵、两种主序、矩阵及嵌套结构体的一维定长数组均有布局 metadata。
+`bool` 和真实跨后端偏移差异仍会使双端编译失败；16/64 位、多维及运行时常量数组不受支持。跨度、尾部填充和步长规则见
 [shader pipeline](../architecture/shader-pipeline.md)。
 
 调用方直接准备并上传常量 buffer 字节，必须保证数据与实际 GPU cbuffer 布局一致。

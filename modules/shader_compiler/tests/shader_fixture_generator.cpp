@@ -26,6 +26,8 @@ constexpr FixtureDescription kFixtures[] = {
     {"spirv_push_constant"},
     {"nested_types"},
     {"compute"},
+    {"layout_constants"},
+    {"layout_vertex"},
 };
 
 bool ReadFile(const std::filesystem::path& path, vector<byte>& output) {

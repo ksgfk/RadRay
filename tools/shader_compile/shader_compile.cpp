@@ -1,5 +1,8 @@
+#include <radray/shader/shader_metadata_wire.h>
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -7,6 +10,7 @@
 #include <system_error>
 
 #include <radray/file.h>
+#include <radray/json.h>
 #include <radray/logger.h>
 #include <radray/shader_compiler/client.h>
 #include <radray/types.h>
@@ -19,6 +23,7 @@ constexpr std::string_view kUsage =
     "usage: radray_shader_compile --shader-root <dir> --source <logical.hlsl> "
     "--output <prefix>\n"
     "                              [--target <dxil|spirv|all>] [--include-path <dir>]...\n"
+    "                              [--keyword NAME=VALUE]... [--manifest <file>]\n"
     "\n"
     "The source name and angle-bracket includes are shader-root-relative. The tool writes\n"
     "<prefix>.dxil.bin and/or <prefix>.spirv.bin as raw compiler metadata blobs.\n";
@@ -29,6 +34,8 @@ struct Arguments {
     string Source;
     std::filesystem::path OutputPrefix;
     shader::ShaderTargetMask Targets{shader::ShaderTargetMask::All};
+    vector<shader::KeywordAssignment> Keywords;
+    std::filesystem::path Manifest;
 };
 
 void PrintError(std::string_view message) {
@@ -91,6 +98,17 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
                 return std::nullopt;
             }
             args.OutputPrefix = std::filesystem::path{value};
+        } else if (option == "--manifest") {
+            if (!TakeValue(argc, argv, index, option, value)) return std::nullopt;
+            args.Manifest = std::filesystem::path{value};
+        } else if (option == "--keyword") {
+            if (!TakeValue(argc, argv, index, option, value)) return std::nullopt;
+            const auto equal = value.find('=');
+            if (equal == std::string_view::npos || equal == 0 || equal + 1 == value.size() || value.find('=', equal + 1) != std::string_view::npos) {
+                PrintError("--keyword expects NAME=VALUE");
+                return std::nullopt;
+            }
+            args.Keywords.push_back({string{value.substr(0, equal)}, string{value.substr(equal + 1)}});
         } else if (option == "--target") {
             if (!TakeValue(argc, argv, index, option, value)) {
                 return std::nullopt;
@@ -178,10 +196,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const vector<shader::KeywordAssignment> assignments = DefaultAssignments(*discovery.Value);
+    vector<shader::KeywordAssignment> assignments = DefaultAssignments(*discovery.Value);
     if (assignments.size() != discovery.Value->KeywordGroups.size()) {
         PrintError("every keyword group must declare at least one value");
         return 1;
+    }
+
+    if (shader::HasDuplicateNames(args->Keywords)) {
+        PrintError("duplicate --keyword name");
+        return 1;
+    }
+    for (const auto& keyword : args->Keywords) {
+        bool found = false;
+        for (size_t index = 0; index < discovery.Value->KeywordGroups.size(); ++index) {
+            const auto& group = discovery.Value->KeywordGroups[index];
+            if (group.Name != keyword.Name) continue;
+            found = std::find(group.Values.begin(), group.Values.end(), keyword.Value) != group.Values.end();
+            if (found) assignments[index] = keyword;
+            break;
+        }
+        if (!found) {
+            PrintError(radray::format("unknown keyword name or value: {}={}", keyword.Name, keyword.Value));
+            return 1;
+        }
     }
 
     const shader::CompileVariantResult result = client.CompileVariant(shader::CompileVariantRequest{
@@ -200,10 +237,42 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    JsonWriter manifest;
+    auto root = manifest.RootObject();
+    root.AddUint("version", 1);
+    auto variant = root.AddArray("variants").AppendObject();
+    variant.AddString("name", "Default");
     for (const shader::CompileTargetLane& lane : *result.Value) {
         const string suffix = radray::format(".{}.bin", TargetName(lane.Target));
         std::filesystem::path output = args->OutputPrefix;
         output += suffix;
+        if (!args->Manifest.empty()) {
+            shader::WireMetadataEnvelope envelope{};
+            if (lane.Metadata.size() < sizeof(envelope)) return 1;
+            shader::DecodeShaderMetadataEnvelope(std::span<const byte>{lane.Metadata}.first(152), envelope);
+            std::error_code error;
+            const auto relative = std::filesystem::relative(output, args->Manifest.parent_path().empty() ? "." : args->Manifest.parent_path(), error);
+            if (error) {
+                PrintError("cannot resolve manifest artifact path");
+                return 1;
+            }
+            auto target = variant.AddObject(lane.Target == shader::ShaderTarget::DXIL ? "dxil" : "spirv");
+            target.AddString("path", relative.generic_string());
+            target.AddString("gpuArtifactHash", envelope.GpuArtifact.ToHex());
+            target.AddUint("toolchainIdentity", envelope.ToolchainIdentity);
+        }
+    }
+    if (!args->Manifest.empty()) {
+        std::error_code error;
+        std::filesystem::remove(args->Manifest, error);
+        if (error) {
+            PrintError("cannot invalidate previous compilation manifest");
+            return 1;
+        }
+    }
+    for (const shader::CompileTargetLane& lane : *result.Value) {
+        std::filesystem::path output = args->OutputPrefix;
+        output += radray::format(".{}.bin", TargetName(lane.Target));
         if (!WriteBinaryFile(output, lane.Metadata)) {
             PrintError(radray::format("failed to write '{}'", output.generic_string()));
             return 1;
@@ -215,6 +284,10 @@ int main(int argc, char** argv) {
                 lane.Metadata.size())
                 .c_str(),
             stdout);
+    }
+    if (!args->Manifest.empty() && !manifest.WriteFile(args->Manifest)) {
+        PrintError("failed to write compilation manifest");
+        return 1;
     }
     return 0;
 }

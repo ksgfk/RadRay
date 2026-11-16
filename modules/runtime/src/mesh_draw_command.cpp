@@ -98,7 +98,7 @@ struct MeshDrawCommandStateCache {
     }
 };
 
-}  // 匿名命名空间
+}  // namespace
 
 namespace {
 
@@ -203,7 +203,7 @@ uint32_t BindingBucket(uint32_t index, uint32_t maxBucket) noexcept {
     return (1 + (index < maxBucket ? index : static_cast<uint32_t>(MixBindingHash(index) % maxBucket))) & maxBucket;
 }
 
-}  // 匿名命名空间
+}  // namespace
 
 void MeshDrawCommandBindingStorage::Reserve(uint32_t commands) {
     _vertices.Entries.reserve(commands);
@@ -338,12 +338,7 @@ void CachedPassMeshDrawList::Clear() noexcept {
 }
 
 bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStream) noexcept {
-    InlineVector<render::VertexAttribute, 8> attributes;
-    for (const auto& attribute : input.Attributes) {
-        attributes.push_back({attribute.BufferBinding, attribute.Offset, attribute.Semantic,
-                              attribute.SemanticIndex, attribute.Format, attribute.Location});
-    }
-    if (!render::ValidateVertexInputState({input.Layouts, {attributes.data(), attributes.size()}})) return false;
+    if (!ValidateVertexInputLayout(input)) return false;
     size_t instanceLayouts = 0;
     size_t deferredStreams = 0;
     for (const auto& layout : input.Layouts) {
@@ -469,7 +464,7 @@ bool ValidateStoredMeshDrawCommand(const MeshDrawCommand& command,
                             elements ? std::span<const MeshDrawElementInstances>{elements->ElementInstances.data(), elements->ElementInstances.size()} : std::span<const MeshDrawElementInstances>{}, visibleCommand);
 }
 
-}  // 匿名命名空间
+}  // namespace
 
 bool MeshDrawCommandBindingStorage::ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements) noexcept {
     return ValidateMeshDrawCommandImpl(command, {bindings.VertexBuffers.data(), bindings.VertexBuffers.size()}, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, {}, validateElements) &&

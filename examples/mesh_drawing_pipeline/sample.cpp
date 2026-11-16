@@ -44,47 +44,39 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     VertexInput vertexInput;
     vertexInput.Layouts.push_back({0, sizeof(vertices[0]), render::VertexStepMode::Vertex});
     vertexInput.Layouts.push_back({1, sizeof(InstanceData), render::VertexStepMode::Instance});
-    vertexInput.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0});
+    vertexInput.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
     for (uint32_t column = 0; column < 4; ++column) {
-        vertexInput.Attributes.push_back({1, column * 16, "INST_COL", column, render::VertexFormat::FLOAT32X4, column + 1});
+        vertexInput.Attributes.push_back({1, column * 16, "INST_COL", column, render::VertexFormat::FLOAT32X4});
     }
     VertexInputStream stream;
     stream.Buffer = gpu.VertexBuffer.Get();
     stream.Size = sizeof(vertices);
     vertexInput.Streams.push_back(stream);
-    if (!gpu.CreatePipelines(vertexInput, gpu.OpaqueResource) ||
-        !gpu.CreatePipelines(vertexInput, gpu.TwoSidedResource) ||
-        !gpu.CreatePipelines(vertexInput, gpu.TransparentResource)) return 3;
+    if (!gpu.CreatePipelines(vertexInput, gpu.OpaqueMaterial) ||
+        !gpu.CreatePipelines(vertexInput, gpu.TwoSidedMaterial) ||
+        !gpu.CreatePipelines(vertexInput, gpu.TransparentMaterial)) return 3;
     RADRAY_INFO_LOG("步骤 1：一份顶点/索引缓冲，两个 Section，已准备 Depth/Color/Outline/Transparent 所需 PSO");
 
-    // 步骤 M2：声明材质参数默认值，再创建只覆盖参数的 MaterialInstance。
-    // 为什么：蓝色和绿色可以共享 shader 与固定性质，改变颜色无需复制几何或重新创建 PSO。
-    // UE5 对照：Engine/Public/Materials/Material.h 的 UMaterial；MaterialInstance.h 的 UMaterialInstance；
-    // MaterialInstanceDynamic.h 的 UMaterialInstanceDynamic::SetScalarParameterValue。
-    // 本例简化：无 UObject/材质图/多层父实例；双面描边和透明各由独立 Resource 表达，参数不改变 shader 变体。
-    const array<MaterialParameter, 2> declarations{{{"BaseColor", array<float, 4>{0.72f, 0.25f, 0.09f, 1}},
-                                                    {"Brightness", 1.0f}}};
-    const auto opaqueMaterial = Material::Create(gpu.OpaqueResource, declarations);
-    const auto twoSidedMaterial = Material::Create(gpu.TwoSidedResource, declarations);
-    const auto transparentMaterial = Material::Create(gpu.TransparentResource, declarations);
-    if (!opaqueMaterial || !twoSidedMaterial || !transparentMaterial) return 4;
-    const auto baseColorIndex = opaqueMaterial->FindParameter("BaseColor");
-    const auto brightnessIndex = opaqueMaterial->FindParameter("Brightness");
+    const auto opaqueMaterial = gpu.OpaqueMaterial;
+    const auto twoSidedMaterial = gpu.TwoSidedMaterial;
+    const auto transparentMaterial = gpu.TransparentMaterial;
+    const auto baseColorIndex = gpu.Assets->Get(opaqueMaterial)->FindParameter("BaseColor");
+    const auto brightnessIndex = gpu.Assets->Get(opaqueMaterial)->FindParameter("Brightness");
     if (!baseColorIndex || !brightnessIndex) return 4;
     const MaterialParameterIndices parameters{*baseColorIndex, *brightnessIndex};
     array<MaterialInstance, 8> instances{
-        MaterialInstance{*opaqueMaterial}, MaterialInstance{*opaqueMaterial},
-        MaterialInstance{*opaqueMaterial}, MaterialInstance{*opaqueMaterial},
-        MaterialInstance{*twoSidedMaterial}, MaterialInstance{*twoSidedMaterial},
-        MaterialInstance{*transparentMaterial}, MaterialInstance{*transparentMaterial}};
-    if (!instances[1].SetParameter(parameters.BaseColor, array<float, 4>{0.12f, 0.58f, 0.88f, 1}) ||
-        !instances[2].SetParameter(parameters.BaseColor, array<float, 4>{0.18f, 0.68f, 0.30f, 1}) ||
-        !instances[3].SetParameter(parameters.BaseColor, array<float, 4>{0.55f, 0.90f, 0.18f, 1}) ||
-        !instances[4].SetParameter(parameters.BaseColor, array<float, 4>{0.54f, 0.24f, 0.75f, 1}) ||
-        !instances[5].SetParameter(parameters.BaseColor, array<float, 4>{0.92f, 0.42f, 0.62f, 1}) ||
-        !instances[6].SetParameter(parameters.BaseColor, array<float, 4>{0.08f, 0.70f, 1.0f, 0.38f}) ||
-        !instances[7].SetParameter(parameters.BaseColor, array<float, 4>{0.25f, 0.90f, 1.0f, 0.48f}) ||
-        !instances[2].SetParameter(parameters.Brightness, 0.5f)) return 4;
+        MaterialInstance{opaqueMaterial}, MaterialInstance{opaqueMaterial},
+        MaterialInstance{opaqueMaterial}, MaterialInstance{opaqueMaterial},
+        MaterialInstance{twoSidedMaterial}, MaterialInstance{twoSidedMaterial},
+        MaterialInstance{transparentMaterial}, MaterialInstance{transparentMaterial}};
+    if (!instances[1].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.12f, 0.58f, 0.88f, 1}) ||
+        !instances[2].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.18f, 0.68f, 0.30f, 1}) ||
+        !instances[3].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.55f, 0.90f, 0.18f, 1}) ||
+        !instances[4].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.54f, 0.24f, 0.75f, 1}) ||
+        !instances[5].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.92f, 0.42f, 0.62f, 1}) ||
+        !instances[6].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.08f, 0.70f, 1.0f, 0.38f}) ||
+        !instances[7].SetParameter(*gpu.Assets, parameters.BaseColor, array<float, 4>{0.25f, 0.90f, 1.0f, 0.48f}) ||
+        !instances[2].SetParameter(*gpu.Assets, parameters.Brightness, 0.5f)) return 4;
 
     // 步骤 2：登记五个 Primitive，给每个 Section 对应的 Batch 设置样例 Pass 参与规则。
     // 为什么：候选物体可以相同，Pass 接受的 Batch 却不同；同一 Primitive 的不同 Section 也可以走不同路径。
@@ -93,10 +85,10 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     // Engine/Private/StaticMeshSceneProxy.cpp 的 GetMeshElement / DrawStaticElements 把 Section 组织为 Batch。
     // 本例简化：BatchPassPolicy 单独保存在样例中；Scene 只拥有 Proxy，用户材质和实例在外部存活。
     Scene scene;
-    array<MaterialHandle, 8> materials;
+    array<MaterialProxyHandle, 8> materials;
     for (size_t index = 0; index < materials.size(); ++index) {
         MaterialRenderProxy proxy;
-        proxy.Update(instances[index]);
+        proxy.Update(*gpu.Assets, instances[index]);
         materials[index] = scene.AddMaterial(std::move(proxy));
     }
 
@@ -184,14 +176,14 @@ int RunSample(render::RenderBackend backend, const std::filesystem::path& shader
     if (originalGreen.Color != array<float, 4>{0.09f, 0.34f, 0.15f, 1.0f}) return 4;
     // 步骤 M3：只更新绿色侧面的 Proxy；Scene 只标脏引用该材质的 Batch。
     // UE5 对照：材质渲染代理更新使相关静态 MeshDrawCommand 失效；视图常量不进入缓存。
-    if (!instances[2].SetParameter(parameters.Brightness, 1.0f)) return 4;
+    if (!instances[2].SetParameter(*gpu.Assets, parameters.Brightness, 1.0f)) return 4;
     RADRAY_INFO_LOG("材质同步前：实例 Brightness={}，Proxy 仍为 {}",
-                    std::get<float>(*instances[2].GetParameter(parameters.Brightness)),
+                    std::get<float>(*instances[2].GetParameter(*gpu.Assets, parameters.Brightness)),
                     std::get<float>(*(*scene.GetMaterial(materials[2])).GetParameter(parameters.Brightness)));
     MaterialRenderProxy editedProxy;
-    editedProxy.Update(instances[2]);
+    editedProxy.Update(*gpu.Assets, instances[2]);
     if (!scene.UpdateMaterial(materials[2], std::move(editedProxy))) return 4;
-    RADRAY_INFO_LOG("材质同步后：{} 个 Batch 标脏，八个实例共享三份 Resource 和六个 PSO", scene.GetDirtyBatches().size());
+    RADRAY_INFO_LOG("材质同步后：{} 个 Batch 标脏，八个实例共享三份 MaterialAsset 和六个 PSO", scene.GetDirtyBatches().size());
     drawing->SetInput(scene);
     scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
     scheduler->RunFrame();

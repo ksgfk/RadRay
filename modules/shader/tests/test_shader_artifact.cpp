@@ -1,3 +1,4 @@
+#include <radray/shader/shader_metadata_wire.h>
 #include <radray/shader/shader_artifact.h>
 
 #include <cstring>
@@ -17,9 +18,15 @@ constexpr uint32_t kPixelBit = 1u << static_cast<uint8_t>(ShaderStage::Pixel);
 
 template <typename T>
 WireBlobRange AppendRecords(vector<byte>& blob, const vector<T>& records) {
-    const WireBlobRange range{static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(records.size() * sizeof(T))};
-    const auto* data = reinterpret_cast<const byte*>(records.data());
-    blob.insert(blob.end(), data, data + range.Size);
+    const auto stride = [&]() { if constexpr (std::is_same_v<T, byte>) return 1u; else return GetShaderMetadataRecordSize(T{}); }();
+    const WireBlobRange range{static_cast<uint32_t>(blob.size()), static_cast<uint32_t>(records.size() * stride)};
+    blob.resize(blob.size() + range.Size);
+    if constexpr (std::is_same_v<T, byte>) {
+        std::copy(records.begin(), records.end(), blob.begin() + range.Offset);
+    } else {
+        for (size_t i = 0; i < records.size(); ++i)
+            EXPECT_TRUE(EncodeShaderMetadataRecord(records[i], std::span<byte>{blob}.subspan(range.Offset + i * stride, stride)));
+    }
     return range;
 }
 
@@ -36,12 +43,12 @@ vector<T> RebaseNames(vector<T> records, Member member) {
 struct SyntheticArtifact {
     ShaderTarget Target{ShaderTarget::DXIL};
     uint64_t ToolchainIdentity{kShaderToolchainIdentity};
-    vector<WireEntryRecord> Entries{};
-    vector<WireBindingRecord> Bindings{};
-    vector<WireTypeRecord> Types{};
-    vector<WireRootConstantRecord> RootConstants{};
-    vector<WireVertexInputRecord> VertexInputs{};
-    vector<WireSamplerRecord> Samplers{};
+    vector<ShaderArtifactEntryRecord> Entries{};
+    vector<ShaderArtifactBindingRecord> Bindings{};
+    vector<ShaderArtifactTypeRecord> Types{};
+    vector<ShaderArtifactRootConstantRecord> RootConstants{};
+    vector<ShaderArtifactVertexInputRecord> VertexInputs{};
+    vector<ShaderArtifactSamplerRecord> Samplers{};
     vector<byte> RootSignature{};
     string Names{};
 
@@ -55,39 +62,41 @@ struct SyntheticArtifact {
         Entries.push_back({.Name = Name(name), .Stage = static_cast<uint8_t>(stage), .InterfaceOffset = 0, .InterfaceSize = kBytecodeSize});
     }
 
-    WireBindingRecord& AddBinding(std::string_view name, ShaderBindingKind kind, uint32_t group, uint32_t binding) {
-        return Bindings.emplace_back(WireBindingRecord{
+    ShaderArtifactBindingRecord& AddBinding(std::string_view name, ShaderBindingKind kind, uint32_t group, uint32_t binding) {
+        return Bindings.emplace_back(ShaderArtifactBindingRecord{
             .Name = Name(name),
             .Group = group,
             .Binding = binding,
             .Type = static_cast<uint32_t>(kind),
             .Count = 1,
-            .StageMask = kPixelBit});
+            .StageMask = kPixelBit,
+            .BufferByteSize = kind == ShaderBindingKind::CBuffer ? 16u : 0u});
     }
 
     // Struct records get no scalar shape; every other kind is a float with one component per 4 bytes.
     uint32_t AddType(std::string_view name, ShaderTypeKind kind, uint32_t size, uint32_t parent = kShaderNoType, uint32_t offset = 0) {
         const bool aggregate = kind == ShaderTypeKind::Struct;
-        Types.push_back({
-            .Name = Name(name),
-            .ParentIndex = parent,
-            .Kind = static_cast<uint32_t>(kind),
-            .ElementCount = 1,
-            .Offset = offset,
-            .Size = size,
-            .Stride = size,
-            .ScalarKind = static_cast<uint32_t>(aggregate ? ShaderScalarKind::None : ShaderScalarKind::Float),
-            .RowCount = aggregate ? 0u : 1u,
-            .ColumnCount = aggregate ? 0u : size / 4});
+        Types.push_back({.Name = Name(name),
+                         .ParentIndex = parent,
+                         .Kind = static_cast<uint32_t>(kind),
+                         .ElementCount = 1,
+                         .Offset = offset,
+                         .Size = size,
+                         .Stride = 0,
+                         .ScalarKind = static_cast<uint32_t>(aggregate ? ShaderScalarKind::None : ShaderScalarKind::Float),
+                         .RowCount = aggregate ? 0u : 1u,
+                         .ColumnCount = aggregate ? 0u : size / 4,
+                         .ElementKind = static_cast<uint32_t>(kind == ShaderTypeKind::Array ? ShaderTypeKind::Vector : kind),
+                         .ElementSize = size});
         return static_cast<uint32_t>(Types.size() - 1);
     }
 
-    WireRootConstantRecord& AddRootConstant(std::string_view name, uint32_t size) {
-        return RootConstants.emplace_back(WireRootConstantRecord{.Name = Name(name), .Size = size, .StageMask = kVertexBit});
+    ShaderArtifactRootConstantRecord& AddRootConstant(std::string_view name, uint32_t size) {
+        return RootConstants.emplace_back(ShaderArtifactRootConstantRecord{.Name = Name(name), .Size = size, .StageMask = kVertexBit});
     }
 
-    WireVertexInputRecord& AddVertexInput(std::string_view semantic, uint32_t location) {
-        return VertexInputs.emplace_back(WireVertexInputRecord{
+    ShaderArtifactVertexInputRecord& AddVertexInput(std::string_view semantic, uint32_t location) {
+        return VertexInputs.emplace_back(ShaderArtifactVertexInputRecord{
             .Semantic = Name(semantic),
             .Location = location,
             .ComponentType = static_cast<uint32_t>(ShaderVertexComponentType::Float),
@@ -97,21 +106,22 @@ struct SyntheticArtifact {
     vector<byte> Encode() const {
         WireMetadataEnvelope envelope{};
         envelope.Target = static_cast<uint8_t>(Target);
+        for (const auto& entry : Entries) envelope.StageMask |= uint8_t{1} << entry.Stage;
         envelope.ToolchainIdentity = ToolchainIdentity;
         envelope.GpuArtifact = kSyntheticArtifact;
         vector<byte> blob(sizeof(envelope));
         const auto* names = reinterpret_cast<const byte*>(Names.data());
         blob.insert(blob.end(), names, names + Names.size());
-        envelope.EntryRecords = AppendRecords(blob, RebaseNames(Entries, &WireEntryRecord::Name));
-        envelope.BindingRecords = AppendRecords(blob, RebaseNames(Bindings, &WireBindingRecord::Name));
-        envelope.TypeRecords = AppendRecords(blob, RebaseNames(Types, &WireTypeRecord::Name));
-        envelope.RootConstantRecords = AppendRecords(blob, RebaseNames(RootConstants, &WireRootConstantRecord::Name));
-        envelope.VertexInputRecords = AppendRecords(blob, RebaseNames(VertexInputs, &WireVertexInputRecord::Semantic));
+        envelope.EntryRecords = AppendRecords(blob, RebaseNames(Entries, &ShaderArtifactEntryRecord::Name));
+        envelope.BindingRecords = AppendRecords(blob, RebaseNames(Bindings, &ShaderArtifactBindingRecord::Name));
+        envelope.TypeRecords = AppendRecords(blob, RebaseNames(Types, &ShaderArtifactTypeRecord::Name));
+        envelope.RootConstantRecords = AppendRecords(blob, RebaseNames(RootConstants, &ShaderArtifactRootConstantRecord::Name));
+        envelope.VertexInputRecords = AppendRecords(blob, RebaseNames(VertexInputs, &ShaderArtifactVertexInputRecord::Semantic));
         envelope.SamplerRecords = AppendRecords(blob, Samplers);
         envelope.RootSignature = AppendRecords(blob, RootSignature);
         envelope.Bytecode = AppendRecords(blob, vector<byte>(kBytecodeSize, byte{0xcc}));
         envelope.TotalSize = static_cast<uint32_t>(blob.size());
-        std::memcpy(blob.data(), &envelope, sizeof(envelope));
+        EncodeShaderMetadataEnvelope(envelope, std::span<byte>{blob}.first(152));
         return blob;
     }
 };
@@ -133,9 +143,9 @@ DiagnosticResult<ShaderArtifactView> Decode(const SyntheticArtifact& artifact) {
 template <typename Mutate>
 vector<byte> PatchEnvelope(vector<byte> blob, Mutate&& mutate) {
     WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, blob.data(), sizeof(envelope));
+    DecodeShaderMetadataEnvelope(std::span<const byte>{blob}.first(152), envelope);
     mutate(envelope);
-    std::memcpy(blob.data(), &envelope, sizeof(envelope));
+    EncodeShaderMetadataEnvelope(envelope, std::span<byte>{blob}.first(152));
     return blob;
 }
 
@@ -153,7 +163,7 @@ DiagnosticResult<ShaderArtifactView> DecodeFixture(std::string_view name, Shader
     file.read(reinterpret_cast<char*>(blob.data()), static_cast<std::streamsize>(blob.size()));
     WireMetadataEnvelope envelope{};
     if (blob.size() >= sizeof(envelope)) {
-        std::memcpy(&envelope, blob.data(), sizeof(envelope));
+        DecodeShaderMetadataEnvelope(std::span<const byte>{blob}.first(152), envelope);
     }
     return DecodeShaderArtifact(blob, {.Target = target, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = kShaderToolchainIdentity});
 }
@@ -174,6 +184,14 @@ TEST(RadRayShaderArtifact, DecodesMinimalArtifact) {
     EXPECT_TRUE(decoded.Value->SerializedRootSignature().empty());
 }
 
+TEST(RadRayShaderArtifact, CompilerUsesCompactMetadataRecords) {
+    const auto artifact = DecodeFixture("layout_constants", ShaderTarget::SPIRV);
+    ASSERT_TRUE(artifact.Succeeded()) << artifact.Diagnostics;
+    EXPECT_EQ(artifact.Value->Envelope().EntryRecords.Size, artifact.Value->Entries().size() * 20);
+    EXPECT_EQ(artifact.Value->Envelope().BindingRecords.Size, artifact.Value->Bindings().size() * 36);
+    EXPECT_EQ(artifact.Value->Envelope().TypeRecords.Size, artifact.Value->Types().size() * 44);
+}
+
 TEST(RadRayShaderArtifact, RejectsTruncatedBlob) {
     vector<byte> blob = MakeArtifact().Encode();
     blob.resize(sizeof(WireMetadataEnvelope) - 1);
@@ -185,7 +203,7 @@ TEST(RadRayShaderArtifact, RejectsTruncatedBlob) {
 }
 
 TEST(RadRayShaderArtifact, RejectsRetiredSchema) {
-    const auto blob = PatchEnvelope(MakeArtifact().Encode(), [](WireMetadataEnvelope& envelope) { envelope.SchemaVersion = 7; });
+    const auto blob = PatchEnvelope(MakeArtifact().Encode(), [](WireMetadataEnvelope& envelope) { envelope.SchemaVersion = 8; });
 
     const auto decoded = DecodeShaderArtifact(blob, SyntheticOptions(ShaderTarget::DXIL));
 
@@ -406,7 +424,7 @@ TEST(RadRayShaderArtifact, RejectsRootDescriptorForTexture) {
 
 TEST(RadRayShaderArtifact, RejectsRootDescriptorArray) {
     SyntheticArtifact artifact = MakeArtifact();
-    WireBindingRecord& binding = artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0);
+    ShaderArtifactBindingRecord& binding = artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0);
     binding.Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
     binding.Count = 2;
 
@@ -534,11 +552,13 @@ TEST(RadRayShaderArtifact, RejectsUnknownTypeKind) {
 
 TEST(RadRayShaderArtifact, RejectsReservedTypeFlags) {
     SyntheticArtifact artifact = MakeArtifact();
-    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 64);
-    artifact.AddType("Transform", ShaderTypeKind::Matrix, 64, root);
-    artifact.Types[1].Flags = kShaderTypeFlagRowMajor << 1;
-
-    EXPECT_FALSE(Decode(artifact).Succeeded());
+    const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 4);
+    artifact.AddType("Value", ShaderTypeKind::Scalar, 4, root);
+    auto bytes = artifact.Encode();
+    WireMetadataEnvelope envelope;
+    DecodeShaderMetadataEnvelope(std::span<const byte>{bytes}.first(152), envelope);
+    bytes[envelope.TypeRecords.Offset + 44 + 14] |= byte{1};  // Reserved shape bit 16.
+    EXPECT_FALSE(DecodeShaderArtifact(bytes, SyntheticOptions(artifact.Target)).Succeeded());
 }
 
 TEST(RadRayShaderArtifact, RejectsMemberOutsideParent) {
@@ -582,15 +602,17 @@ TEST(RadRayShaderArtifact, RejectsCyclicParentChain) {
     const auto decoded = Decode(artifact);
 
     EXPECT_FALSE(decoded.Succeeded());
-    EXPECT_NE(decoded.Diagnostics.find("cyclic"), string::npos);
+    EXPECT_NE(decoded.Diagnostics.find("parent"), string::npos);
 }
 
-TEST(RadRayShaderArtifact, RejectsArraySizeOtherThanStrideTimesCount) {
+TEST(RadRayShaderArtifact, RejectsArraySizeOtherThanLastElementEnd) {
     SyntheticArtifact artifact = MakeArtifact();
     const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 64);
     const uint32_t array = artifact.AddType("Corners", ShaderTypeKind::Array, 64, root);
     artifact.Types[array].Stride = 16;
     artifact.Types[array].ElementCount = 3;
+    artifact.Types[array].ElementSize = 16;
+    artifact.Types[array].ColumnCount = 4;
 
     const auto decoded = Decode(artifact);
 
@@ -598,7 +620,7 @@ TEST(RadRayShaderArtifact, RejectsArraySizeOtherThanStrideTimesCount) {
     EXPECT_NE(decoded.Diagnostics.find("array size"), string::npos);
 }
 
-TEST(RadRayShaderArtifact, LeafPaddingIsDxilOnly) {
+TEST(RadRayShaderArtifact, RejectsLegacyLeafPaddingOnBothTargets) {
     for (const ShaderTarget target : {ShaderTarget::DXIL, ShaderTarget::SPIRV}) {
         SyntheticArtifact artifact = MakeArtifact(target);
         const uint32_t root = artifact.AddType("Lighting", ShaderTypeKind::Struct, 28);
@@ -609,11 +631,11 @@ TEST(RadRayShaderArtifact, LeafPaddingIsDxilOnly) {
 
         const auto decoded = Decode(artifact);
 
-        EXPECT_EQ(decoded.Succeeded(), target == ShaderTarget::DXIL) << static_cast<uint32_t>(target) << ": " << decoded.Diagnostics;
+        EXPECT_FALSE(decoded.Succeeded()) << static_cast<uint32_t>(target) << ": " << decoded.Diagnostics;
     }
 }
 
-TEST(RadRayShaderArtifact, DxilAcceptsPaddedScalarLeaf) {
+TEST(RadRayShaderArtifact, RejectsLegacyPaddedScalarLeaf) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
     const uint32_t root = artifact.AddType("Lighting", ShaderTypeKind::Struct, 28);
     const uint32_t padded = artifact.AddType("Brightness", ShaderTypeKind::Scalar, 12, root, 4);
@@ -623,9 +645,7 @@ TEST(RadRayShaderArtifact, DxilAcceptsPaddedScalarLeaf) {
 
     const auto decoded = Decode(artifact);
 
-    ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
-    EXPECT_EQ(decoded.Value->Types()[padded].Size, 12u);
-    EXPECT_EQ(decoded.Value->Types()[padded].Stride, 4u);
+    EXPECT_FALSE(decoded.Succeeded());
 }
 
 TEST(RadRayShaderArtifact, DxilRejectsPaddedMatrixLeaf) {
@@ -716,7 +736,7 @@ TEST(RadRayShaderArtifact, DecodesCompilerFixturesForBothTargets) {
 
             ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
             ASSERT_FALSE(decoded.Value->Entries().empty());
-            for (const WireEntryRecord& entry : decoded.Value->Entries()) {
+            for (const ShaderArtifactEntryRecord& entry : decoded.Value->Entries()) {
                 const auto stage = decoded.Value->FindStageBytecode(static_cast<ShaderStage>(entry.Stage));
                 ASSERT_TRUE(stage.has_value());
                 EXPECT_FALSE(stage->empty());
@@ -771,7 +791,7 @@ TEST(RadRayShaderArtifact, FixtureSpirvStaticSamplerKeepsFullState) {
     ASSERT_TRUE(sampler.has_value());
     EXPECT_EQ(sampler->Record.Placement, static_cast<uint32_t>(ShaderBindingPlacement::Table));
     ASSERT_LT(sampler->Record.SamplerIndex, decoded.Value->Samplers().size());
-    const WireSamplerRecord& state = decoded.Value->Samplers()[sampler->Record.SamplerIndex];
+    const ShaderArtifactSamplerRecord& state = decoded.Value->Samplers()[sampler->Record.SamplerIndex];
     // FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT in Vulkan terms.
     EXPECT_EQ(state.MagFilter, 1u);
     EXPECT_EQ(state.MinFilter, 1u);
@@ -799,7 +819,7 @@ TEST(RadRayShaderArtifact, FixtureSpirvPushBlockOwnsPayloadRoot) {
 
     ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
     ASSERT_EQ(decoded.Value->RootConstants().size(), 1u);
-    const WireRootConstantRecord& push = decoded.Value->RootConstants()[0];
+    const ShaderArtifactRootConstantRecord& push = decoded.Value->RootConstants()[0];
     EXPECT_EQ(NameOf(*decoded.Value, push.Name), "PushConstants");
     EXPECT_EQ(push.StageMask, 1u << static_cast<uint8_t>(ShaderStage::Pixel));
     ASSERT_LT(push.TypeIndex, decoded.Value->Types().size());

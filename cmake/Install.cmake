@@ -9,13 +9,17 @@ foreach(directory CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_BI
     endif()
 endforeach()
 set(RADRAY_AVAILABLE_COMPONENTS "")
-foreach(component core shader window render runtime shadercompiler)
+foreach(component core shader window render runtime shadercompiler shaderreflector)
     if (TARGET radray${component})
         list(APPEND RADRAY_AVAILABLE_COMPONENTS ${component})
     endif()
 endforeach()
 if (TARGET radray_shader_compile)
     list(APPEND RADRAY_AVAILABLE_COMPONENTS tools)
+endif()
+
+if (TARGET radray_shader_reflect)
+    list(APPEND RADRAY_AVAILABLE_COMPONENTS reflector_tools)
 endif()
 
 # Prevent incompatible configurations from being installed into the same prefix.
@@ -33,6 +37,8 @@ file(GLOB_RECURSE implementation_files CONFIGURE_DEPENDS
     "${RADRAY_SOURCE_ROOT}/modules/*/src/*.m"
     "${RADRAY_SOURCE_ROOT}/modules/*/src/*.mm"
     "${RADRAY_SOURCE_ROOT}/tools/shader_compile/*.cpp"
+    "${RADRAY_SOURCE_ROOT}/tools/shader_reflect/*.cpp"
+    "${RADRAY_SOURCE_ROOT}/tools/shader_reflect/*.h"
     "${RADRAY_SOURCE_ROOT}/shaderlib/*.hlsli")
 list(SORT implementation_files)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${implementation_files})
@@ -47,7 +53,10 @@ install(SCRIPT "${RADRAY_BINARY_ROOT}/InstallGuard.cmake")
 
 foreach(component IN LISTS RADRAY_AVAILABLE_COMPONENTS)
     set(RADRAY_FIND_${component} "")
-    if (component STREQUAL "tools")
+    if (component STREQUAL "reflector_tools")
+        install(TARGETS radray_shader_reflect EXPORT RadRay_reflector_tools
+            RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/$<CONFIG>")
+    elseif (component STREQUAL "tools")
         install(TARGETS radray_shader_compile EXPORT RadRay_tools
             RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}/$<CONFIG>")
     else()
@@ -56,6 +65,8 @@ foreach(component IN LISTS RADRAY_AVAILABLE_COMPONENTS)
         set(module "${component}")
         if (component STREQUAL "shadercompiler")
             set(module shader_compiler)
+        elseif (component STREQUAL "shaderreflector")
+            set(module shader_reflector)
         endif()
         install(DIRECTORY "${RADRAY_SOURCE_ROOT}/modules/${module}/include/radray"
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")

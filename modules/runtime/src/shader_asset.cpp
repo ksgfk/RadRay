@@ -1,0 +1,150 @@
+#include <radray/runtime/shader_asset.h>
+
+#include <algorithm>
+#include <radray/file.h>
+#include <radray/json.h>
+#include <radray/logger.h>
+
+namespace radray {
+namespace {
+template <typename T>
+bool AssetActive(const T& value, render::RenderBackend backend) noexcept {
+    return backend == render::RenderBackend::D3D12 ? value.D3D12.has_value() : value.Vulkan.has_value();
+}
+}  // namespace
+
+std::optional<ShaderAsset> ShaderAsset::Create(render::Device& device, const ShaderAssetDesc& desc) {
+    string diagnostic;
+    const auto backend = device.GetBackend();
+    if ((backend != render::RenderBackend::D3D12 && backend != render::RenderBackend::Vulkan) ||
+        desc.Family.Variants.empty() || !ValidateShaderFamilyLayoutDesc(desc.Family, &diagnostic)) {
+        RADRAY_ERR_LOG("Invalid shader asset family: {}", diagnostic);
+        return std::nullopt;
+    }
+    vector<render::ShaderStages> stages(desc.Family.Variants.size());
+    for (size_t i = 0; i < desc.Stages.size(); ++i) {
+        const auto& entry = desc.Stages[i];
+        if (entry.VariantIndex >= desc.Family.Variants.size() || entry.Entry.empty() || entry.Bytecode.empty() ||
+            (entry.Stage != render::ShaderStage::Vertex && entry.Stage != render::ShaderStage::Pixel && entry.Stage != render::ShaderStage::Compute)) {
+            RADRAY_ERR_LOG("Invalid shader stage record {}", i);
+            return std::nullopt;
+        }
+        const auto target = GetShaderTargetInterface(desc.Family.Variants[entry.VariantIndex], entry.Backend);
+        if (!target || !target->Stages.HasFlag(entry.Stage)) return std::nullopt;
+        for (size_t j = 0; j < i; ++j)
+            if (desc.Stages[j].VariantIndex == entry.VariantIndex && desc.Stages[j].Backend == entry.Backend && desc.Stages[j].Stage == entry.Stage) {
+                RADRAY_ERR_LOG("Duplicate shader stage record {}", i);
+                return std::nullopt;
+            }
+        if (entry.Backend == backend) stages[entry.VariantIndex] |= entry.Stage;
+    }
+    bool available = false;
+    for (size_t i = 0; i < stages.size(); ++i) {
+        const auto target = GetShaderTargetInterface(desc.Family.Variants[i], backend);
+        if (!target) continue;
+        const auto expected = target->Stages;
+        if (stages[i] != expected ||
+            (expected.HasFlag(render::ShaderStage::Compute) ? expected != render::ShaderStages{render::ShaderStage::Compute}
+                                                            : !expected.HasFlag(render::ShaderStage::Vertex))) {
+            RADRAY_ERR_LOG("Missing or invalid shader stages for variant {}", desc.Family.Variants[i].Name);
+            return std::nullopt;
+        }
+        available = true;
+    }
+    if (!available) return std::nullopt;
+    ShaderAsset result;
+    result._family = desc.Family;
+    result._backend = backend;
+    for (const auto& entry : desc.Stages) {
+        if (entry.Backend != backend) continue;
+        auto shader = device.CreateShader({entry.Bytecode, backend == render::RenderBackend::D3D12 ? render::ShaderBlobCategory::DXIL : render::ShaderBlobCategory::SPIRV, entry.Stage});
+        if (!shader) {
+            RADRAY_ERR_LOG("Cannot create shader entry {}", entry.Entry);
+            return std::nullopt;
+        }
+        result._stages.push_back({entry.VariantIndex, entry.Stage, entry.Entry, shader.Release()});
+    }
+    return result;
+}
+
+std::optional<ShaderAsset> ShaderAsset::Load(render::Device& device, const std::filesystem::path& indexPath) {
+    const auto document = JsonDocument::ParseFile(indexPath);
+    if (!document) {
+        RADRAY_ERR_LOG("Cannot read shader index {}", indexPath.generic_string());
+        return std::nullopt;
+    }
+    const auto root = document->Root();
+    uint32_t version = 0;
+    string layoutFile;
+    if (!DeserializeJsonValue(root["version"], version) || version != 1 ||
+        !DeserializeJsonValue(root["layoutBinary"], layoutFile) || layoutFile.empty() || !root["stages"].IsArray()) return std::nullopt;
+    ShaderAssetDesc desc;
+    const auto bytes = ReadBinaryFile(indexPath.parent_path() / layoutFile);
+    if (!bytes || !ReadShaderFamilyLayoutBinary(*bytes, desc.Family)) return std::nullopt;
+    const auto backend = device.GetBackend();
+    const auto records = root["stages"];
+    vector<ShaderStageBytecode> inventory;
+    for (size_t i = 0; i < records.Size(); ++i) {
+        const auto record = records.At(i);
+        string variant, target, stage, file, entry;
+        if (!DeserializeJsonValue(record["variant"], variant) || !DeserializeJsonValue(record["backend"], target) ||
+            !DeserializeJsonValue(record["stage"], stage) || !DeserializeJsonValue(record["file"], file) ||
+            !DeserializeJsonValue(record["entry"], entry) || entry.empty() || file.empty()) return std::nullopt;
+        const auto found = std::find_if(desc.Family.Variants.begin(), desc.Family.Variants.end(), [&](const auto& v) { return v.Name == variant; });
+        if (found == desc.Family.Variants.end() || (target != "dxil" && target != "spirv") ||
+            (stage != "vertex" && stage != "pixel" && stage != "compute")) return std::nullopt;
+        ShaderStageBytecode code;
+        code.VariantIndex = static_cast<uint32_t>(found - desc.Family.Variants.begin());
+        code.Backend = target == "dxil" ? render::RenderBackend::D3D12 : render::RenderBackend::Vulkan;
+        code.Stage = stage == "vertex" ? render::ShaderStage::Vertex : stage == "pixel" ? render::ShaderStage::Pixel
+                                                                                        : render::ShaderStage::Compute;
+        code.Entry = std::move(entry);
+        const auto interface = GetShaderTargetInterface(*found, code.Backend);
+        if (!interface || !interface->Stages.HasFlag(code.Stage)) return std::nullopt;
+        for (const auto& old : inventory)
+            if (old.VariantIndex == code.VariantIndex && old.Backend == code.Backend && old.Stage == code.Stage) return std::nullopt;
+        inventory.push_back(code);
+        if (code.Backend != backend) continue;
+        auto stageBytes = ReadBinaryFile(indexPath.parent_path() / file);
+        if (!stageBytes) {
+            RADRAY_ERR_LOG("Cannot read shader stage {}", file);
+            return std::nullopt;
+        }
+        code.Bytecode = std::move(*stageBytes);
+        desc.Stages.push_back(std::move(code));
+    }
+    return Create(device, desc);
+}
+
+const ShaderPipelineLayoutDesc& ShaderAsset::GetLayoutDesc() const noexcept { return _family.SharedLayout; }
+const ShaderFamilyLayoutDesc& ShaderAsset::GetFamilyDesc() const noexcept { return _family; }
+render::RenderBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
+Nullable<const ShaderTargetProgramInterfaceDesc*> ShaderAsset::GetVariantInterface(uint32_t variant) const noexcept {
+    return variant < _family.Variants.size() ? GetShaderTargetInterface(_family.Variants[variant], _backend) : nullptr;
+}
+std::optional<render::ShaderEntry> ShaderAsset::GetStage(uint32_t variant, render::ShaderStage stage) const noexcept {
+    for (const auto& entry : _stages)
+        if (entry.VariantIndex == variant && entry.Stage == stage) return render::ShaderEntry{entry.Object.get(), entry.Entry};
+    return std::nullopt;
+}
+std::optional<ShaderBindingLocation> ShaderAsset::FindBinding(std::string_view name) const noexcept {
+    for (const auto& group : _family.SharedLayout.Groups)
+        for (const auto& entry : group.Bindings)
+            if (entry.Name == name) return ShaderBindingLocation{group.GroupSlot, entry.Binding.BindingId, entry.Binding.Kind, entry.Binding.Count,
+                                                                 entry.TypeIndex, entry.BufferByteSize, entry.Binding.ImmutableSampler.has_value(), AssetActive(entry.Binding, _backend)};
+    return std::nullopt;
+}
+std::optional<ShaderPushConstantLocation> ShaderAsset::FindPushConstant(std::string_view name) const noexcept {
+    for (const auto& entry : _family.SharedLayout.PushConstants)
+        if (entry.Name == name) return ShaderPushConstantLocation{entry.Push.PushId, entry.Push.Size, entry.TypeIndex, AssetActive(entry.Push, _backend)};
+    return std::nullopt;
+}
+std::optional<shader::ShaderResolvedMember> ShaderAsset::FindBufferMember(std::string_view block, std::string_view path) const {
+    const auto binding = FindBinding(block);
+    if (binding && binding->TypeIndex) return shader::FindShaderTypeMember(_family.SharedLayout.Types, *binding->TypeIndex, path);
+    const auto push = FindPushConstant(block);
+    if (push && push->TypeIndex) return shader::FindShaderTypeMember(_family.SharedLayout.Types, *push->TypeIndex, path);
+    return std::nullopt;
+}
+
+}  // namespace radray

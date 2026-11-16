@@ -16,7 +16,7 @@ protected:
         auto& queue = render::test::DirectQueue(device);
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
         const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
-        const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+        const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
         auto vertices = VertexBufferPool::Create(device, {.VertexStride = 12, .PageVertexCapacity = 4, .AdditionalUsage = BufferUse::Resource | BufferUse::CopySource, .Layouts = layouts, .Attributes = attributes});
         auto indices = IndexBufferPool::Create(device, {.PageIndexCapacity = 4, .AdditionalUsage = BufferUse::CopySource});
         ASSERT_TRUE(vertices && indices);

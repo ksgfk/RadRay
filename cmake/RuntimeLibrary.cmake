@@ -42,7 +42,9 @@ function(radray_load_mimalloc_early target)
         return()
     endif()
     _radray_windows_runtime(runtime shared)
-    target_link_options(${target} PRIVATE "$<${shared}:/INCLUDE:mi_version>")
+    # An explicit linker input precedes transitive graphics DLLs. CMake may move
+    # repeated shared-library dependencies to their last occurrence otherwise.
+    target_link_options(${target} PRIVATE "$<${shared}:$<TARGET_LINKER_FILE:mimalloc>>" "$<${shared}:/INCLUDE:mi_version>")
 endfunction()
 
 # Repository triplets describe both the compiler and the CRT ABI of prepared packages.

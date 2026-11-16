@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include <radray/shader/shader_artifact.h>
+#include <radray/shader/shader_metadata_wire.h>
 #include <radray/shader_compiler/client.h>
 
 namespace radray::shader_compiler::test {
@@ -96,7 +97,7 @@ inline shader::DiagnosticResult<shader::ShaderArtifactView> DecodeLane(
         }
         shader::WireMetadataEnvelope envelope{};
         if (lane.Metadata.size() >= sizeof(envelope)) {
-            std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+            shader::DecodeShaderMetadataEnvelope(std::span<const byte>{lane.Metadata}.first(152), envelope);
         }
         return shader::DecodeShaderArtifact(
             lane.Metadata,

@@ -26,6 +26,9 @@ ctest --preset win-x64-debug
 配置、构建和安装均不自动恢复或构建依赖。shader compiler 开启时需要匹配的 fork
 package，stock DXC 不能替代。包的 ABI 与部署边界见 [Shader pipeline](../architecture/shader-pipeline.md)。
 
+SDK restore 只有在归档、完成标记及 `.radray-sdk.json` 中的版本、来源、平台和 hash 均匹配时才复用解包目录；
+升级 manifest 或缺失安装身份时会重新恢复，不能仅凭旧 `.done` 标记沿用旧 SDK。
+
 仓库交付 `project_manifest.lock.json`，以完整提交号固定 Git 依赖；`project_manifest.json` 以版本和 EnforceHash 固定 DXC SDK 归档。
 锁文件与 manifest 一起保存和分发。`fetch_third_party.py restore` 优先恢复已有 `project_manifest.lock.json` 中的提交；没有 lockfile
 时按 manifest 恢复，已安装的默认分支或显式 `Branch` 不会自动检查远端更新。需要更新这些可变引用时运行：
@@ -259,12 +262,14 @@ cmake --preset win-x64-debug -B build_clangd -DCMAKE_UNITY_BUILD=OFF
 | `RADRAY_BUILD_EXAMPLES` | ON（含子工程）；要求 runtime、render、libpng |
 | `RADRAY_BUILD_COMPILE_COMMANDS` | 独立构建 ON；子工程 OFF；仅 Ninja/Makefile 提供辅助目标 |
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
-| `RADRAY_BUILD_RUNTIME` | ON；要求 render |
+| `RADRAY_BUILD_RUNTIME` | ON；要求 render 和 shader，缺失依赖时自动 OFF |
 | `RADRAY_ENABLE_D3D12` | Windows 且 render 开启时默认 ON |
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
-| `RADRAY_BUILD_SHADER` | ON；独立 shader contract/decoder |
+| `RADRAY_BUILD_SHADER` | ON；独立 shader contract/decoder/类型树 |
 | `RADRAY_BUILD_SHADER_COMPILER` | ON；要求 shader |
 | `RADRAY_BUILD_SHADER_TOOLS` | 独立构建且 compiler 开启时 ON；否则 OFF；要求 shader compiler |
+| `RADRAY_BUILD_SHADER_REFLECTOR` | runtime 和 shader 存在时默认 ON；缺失依赖时自动 OFF |
+| `RADRAY_BUILD_SHADER_REFLECTOR_TOOLS` | 顶层默认 ON；要求 reflector |
 | `RADRAY_ENABLE_PROFILER` | 所有配置默认 ON；链接 Tracy client，见[性能采样](performance.md#性能采样tracy) |
 
 验证不带编译器的基础模块时使用独立目录。先按[本地测试 shader](#本地测试-shader)在 compiler 开启的配置中生成夹具；以下配置共享默认夹具目录，不查找或加载 DXC：
@@ -352,11 +357,12 @@ target_link_libraries(my_app PRIVATE RadRay::render)
 ```
 
 公开 targets 为 `RadRay::core`、`RadRay::shader`、`RadRay::window`、`RadRay::render`、
-`RadRay::runtime`、`RadRay::shadercompiler`，以及 CLI 的 `RadRay::shader_compile`。源码构建提供相同别名，
+`RadRay::runtime`、`RadRay::shadercompiler`、`RadRay::shaderreflector`，以及 CLI 的 `RadRay::shader_compile`、`RadRay::shader_reflect`。源码构建提供相同别名，
 旧的实际 target 名称保留。组件为 `core`、`shader`、`window`、`render`、`runtime`、`shadercompiler`、
-`tools`；模块依赖自动加载，不指定组件时加载全部已安装组件。`RadRay_AVAILABLE_COMPONENTS`
+`shaderreflector`、`tools`、`reflector_tools`；模块依赖自动加载，不指定组件时加载全部已安装组件。`RadRay_AVAILABLE_COMPONENTS`
 按实际生成 target 列出安装能力。render 组件只加载 core 和启用后端的外部包，无需 shader 或 DXC。
-runtime 组件传递加载 render/core；公共类型直接位于 `radray`，头文件位于 `<radray/runtime/...>`。
+shaderreflector 组件加载 runtime/shader，reflector_tools 仅加载 shaderreflector；二者都不要求 DXC。
+runtime 组件传递加载 render/shader/core；公共类型直接位于 `radray`，头文件位于 `<radray/runtime/...>`。
 支持重复/追加组件及标准 `OPTIONAL_COMPONENTS`；必需但未安装的组件失败。
 只请求 core 不查找图形或 DXC 包；静态库 PRIVATE 链接依赖仍通过 `find_dependency` 发现。
 
@@ -395,7 +401,7 @@ ctest --preset win-x64-debug-clangcl
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader_compiler`（compiler 开启） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_render` | 见下文 [render 测试](#render-测试) |
-| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`MaterialResourceTest`、`MaterialTest`、`MaterialInstanceTest`、`MaterialRenderProxyTest`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
+| `test_radray_runtime` | `MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`PipelineLayoutCache`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -494,6 +500,28 @@ ctest --test-dir build/no_compiler -C Debug --output-on-failure
 `RADRAY_TEST_SHADER_DIR` 只影响测试数据路径，不改变源码根或产品安装内容。
 单独运行 `compile_render_fixtures.py --output-dir <raw-directory>` 只用于调试 render 配方，不更新校验清单；之后应再运行统一入口。
 
+## 独立布局反射工具
+
+```powershell
+. tools/dev_env.ps1 -Triplet windows-x64-msvc -Config Debug
+cmake --build --preset win-x64-debug --target radray_shader_compile radray_shader_reflect
+build/windows-x64-msvc/Debug/_build/Debug/radray_shader_compile.exe --shader-root examples/mesh_drawing_pipeline --source cube.hlsl --include-path shaderlib --output build/offline/cube --manifest build/offline/cube.manifest.json
+build/windows-x64-msvc/Debug/_build/Debug/radray_shader_reflect.exe --manifest build/offline/cube.manifest.json --output build/offline/cube
+```
+
+编译 CLI 可重复传 `--keyword NAME=VALUE`；省略时保留各组首值。输入 manifest 及输出索引契约见
+[Shader pipeline](../architecture/shader-pipeline.md#build-boundary)。反射工具和加载布局的应用不需要 DXC。
+关闭编译器并保留反射工具的配置如下；预生成测试夹具仍须先显式准备：
+
+```powershell
+cmake --preset win-x64-debug -B build/reflect_no_compiler -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF
+cmake --build build/reflect_no_compiler --target test_radray_shader_reflector radray_shader_reflect --parallel 4
+ctest --test-dir build/reflect_no_compiler -R 'ShaderReflect|ShaderLayoutGpuTest' --output-on-failure
+```
+
+反射测试覆盖结构树重排、单侧资源、静态 sampler、CLI 的 hash 校验与失败输出，以及双后端矩阵/材质读回和顶点解析绘制。
+布局、材质映射和纯几何解析测试归入 runtime 的常规 GTest 程序。
+
 ## 编译数据库与文档检查
 
 启用 `RADRAY_BUILD_COMPILE_COMMANDS` 时，Ninja/Makefile 配置开启
@@ -545,13 +573,13 @@ IDE 设置见 [开发环境](dev-env.md)。
 
 ## Runtime 构建
 
-`RADRAY_BUILD_RUNTIME=ON` 要求 render 开启，提供 `RadRay::runtime` / `radrayruntime`。
+`RADRAY_BUILD_RUNTIME=ON` 要求 render 与 shader 开启，提供 `RadRay::runtime` / `radrayruntime`。
 当前模块包含 Environment、DeviceContext、材质核心、Scene 绘制输入和 Mesh Drawing Pipeline 基础接口，公共入口为
 `<radray/runtime/gpu_env.h>`、`<radray/runtime/gpu_device.h>` 和 `<radray/runtime/scene.h>`。
 Scene 头包含材质、Primitive、MeshBatch、VertexInput 与 Processor 的类型；
 资源分段描述 `MeshSection` 与 MeshBatch 同在 `<radray/runtime/mesh_batch.h>`。绘制入口为
 `<radray/runtime/mesh_pass_processor.h>`（Processor 与输出 Context）与 `<radray/runtime/mesh_draw_command.h>`。
-材质资源、定义、实例与渲染快照均在 `<radray/runtime/material.h>`。
+材质资产、实例与渲染快照均在 `<radray/runtime/material.h>`。
 各头文件声明的类型见 [Runtime 头文件布局](../architecture/runtime.md#头文件布局)。
 多槽帧循环入口为 `<radray/runtime/frame_scheduler.h>`，阶段接口与槽位分别在
 `frame_pipeline.h`、`frame_slot.h`；配置与生命周期见 [多槽帧循环](../architecture/runtime.md#多槽帧循环)。
@@ -604,17 +632,17 @@ Outline 还会拒绝没有描边标签的 A/C，Transparent 拒绝不透明材�
 配置表在 `sample.cpp` 的 `cubes` 中，索引 0 为侧面和底面 Section，索引 1 为顶面 Section。
 可直接调整 `SectionPasses`，观察 Processor 的接受/跳过日志及图片变化。
 
-材质不再使用独立颜色查找表。`Material` 声明 `BaseColor(float4)` 与 `Brightness(float)` 默认值，
+材质不再使用独立颜色查找表。`MaterialAsset` 声明 `BaseColor(float4)` 与 `Brightness(float)` 默认值，
 八个 `MaterialInstance` 覆盖颜色，Scene 通过 `MaterialRenderProxy::Update` 接收参数快照。
 A/B/C 使用背面剔除不透明材质，D 使用关闭剔除并写模板的不透明材质，E 使用背面剔除的透明材质。
-三份 Resource 共享加载的 shader，共准备六个 PSO：普通材质 Depth/Color、描边材质 Depth/Color/Outline、透明材质 Color。
+三份 MaterialAsset 共享加载的 shader，共准备六个 PSO：普通材质 Depth/Color、描边材质 Depth/Color/Outline、透明材质 Color。
 透明材质的 Color 程序/PSO 由 Transparent Processor 使用；程序名不等于 Pass 参与声明。
 应用持有 MaterialTagTable；Processor 通过预先登记的 ID 对筛选材质，再结合 BatchPassPolicy 决定参与。
 缺少或不匹配的标签会跳过；表身份不同则报错，避免将两个表的相同编号误当作相同语义。
 样例还先把绿色实例的 Brightness 同步为 0.5，再改为 1.0：日志先显示实例为 1、Proxy 仍为 0.5，
 显式 Update 后 Proxy 才变为 1。Frame 0 提交后执行 Scene::UpdateMaterial，Frame 1 先显式同步当前 registrations，再设置管线输入并调用 `RunFrame()`；日志验证仅绿色材质关联的一个 Batch 重建，其余九个 Batch 的驻留状态索引不变，
 且该命令对应绑定池载荷的颜色常量 RGB 从 0.5 倍更新为 1.0 倍、alpha 不变。
-可调整参数覆盖观察颜色；调整 Tags / RenderState 需要在 Resource 发布和 PSO 创建之前进行。
+可调整参数覆盖观察颜色；调整 Tags / RenderState 需要在 MaterialAsset 发布和 PSO 创建之前进行。
 四个 Pass 按以下顺序执行；每个 Pass 仍自行决定采用或覆盖材质状态：
 
 1. **Depth**：只收不透明材质，沿用剔除和深度偏移，覆盖为 Less、深度测试/写入开启、模板关闭。
@@ -635,11 +663,11 @@ Mask、折射、透明排序、OIT、纹理绑定和静态 shader 变体尚未�
 | 文件 | 阅读重点 |
 |---|---|
 | [sample.h](../../examples/mesh_drawing_pipeline/sample.h) / [sample.cpp](../../examples/mesh_drawing_pipeline/sample.cpp) | 准备共享资源与场景，创建 Scheduler，每帧设置管线输入并显式同步当前 registrations，再调用 RunFrame，帧间更新材质并验证局部重建，WaitIdle 后保存图片 |
-| [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | shader/布局借用、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
+| [material.h](../../modules/runtime/include/radray/runtime/material.h) / [material.cpp](../../modules/runtime/src/material.cpp) | ShaderAsset 句柄、材质性质、材质默认值、单层实例继承、类型不变的参数覆盖、Scene 拥有的参数快照 |
 | [pipeline.h](../../examples/mesh_drawing_pipeline/pipeline.h) / [pipeline.cpp](../../examples/mesh_drawing_pipeline/pipeline.cpp) | Processor 筛选并复制命令颜色；MeshDrawingFramePipeline 继承 RenderGraphFramePipeline，实现 Pass 登记、帧数据提取、RDG 构图、存活 Pass 命令借用与提交/等待 |
 | [mesh_pass_processor.h](../../modules/runtime/include/radray/runtime/mesh_pass_processor.h) / [mesh_pass_processor.cpp](../../modules/runtime/src/mesh_pass_processor.cpp) | 单个 Batch 的 Processor 接口、显式传入的输出 Context、共享状态和返回 void 的构建 helper；单步 AddCommand 发布完整命令。缓存 Context 写入连续命令表与 Batch 槽位；动态 Context 自动追加当帧可见命令 |
 | [mesh_draw_command.h](../../modules/runtime/include/radray/runtime/mesh_draw_command.h) / [mesh_draw_command.cpp](../../modules/runtime/src/mesh_draw_command.cpp) | 64 字节 Batch 命令、VB/Payload 驻留池与自持有 PushConstants、Pass 提交参数与延迟实例流，可见命令指针与 SubmitMeshDrawCommands |
-| [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 准备共享 Device 几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
+| [gpu_support.h](../../examples/mesh_drawing_pipeline/gpu_support.h) / [gpu_support.cpp](../../examples/mesh_drawing_pipeline/gpu_support.cpp) | GpuResources 持有 Device、AssetManager 和 PipelineLayoutCache，创建 PSO 时获取原生布局，并准备共享几何缓冲与待上传字节，GpuFrameResources 持有每槽缓冲、参数组与 fence；附件交给 RDG 瞬态池 |
 | [cube.hlsl](../../examples/mesh_drawing_pipeline/cube.hlsl) | VS 读取 80 字节 Pass UBO 和 64 字节实例矩阵；PS 读取 16 字节命令颜色，Transparent 使用颜色 alpha |
 
 本例直接组装 Batch、假定全部候选可见，用 Scene 的持久缓存和脏追踪更新命令，按 Pass 声明的状态/深度优先键稳定排序；
@@ -694,6 +722,7 @@ runtime 构建 helper 的输入校验仅在 Debug 启用，Release 信任前置�
 先显式预编译 shader，再构建样例：
 
 ```powershell
+cmake --build --preset win-x64-debug --target radray_shader_compile radray_shader_reflect
 python -X utf8 examples/mesh_drawing_pipeline/compile_shaders.py
 cmake --preset win-x64-debug-clangcl -DRADRAY_BUILD_EXAMPLES=ON
 cmake --build --preset win-x64-debug-clangcl --target radray_mesh_drawing_sample --parallel 8
@@ -702,10 +731,10 @@ cmake --build --preset win-x64-release-clangcl --target radray_mesh_drawing_samp
 ```
 
 [预编译脚本](../../examples/mesh_drawing_pipeline/compile_shaders.py) 默认使用
-`SDKs/radray_dxc/extracted/bin/dxc.exe`，可用 `--dxc` 指定本地编译器，`--output-dir` 指定输出目录。
-生成 `cube.VSMain.dxil.bin`、`cube.PSMain.dxil.bin` 和对应的两个 `.spirv.bin`，默认位于
-`build/mesh_drawing_pipeline/shaders/`。DXIL 使用 SM 6.0；SPIR-V 使用 Vulkan 1.2 target 与 DX 布局。
-HLSL 修改后须手动重新执行脚本。脚本、构建和运行均不下载依赖，CMake 不自动编译 shader。
+`build/windows-x64-msvc/Debug/_build/Debug/` 的两个 CLI，可通过 `--tools-dir` 改写。
+先加载开发环境以提供 DXC/mimalloc 运行库；脚本显式完成编译、反射和完整产物替换，CMake 不自动执行。
+样例运行从 `cube.index.json` 加载 `cube.layout.bin` 与当前后端的独立 stage 字节码，不加载 DXC，按后端签名解析顶点 Location。
+布局 manifest 显式固定 Pass 的 GroupSlot/BindingId 和 MaterialPush 的 PushId，样例不再手写原生布局。
 
 ### 运行与核对
 

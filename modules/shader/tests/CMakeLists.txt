@@ -1,6 +1,8 @@
 add_executable(test_radray_shader
+    test_shader_type_tree.cpp
     test_diagnostic_result.cpp
     test_shader_compiler_contract.cpp
+    test_shader_metadata_wire.cpp
     test_shader_artifact.cpp)
 target_link_libraries(test_radray_shader PRIVATE radrayshader GTest::gtest_main)
 radray_default_compile_flags(test_radray_shader)

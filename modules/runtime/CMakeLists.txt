@@ -7,7 +7,7 @@ set_target_properties(radrayruntime PROPERTIES EXPORT_NAME runtime)
 target_include_directories(radrayruntime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(radrayruntime PUBLIC RadRay::render)
+target_link_libraries(radrayruntime PUBLIC RadRay::render RadRay::shader)
 radray_default_compile_flags(radrayruntime)
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)

@@ -52,6 +52,90 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
     }
 }
 
+TEST(RadRayDxcMetadata, InternsRepeatedCompleteNamesAcrossTypeRecords) {
+    const Client client;
+    const auto result = DiscoverAndCompile(client, Source("metadata/shared_names.hlsl", R"hlsl(
+struct First { float Value; };
+struct Second { float Value; };
+[[vk::binding(0,0)]] ConstantBuffer<First> A : register(b0);
+[[vk::binding(1,0)]] ConstantBuffer<Second> B : register(b1);
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return A.Value + B.Value; }
+)hlsl"));
+    for (auto target : kTargets) {
+        const auto artifact = DecodeLane(result, target);
+        ASSERT_TRUE(artifact.Succeeded()) << artifact.Diagnostics;
+        vector<shader::WireBlobRange> names;
+        for (const auto& type : artifact.Value->Types())
+            if (artifact.Value->GetName(type.Name) == "Value") names.push_back(type.Name);
+        ASSERT_EQ(names.size(), 2u);
+        EXPECT_EQ(names[0].Offset, names[1].Offset);
+        EXPECT_EQ(names[0].Size, 5u);
+        EXPECT_EQ(names[1].Size, 5u);
+    }
+}
+
+TEST(RadRayDxcMetadata, InterfaceIdentityIgnoresCpuTypeNamesShapeAndTableOrder) {
+    const Client client;
+    const auto compile = [&](std::string_view declarations) {
+        const auto source = radray::format(R"hlsl(
+{}
+[[vk::binding(0,0)]] ConstantBuffer<First> A : register(b0);
+[[vk::binding(1,0)]] ConstantBuffer<Second> B : register(b1);
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position {{ return float4(p, 1); }}
+[shader("pixel")] float4 PSMain() : SV_Target0 {{ return A.Value + B.Value; }}
+)hlsl",
+                                           declarations);
+        return DiscoverAndCompile(client, Source("metadata/cpu_identity.hlsl", source));
+    };
+    const auto baseline = compile("struct First { float Value; float Spare; }; struct Second { float Value; };");
+    bool comparedIdenticalBytecode = false;
+    for (const std::string_view declarations : {
+             "struct Second { float Value; }; struct First { float Value; float Spare; };",
+             "struct First { float Value; float CpuOnlyLongerName; }; struct Second { float Value; };",
+             "struct First { float Value; float4 CpuOnlyLongerName[2]; }; struct Second { float Value; };"}) {
+        const auto changed = compile(declarations);
+        for (auto target : kTargets) {
+            const auto a = DecodeLane(baseline, target), b = DecodeLane(changed, target);
+            ASSERT_TRUE(a.Succeeded()) << a.Diagnostics;
+            ASSERT_TRUE(b.Succeeded()) << b.Diagnostics;
+            EXPECT_EQ(a.Value->Envelope().BasePipelineLayoutDigest, b.Value->Envelope().BasePipelineLayoutDigest);
+            // GPU identity additionally includes the actual bytecode; a compiler may retain type information there.
+            if (std::ranges::equal(a.Value->Bytecode(), b.Value->Bytecode())) {
+                comparedIdenticalBytecode = true;
+                EXPECT_EQ(a.Value->Envelope().GpuArtifact, b.Value->Envelope().GpuArtifact);
+            }
+        }
+    }
+    EXPECT_TRUE(comparedIdenticalBytecode);
+}
+
+TEST(RadRayDxcMetadata, GpuIdentityTracksBindingAndBytecodeChanges) {
+    const Client client;
+    const auto compile = [&](uint32_t binding, uint32_t increment) {
+        const auto source = radray::format(R"hlsl(
+struct Data {{ float Value; }};
+[[vk::binding({},0)]] ConstantBuffer<Data> Constants : register(b{});
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position {{ return float4(p, 1); }}
+[shader("pixel")] float4 PSMain() : SV_Target0 {{ return Constants.Value + {}; }}
+)hlsl",
+                                           binding, binding, increment);
+        return DiscoverAndCompile(client, Source("metadata/gpu_identity.hlsl", source));
+    };
+    const auto baseline = compile(0, 1), mapping = compile(1, 1), bytecode = compile(0, 2);
+    for (auto target : kTargets) {
+        const auto a = DecodeLane(baseline, target), b = DecodeLane(mapping, target), c = DecodeLane(bytecode, target);
+        ASSERT_TRUE(a.Succeeded()) << a.Diagnostics;
+        ASSERT_TRUE(b.Succeeded()) << b.Diagnostics;
+        ASSERT_TRUE(c.Succeeded()) << c.Diagnostics;
+        EXPECT_NE(a.Value->Envelope().BasePipelineLayoutDigest, b.Value->Envelope().BasePipelineLayoutDigest);
+        EXPECT_NE(a.Value->Envelope().GpuArtifact, b.Value->Envelope().GpuArtifact);
+        EXPECT_EQ(a.Value->Envelope().BasePipelineLayoutDigest, c.Value->Envelope().BasePipelineLayoutDigest);
+        EXPECT_NE(a.Value->Envelope().BytecodeDigest, c.Value->Envelope().BytecodeDigest);
+        EXPECT_NE(a.Value->Envelope().GpuArtifact, c.Value->Envelope().GpuArtifact);
+    }
+}
+
 // --- Bindings ---
 
 constexpr std::string_view kTextureSamplerSource = R"hlsl(
@@ -88,7 +172,7 @@ TEST(RadRayDxcMetadata, BindingsUseTargetSpecificCoordinates) {
         for (const Expected& want : expected) {
             const auto binding = artifact.Value->FindBinding(want.Name);
             ASSERT_TRUE(binding.has_value()) << want.Name;
-            const shader::WireBindingRecord& record = binding->Record;
+            const shader::ShaderArtifactBindingRecord& record = binding->Record;
             EXPECT_EQ(record.Type, static_cast<uint32_t>(want.Kind)) << want.Name;
             EXPECT_EQ(record.Group, target == ShaderTarget::DXIL ? want.DxilSpace : want.VulkanSet) << want.Name;
             EXPECT_EQ(record.Binding, target == ShaderTarget::DXIL ? want.DxilRegister : want.VulkanBinding) << want.Name;
@@ -193,7 +277,8 @@ VK_BINDING(3, 0) Texture2D<float4> Implicit;
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position { return Implicit.Load(int3(0, 0, 0)) + float4(position, 1.0); }
-)hlsl", ShaderTargetMask::DXIL));
+)hlsl",
+                                                          ShaderTargetMask::DXIL));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -209,7 +294,8 @@ VK_BINDING(3, 0) Texture2D<float4> Implicit[2];
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position { return Implicit[1].Load(int3(0, 0, 0)) + float4(position, 1.0); }
-)hlsl", ShaderTargetMask::DXIL));
+)hlsl",
+                                                          ShaderTargetMask::DXIL));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -223,7 +309,8 @@ Texture2D<float4> Implicit : register(t4);
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position { return Implicit.Load(int3(0, 0, 0)) + float4(position, 1.0); }
-)hlsl", ShaderTargetMask::SPIRV));
+)hlsl",
+                                                          ShaderTargetMask::SPIRV));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -248,7 +335,8 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return Shared.Load(int
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 { return Shared.Load(int3(0, 0, 0)); }
-)hlsl", ShaderTargetMask::SPIRV));
+)hlsl",
+                                                          ShaderTargetMask::SPIRV));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -285,14 +373,14 @@ TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
     };
     // HLSL cbuffer packing; every stage reads every field so none is dead-stripped.
     constexpr Field expected[] = {
-        {"Transform", Kind::Matrix, Scalar::Float, 4, 4, 1, 0, 64, 64, ""},
-        {"Uv", Kind::Vector, Scalar::Float, 1, 2, 1, 64, 8, 8, ""},
-        {"Scale", Kind::Scalar, Scalar::Float, 1, 1, 1, 72, 4, 4, ""},
-        {"Signed", Kind::Scalar, Scalar::SignedInteger, 1, 1, 1, 76, 4, 4, ""},
-        {"Unsigned", Kind::Scalar, Scalar::UnsignedInteger, 1, 1, 1, 80, 4, 4, ""},
-        {"Bias", Kind::Vector, Scalar::Float, 1, 3, 1, 84, 12, 12, ""},
+        {"Transform", Kind::Matrix, Scalar::Float, 4, 4, 1, 0, 64, 0, ""},
+        {"Uv", Kind::Vector, Scalar::Float, 1, 2, 1, 64, 8, 0, ""},
+        {"Scale", Kind::Scalar, Scalar::Float, 1, 1, 1, 72, 4, 0, ""},
+        {"Signed", Kind::Scalar, Scalar::SignedInteger, 1, 1, 1, 76, 4, 0, ""},
+        {"Unsigned", Kind::Scalar, Scalar::UnsignedInteger, 1, 1, 1, 80, 4, 0, ""},
+        {"Bias", Kind::Vector, Scalar::Float, 1, 3, 1, 84, 12, 0, ""},
         {"Corners", Kind::Array, Scalar::Float, 1, 4, 4, 96, 64, 16, ""},
-        {"Leaves", Kind::Array, Scalar::None, 1, 1, 2, 160, 64, 32, "Leaf"}};
+        {"Leaves", Kind::Array, Scalar::None, 0, 0, 2, 160, 64, 32, "Leaf"}};
     const Client client;
 
     const auto result = DiscoverAndCompile(client, Source("metadata/cbuffer_payload.hlsl", R"hlsl(
@@ -346,7 +434,7 @@ float4 PSMain() : SV_Target0 { return ReadEverything(); }
             SCOPED_TRACE(want.Name);
             const auto index = FindType(*artifact.Value, root, want.Name);
             ASSERT_TRUE(index.has_value());
-            const shader::WireTypeRecord& field = types[*index];
+            const shader::ShaderArtifactTypeRecord& field = types[*index];
             EXPECT_EQ(field.Kind, static_cast<uint32_t>(want.Kind));
             EXPECT_EQ(field.ScalarKind, static_cast<uint32_t>(want.Scalar));
             EXPECT_EQ(field.RowCount, want.Rows);
@@ -406,8 +494,12 @@ float4 VSMain() : SV_Position {{ return mul(SharedData.Transform, float4(1, 1, 1
 
         const auto result = DiscoverAndCompile(client, Source("metadata/cbuffer_disputed.hlsl", source));
 
-        EXPECT_FALSE(result.Succeeded());
-        EXPECT_NE(result.Diagnostics.find("Shared"), string::npos) << result.Diagnostics;
+        if (disputed.Declarations == "bool Disputed;") {
+            EXPECT_FALSE(result.Succeeded());
+            EXPECT_FALSE(result.Diagnostics.empty());
+        } else {
+            EXPECT_TRUE(result.Succeeded()) << result.Diagnostics;
+        }
     }
 }
 
@@ -470,7 +562,7 @@ float4 PSMain() : SV_Target0 { return Outer.Nested.InnerValue; }
 }
 
 // Type record of a member of the DXIL cbuffer named Lighting.
-std::optional<shader::WireTypeRecord> DxilLightingMember(const Client& client, std::string_view source, std::string_view member) {
+std::optional<shader::ShaderArtifactTypeRecord> DxilLightingMember(const Client& client, std::string_view source, std::string_view member) {
     const auto artifact = DecodeLane(DiscoverAndCompile(client, Source("metadata/lighting.hlsl", source, ShaderTargetMask::DXIL), {}), ShaderTarget::DXIL);
     if (!artifact.Succeeded()) {
         ADD_FAILURE() << artifact.Diagnostics;
@@ -487,7 +579,7 @@ std::optional<shader::WireTypeRecord> DxilLightingMember(const Client& client, s
     return artifact.Value->Types()[*index];
 }
 
-TEST(RadRayDxcMetadata, PaddedDxilCbufferLeavesDecodeWithoutChangingCompilerMetadata) {
+TEST(RadRayDxcMetadata, DxilLeavesExcludeRegisterPadding) {
     const Client client;
 
     const auto direction = DxilLightingMember(client, R"hlsl(
@@ -502,11 +594,11 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 
     ASSERT_TRUE(direction.has_value());
     EXPECT_EQ(direction->Offset, 0u);
-    EXPECT_EQ(direction->Size, 16u);
-    EXPECT_EQ(direction->Stride, 12u);
+    EXPECT_EQ(direction->Size, 12u);
+    EXPECT_EQ(direction->Stride, 0u);
 }
 
-TEST(RadRayDxcMetadata, PaddedDxilVectorSpansSkippedRegister) {
+TEST(RadRayDxcMetadata, DxilVectorExcludesSkippedRegister) {
     const Client client;
 
     const auto direction = DxilLightingMember(client, R"hlsl(
@@ -520,11 +612,11 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
                                               "Direction0");
 
     ASSERT_TRUE(direction.has_value());
-    EXPECT_EQ(direction->Size, 32u);
-    EXPECT_EQ(direction->Stride, 12u);
+    EXPECT_EQ(direction->Size, 12u);
+    EXPECT_EQ(direction->Stride, 0u);
 }
 
-TEST(RadRayDxcMetadata, PaddedDxilScalarSpansGapToNextField) {
+TEST(RadRayDxcMetadata, DxilScalarExcludesGapToNextField) {
     const Client client;
 
     const auto brightness = DxilLightingMember(client, R"hlsl(
@@ -540,14 +632,14 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 
     ASSERT_TRUE(brightness.has_value());
     EXPECT_EQ(brightness->Offset, 20u);
-    EXPECT_EQ(brightness->Size, 12u);
-    EXPECT_EQ(brightness->Stride, 4u);
+    EXPECT_EQ(brightness->Size, 4u);
+    EXPECT_EQ(brightness->Stride, 0u);
 }
 
 // --- Root constants and push blocks ---
 
-std::optional<shader::WireRootConstantRecord> FindRootConstant(const shader::ShaderArtifactView& artifact, std::string_view name) {
-    for (const shader::WireRootConstantRecord& record : artifact.RootConstants()) {
+std::optional<shader::ShaderArtifactRootConstantRecord> FindRootConstant(const shader::ShaderArtifactView& artifact, std::string_view name) {
+    for (const shader::ShaderArtifactRootConstantRecord& record : artifact.RootConstants()) {
         if (NameOf(artifact, record.Name) == name) {
             return record;
         }
@@ -575,7 +667,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 [shader("pixel")]
 [RootSignature(RS)]
 float4 PSMain() : SV_Target0 { return float4(1.0, 1.0, 1.0, 1.0); }
-)hlsl", ShaderTargetMask::DXIL), {}), ShaderTarget::DXIL);
+)hlsl",
+                                                                       ShaderTargetMask::DXIL),
+                                                        {}),
+                                     ShaderTarget::DXIL);
 
     ASSERT_TRUE(artifact.Succeeded()) << artifact.Diagnostics;
     EXPECT_FALSE(artifact.Value->SerializedRootSignature().empty());
@@ -608,7 +703,10 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 [shader("pixel")]
 [RootSignature(RS)]
 float4 PSMain() : SV_Target0 { return float4(1.0, 1.0, 1.0, 1.0); }
-)hlsl", ShaderTargetMask::DXIL), {}), ShaderTarget::DXIL);
+)hlsl",
+                                                                       ShaderTargetMask::DXIL),
+                                                        {}),
+                                     ShaderTarget::DXIL);
 
     ASSERT_TRUE(artifact.Succeeded()) << artifact.Diagnostics;
     const auto constants = FindRootConstant(*artifact.Value, "VertexConstants");
@@ -630,7 +728,9 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 { return PushConstants.Tint; }
-)hlsl", ShaderTargetMask::SPIRV)), ShaderTarget::SPIRV);
+)hlsl",
+                                                                       ShaderTargetMask::SPIRV)),
+                                     ShaderTarget::SPIRV);
 
     ASSERT_TRUE(artifact.Succeeded()) << artifact.Diagnostics;
     EXPECT_FALSE(artifact.Value->FindBinding("PushConstants").has_value());
@@ -658,7 +758,8 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 { return Second.Value; }
-)hlsl", ShaderTargetMask::SPIRV));
+)hlsl",
+                                                          ShaderTargetMask::SPIRV));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -675,7 +776,8 @@ VK_BINDING(0, 0) VK_PUSH_CONSTANT ConstantBuffer<PushData> PushConstants : regis
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position, 1.0) + PushConstants.Tint; }
-)hlsl", ShaderTargetMask::SPIRV));
+)hlsl",
+                                                          ShaderTargetMask::SPIRV));
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -726,7 +828,7 @@ TEST(RadRayDxcMetadata, SpirvStaticSamplerPublishesImmutableState) {
     EXPECT_EQ(sampler->Record.Group, 4u);
     EXPECT_EQ(sampler->Record.Binding, 2u);
     ASSERT_LT(sampler->Record.SamplerIndex, artifact.Value->Samplers().size());
-    const shader::WireSamplerRecord& state = artifact.Value->Samplers()[sampler->Record.SamplerIndex];
+    const shader::ShaderArtifactSamplerRecord& state = artifact.Value->Samplers()[sampler->Record.SamplerIndex];
     // FILTER_MIN_MAG_LINEAR_MIP_POINT in Vulkan terms.
     EXPECT_EQ(state.MagFilter, 1u);
     EXPECT_EQ(state.MinFilter, 1u);
@@ -789,7 +891,9 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 [shader("pixel")]
 [RootSignature(RS)]
 float4 PSMain() : SV_Target0 { return ActiveTexture.SampleLevel(ActiveSampler, float2(0.0, 0.0), 0.0); }
-)hlsl", ShaderTargetMask::DXIL), {});
+)hlsl",
+                                                          ShaderTargetMask::DXIL),
+                                           {});
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -845,7 +949,9 @@ float4 VSMain(float3 position : POSITION) : SV_Position { return float4(position
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 { return float4(1.0, 1.0, 1.0, 1.0); }
-)hlsl", ShaderTargetMask::DXIL), {});
+)hlsl",
+                                                          ShaderTargetMask::DXIL),
+                                           {});
 
     EXPECT_FALSE(result.Succeeded());
     EXPECT_FALSE(result.Diagnostics.empty());
@@ -853,8 +959,8 @@ float4 PSMain() : SV_Target0 { return float4(1.0, 1.0, 1.0, 1.0); }
 
 // --- Vertex inputs ---
 
-std::optional<shader::WireVertexInputRecord> FindVertexInput(const shader::ShaderArtifactView& artifact, std::string_view semantic, uint32_t index) {
-    for (const shader::WireVertexInputRecord& input : artifact.VertexInputs()) {
+std::optional<shader::ShaderArtifactVertexInputRecord> FindVertexInput(const shader::ShaderArtifactView& artifact, std::string_view semantic, uint32_t index) {
+    for (const shader::ShaderArtifactVertexInputRecord& input : artifact.VertexInputs()) {
         if (NameOf(artifact, input.Semantic) == semantic && input.SemanticIndex == index) {
             return input;
         }
@@ -961,4 +1067,3 @@ TEST(RadRayDxcMetadata, SpirvBytecodeDeclaresNoGoogleExtensions) {
 
 }  // namespace
 }  // namespace radray::shader_compiler
-

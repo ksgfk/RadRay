@@ -34,12 +34,13 @@ struct PassContext {
 
 class DepthPassProcessor final : public MeshPassProcessor {
 public:
-    DepthPassProcessor(const Scene& scene, std::span<const MaterialPipelines> pipelines,
+    DepthPassProcessor(const Scene& scene, const AssetManager& assets, std::span<const MaterialPipelines> pipelines,
                        std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter) noexcept;
     void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override;
 
 private:
     const Scene* _scene;
+    const AssetManager* _assets;
     std::span<const MaterialPipelines> _pipelines;
     std::span<const BatchPassPolicy> _policies;
     MaterialTagFilter _materialFilter;
@@ -47,12 +48,13 @@ private:
 
 class ColorPassProcessor final : public MeshPassProcessor {
 public:
-    ColorPassProcessor(const Scene& scene, std::span<const MaterialPipelines> pipelines,
+    ColorPassProcessor(const Scene& scene, const AssetManager& assets, std::span<const MaterialPipelines> pipelines,
                        std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter, MaterialParameterIndices parameters) noexcept;
     void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override;
 
 private:
     const Scene* _scene;
+    const AssetManager* _assets;
     std::span<const MaterialPipelines> _pipelines;
     std::span<const BatchPassPolicy> _policies;
     MaterialTagFilter _materialFilter;
@@ -61,12 +63,13 @@ private:
 
 class OutlinePassProcessor final : public MeshPassProcessor {
 public:
-    OutlinePassProcessor(const Scene& scene, std::span<const MaterialPipelines> pipelines,
+    OutlinePassProcessor(const Scene& scene, const AssetManager& assets, std::span<const MaterialPipelines> pipelines,
                          std::span<const BatchPassPolicy> policies, MaterialTagFilter opaqueFilter, MaterialTagFilter outlineFilter) noexcept;
     void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override;
 
 private:
     const Scene* _scene;
+    const AssetManager* _assets;
     std::span<const MaterialPipelines> _pipelines;
     std::span<const BatchPassPolicy> _policies;
     MaterialTagFilter _opaqueFilter;
@@ -75,12 +78,13 @@ private:
 
 class TransparentPassProcessor final : public MeshPassProcessor {
 public:
-    TransparentPassProcessor(const Scene& scene, std::span<const MaterialPipelines> pipelines,
+    TransparentPassProcessor(const Scene& scene, const AssetManager& assets, std::span<const MaterialPipelines> pipelines,
                              std::span<const BatchPassPolicy> policies, MaterialTagFilter materialFilter, MaterialParameterIndices parameters) noexcept;
     void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override;
 
 private:
     const Scene* _scene;
+    const AssetManager* _assets;
     std::span<const MaterialPipelines> _pipelines;
     std::span<const BatchPassPolicy> _policies;
     MaterialTagFilter _materialFilter;

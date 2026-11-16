@@ -1,5 +1,5 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或产品 pass
-> - 权威: 本文是 schema 8 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
+> - 权威: 本文是 schema 10 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
 > - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
 
 # shaderlib

@@ -14,3 +14,7 @@ endif()
 if (RADRAY_BUILD_RUNTIME)
     add_subdirectory(runtime)
 endif()
+
+if (RADRAY_BUILD_SHADER_REFLECTOR)
+    add_subdirectory(shader_reflector)
+endif()

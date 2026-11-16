@@ -736,7 +736,7 @@ TEST_F(RDGExecutionTest, CombinesRepeatedReadOnlyBufferAccessesAndRestoresBounda
 
 TEST_F(RDGExecutionTest, GeometryPoolsShareUploadBoundaryAcrossUploadOnlyAndDrawFrames) {
     const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
-    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
     auto vertices = VertexBufferPool::Create(*Device, {.VertexStride = 12, .PageVertexCapacity = 3, .AdditionalUsage = BufferUse::Resource, .Layouts = layouts, .Attributes = attributes});
     auto indices = IndexBufferPool::Create(*Device, {.PageIndexCapacity = 3});
     ASSERT_TRUE(vertices && indices);
@@ -1637,7 +1637,7 @@ TEST(RenderGraphFramePipeline, ExplicitSceneInputsCoexistWithCustomRdgPassAndMay
     FakeBuffer vertices{48, BufferUse::Vertex}, indices{12, BufferUse::Index};
     VertexInput input;
     input.Layouts = {{0, 12, VertexStepMode::Vertex}};
-    input.Attributes = {{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3, 0}};
+    input.Attributes = {{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
     input.Streams = {{&vertices, 0, 48, 0}};
     const auto add = [&](Scene& scene) {
         const auto primitive = scene.AddPrimitive();

@@ -32,7 +32,7 @@ private:
 
 using MeshBatchHandle = SceneHandle<MeshBatch>;
 using PrimitiveHandle = SceneHandle<PrimitiveSceneInfo>;
-using MaterialHandle = SceneHandle<MaterialRenderProxy>;
+using MaterialProxyHandle = SceneHandle<MaterialRenderProxy>;
 
 }  // namespace radray
 

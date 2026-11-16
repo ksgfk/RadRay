@@ -24,7 +24,7 @@ class MeshPassProcessorTest : public testing::Test {
 protected:
     MeshPassProcessorTest() {
         Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3, 0});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
         Batch.VertexInput = &Input;
         Batch.Elements.push_back(Element(0));
@@ -34,7 +34,7 @@ protected:
     }
     void AddInstanceLayout() {
         Input.Layouts.push_back({1, 16, render::VertexStepMode::Instance});
-        Input.Attributes.push_back({1, 0, "INSTANCE", 0, render::VertexFormat::FLOAT32X4, 1});
+        Input.Attributes.push_back({1, 0, "INSTANCE", 0, render::VertexFormat::FLOAT32X4});
     }
     MeshBatchContext Context() const { return {Primitive, Batch}; }
     void Build(const MeshDrawCommandSharedState& state) {
@@ -314,8 +314,8 @@ TEST_F(MeshPassProcessorTest, All32ElementsDrawFromOneDynamicCommand) {
 TEST_F(MeshPassProcessorTest, BuildStoresAllStreamsInOneSortedGroup) {
     Input.Layouts.push_back({1, 16, render::VertexStepMode::Vertex});
     Input.Layouts.push_back({2, 16, render::VertexStepMode::Vertex});
-    Input.Attributes.push_back({1, 0, "TEXCOORD", 0, render::VertexFormat::FLOAT32X4, 1});
-    Input.Attributes.push_back({2, 0, "COLOR", 0, render::VertexFormat::FLOAT32X4, 2});
+    Input.Attributes.push_back({1, 0, "TEXCOORD", 0, render::VertexFormat::FLOAT32X4});
+    Input.Attributes.push_back({2, 0, "COLOR", 0, render::VertexFormat::FLOAT32X4});
     Input.Streams = {{&Vertices, 64, 32, 2}, {&Vertices, 0, 32, 0}, {&Vertices, 32, 32, 1}};
     Build({.Pipeline = &Pipeline});
     ASSERT_EQ(Output.Commands.size(), 1u);

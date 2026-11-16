@@ -1,5 +1,7 @@
 #include <radray/shader/shader_artifact.h>
+#include <radray/shader/shader_metadata_wire.h>
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 
@@ -36,11 +38,13 @@ bool CopyRecords(
     if (range.Size == 0) {
         return true;
     }
-    if (range.Size % sizeof(T) != 0 || range.Offset > blob.size() || range.Size > blob.size() - range.Offset) {
+    const auto stride = GetShaderMetadataRecordSize(T{});
+    if (range.Size % stride != 0 || range.Offset > blob.size() || range.Size > blob.size() - range.Offset) {
         return false;
     }
-    records.resize(range.Size / sizeof(T));
-    std::memcpy(records.data(), blob.data() + range.Offset, range.Size);
+    records.resize(range.Size / stride);
+    for (size_t i = 0; i < records.size(); ++i)
+        if (!DecodeShaderMetadataRecord(blob.subspan(range.Offset + i * stride, stride), records[i])) return false;
     return true;
 }
 
@@ -54,114 +58,108 @@ bool IsValidName(
 }
 
 string ValidateTypeRecords(const ShaderArtifactView& artifact) {
-    constexpr uint32_t kNoParent = kShaderNoType;
-    constexpr uint32_t kScalar = static_cast<uint32_t>(ShaderTypeKind::Scalar);
-    constexpr uint32_t kStruct = static_cast<uint32_t>(ShaderTypeKind::Struct);
-    constexpr uint32_t kArray = static_cast<uint32_t>(ShaderTypeKind::Array);
-    constexpr uint32_t kMember = static_cast<uint32_t>(ShaderTypeKind::Member);
-    const std::span<const WireTypeRecord> types = artifact.Types();
-    vector<uint32_t> parentVisit(types.size(), 0);
-
+    const auto types = artifact.Types();
+    vector<bool> resolved(types.size(), false);
+    size_t unresolvedRoots = 0;
     for (size_t index = 0; index < types.size(); ++index) {
-        const WireTypeRecord& type = types[index];
+        const auto& type = types[index];
+        const bool root = type.ParentIndex == kShaderNoType;
+        const bool array = type.Kind == static_cast<uint32_t>(ShaderTypeKind::Array);
+        const bool structure = type.ElementKind == static_cast<uint32_t>(ShaderTypeKind::Struct);
         if (!IsValidName(artifact, type.Name, artifact.Envelope().Bytecode.Offset) || type.Size == 0 ||
-            type.Stride == 0 || type.Kind < kScalar || type.Kind > kMember || type.ElementCount == 0) {
-            return radray::format("type record {} has an invalid name, kind, size, stride, or element count", index);
+            type.ElementSize == 0 || type.ElementCount == 0 || type.Kind < 1 || type.Kind > 5 ||
+            type.ElementKind < 1 || type.ElementKind > 4 || (type.Flags & ~kShaderTypeFlagMask) != 0) {
+            return radray::format("type record {} has invalid shape or name", index);
         }
-        if ((type.Flags & ~kShaderTypeFlagMask) != 0 ||
-            type.ScalarKind > static_cast<uint32_t>(ShaderScalarKind::Bool)) {
-            return radray::format("type record {} has unsupported flags or scalar kind", index);
+        if (array) {
+            if (type.Stride < type.ElementSize ||
+                uint64_t{type.ElementCount - 1} * type.Stride + type.ElementSize != type.Size) {
+                return radray::format("type record {} array size or stride mismatch", index);
+            }
+        } else if (type.Kind != type.ElementKind || type.ElementCount != 1 || type.Stride != 0 || type.Size != type.ElementSize) {
+            return radray::format("type record {} has incompatible size or stride", index);
         }
-        if (type.Kind == kArray) {
-            const uint64_t expectedSize = static_cast<uint64_t>(type.Stride) * type.ElementCount;
-            if (expectedSize != type.Size) {
-                return radray::format("type record {} array size mismatch: expected {}, got {}", index, expectedSize, type.Size);
+        if (root) {
+            if (type.Kind != 4 || type.TypeIndex != kShaderNoType || type.Offset != 0) {
+                return radray::format("type record {} is not a root struct", index);
+            }
+            ++unresolvedRoots;
+        } else if (type.ParentIndex >= types.size() || types[type.ParentIndex].ParentIndex != kShaderNoType ||
+                   types[type.ParentIndex].Kind != 4 || type.Offset > types[type.ParentIndex].Size ||
+                   type.Size > types[type.ParentIndex].Size - type.Offset) {
+            return radray::format("type record {} has invalid parent or exceeds parent range", index);
+        }
+        if (structure) {
+            if (type.ScalarKind != 0 || type.RowCount != 0 || type.ColumnCount != 0 || type.Flags != 0 || type.MatrixStride != 0 ||
+                (!root && (type.TypeIndex >= types.size() || types[type.TypeIndex].ParentIndex != kShaderNoType ||
+                           types[type.TypeIndex].Kind != 4 || type.ElementSize != types[type.TypeIndex].Size))) {
+                return radray::format("type record {} has invalid underlying struct or shape", index);
             }
         } else {
-            // DXIL float/float3 leaf Size includes the gap to the next field.
-            // Stride remains payload size; parent bounds and sibling ranges still apply.
-            const bool paddedDxilLeaf = artifact.Envelope().Target == static_cast<uint8_t>(ShaderTarget::DXIL) &&
-                                        type.ParentIndex != kNoParent && type.TypeIndex == kShaderNoType &&
-                                        type.ScalarKind == static_cast<uint32_t>(ShaderScalarKind::Float) &&
-                                        type.RowCount == 1 && type.Flags == 0 &&
-                                        ((type.Kind == kScalar && type.ColumnCount == 1 && type.Stride == 4) ||
-                                         (type.Kind == static_cast<uint32_t>(ShaderTypeKind::Vector) && type.ColumnCount == 3 && type.Stride == 12));
-            if (type.ElementCount != 1 || type.Size < type.Stride ||
-                (!paddedDxilLeaf && type.Size != type.Stride)) {
-                return radray::format("type record {} has incompatible size {}, stride {}, and element count {}", index, type.Size, type.Stride, type.ElementCount);
+            if (type.TypeIndex != kShaderNoType || type.ScalarKind < 1 || type.ScalarKind > 4) {
+                return radray::format("type record {} has invalid scalar kind or type owner", index);
+            }
+            if (type.ElementKind == 3) {
+                const bool rowMajor = (type.Flags & kShaderTypeFlagRowMajor) != 0;
+                const uint32_t major = rowMajor ? type.RowCount : type.ColumnCount;
+                const uint32_t minor = rowMajor ? type.ColumnCount : type.RowCount;
+                if (type.ScalarKind != 1 || type.RowCount < 2 || type.RowCount > 4 || type.ColumnCount < 2 || type.ColumnCount > 4 ||
+                    type.MatrixStride < minor * 4 || type.MatrixStride % 4 != 0 ||
+                    uint64_t{major - 1} * type.MatrixStride + minor * 4 != type.ElementSize) {
+                    return radray::format("type record {} has invalid matrix shape", index);
+                }
+            } else if (type.RowCount != 1 || type.ColumnCount < 1 || type.ColumnCount > 4 ||
+                       (type.ElementKind == 1 && type.ColumnCount != 1) ||
+                       type.ElementSize != type.ColumnCount * 4 || type.MatrixStride != 0 || type.Flags != 0) {
+                return radray::format("type record {} has invalid scalar/vector shape", index);
             }
         }
-
-        if (type.ParentIndex == kNoParent) {
-            if (type.Offset != 0) {
-                return radray::format("type record {} is a root with nonzero offset {}", index, type.Offset);
-            }
-        } else {
-            if (type.ParentIndex >= types.size() || type.ParentIndex == index ||
-                types[type.ParentIndex].Kind != kStruct) {
-                return radray::format("type record {} has invalid parent index {}", index, type.ParentIndex);
-            }
-            const WireTypeRecord& parent = types[type.ParentIndex];
-            if (type.Offset > parent.Size || type.Size > parent.Size - type.Offset) {
-                return radray::format("type record {} range [{}, {}) exceeds parent {} size {}", index, type.Offset, static_cast<uint64_t>(type.Offset) + type.Size, type.ParentIndex, parent.Size);
+        if (!root) {
+            for (size_t previous = 0; previous < index; ++previous) {
+                const auto& old = types[previous];
+                if (old.ParentIndex != type.ParentIndex) continue;
+                if (artifact.GetName(old.Name) == artifact.GetName(type.Name))
+                    return radray::format("type record {} duplicates sibling name", index);
+                if (uint64_t{type.Offset} < uint64_t{old.Offset} + old.Size && uint64_t{old.Offset} < uint64_t{type.Offset} + type.Size)
+                    return radray::format("type record {} overlaps sibling {}", index, previous);
             }
         }
-        if (type.TypeIndex != kShaderNoType) {
-            if (type.TypeIndex >= types.size() || type.TypeIndex == index ||
-                types[type.TypeIndex].ParentIndex != kNoParent ||
-                types[type.TypeIndex].Kind != kStruct) {
-                return radray::format("type record {} references invalid underlying struct {}", index, type.TypeIndex);
+    }
+    // Resolve the struct dependency graph without recursive traversal of untrusted input.
+    while (unresolvedRoots != 0) {
+        bool progress = false;
+        for (size_t index = 0; index < types.size(); ++index) {
+            if (types[index].ParentIndex != kShaderNoType || resolved[index]) continue;
+            bool ready = true;
+            uint64_t size = 0;
+            for (const auto& child : types) {
+                if (child.ParentIndex != index) continue;
+                size = std::max(size, uint64_t{child.Offset} + child.Size);
+                if (child.TypeIndex != kShaderNoType && !resolved[child.TypeIndex]) ready = false;
             }
+            if (!ready) continue;
+            if (size != types[index].Size) return radray::format("root type {} size differs from members", index);
+            resolved[index] = true;
+            --unresolvedRoots;
+            progress = true;
         }
-        if (type.ParentIndex != kNoParent && type.Kind == kStruct &&
-            type.TypeIndex == kShaderNoType) {
-            return radray::format("type record {} is a nested struct without an underlying type", index);
-        }
-
-        const uint32_t visitToken = static_cast<uint32_t>(index + 1);
-        size_t cursor = index;
-        while (cursor < types.size() && types[cursor].ParentIndex != kNoParent) {
-            if (parentVisit[cursor] == visitToken) {
-                return radray::format("type record {} has a cyclic parent chain at record {}", index, cursor);
-            }
-            parentVisit[cursor] = visitToken;
-            cursor = types[cursor].ParentIndex;
-        }
-        if (cursor >= types.size()) {
-            return radray::format("type record {} parent chain leaves the type table at {}", index, cursor);
-        }
-
-        for (size_t previous = 0; previous < index; ++previous) {
-            if (types[previous].ParentIndex != type.ParentIndex) {
-                continue;
-            }
-            if (type.ParentIndex != kNoParent &&
-                static_cast<uint64_t>(type.Offset) < static_cast<uint64_t>(types[previous].Offset) + types[previous].Size &&
-                static_cast<uint64_t>(types[previous].Offset) < static_cast<uint64_t>(type.Offset) + type.Size) {
-                return radray::format("type record {} overlaps sibling {}", index, previous);
-            }
-            const std::optional<std::string_view> previousName = artifact.GetName(types[previous].Name);
-            const std::optional<std::string_view> currentName = artifact.GetName(type.Name);
-            if (previousName.has_value() && currentName.has_value() && previousName == currentName) {
-                return radray::format("type record {} duplicates sibling name {}", index, *currentName);
-            }
-        }
+        if (!progress) return "cyclic underlying struct types";
     }
     return {};
 }
 bool IsRootStruct(
     const ShaderArtifactView& artifact,
     uint32_t typeIndex) noexcept {
-    const std::span<const WireTypeRecord> types = artifact.Types();
+    const std::span<const ShaderArtifactTypeRecord> types = artifact.Types();
     return typeIndex < types.size() &&
            types[typeIndex].ParentIndex == kShaderNoType &&
            types[typeIndex].Kind == static_cast<uint32_t>(ShaderTypeKind::Struct);
 }
 
 string ValidateVertexInputRecords(const ShaderArtifactView& artifact) {
-    const std::span<const WireVertexInputRecord> inputs = artifact.VertexInputs();
+    const std::span<const ShaderArtifactVertexInputRecord> inputs = artifact.VertexInputs();
     for (size_t index = 0; index < inputs.size(); ++index) {
-        const WireVertexInputRecord& input = inputs[index];
+        const ShaderArtifactVertexInputRecord& input = inputs[index];
         const std::optional<std::string_view> semantic = artifact.GetName(input.Semantic);
         const uint32_t componentType = input.ComponentType;
         if (!IsValidName(artifact, input.Semantic, artifact.Envelope().Bytecode.Offset) ||
@@ -173,7 +171,7 @@ string ValidateVertexInputRecords(const ShaderArtifactView& artifact) {
             return radray::format("vertex input record {} has an invalid semantic, component type, or component count", index);
         }
         for (size_t previous = 0; previous < index; ++previous) {
-            const WireVertexInputRecord& old = inputs[previous];
+            const ShaderArtifactVertexInputRecord& old = inputs[previous];
             const std::optional<std::string_view> oldSemantic = artifact.GetName(old.Semantic);
             if (old.Location == input.Location ||
                 (oldSemantic.has_value() && oldSemantic == semantic &&
@@ -188,7 +186,7 @@ string ValidateVertexInputRecords(const ShaderArtifactView& artifact) {
 // Placement legality mirrors the compiler's 2122 check, so a hand-built or tampered artifact
 // cannot ask a backend to do something the policy frontend would have rejected.
 bool IsValidPlacement(
-    const WireBindingRecord& binding,
+    const ShaderArtifactBindingRecord& binding,
     ShaderTarget target,
     size_t samplerCount) noexcept {
     const auto kind = static_cast<ShaderBindingKind>(binding.Type);
@@ -224,7 +222,7 @@ bool IsValidPlacement(
 
 string ValidateSamplerRecords(const ShaderArtifactView& artifact) {
     for (size_t index = 0; index < artifact.Samplers().size(); ++index) {
-        const WireSamplerRecord& sampler = artifact.Samplers()[index];
+        const ShaderArtifactSamplerRecord& sampler = artifact.Samplers()[index];
         if (sampler.MagFilter > kShaderSamplerMaxFilter ||
             sampler.MinFilter > kShaderSamplerMaxFilter ||
             sampler.MipmapMode > kShaderSamplerMaxMipmapMode ||
@@ -271,7 +269,7 @@ std::optional<std::string_view> ShaderArtifactView::GetName(WireBlobRange range)
 
 std::optional<std::span<const byte>> ShaderArtifactView::FindStageBytecode(
     ShaderStage stage) const noexcept {
-    for (const WireEntryRecord& entry : _entries) {
+    for (const ShaderArtifactEntryRecord& entry : _entries) {
         if (entry.Stage == static_cast<uint8_t>(stage)) {
             return Bytecode().subspan(entry.InterfaceOffset, entry.InterfaceSize);
         }
@@ -281,7 +279,7 @@ std::optional<std::span<const byte>> ShaderArtifactView::FindStageBytecode(
 
 std::optional<ShaderArtifactBindingView> ShaderArtifactView::FindBinding(
     std::string_view name) const noexcept {
-    for (const WireBindingRecord& binding : _bindings) {
+    for (const ShaderArtifactBindingRecord& binding : _bindings) {
         const std::optional<std::string_view> bindingName = GetName(binding.Name);
         if (bindingName.has_value() && bindingName.value() == name) {
             return ShaderArtifactBindingView{bindingName.value(), binding};
@@ -298,12 +296,11 @@ DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
     }
 
     ShaderArtifactView result;
-    uint16_t schema = 0;
-    std::memcpy(&schema, blob.data() + sizeof(uint32_t), sizeof(schema));
+    DecodeShaderMetadataEnvelope(blob.first(152), result._envelope);
+    const auto schema = result._envelope.SchemaVersion;
     if (schema != kShaderMetadataSchemaVersion) {
         return {std::nullopt, radray::format("unsupported metadata schema: expected {}, got {}", kShaderMetadataSchemaVersion, schema)};
     }
-    std::memcpy(&result._envelope, blob.data(), sizeof(result._envelope));
     const WireMetadataEnvelope& envelope = result._envelope;
     if (envelope.Target > static_cast<uint8_t>(ShaderTarget::SPIRV)) {
         return {std::nullopt, radray::format("artifact target does not match the requested decoder: requested {}", static_cast<uint32_t>(options.Target))};
@@ -366,7 +363,7 @@ DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
     }
 
     for (size_t index = 0; index < result._entries.size(); ++index) {
-        const WireEntryRecord& entry = result._entries[index];
+        const ShaderArtifactEntryRecord& entry = result._entries[index];
         if (!IsValidName(result, entry.Name, envelope.Bytecode.Offset) ||
             entry.Stage > static_cast<uint8_t>(ShaderStage::Compute) ||
             entry.InterfaceSize == 0 ||
@@ -384,7 +381,7 @@ DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
     }
 
     for (size_t index = 0; index < result._bindings.size(); ++index) {
-        const WireBindingRecord& binding = result._bindings[index];
+        const ShaderArtifactBindingRecord& binding = result._bindings[index];
         const std::optional<std::string_view> bindingName = result.GetName(binding.Name);
         if (!IsValidName(result, binding.Name, envelope.Bytecode.Offset) ||
             !bindingName.has_value() || binding.Group > 0xffffu || binding.Count == 0 ||
@@ -397,7 +394,7 @@ DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
             return {std::nullopt, radray::format("binding record {} ({}) has an invalid target placement", index, *bindingName)};
         }
         for (size_t previous = 0; previous < index; ++previous) {
-            const WireBindingRecord& old = result._bindings[previous];
+            const ShaderArtifactBindingRecord& old = result._bindings[previous];
             const std::optional<std::string_view> oldName = result.GetName(old.Name);
             const bool sameTargetCoordinate = envelope.Target == static_cast<uint8_t>(ShaderTarget::SPIRV)
                                                   ? old.Group == binding.Group && old.Binding == binding.Binding
@@ -413,17 +410,19 @@ DiagnosticResult<ShaderArtifactView> DecodeShaderArtifact(
     if (string diagnostic = ValidateTypeRecords(result); !diagnostic.empty()) {
         return {std::nullopt, std::move(diagnostic)};
     }
-    for (const WireBindingRecord& binding : result._bindings) {
+    for (const ShaderArtifactBindingRecord& binding : result._bindings) {
         const bool cbuffer =
             binding.Type == static_cast<uint32_t>(ShaderBindingKind::CBuffer);
         if ((cbuffer && !IsRootStruct(result, binding.TypeIndex)) ||
-            (!cbuffer && binding.TypeIndex != kShaderNoType)) {
+            (!cbuffer && (binding.TypeIndex != kShaderNoType || binding.BufferByteSize != 0)) ||
+            (cbuffer && (binding.BufferByteSize == 0 || binding.BufferByteSize % 16 != 0 ||
+                         binding.BufferByteSize < result._types[binding.TypeIndex].Size))) {
             return {std::nullopt, radray::format("binding {} has invalid type owner {}", *result.GetName(binding.Name), binding.TypeIndex)};
         }
     }
 
     for (size_t index = 0; index < result._rootConstants.size(); ++index) {
-        const WireRootConstantRecord& constant = result._rootConstants[index];
+        const ShaderArtifactRootConstantRecord& constant = result._rootConstants[index];
         const std::optional<std::string_view> name = result.GetName(constant.Name);
         if (constant.Size == 0 || (constant.Size % 4) != 0 || constant.StageMask == 0 ||
             (constant.StageMask & ~kStageMask) != 0 ||

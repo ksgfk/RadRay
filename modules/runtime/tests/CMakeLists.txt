@@ -1,4 +1,6 @@
 add_executable(test_radray_runtime
+    test_shader_asset.cpp
+    test_shader_layout.cpp
     test_material_tag.cpp
     test_material.cpp
     test_mesh_draw_command.cpp

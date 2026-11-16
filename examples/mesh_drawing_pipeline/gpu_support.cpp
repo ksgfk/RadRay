@@ -5,35 +5,12 @@
 #include <fstream>
 
 #include <radray/basic_math.h>
+#include <radray/file.h>
 #include <radray/image_data.h>
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 
 namespace radray::examples::mesh_drawing {
-namespace {
-
-Nullable<unique_ptr<render::Shader>> LoadShader(
-    render::Device& device, const std::filesystem::path& path, render::ShaderStage stage) {
-    std::ifstream file{path, std::ios::binary | std::ios::ate};
-    if (!file || file.tellg() <= 0) {
-        RADRAY_ERR_LOG("无法读取 shader：{}；请先显式运行 compile_shaders.py", path.string());
-        return nullptr;
-    }
-    const auto size = static_cast<size_t>(file.tellg());
-    vector<byte> bytes(size);
-    file.seekg(0);
-    if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()))) {
-        RADRAY_ERR_LOG("shader 文件读取不完整：{}", path.string());
-        return nullptr;
-    }
-    const auto category = device.GetBackend() == render::RenderBackend::Vulkan
-                              ? render::ShaderBlobCategory::SPIRV
-                              : render::ShaderBlobCategory::DXIL;
-    return device.CreateShader({bytes, category, stage});
-}
-
-}  // namespace
-
 bool GpuResources::Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
     RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证，读取预编译 shader", backend);
     Env = Environment::Create(backend, true, "RadRay Mesh Drawing tutorial");
@@ -47,34 +24,20 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
         return false;
     }
     auto& device = Device->GetDevice();
-    const auto suffix = backend == render::RenderBackend::Vulkan ? "spirv" : "dxil";
-    VertexShader = LoadShader(device, shaderDirectory / radray::format("cube.VSMain.{}.bin", suffix), render::ShaderStage::Vertex);
-    if (!VertexShader) return false;
-    PixelShader = LoadShader(device, shaderDirectory / radray::format("cube.PSMain.{}.bin", suffix), render::ShaderStage::Pixel);
-    if (!PixelShader) return false;
-
-    // 步骤 M1：把离线编译并加载的 shader、布局和材质性质放进 MaterialResource。
-    // 为什么：多个实例可共享同一组程序；shader 可用性与具体 Pass 的参与规则是两件事。
-    // UE5 对照：Engine/Public/MaterialShared.h 的 FMaterial / FMaterialResource / FMaterialShaderMap。
-    // 本例简化：具名程序与 Surface/Outline 标签由应用准备；标签不触发编译，也不是 UE 的固定材质枚举。
-    const render::BindingDescriptor passBinding{
-        .BindingId = 0,
-        .Kind = render::BindingKind::CBuffer,
-        .Count = 1,
-        .Stages = render::ShaderStage::Vertex,
-        .D3D12 = render::D3D12BindingDescriptor{render::BindingRegisterClass::CBV, 0, 0, render::D3D12BufferPlacement::Table},
-        .Vulkan = render::VulkanBindingDescriptor{0, 0, render::VulkanBufferDescriptorPlacement::Regular}};
-    PassGroupLayout = device.CreateBindingGroupLayout({std::span{&passBinding, 1}});
-    if (!PassGroupLayout) return false;
-    const render::PipelineLayoutGroupDescriptor passGroup{.GroupSlot = 0, .Layout = PassGroupLayout.Get()};
-    const render::PushConstantDescriptor push{
-        0, sizeof(MaterialConstants), render::ShaderStage::Pixel,
-        render::PushConstantDescriptor::D3D12Location{1, 0}, render::PushConstantDescriptor::VulkanLocation{0}};
-    Layout = device.CreatePipelineLayout({std::span{&passGroup, 1}, std::span{&push, 1}});
-    if (!Layout) return false;
-    OpaqueResource.Programs = {
-        {"Depth", Layout.Get(), VertexShader.Get(), "VSMain", nullptr, ""},
-        {"Color", Layout.Get(), VertexShader.Get(), "VSMain", PixelShader.Get(), "PSMain"}};
+    LayoutCache = make_unique<PipelineLayoutCache>(device);
+    Assets = make_unique<AssetManager>(device);
+    const auto shader = Assets->LoadShader(shaderDirectory / "cube.index.json");
+    if (!shader) return false;
+    Shader = *shader;
+    const auto shaderAsset = Assets->Get(Shader);
+    const auto pass = shaderAsset->FindBinding("Pass");
+    const auto push = shaderAsset->FindPushConstant("MaterialPush");
+    if (!pass || pass->GroupSlot != 0 || pass->BindingId != 0 || !push || push->PushId != 0) return false;
+    MaterialAssetDesc opaqueDesc;
+    opaqueDesc.Programs = {{"Depth", Shader, 0, "VSMain", ""}, {"Color", Shader, 0, "VSMain", "PSMain"}};
+    opaqueDesc.Parameters = {{"BaseColor", array<float, 4>{0.72f, 0.25f, 0.09f, 1}}, {"Brightness", 1.0f}};
+    // The pass combines these CPU parameters into its Color push constant.
+    opaqueDesc.Families = {{Shader, {}, {}}};
     const auto surface = MaterialTags.Intern("Surface");
     const auto opaque = MaterialTags.Intern("Opaque");
     const auto transparent = MaterialTags.Intern("Transparent");
@@ -84,22 +47,27 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     OpaqueTag = {*surface, *opaque};
     TransparentTag = {*surface, *transparent};
     OutlineTag = {*outline, *enabled};
-    OpaqueResource.Properties.Tags = MaterialTagSet{MaterialTags};
-    if (!OpaqueResource.Properties.Tags.Set(*surface, *opaque)) return false;
-    TwoSidedResource = OpaqueResource;
-    if (!TwoSidedResource.Properties.Tags.Set(*outline, *enabled)) return false;
-    auto& twoSided = TwoSidedResource.Properties.RenderState;
+    opaqueDesc.Properties.Tags = MaterialTagSet{MaterialTags};
+    if (!opaqueDesc.Properties.Tags.Set(*surface, *opaque)) return false;
+    auto twoSidedDesc = opaqueDesc;
+    if (!twoSidedDesc.Properties.Tags.Set(*outline, *enabled)) return false;
+    auto& twoSided = twoSidedDesc.Properties.RenderState;
     twoSided.Cull = render::CullMode::None;
     twoSided.Stencil = render::StencilState::Default();
     twoSided.Stencil->Front.PassOp = twoSided.Stencil->Back.PassOp = render::StencilOperation::Replace;
     twoSided.StencilReference = 7;
-    TransparentResource = OpaqueResource;
-    if (!TransparentResource.Properties.Tags.Set(*surface, *transparent)) return false;
-    auto& translucent = TransparentResource.Properties.RenderState;
+    auto transparentDesc = opaqueDesc;
+    if (!transparentDesc.Properties.Tags.Set(*surface, *transparent)) return false;
+    auto& translucent = transparentDesc.Properties.RenderState;
     translucent.DepthWriteEnable = false;
     translucent.Blend = render::BlendState{
         {render::BlendFactor::SrcAlpha, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add},
         {render::BlendFactor::One, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add}};
+    const auto a = Assets->CreateMaterial(opaqueDesc), b = Assets->CreateMaterial(twoSidedDesc), c = Assets->CreateMaterial(transparentDesc);
+    if (!a || !b || !c) return false;
+    OpaqueMaterial = *a;
+    TwoSidedMaterial = *b;
+    TransparentMaterial = *c;
     RADRAY_INFO_LOG("材质标签登记：Surface=Opaque / Transparent，Outline=Enabled；描边物体写模板 7，透明材质启用 alpha 混合并关闭深度写入");
 
     return true;
@@ -130,45 +98,52 @@ bool GpuFrameResources::Initialize(const GpuResources& shared) {
     return CompletionFence.HasValue();
 }
 
-bool GpuResources::CreatePipelines(const VertexInput& input, const MaterialResource& resource) {
+bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material) {
     // 步骤 M4：材质程序 + 材质性质 + 顶点输入 + Pass 状态，形成具体 PSO。
     // 为什么：材质提供状态默认值；Depth/Outline 明确覆盖状态，Color/Transparent 沿用材质，附件格式由 Pass 补充。
     // UE5 对照：Renderer/Private/DepthRendering.cpp 的 FDepthPassMeshProcessor::Process；
     // Renderer/Public/MeshPassProcessor.inl 的 BuildMeshDrawCommands 组装 GraphicsPSOInitializer。
     // 本例简化：启动时按已知标签准备有限的 PSO；实际 Batch 是否参与仍由 Processor 判断，不提供通用 PSO 缓存。
-    const auto depthIndex = resource.FindProgram("Depth");
-    const auto colorIndex = resource.FindProgram("Color");
+    const auto resource = Assets->Get(material);
+    if (!resource) return false;
+    const auto depthIndex = resource->FindProgram("Depth");
+    const auto colorIndex = resource->FindProgram("Color");
     if (!depthIndex || !colorIndex) {
         RADRAY_ERR_LOG("样例材质需要 Depth/Color 程序；Surface 标签由 Processor 筛选");
         return false;
     }
-    const auto& depthProgram = *resource.GetProgram(*depthIndex);
-    const auto& colorProgram = *resource.GetProgram(*colorIndex);
-    if (!depthProgram.Layout || !depthProgram.VertexShader || depthProgram.VertexEntry.empty() || depthProgram.PixelShader ||
-        !colorProgram.Layout || !colorProgram.VertexShader || colorProgram.VertexEntry.empty() ||
-        !colorProgram.PixelShader || colorProgram.PixelEntry.empty() ||
-        depthProgram.Layout != colorProgram.Layout || depthProgram.VertexShader != colorProgram.VertexShader ||
-        depthProgram.VertexEntry != colorProgram.VertexEntry) {
-        RADRAY_ERR_LOG("样例材质程序无效，Depth/Color 程序必须共享布局和顶点位置计算");
-        return false;
-    }
+    const auto& depthProgram = *resource->GetProgram(*depthIndex);
+    const auto& colorProgram = *resource->GetProgram(*colorIndex);
+    const auto depthShader = Assets->Get(depthProgram.Shader), colorShader = Assets->Get(colorProgram.Shader);
+    if (!depthShader || !colorShader) return false;
+    const auto vs = depthShader->GetStage(depthProgram.VariantIndex, render::ShaderStage::Vertex);
+    const auto colorVs = colorShader->GetStage(colorProgram.VariantIndex, render::ShaderStage::Vertex);
+    const auto ps = colorShader->GetStage(colorProgram.VariantIndex, render::ShaderStage::Pixel);
+    if (!vs || !colorVs || !ps || vs->Target != colorVs->Target || !depthProgram.PixelEntry.empty()) return false;
+    const auto layout = LayoutCache->Acquire(depthShader->GetLayoutDesc());
+    const auto colorLayout = LayoutCache->Acquire(colorShader->GetLayoutDesc());
+    if (!layout || !colorLayout || layout.Get() != colorLayout.Get()) return false;
+    for (const auto& group : layout->GetDesc().Groups)
+        if (group.GroupSlot == 0) {
+            if (PassGroupLayout && PassGroupLayout.Get() != group.Layout) return false;
+            PassGroupLayout = group.Layout;
+        }
+    if (!PassGroupLayout) return false;
     auto& device = Device->GetDevice();
-    vector<render::VertexAttribute> attributes;
-    for (const auto& attribute : input.Attributes) {
-        attributes.push_back({attribute.BufferBinding, attribute.Offset, attribute.Semantic,
-                              attribute.SemanticIndex, attribute.Format, attribute.Location});
-    }
+    ResolvedVertexInputState depthInput, colorInput;
+    if (!PrepareMaterialVertexInput(*depthShader->GetVariantInterface(depthProgram.VariantIndex), input, depthInput) ||
+        !PrepareMaterialVertexInput(*colorShader->GetVariantInterface(colorProgram.VariantIndex), input, colorInput)) return false;
     auto primitive = render::PrimitiveState::Default();
-    const auto& state = resource.Properties.RenderState;
+    const auto& state = resource->GetProperties().RenderState;
     primitive.Cull = state.Cull;
     primitive.UnclippedDepth = false;
     auto depth = render::DepthStencilState::Default();  // Depth Pass：Less、测试/写入开启、模板关闭。
     depth.Format = render::TextureFormat::D32_FLOAT_S8_UINT;
     depth.DepthBias = state.DepthBias;
     render::GraphicsPipelineStateDescriptor descriptor{
-        .PipelineLayout = depthProgram.Layout.Get(), .VS = render::ShaderEntry{depthProgram.VertexShader.Get(), depthProgram.VertexEntry}, .VertexInput = {input.Layouts, attributes}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = render::MultiSampleState::Default()};
-    MaterialPipelines pipelines{&resource};
-    if (resource.Properties.Tags.Matches(OpaqueTag.Key, OpaqueTag.Value)) {
+        .PipelineLayout = layout.Get(), .VS = *vs, .VertexInput = {depthInput.Layouts, depthInput.Attributes}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = render::MultiSampleState::Default()};
+    MaterialPipelines pipelines{material, layout.Get()};
+    if (resource->GetProperties().Tags.Matches(OpaqueTag.Key, OpaqueTag.Value)) {
         pipelines.Depth = device.CreateGraphicsPipelineState(descriptor);
         if (!pipelines.Depth) return false;
     }
@@ -182,12 +157,13 @@ bool GpuResources::CreatePipelines(const VertexInput& input, const MaterialResou
     auto color = render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM);
     color.Blend = state.Blend;
     color.WriteMask = state.ColorWriteMask;
-    descriptor.PS = render::ShaderEntry{colorProgram.PixelShader.Get(), colorProgram.PixelEntry};
+    descriptor.VertexInput = {colorInput.Layouts, colorInput.Attributes};
+    descriptor.PS = *ps;
     descriptor.DepthStencil = depth;
     descriptor.ColorTargets = std::span{&color, 1};
     pipelines.Color = device.CreateGraphicsPipelineState(descriptor);
     if (!pipelines.Color) return false;
-    if (resource.Properties.Tags.Matches(OutlineTag.Key, OutlineTag.Value)) {
+    if (resource->GetProperties().Tags.Matches(OutlineTag.Key, OutlineTag.Value)) {
         // 步骤 M4a：描边 PSO 只保留模板不等于 7 的像素，禁止改写深度和模板。
         // 为什么：Color 已为原物体写入 7；放大的外壳被内部模板挖空，只留下轮廓，深度测试仍遮住被前景挡住的部分。
         // UE5 对照：Renderer/Private/CustomDepthRendering.cpp 的 TryAddMeshBatch 设置模板状态和参考值。

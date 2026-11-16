@@ -1,5 +1,6 @@
-if (NOT RADRAY_BUILD_SHADER_COMPILER)
-    message(FATAL_ERROR "RADRAY_BUILD_SHADER_TOOLS requires RADRAY_BUILD_SHADER_COMPILER")
+if (RADRAY_BUILD_SHADER_TOOLS)
+    add_subdirectory(shader_compile)
 endif()
-
-add_subdirectory(shader_compile)
+if (RADRAY_BUILD_SHADER_REFLECTOR_TOOLS)
+    add_subdirectory(shader_reflect)
+endif()

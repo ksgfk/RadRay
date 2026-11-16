@@ -1,3 +1,4 @@
+#include <radray/shader/shader_metadata_wire.h>
 #include <radray/shader/shader_compiler_contract.h>
 
 #include <cstring>
@@ -12,20 +13,21 @@ constexpr GpuArtifactHash kArtifact{{0x42, 0x17}};
 vector<byte> MakeEnvelope(ShaderTarget target) {
     WireMetadataEnvelope envelope{};
     envelope.Target = static_cast<uint8_t>(target);
+    envelope.StageMask = 1;
     envelope.TotalSize = sizeof(envelope) + 4;
     envelope.Bytecode = {sizeof(envelope), 4};
     envelope.GpuArtifact = kArtifact;
     vector<byte> blob(envelope.TotalSize, byte{0});
-    std::memcpy(blob.data(), &envelope, sizeof(envelope));
+    EncodeShaderMetadataEnvelope(envelope, std::span<byte>{blob}.first(152));
     return blob;
 }
 
 template <typename Mutate>
 vector<byte> PatchEnvelope(vector<byte> blob, Mutate&& mutate) {
     WireMetadataEnvelope envelope{};
-    std::memcpy(&envelope, blob.data(), sizeof(envelope));
+    DecodeShaderMetadataEnvelope(std::span<const byte>{blob}.first(152), envelope);
     mutate(envelope);
-    std::memcpy(blob.data(), &envelope, sizeof(envelope));
+    EncodeShaderMetadataEnvelope(envelope, std::span<byte>{blob}.first(152));
     return blob;
 }
 
@@ -218,7 +220,7 @@ TEST(RadRayShaderContract, EnvelopeRejectsWrongMagic) {
 }
 
 TEST(RadRayShaderContract, EnvelopeRejectsOtherSchemaVersions) {
-    for (const uint16_t schema : {uint16_t{7}, uint16_t{kShaderMetadataSchemaVersion + 1}}) {
+    for (const uint16_t schema : {uint16_t{7}, uint16_t{9}, uint16_t{kShaderMetadataSchemaVersion + 1}}) {
         const auto blob = PatchEnvelope(MakeEnvelope(ShaderTarget::DXIL), [schema](WireMetadataEnvelope& envelope) {
             envelope.SchemaVersion = schema;
         });

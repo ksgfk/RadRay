@@ -1073,12 +1073,16 @@ struct D3D12BindingDescriptor {
     uint32_t Register{0};
     uint32_t Space{0};
     D3D12BufferPlacement Placement{D3D12BufferPlacement::Table};
+
+    friend bool operator==(const D3D12BindingDescriptor&, const D3D12BindingDescriptor&) noexcept = default;
 };
 
 struct VulkanBindingDescriptor {
     uint32_t Set{0};
     uint32_t Binding{0};
     VulkanBufferDescriptorPlacement Placement{VulkanBufferDescriptorPlacement::Regular};
+
+    friend bool operator==(const VulkanBindingDescriptor&, const VulkanBindingDescriptor&) noexcept = default;
 };
 
 /// Numeric ID is group-local. Only the active backend mapping is consumed.
@@ -1090,6 +1094,8 @@ struct BindingDescriptor {
     std::optional<D3D12BindingDescriptor> D3D12{};
     std::optional<VulkanBindingDescriptor> Vulkan{};
     std::optional<SamplerDescriptor> ImmutableSampler{};
+
+    friend bool operator==(const BindingDescriptor&, const BindingDescriptor&) noexcept = default;
 };
 
 /// Input spans are borrowed only until creation returns.
@@ -1107,9 +1113,11 @@ struct PushConstantDescriptor {
     struct D3D12Location {
         uint32_t Register{0};
         uint32_t Space{0};
+        friend bool operator==(const D3D12Location&, const D3D12Location&) noexcept = default;
     };
     struct VulkanLocation {
         uint32_t Offset{0};
+        friend bool operator==(const VulkanLocation&, const VulkanLocation&) noexcept = default;
     };
 
     uint32_t PushId{0};
@@ -1392,7 +1400,7 @@ struct DeviceLimits {
 struct DeviceFeatures {
     bool TimestampQueries{false};
     bool IndirectDraw{false};
-    bool IndirectFirstInstance{false}; // Nonzero firstInstance is enabled for indirect draws.
+    bool IndirectFirstInstance{false};  // Nonzero firstInstance is enabled for indirect draws.
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
     bool IndependentDepthStencilTransitions{false};
