@@ -12,7 +12,7 @@ std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(s
     MaterialParameterBindingMap result;
     for (const auto& group : layout.GetLayoutDesc().Groups)
         if (std::any_of(group.Bindings.begin(), group.Bindings.end(), [&](const auto& entry) {
-                return layout.GetBackend() == render::RenderBackend::D3D12 ? entry.Binding.D3D12.has_value() : entry.Binding.Vulkan.has_value();
+                return layout.GetBackend() == gpu::RenderBackend::D3D12 ? entry.Binding.D3D12.has_value() : entry.Binding.Vulkan.has_value();
             })) result._activeGroups.push_back(group.GroupSlot);
     unordered_set<string> names;
     for (const auto& name : subset) {
@@ -31,7 +31,7 @@ std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(s
             if (!result._constantBlockSize) {
                 const auto buffer = layout.FindBinding(constantBlockName);
                 const auto push = layout.FindPushConstant(constantBlockName);
-                if (buffer && buffer->Kind == render::BindingKind::CBuffer && buffer->ActiveOnDevice)
+                if (buffer && buffer->Kind == gpu::BindingKind::CBuffer && buffer->ActiveOnDevice)
                     result._constantBlockSize = buffer->BufferByteSize;
                 else if (push && push->ActiveOnDevice)
                     result._constantBlockSize = push->Size;
@@ -52,14 +52,14 @@ std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(s
             result._constants.push_back({index, member->AbsoluteOffset, size});
         } else {
             const auto binding = layout.FindBinding(parameter.Name);
-            const bool texture = std::holds_alternative<Nullable<render::TextureView*>>(parameter.DefaultValue);
+            const bool texture = std::holds_alternative<Nullable<gpu::TextureView*>>(parameter.DefaultValue);
             if (!binding || binding->Count != 1 || binding->ImmutableSampler ||
-                (texture ? (binding->Kind != render::BindingKind::Texture && binding->Kind != render::BindingKind::RWTexture)
-                         : binding->Kind != render::BindingKind::Sampler)) {
+                (texture ? (binding->Kind != gpu::BindingKind::Texture && binding->Kind != gpu::BindingKind::RWTexture)
+                         : binding->Kind != gpu::BindingKind::Sampler)) {
                 RADRAY_ERR_LOG("Material resource type mismatch: {}", parameter.Name);
                 return std::nullopt;
             }
-            result._resources.push_back({index, binding->GroupSlot, binding->BindingId, binding->Kind, binding->ActiveOnDevice});
+            result._resources.push_back({index, binding->Reference, binding->Kind, binding->ActiveOnDevice});
         }
     }
     return result;
@@ -88,29 +88,29 @@ bool MaterialParameterBindingMap::WriteConstants(const MaterialRenderProxy& prox
     return true;
 }
 
-bool MaterialParameterBindingMap::BindResources(const MaterialRenderProxy& proxy, uint32_t groupSlot, render::ShaderParameterSet& parameterSet) const noexcept {
+bool MaterialParameterBindingMap::BindResources(const MaterialRenderProxy& proxy, uint32_t groupSlot, gpu::ShaderParameterSet& parameterSet) const noexcept {
 #if RADRAY_IS_DEBUG
     RADRAY_ASSERT(proxy.GetMaterial() == _material);
 #endif
     if (std::find(_activeGroups.begin(), _activeGroups.end(), groupSlot) == _activeGroups.end()) return false;
     for (const auto& target : _resources) {
-        if (!target.ActiveOnDevice || target.GroupSlot != groupSlot) continue;
+        if (!target.ActiveOnDevice || target.Reference.GroupSlot != groupSlot) continue;
         const auto parameter = proxy.GetParameter(target.ParameterIndex);
         if (!parameter) return false;
-        if (target.Kind == render::BindingKind::Sampler) {
-            const auto* sampler = std::get_if<Nullable<render::Sampler*>>(parameter.Get());
+        if (target.Kind == gpu::BindingKind::Sampler) {
+            const auto* sampler = std::get_if<Nullable<gpu::Sampler*>>(parameter.Get());
             if (!sampler || !*sampler) return false;
         } else {
-            const auto* texture = std::get_if<Nullable<render::TextureView*>>(parameter.Get());
+            const auto* texture = std::get_if<Nullable<gpu::TextureView*>>(parameter.Get());
             if (!texture || !*texture) return false;
         }
     }
     for (const auto& target : _resources) {
-        if (!target.ActiveOnDevice || target.GroupSlot != groupSlot) continue;
+        if (!target.ActiveOnDevice || target.Reference.GroupSlot != groupSlot) continue;
         const auto& parameter = *proxy.GetParameter(target.ParameterIndex).Get();
-        if (target.Kind == render::BindingKind::Sampler) {
-            if (!parameterSet.Set(target.BindingId, 0, std::get<Nullable<render::Sampler*>>(parameter).Get())) return false;
-        } else if (!parameterSet.Set(target.BindingId, 0, std::get<Nullable<render::TextureView*>>(parameter).Get()))
+        if (target.Kind == gpu::BindingKind::Sampler) {
+            if (!parameterSet.Set(target.Reference.BindingId, 0, std::get<Nullable<gpu::Sampler*>>(parameter).Get())) return false;
+        } else if (!parameterSet.Set(target.Reference.BindingId, 0, std::get<Nullable<gpu::TextureView*>>(parameter).Get()))
             return false;
     }
     return true;

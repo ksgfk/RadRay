@@ -11,7 +11,7 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 
 | 目录 | 内容 |
 |---|---|
-| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client 和 reflector |
+| `modules/` | core、gpu 契约、gpu_impl 后端、统一 shader、window 和 runtime |
 | `shaderlib/` | HLSL 数学、BSDF、光照共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复与手动包准备、文档检查、编译数据库脚本和 shader compile / reflect CLI |
 | `benchmarks/` | OBJ 解析、SparseSet 压力与 RDG 上传及帧回收基准 |
@@ -31,17 +31,17 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 箭头表示依赖方向，只列自有 target：
 
 ```text
-shader         → core
-window         → core
-shadercompiler → shader, core                 可选
-render         → core
-runtime        → render, shader, core
-shaderreflector → runtime, shader              可选
+gpu       → core                              纯头文件
+gpu_impl  → gpu
+shader    → gpu
+window    → core
+runtime   → gpu_impl, shader
 ```
 
-`radrayshader` 提供 shader wire contract、artifact decoder 与拥有型类型树，不依赖 DXC 或 render。
-可选 `radrayshadercompiler` 通过 RadRay DXC fork extension ABI 提供 discovery 与 typed variant
-compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)。render 接收原始字节码与显式布局，不依赖 shader 或 compiler。
+`RadRay::gpu` 提供枚举、描述符与抽象接口；`RadRay::gpu_impl` 提供设备工厂、校验层和后端实现。
+统一的 `RadRay::shader` 包含编译 client、wire contract、artifact decoder、类型树、布局序列化和家族反射，
+不依赖 gpu_impl 或 runtime。DXC SDK 只用于编译私有实现，调用 client 时才动态加载运行库。
+gpu_impl 接收原始字节码与显式布局，不依赖 shader。发布边界见 [Shader pipeline](shader-pipeline.md)。
 
 ## 文档索引
 
@@ -74,12 +74,12 @@ compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)�
 | Runtime 绘制命令数据 | `modules/runtime/include/radray/runtime/mesh_draw_command.h` |
 | Runtime Pass Processor 与命令输出 Context | `modules/runtime/include/radray/runtime/mesh_pass_processor.h` |
 | Mesh Drawing Pipeline 教学主流程 | `examples/mesh_drawing_pipeline/sample.cpp` |
-| GPU 设备与 RHI | `modules/render/src/rhi.cpp` |
+| GPU 契约与设备工厂 | `modules/gpu/include/radray/gpu/types.h`、`modules/gpu_impl/include/radray/gpu_impl/factory.h` |
 | Shader artifact 解码 | `modules/shader/include/radray/shader/shader_artifact.h` |
-| Shader 家族反射 | `modules/shader_reflector/include/radray/shader_reflector/shader_reflector.h` |
-| Runtime 布局文件、Shader 资产与布局缓存 | `modules/runtime/include/radray/runtime/shader_layout.h`、`shader_asset.h`、`pipeline_layout_cache.h` |
+| Shader 家族反射 | `modules/shader/include/radray/shader/shader_reflector.h` |
+| Shader 布局文件、类型树与成员寻址 | `modules/shader/include/radray/shader/shader_layout.h` |
+| Runtime Shader 资产与布局注册表 | `modules/runtime/include/radray/runtime/shader_asset.h`、`modules/runtime/include/radray/runtime/gpu_pipeline_layout.h`、`modules/runtime/include/radray/runtime/pipeline_layout_registry.h` |
 | Runtime 资产句柄与管理 | `modules/runtime/include/radray/runtime/asset_handle.h`、`asset_manager.h` |
-| Shader 类型树与成员寻址 | `modules/shader/include/radray/shader/shader_type_tree.h` |
-| Compiler client | `modules/shader_compiler/include/radray/shader_compiler/client.h` |
+| Compiler client | `modules/shader/include/radray/shader/client.h` |
 
 当前能力与限制在各子系统页面说明。

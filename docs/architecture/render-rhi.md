@@ -1,15 +1,22 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明显式 RHI layout 契约、所有权与两个后端映射。Shader 编写方式见 [authoring 指南](../guide/shader-authoring.md)
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/external_resource.h`, `modules/render/include/radray/render/backend/vulkan_impl.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/rhi_validation.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/gpu/include/radray/gpu/types.h`, `modules/gpu_impl/include/radray/gpu_impl/external_resource.h`, `modules/gpu_impl/include/radray/gpu_impl/backend/vulkan_impl.h`, `modules/gpu_impl/include/radray/gpu_impl/sampler_cache.h`, `modules/gpu_impl/src/factory.cpp`, `modules/gpu_impl/src/rhi_validation.cpp`, `modules/gpu_impl/src/sampler_cache.cpp`, `modules/gpu_impl/src/d3d12/d3d12_impl.cpp`, `modules/gpu_impl/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
-`radrayrender` 提供后端无关的 RHI（`rhi.h` 中的接口与描述符）、可选 CPU 校验层，以及 D3D12 / Vulkan
-原生实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
+`radraygpu` / `RadRay::gpu` 是依赖 core 的纯头文件契约库，命名空间为 `radray::gpu`。
+公共头 `<radray/gpu/types.h>` 统一提供枚举、flags、格式化、类型查询、描述符、值操作和抽象对象接口，
+不包含原生 SDK 头。
+
+`radraygpu_impl` / `RadRay::gpu_impl` 提供工厂、描述符校验、CPU 校验包装、sampler cache、外部资源扩展与
+D3D12 / Vulkan 实现。`factory.h/.cpp` 提供 `CreateDevice`、`CreateDXGIFactory`、
+`CreateDXGIDiagnosticContext`、`InitVulkanEnv`、`ShutdownVulkanEnv`；接口类没有静态工厂。
+`validation.h/.cpp` 提供完整描述符与设备能力校验。外部资源扩展及 OS 句柄所有权位于 gpu_impl；
+gpu 的 Device 只前置声明扩展并提供查询。两个模块都不知道资产、场景和帧节奏。
 
 ## 可选 RHI 校验
 
-`Device::Create(desc, RhiValidationOptions)` 在创建真实后端后按固定配置决定是否包装。
+`CreateDevice(desc, RhiValidationOptions)` 在创建真实后端后按固定配置决定是否包装。
 `RhiValidationOptions::IsEnabled` 在 Debug（定义 `RADRAY_IS_DEBUG` 且未定义 `NDEBUG`）中默认开启，
 Release、RelWithDebInfo、MinSizeRel 默认关闭；
 调用方可以显式覆盖。`LogCallback` / `LogUserData` 接收 RHI 误用诊断；未提供回调时写项目错误日志。
@@ -17,7 +24,7 @@ Release、RelWithDebInfo、MinSizeRel 默认关闭；
 该开关独立于 D3D12 debug layer、GBV 和 Vulkan validation / synchronization validation。
 
 ```cpp
-auto device = Device::Create(descriptor, {.IsEnabled = true});
+auto device = CreateDevice(descriptor, {.IsEnabled = true});
 // 性能运行显式传 {.IsEnabled = false}。
 ```
 
@@ -39,7 +46,8 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 校验层检查 device 归属与有效性、范围与对齐、usage、录制与 allocator epoch、encoder 配对、
 附件 / PSO 兼容、binding 数字 ID、资源类型、完整 dynamic offsets，以及 CPU 上可检测的父子销毁顺序。
 批量调用全部预检通过才向后端转发；状态在成功后提交，不自动修正录制顺序或补发同步。
-参数与调用顺序校验统一放在 `rhi_validation.cpp`，后端检查保持薄，聚焦原生能力、格式约束与执行结果。
+参数与调用顺序由 `rhi_validation.cpp` 统一校验；可复用的描述符与设备能力检查位于 `validation.cpp`。
+后端检查保持薄，聚焦原生能力、格式约束与执行结果。
 
 `FlushMappedRange` / `InvalidateMappedRange` 要求普通 buffer 当前处于 `Map` / `Unmap` 区间内，
 未映射的调用由 RHI 校验拒绝。`PersistentMap` allocation 在创建时已映射，允许在显式 `Map` 之前或
@@ -124,9 +132,9 @@ HRESULT 检查成功时直接返回，仅失败时查询 `GetDeviceRemovedReason
 
 ### D3D12 / DXGI 诊断通道
 
-诊断实现位于内部 `modules/render/src/d3d12/d3d12_diagnostics.h/.cpp`，没有全局注册表、
+诊断实现位于内部 `modules/gpu_impl/src/d3d12/d3d12_diagnostics.h/.cpp`，没有全局注册表、
 函数内静态实例、全局锁或全局订阅者列表。`RenderLogCallback` 签名不变。
-调用方通过 `DXGIDiagnosticContext::Create()` 创建上下文，并传入
+调用方通过 `CreateDXGIDiagnosticContext()` 创建上下文，并传入
 `DXGIFactoryDescriptor::DiagnosticContext`；启用 debug layer 时缺少上下文会创建失败。
 同进程所有同时存活的验证 Factory **必须显式共享同一个上下文**，包括被 Device 保留的原生 Factory。
 上下文由调用方管理此共享关系，后端不自动发现或合并独立上下文；独立上下文不能隔离原生 DXGI producer。
@@ -199,13 +207,13 @@ APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留�
 
 #### 当前测试的诊断收尾
 
-`modules/render/tests/gpu_test_fixture.h/.cpp` 的 `GpuTest` 通过原生与 RHI 日志回调，
+`modules/gpu_impl/tests/gpu_test_fixture.h/.cpp` 的 `GpuTest` 通过原生与 RHI 日志回调，
 分别记录 `Err` / `Critical` 级别消息数量。`TearDown()` 等待每个已创建设备的 Direct 队列，
 释放设备、DXGI factory/context 或 Vulkan instance，再检查两个计数为零。
 测试可以用 `TakeRhiValidationErrors()` 取走并检查预期的 RHI 诊断；原生错误没有同类豁免接口。
 当前 fixture 不按原生 ID、producer 或 HRESULT 匹配错误，也没有诊断自检 marker。
 `SubmitAndWait` helper 提交后同步等待；局部 GPU 资源的使用仍须在自身析构前结束，不能依赖稍后的 `TearDown()`。
-实际 suite 与后端跳过规则见[render 测试](../guide/build-test.md#render-测试)。
+实际 suite 与后端跳过规则见[gpu_impl 测试](../guide/build-test.md#gpu_impl-测试)。
 
 #### Fence 等待与不可呈现窗口
 
@@ -266,7 +274,7 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 | queue、缓存 sampler、swapchain image 与同步对象 | 从所属 device/cache/swapchain 借用，不转移 owner |
 | graphics/compute encoder | Begin 返回独占 owner，按值交给 End 消费 |
 
-`Device::Create` 创建 RHI device；资源和显式布局通过其纯虚工厂创建，encoder 由 command 开始。`Nullable<unique_ptr<T>>` 表达可能创建失败；`Get()` 借用，`Release()` 转移 owner。
+`CreateDevice` 创建 RHI device；资源和显式布局通过其纯虚工厂创建，encoder 由 command 开始。`Nullable<unique_ptr<T>>` 表达可能创建失败；`Get()` 借用，`Release()` 转移 owner。
 
 `Device` 之所以是 `shared_ptr`：后端实现对象需要回指 device 拿分配器、描述符堆和函数表，
 而 device 的生命周期由调用方管理。RHI 不为每个资源公开共享工厂；调用方可以显式共享
@@ -274,7 +282,7 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 
 **两段式析构**：对象具有幂等的 `Destroy()`，析构函数兜底释放。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
 
-`RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `rhi.h` 中直接返回类型标签外，
+`RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `types.h` 中直接返回类型标签外，
 所有实例操作都是纯虚接口；保留构造、虚析构、静态工厂和无状态辅助函数。
 `RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
 （`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），用于日志和 RHI 校验注册表的对象类型检查。
@@ -312,24 +320,24 @@ Vulkan 一个 storage 持有一个未开启逐 buffer reset 的 command pool，�
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
 ```
 
-`Device::Create` 对它 `std::visit`，分派到 `d3d12::CreateDevice` / `vulkan::CreateDeviceVulkan`。
+`CreateDevice` 对它 `std::visit`，分派到 `d3d12::CreateDevice` / `vulkan::CreateDeviceVulkan`。
 这是全仓库唯一决定**创建哪个后端**的分派点。对应后端未编译时打日志返回 `nullptr`，不尝试
 另一个后端。
 
 Shader 直接通过 `ShaderDescriptor::Source` 接收原始 DXIL 或 SPIR-V 字节码，`Category` 与设备匹配。
-`ShaderEntry` 在 PSO 描述中选择 entry。render 不解码 artifact、不解析反射、不链接 shader/compiler；
-调用方可以使用独立 shader/compiler 模块，也可以提供外部工具生成的合法字节码。
+`ShaderEntry` 在 PSO 描述中选择 entry。gpu_impl 不解码 artifact、不解析反射、不链接 shader/compiler；
+调用方可以使用统一 shader 模块，也可以提供外部工具生成的合法字节码。
 
 编译期开关在 `cmake/Options.cmake`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
-`modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
+`modules/gpu_impl/CMakeLists.txt` 据此追加 `src/d3d12/` 或
 `src/vk/` 的源文件并定义同名宏。公共 `src/*.cpp` 使用非递归 glob，后端目录使用递归 glob；
 均带 `CONFIGURE_DEPENDS`，目录匹配变化会触发 CMake 重新生成。
 
 运行期探测的是**选哪块 GPU**：D3D12 走 DXGI 1.6 的 `EnumAdapterByGpuPreference(HIGH_PERFORMANCE)`
 并回退到枚举评分，Vulkan 按 `VkPhysicalDeviceType` 打分。
 
-Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `InstanceVulkan::InitEnv` /
-`ShutdownEnv` 管理，独立于 `Device`。D3D12 的对应物是 `DXGIFactory::Create`。
+Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `InitVulkanEnv` /
+`ShutdownEnv` 管理，独立于 `Device`。D3D12 的对应物是 `CreateDXGIFactory`。
 `InstanceVulkan::IsValidationEnabled()` 与 `DXGIFactory::IsValidationEnabled()` 报告实际启用的验证状态；
 运行时据此区分验证不可用和后续设备初始化失败。
 Vulkan 初始化会复制应用名和引擎名，保证传给 native API 的字符串以空字符终止。
@@ -368,7 +376,7 @@ Vulkan 的 `IsLayeredRenderingFromVertexShaderSupported` 返回 false；这不�
 固定 descriptor 数组与参数集动态 offsets 继续支持，它们不隐含开启 shader 动态索引。
 调用方提供的 shader 必须满足此启用集：不使用未开启的 SPIR-V capability，storage image 使用合法显式格式，
 或在 `shaderStorageImageWriteWithoutFormat` 已启用时使用 Unknown 格式写入并满足实际格式的支持要求；
-buffer 布局遵从未开启额外 layout feature 时的规则；render 不反射或改写字节码来补足能力。
+buffer 布局遵从未开启额外 layout feature 时的规则；gpu_impl 不反射或改写字节码来补足能力。
 
 sampler 创建、RHI 校验、间接绘制和 UAV stage 报告读取 Enabled，而非硬件 Supported。
 未启用 `multiDrawIndirect` 时拆成单 draw；未启用 `drawIndirectFirstInstance` 时，间接参数的 firstInstance 必须为零。
@@ -424,7 +432,7 @@ Vulkan 映射包含 Set、Binding、Regular/Dynamic placement。一个组的全�
 `ShaderParameterValue` 为 buffer、typed buffer、texture view、sampler 的 variant。
 `ShaderBufferBinding` 携带 buffer range 和 structured stride；typed buffer 使用独立
 `ShaderTexelBufferBinding`，同时携带格式；raw buffer 的 stride 为 0。Set 只更新指定数组元素。
-`ImmutableSampler` 直接持有 render 自有 `SamplerDescriptor`，归组布局，不能通过 Set 覆盖。
+`ImmutableSampler` 直接持有 gpu 契约中的 `SamplerDescriptor`，归组布局，不能通过 Set 覆盖。
 固定与普通 sampler 使用相同 filter/address/LOD/bias/anisotropy/compare/border/reduction 语义；
 Vulkan 支持合法的 unnormalized coordinates 与整数 border，D3D12 拒绝这两种配置；D3D12 mirror-clamp 映射为 MIRROR_ONCE。
 普通、缓存、immutable sampler 在可选校验层复用相同参数检查：枚举、有限 LOD/bias、LOD 范围、anisotropy 上限，
@@ -499,7 +507,7 @@ independent blend 和 dual-source blend，并检查保守光栅化扩展；不�
 RHI 暂无动态设置入口。D3D12 多颜色附件启用 independent blend，使每个附件自己的 blend 和 write mask 生效；
 write mask 支持 RGBA 的所有子集。
 
-VB 与 PSO 的可移植绑定顺序以 `rhi.h` 的 `GraphicsCommandEncoder::BindVertexBuffers` 契约为准。
+VB 与 PSO 的可移植绑定顺序以 `types.h` 的 `GraphicsCommandEncoder::BindVertexBuffers` 契约为准。
 D3D12 不保存 VB 绑定缓存；每次绑定从当前 PSO 取得 stride 并直接下发。校验层拒绝未先绑定 PSO 的调用。
 切换 PSO 时不自动重新下发 VB。
 Vulkan 的 VB 绑定同样不保存去重缓存，每次合法调用都直接下发。
@@ -576,7 +584,7 @@ D3D12 的 `ResolveTexture` 只允许 Direct command list，并要求格式支持
 当前 timestamp query pool 使用普通 TIMESTAMP heap，仅支持 Direct / Compute，Copy queue 上的查询操作由
 校验层拒绝。
 
-`RenderPassBeginDescriptor::AllowUavWrites` 是执行期开关，不属于 render pass/graphics PSO compatibility
+`RenderPassBeginDescriptor::AllowUavWrites` 是执行期开关，不属于 gpu_impl pass/graphics PSO compatibility
 事实。D3D12 将它映射到
 [`D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES`](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_render_pass_flags)；
 Vulkan 传统 render-pass 路径不需要对应 begin flag，写阶段是否合法由 device capabilities 与 barrier
@@ -585,7 +593,7 @@ Vulkan 传统 render-pass 路径不需要对应 begin flag，写阶段是否合�
 ## 资源状态：显式 barrier，无自动推导
 
 `ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>`，
-调用方给出 before/after 状态。render 层**不做** per-resource 状态跟踪，初始状态在创建时固化
+调用方给出 before/after 状态。gpu_impl 层**不做** per-resource 状态跟踪，初始状态在创建时固化
 （buffer 按 memory type 映射；D3D12 texture 使用 COMMON，Vulkan image 使用 UNDEFINED layout）。Buffer/Texture barrier 均不支持跨队列
 ownership transfer；Vulkan 的源/目标 queue family 均为 `VK_QUEUE_FAMILY_IGNORED`。
 
@@ -650,10 +658,10 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 
 | 后端 | zone 边界 | 原因 |
 |---|---|---|
-| Vulkan | 每个 debug group 一个 zone | `vkCmdWriteTimestamp` 在 render pass 内合法；`Begin()` 时回收查询槽 |
-| D3D12 | render pass 外的 group 一个 zone；render pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
+| Vulkan | 每个 debug group 一个 zone | `vkCmdWriteTimestamp` 在 gpu_impl pass 内合法；`Begin()` 时回收查询槽 |
+| D3D12 | gpu_impl pass 外的 group 一个 zone；gpu_impl pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
 
-因此 D3D12 同一原生 render pass 内的嵌套 group 不产生独立 GPU zone；`Submit()` 后收集已完成的时间戳。
+因此 D3D12 同一原生 gpu_impl pass 内的嵌套 group 不产生独立 GPU zone；`Submit()` 后收集已完成的时间戳。
 Tracy on-demand 未连接时不发出 zone timestamp；连接时每个 zone 发出两个 timestamp，D3D12 另有一次
 `ResolveQueryData`。Vulkan 通过 `vkGetQueryPoolResults` 批量收集，并重置已回收的 query 区间，不逐 zone 录制 resolve。
 RDG 上传按 execution group 记录 zone，逐节点 CPU 诊断仍保留，见 [RDG 上传](runtime.md#上传与资源状态)。
@@ -835,7 +843,7 @@ Vulkan 分两步录制本地 layout 转换与 `VK_QUEUE_FAMILY_EXTERNAL` ↔ 当
 D3D12 句柄的四种后端组合与 opaque Vulkan→Vulkan 都有原生代码路径，成功与否由运行时决定。
 能力查询通过后的数据错误必须判失败；定位时仍需逐项排查应用契约、runtime、隐式层和驱动，不能仅凭 validation 无错误归因于驱动。
 `Routes/ExternalResourceTest` 在同一进程内覆盖四种后端组合的 buffer 与 2D RGBA8 纹理往返，能力查询不支持时跳过；
-覆盖范围见[render 测试](../guide/build-test.md#render-测试)。
+覆盖范围见[gpu_impl 测试](../guide/build-test.md#gpu_impl-测试)。
 
 ### 互操作规范边界
 
@@ -943,7 +951,7 @@ object 的信号并永久 RetryLater。调用方仍须在撤销/重配前排空 
 `SetViewport(Viewport)` 在 D3D12 直填 `D3D12_VIEWPORT`，在 Vulkan 直填 `VkViewport`，
 **两边都不做 Y 翻转**。所以 `Viewport` 的语义是"原点在左上"，与 D3D 一致。
 `Viewport` 与裁剪用的 `Rect` 定义在 `modules/core/include/radray/viewport.h`。
-`PrimitiveTopology` 定义在 `rhi.h` 的枚举区，成员名和 `int32_t` 底层类型保持稳定。
+`PrimitiveTopology` 定义在 `types.h` 的枚举区，成员名和 `int32_t` 底层类型保持稳定。
 
 Vulkan 的 NDC Y 轴朝下，要得到与 D3D12 一致的画面，处理它是**调用方的责任**——在投影矩阵里
 翻，或者传一个负 `Height` 的 viewport。RHI 刻意不替你决定，因为这两种做法对
@@ -958,9 +966,9 @@ front-face winding 的影响不同。
 和 PSO 兼容语义不变。Framebuffer 在 device 初始化时按 Enabled 固定为 imageless 或传统模式，
 不新增公共模式开关；独立 depth/stencil layouts 同样读取 Enabled，不启用 dynamic rendering 或 synchronization2。
 
-公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、render area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
+公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、gpu_impl area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
 
-PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；resolve 也不进入光栅化签名，同一 PSO 可用于兼容的有/无 resolve pass。只读 aspect 必须 Load + Store，拒绝 Clear/Discard，PSO 按 depth/stencil 分别检查写入。pass 没有重复的 ReadOnly 字段；DSV flags、原生 render pass flags 和布局从 view 权限推导。
+PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；resolve 也不进入光栅化签名，同一 PSO 可用于兼容的有/无 resolve pass。只读 aspect 必须 Load + Store，拒绝 Clear/Discard，PSO 按 depth/stencil 分别检查写入。pass 没有重复的 ReadOnly 字段；DSV flags、原生 gpu_impl pass flags 和布局从 view 权限推导。
 
 `CommandBuffer::BeginRenderPass(desc)` 经可选校验后获取原生对象并开始录制，无独立准备阶段或 token。
 未处于 recording、已有 active encoder、附件校验或原生对象获取失败时返回 `nullptr`，不录制 clear/Begin，
@@ -1000,7 +1008,7 @@ DS 附件的可选 `DepthStencilResolveDescriptor` 携带完整 DS 目标 view �
 至少一个模式非 None，缺失 aspect 必须为 None。`QueryAttachmentResolveSupport(format, samples)` 返回颜色 Average、
 DS 模式集合及 IndependentResolve/IndependentResolveNone 组合约束；调用方选择模式，后端不替换或模拟。
 源/目标 view 格式、mip 尺寸和 view 层数必须相同，源 MSAA、目标单采样；目标为 RenderTarget 或完整可写 DepthWrite view，
-不得与当前其他附件非法重叠。resolve 覆盖 pass render area、同坐标目标，无独立目标偏移。
+不得与当前其他附件非法重叠。resolve 覆盖 pass gpu_impl area、同坐标目标，无独立目标偏移。
 
 附件 resolve 与 `ResolveTexture` 独立命令不同：源保持附件状态，目标由调用方准备 `AttachmentResolveDestination`，
 不能用独立命令的 ResolveDestination 替代。End 不转换为 ShaderRead。DS 目标覆盖的两种 aspects 都必须显式准备目标状态；
@@ -1009,9 +1017,9 @@ None 保留内容，不恢复其此前资源状态。
 | 对象 | pass 完成后的内容保证 |
 |---|---|
 | 源 Store | 保留所选 aspect 的全部 MSAA samples |
-| 源 Discard | render area 内不保证，但 resolve 必须先读取有效源；后端可以保留更多 |
-| resolve 目标 | 保存 render area 内结果，无目标 Discard 选项 |
-| render area 外 | 保留源和目标原内容；调用方先初始化，不能用 Undefined 放弃内容 |
+| 源 Discard | gpu_impl area 内不保证，但 resolve 必须先读取有效源；后端可以保留更多 |
+| resolve 目标 | 保存 gpu_impl area 内结果，无目标 Discard 选项 |
+| gpu_impl area 外 | 保留源和目标原内容；调用方先初始化，不能用 Undefined 放弃内容 |
 | 目标 None aspect | 整个所选子资源内容不变 |
 | 源未 resolve aspect | 继续遵守其自身 Load/Store |
 
@@ -1039,7 +1047,7 @@ Reset/释放前已提交工作必须真实完成，失败的 Begin 不留下 pin
 每章以 `// == 章节名 ==` 开头。跳转：
 
 ```
-rg -n '^// == ' modules/render/src/d3d12/d3d12_impl.cpp modules/render/src/vk/vulkan_impl.cpp
+rg -n '^// == ' modules/gpu_impl/src/d3d12/d3d12_impl.cpp modules/gpu_impl/src/vk/vulkan_impl.cpp
 ```
 
 两份实现的大致顺序一致：辅助函数与适配器/物理设备选择 → 描述符堆与分配器 → 环境对象与
@@ -1077,8 +1085,8 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 | `test_swapchain.cpp` | `SwapChainBackBufferTest`：D3D12/Vulkan 获取前准备视图、图像身份、越界与重建后重新准备 |
 | `test_vulkan_swapchain.cpp` | `VulkanSwapChainRetirement`、`VulkanSwapChainWindowTest` |
 
-各 suite 的覆盖内容、GPU 测试环境变量与跳过规则见[render 测试](../guide/build-test.md#render-测试)。
-GPU 用例以读回内容断言行为，使用 `modules/render/tests/data/` 中的 HLSL 编译出的 stage 字节码和手写布局；
+各 suite 的覆盖内容、GPU 测试环境变量与跳过规则见[gpu_impl 测试](../guide/build-test.md#gpu_impl-测试)。
+GPU 用例以读回内容断言行为，使用 `modules/gpu_impl/tests/data/` 中的 HLSL 编译出的 stage 字节码和手写布局；
 artifact/contract 测试归 shader 模块。生产对象不添加测试计数。
 
 `DeviceDetail` 的 `GpuName`、`VendorId`、`DriverVersion` 和 `IsSoftware` 来自已选设备，查询不要求启用外部资源共享。驱动版本字符串由后端提供，Vulkan 使用原生版本整数的十进制表示。

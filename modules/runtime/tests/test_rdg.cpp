@@ -16,7 +16,7 @@
 
 using namespace radray;
 using namespace radray::test;
-using namespace radray::render;
+using namespace radray::gpu;
 
 namespace {
 

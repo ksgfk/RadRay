@@ -78,5 +78,18 @@ TEST(HashTest, HashData128DependsOnInput) {
     EXPECT_NE(HashData128(first, sizeof(first)), HashData128(second, sizeof(second)));
 }
 
+TEST(HashTest, HashHexListsBytesInOrder) {
+    Hash128 hash{};
+    for (uint8_t index = 0; index < hash.Bytes.size(); ++index) {
+        hash.Bytes[index] = index;
+    }
+
+    EXPECT_EQ(hash.ToHex(), "000102030405060708090a0b0c0d0e0f");
+}
+
+TEST(HashTest, HashData128PreservesXxh3ByteOrder) {
+    EXPECT_EQ(HashData128("", 0).ToHex(), "7f498d4624c30160d8984701d306aa99");
+}
+
 }  // namespace
 }  // namespace radray

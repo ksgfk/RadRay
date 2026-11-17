@@ -4,8 +4,8 @@
 
 # Rendering runtime
 
-`RadRay::runtime` 是 C++20 静态库，实际 target 为 `radrayruntime`，公共依赖 `RadRay::render`、`RadRay::shader`，
-并通过它们依赖 core。公共类型位于 `namespace radray`，RHI 类型位于 `radray::render`。
+`RadRay::runtime` 是 C++20 静态库，实际 target 为 `radrayruntime`，公共依赖 `RadRay::gpu_impl`、`RadRay::shader`，
+并通过它们依赖 core。公共类型位于 `namespace radray`，RHI 类型位于 `radray::gpu`。
 构建开关与包消费见[构建与测试](../guide/build-test.md#runtime-构建)。
 
 当前模块包含 `gpu_env.h/.cpp` 中的 `Environment`、`gpu_device.h/.cpp` 中的 `DeviceContext`，
@@ -26,9 +26,8 @@
 | `material_tag.h` | `MaterialTagId`、`MaterialTag`、`MaterialTagTable`、`MaterialTagSet` | 有 |
 | `material.h` | `MaterialRenderState`、`MaterialProperties`、`MaterialShaderProgram`、`MaterialAsset`、`MaterialAssetDesc`、`MaterialParameterValue`、`MaterialParameter`、`MaterialInstance`、`MaterialRenderProxy` | 有 |
 | `vertex_input.h` | 几何描述、`ValidateVertexInputLayout`、`ResolveVertexInputState` | 有 |
-| `shader_layout.h` | CPU 布局与变体接口描述、校验、JSON/Binary | 有 |
 | `shader_asset.h` | `ShaderAsset`、内存与离线索引加载 | 有 |
-| `pipeline_layout_cache.h` | `PipelineLayoutCache`、原生组和完整布局缓存 | 有 |
+| `gpu_pipeline_layout.h`、`pipeline_layout_registry.h` | `GpuPipelineLayout` 持有原生布局，`PipelineLayoutRegistry` 按签名复用组布局和完整布局 | 有 |
 | `asset_handle.h` | `AssetHandle<T>` | 无 |
 | `asset_manager.h` | `AssetManager`、Shader/Material 资产登记与查询 | 有 |
 | `material_parameter_binding_map.h` | `MaterialParameterBindingMap`、常量写入与资源绑定 | 有 |
@@ -117,10 +116,10 @@ Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
 分配和构造异常原样传播，失败对象不登记，其存储留到槽回收；成功的嵌套对象仍由该槽清理。
 对象析构必须 noexcept；构造和清理期间不得重入槽回收或调度器。
 
-转移 `unique_ptr` 所有权即可延迟释放 GPU 资源，例如已成功创建的 `unique_ptr<render::Buffer> buffer`：
+转移 `unique_ptr` 所有权即可延迟释放 GPU 资源，例如已成功创建的 `unique_ptr<gpu::Buffer> buffer`：
 
 ```cpp
-auto* owner = slot.Emplace<unique_ptr<render::Buffer>>(std::move(buffer));
+auto* owner = slot.Emplace<unique_ptr<gpu::Buffer>>(std::move(buffer));
 auto* borrowedBuffer = owner->get();
 ```
 
@@ -287,7 +286,7 @@ Build、Prepare、Record 不修改已提交状态。状态不表示全部区域�
 
 `UploadBuffer(handle, offset, source)` 声明 Device 目标的 GPU Copy 或 Upload 目标的 HostWrite。
 `UploadTexture(handle, region, RDGTextureUploadSource)` 支持非压缩颜色 2D/2DArray 的 mip、array layer 和局部区域。
-region 直接使用 `render::TextureRegion2D`；Prepare 确定 staging offset/pitch 后，Record 将它与目标区域组合成 RHI 复制描述。
+region 直接使用 `gpu::TextureRegion2D`；Prepare 确定 staging offset/pitch 后，Record 将它与目标区域组合成 RHI 复制描述。
 CPU 源 pitch 与 staging pitch 独立；Borrow/Owned 逐行只复制有效像素，Generated 的 WriteContext 提供最终 RowPitch、RowBytes、Rows。
 源 pitch 不需要满足设备对齐，staging 的 pitch/placement 按设备约束与像素大小的公倍数对齐。
 上传默认不是图根；必须完成的初始化显式 MarkOutput。裁剪不会将请求自动排回下一帧。
@@ -301,7 +300,7 @@ Write 接收最终映射区间，不能改变尺寸、图拓扑或登记新上�
 ### 每槽 UploadArena
 
 Pipeline 每槽独占 UploadArena，页首次存活分配时才创建并持久 Map；页大小默认 1 MiB，可由 Pipeline 构造参数指定。
-页直接持有 `render::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
+页直接持有 `gpu::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
 Reset 保留映射；Clear 和析构先 Unmap 再释放页。新增页创建或映射失败时，已有页及返回的切片保持有效。
 一次分配不跨页，空间不足追加页，本帧已使用的 buffer、offset、写指针不搬移，不复制旧页。
 页同时考虑 copy、CBuffer、storage/texel、index 对齐；CBuffer 的物理保留范围覆盖后端描述符 padding。
@@ -385,7 +384,7 @@ PassData 显式持有，Record 是 `bool(const T&, Context&) noexcept` 函数指
 frame/slot id 和只读可见命令，不提供可变 GetSlot。
 借用输入保持到消费完成，PassData 析构不得访问已结束的外部借用。
 
-资源分为导入的 `render::Texture*` / `Buffer*` 与按完整描述符声明的瞬态资源。导入需要真实 `initialState`，可选 `finalState`；
+资源分为导入的 `gpu::Texture*` / `Buffer*` 与按完整描述符声明的瞬态资源。导入需要真实 `initialState`，可选 `finalState`；
 同一物理对象重复导入会合并句柄，初态和显式终态冲突时编译失败。GPU 对象的 owner 仍由调用方持有，必须活到引用它的命令存储重置；
 外部附件 View 可通过 `WriteColor` / `SetDepthStencil` 的 `explicitView` 传入，目标必须与导入资源一致。
 状态与依赖按整个资源追踪，Texture barrier 使用 `SubresourceRange::AllSub()`，Pass 访问接口不接受子资源范围。
@@ -395,7 +394,7 @@ frame/slot id 和只读可见命令，不提供可变 GetSlot。
 Raster 通过 `WriteColor` / `SetDepthStencil` 声明附件，颜色槽从 0 连续排列，至少有一个附件，各附件有效尺寸、层数和采样数一致。
 自动 View 使用首个 mip；显式 View 可选择附件子资源，但状态仍按整个资源同步。
 只读深度/模板 aspect 必须 Load / Store；丢弃 Store 使用 `StoreAction::Discard`。
-Buffer 的导入边界、读取状态与瞬态池 LastState 使用 `render::BufferStates`。只读状态组合逐位要求相应 Usage：
+Buffer 的导入边界、读取状态与瞬态池 LastState 使用 `gpu::BufferStates`。只读状态组合逐位要求相应 Usage：
 Raster 允许 `Vertex | Index | CBuffer | ShaderRead | Indirect` 的非空子集，Compute 允许 `CBuffer | ShaderRead | Indirect` 的非空子集；Copy 读取使用 CopySource。
 同一 Pass 多次 ReadBuffer 的纯只读状态自动按位合并。单独 UnorderedAccess 仍支持只读、写和读写，不能与其他位混合；
 Undefined、Common、CopyDestination、HostRead、HostWrite 也只允许单态。导入边界可使用包括 CopySource 的纯只读组合。
@@ -580,7 +579,7 @@ Scene 入口在所有配置下检查关联与几何；Processor helper 与提交
 可用 `LocalBounds.Transform(LocalToWorld)` 得到世界空间 AABB，Scene 不自动维护其副本。
 空盒、包含/相交和扩展操作的契约见 [Core 数学](core-facilities.md#数学)。
 
-例如，已由外部准备好 `VertexInput cubeVertices` 和 `render::Buffer& cubeIndices` 后，
+例如，已由外部准备好 `VertexInput cubeVertices` 和 `gpu::Buffer& cubeIndices` 后，
 可用下面的数据组织一个顶面金属、其余五面木头的立方体。假定索引缓冲按木头 30 个索引、金属 6 个索引排列，
 索引宽度为 4 字节，立方体本地坐标范围为 [-0.5, 0.5]。木头和金属实例由调用方准备：
 
@@ -589,7 +588,7 @@ Scene 入口在所有配置下检查关联与几何；Processor helper 与提交
 #include <radray/runtime/mesh_batch.h>
 
 // scene must stop referencing cubeVertices and cubeIndices before they are destroyed.
-void AddCube(Scene& scene, const AssetManager& assets, const VertexInput& cubeVertices, render::Buffer& cubeIndices,
+void AddCube(Scene& scene, const AssetManager& assets, const VertexInput& cubeVertices, gpu::Buffer& cubeIndices,
              const MaterialInstance& wood, const MaterialInstance& metal) {
     MaterialRenderProxy woodProxy, metalProxy;
     if (!woodProxy.Update(assets, wood)) return;
@@ -625,17 +624,8 @@ void AddCube(Scene& scene, const AssetManager& assets, const VertexInput& cubeVe
 
 ## Shader 资产、布局与缓存
 
-`shader_layout.h/.cpp` 提供纯 CPU 的 `ShaderPipelineLayoutDesc`、`ShaderProgramInterfaceDesc` 和
-`ShaderFamilyLayoutDesc`。绑定与 push constant 使用 RHI 描述，拥有型类型表使用
-`shader::ShaderTypeRecord`；顶点签名使用 `shader::ShaderVertexComponentType`。
-类型校验和 `FindShaderTypeMember` 位于 shader 的 `shader_type_tree.h/.cpp`，不依赖 render 或 DXC。
-成员路径支持 `a.b[i].c`，返回绝对偏移、数组和矩阵步长及 padding 信息。
-
-三类布局描述保留版本 1 的 JSON/Binary 读写，失败不改变输出；二进制显式编码小端字段。
-原有顶点类型编号 Float=0、Sint=1、Uint=2 和 JSON 的 Sint/Uint 名称保持不变，读写时显式映射到 shader 枚举。
-校验覆盖名称/ID 唯一、原生映射冲突、数量、溢出、类型引用和跨度及变体引用。
-绑定和 push constant 共用全局名称空间；结构体成员仅在所属结构内唯一。
-类型跨度见 [Shader pipeline](shader-pipeline.md#artifact-wire)。
+runtime 消费 shader 模块的拥有型布局与变体接口；描述、验证和序列化契约见
+[Shader 布局](shader-pipeline.md#shader-布局)。runtime 负责 GPU 资产、布局注册表与材质绑定。
 
 ### ShaderAsset 与离线加载
 
@@ -645,16 +635,21 @@ void AddCube(Scene& scene, const AssetManager& assets, const VertexInput& cubeVe
 另一个后端的 stage 文件不必部署。非法索引、重复 stage、缺少当前后端必需 stage 或创建 Shader 失败时不发布资产。
 runtime 不调用 DXC，也不在加载时重新反射 artifact。离线产物入口见 [家族反射](shader-pipeline.md#家族反射)。
 
-ShaderAsset 不引用布局缓存，也不保存原生 PipelineLayout/BindingGroupLayout。
-`GetVariantInterface` 返回当前后端接口，`GetStage` 返回包含 Shader 指针和入口视图的 `render::ShaderEntry`。
-`FindBinding`、`FindPushConstant`、`FindBufferMember` 查询 CPU 描述；前两者提供 ActiveOnDevice。
+ShaderAsset 不引用布局注册表，也不保存原生 PipelineLayout/BindingGroupLayout。
+`GetLayoutDesc()` 返回共享的 `shader::ShaderPipelineLayoutDesc`。`GetVariantInterface(variant)` 按变体索引和当前后端
+返回 `shader::ShaderVariantTargetInterfaceDesc` 的可空只读指针。`GetStage` 返回包含 Shader 指针和入口视图的 `gpu::ShaderEntry`。
+`FindBinding`、`FindPushConstant`、`FindBufferMember` 查询 CPU 描述；前两者分别返回可选的 `radray::ShaderBindingLocation`
+和 `radray::ShaderPushConstantLocation`，其 `ActiveOnDevice` 表示当前后端是否有映射。
+这两个查询结果由 `radray/runtime/shader_asset.h` 提供。迁移原 `shader::` 查询结果时使用 runtime 类型；
+绑定查询与材质资源目标共用 `shader::ShaderBindingReference`，通过 `Reference.GroupSlot` 和
+`Reference.BindingId` 读取组槽和组内 ID。
 借用的指针和入口字符串不得跨所属资产的搬移或销毁保存。
 
-### PipelineLayoutCache
+### PipelineLayoutRegistry
 
-`PipelineLayoutCache` 显式借用一台 Device，单线程串行调用，无全局状态。
-创建 PSO 的调用方使用 `cache.Acquire(shader.GetLayoutDesc())` 获取原生布局，按
-`layout->GetDesc().Groups` 取得各 GroupSlot 的组布局并创建参数集；Shader 加载不触发该操作。
+`PipelineLayoutRegistry` 显式借用一台 Device，单线程串行调用，无全局状态。
+创建 PSO 的调用方使用 `registry.Acquire(shader.GetLayoutDesc())` 取得 `GpuPipelineLayout` 的共享句柄，
+通过 `GetLayout()` 借用原生布局，通过 `GetGroupLayout(groupSlot)` 独立持有组布局并创建参数集；Shader 加载不触发该操作。
 
 组 key 按 BindingId 排序，只包含当前后端映射的 BindingDescriptor，不含名称、类型树或块成员信息。
 完整布局 key 为排序后的 `(GroupSlot, 组布局对象)` 与 push constant 描述。
@@ -662,9 +657,11 @@ ShaderAsset 不引用布局缓存，也不保存原生 PipelineLayout/BindingGro
 Stages 属于 key，不同阶段可见性会生成不同条目。共享组的 CPU 参数 ABI 兼容性由调用方保证。
 GroupSlot 独立于 space/set；过滤后空组不创建。
 
-缓存拥有条目，地址稳定，无驱逐或 Clear，不做引用计数。
-Device 必须晚于缓存销毁；缓存必须晚于借用布局的 PSO、参数集和在途命令销毁。
-缓存析构不等待 GPU，先销毁完整布局再销毁组布局。
+注册表的两个索引只持有弱引用。完整布局持有各组的强引用，最后一个使用者释放时销毁相应原生对象。
+完整布局先销毁原生 pipeline layout，再释放组。查找时清理所在桶的过期项，每级累计到阈值时清扫所有桶，
+阈值初始为 64，清扫后取 64 与存活项数两倍中的较大值。
+句柄可以晚于注册表销毁。调用方须保证布局覆盖借用它的 PSO、参数集、已录制命令及 GPU 在途使用，
+提交完成由 fence 确认。Device 必须晚于注册表和所有句柄销毁。
 
 ### 资产登记与生命周期
 
@@ -678,7 +675,7 @@ Scene 同步、帧录制期间不得登记资产。
 材质引用 Shader 的句柄；参数资源及标签表仍由外部持有。
 所有资产 owner 保留到 manager 析构，manager 不隐式等待 GPU。
 关闭时先由 Scheduler 等待所有 frame slot 并重置命令存储，再销毁 CPU 命令缓存、PSO 与参数集，
-最后销毁资产与布局缓存，Device 最后释放；不能只等待其中一个使用过该资源的槽。
+最后销毁资产与布局注册表，Device 最后释放；不能只等待其中一个使用过该资源的槽。
 
 ### 顶点接口解析
 
@@ -726,7 +723,7 @@ Proxy 不保留实例地址，其参数引用不能跨 Update、对象移动或 
 ### 材质参数映射
 
 `MaterialParameterBindingMap` 在创建资产时预解析，只保存数值位置和材质句柄身份，不借用 ShaderAsset、
-布局缓存或原生布局。通过 `MaterialAsset::GetBindingMap(shaderHandle)` 查询。
+布局注册表或原生布局。通过 `MaterialAsset::GetBindingMap(shaderHandle)` 查询。
 常量子集只映射到指定 CBuffer/PushConstant；参数名作为成员路径，可定位单个数组元素。
 float 只接受 4 字节 float 标量，array<float,4> 只接受 16 字节 float4；不转换类型或复制带空隙的矩阵。
 TextureView 只映射 Texture/RWTexture，Sampler 只映射动态 Sampler，数量必须为 1；资源数组和 immutable sampler 拒绝。
@@ -751,11 +748,11 @@ BindResources 先检查该组全部适用参数和非空资源，再调用 Set�
 | 字段 | 默认值与含义 |
 |---|---|
 | `Cull` | `Back` |
-| `Blend` | 空，关闭混合；有值时使用 `render::BlendState` |
+| `Blend` | 空，关闭混合；有值时使用 `gpu::BlendState` |
 | `ColorWriteMask` | `ColorWrite::All`；单组材质默认值，具体颜色附件由 Pass 决定 |
 | `DepthTestEnable` / `DepthWriteEnable` | 均为 true |
 | `DepthCompare` / `DepthBias` | `LessEqual` / 零偏移 |
-| `Stencil` | 空，关闭模板测试；有值时使用 `render::StencilState` |
+| `Stencil` | 空，关闭模板测试；有值时使用 `gpu::StencilState` |
 | `StencilReference` | `uint8_t`，默认 0，正反面共用；通过 RHI 动态设置 |
 
 没有直接保存整个 RHI `DepthStencilState`，因为其中的附件格式属于本次 Pass。
@@ -964,7 +961,7 @@ Environment 拥有 D3D12 factory，或负责 Vulkan environment 的初始化与�
 默认设备不启用外部资源共享，也不接收宿主 GPU 身份；需要外部共享的调用方自行创建设备并使用现有 owner 构造函数。
 创建失败记录日志并返回空 owner。
 
-DeviceContext 也提供接收 `shared_ptr<render::Device>` 与非空 Direct 队列指针的构造函数。
+DeviceContext 也提供接收 `shared_ptr<gpu::Device>` 与非空 Direct 队列指针的构造函数。
 调用方须保证队列属于传入设备，且底层环境寿命满足设备要求。
 DeviceContext 持有共享 Device owner，队列指针从设备借用；`GetDevice` / `GetQueue` 返回借用引用。
 `SupportsIndirect` 实时读取 RHI 的 `IndirectDraw` 和 `IndirectFirstInstance` 能力，不依赖后端内部头。

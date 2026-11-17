@@ -261,6 +261,8 @@ private:
     size_t _queue1{0}, _queue2{0}, _queue3{0};
 };
 
+static_assert(std::is_standard_layout_v<HashCode> && std::is_trivially_copyable_v<HashCode>);
+
 struct StringHash {
     using hash_type = std::hash<std::string_view>;
     using is_transparent = void;
@@ -280,11 +282,25 @@ struct StringEqual {
     bool operator()(const string& lhs, const string& rhs) const noexcept { return lhs == rhs; }
 };
 
+struct Hash128 {
+    array<uint8_t, 16> Bytes{};
+
+    // Stores each word little-endian, starting with the low word.
+    static Hash128 FromWords(uint64_t low, uint64_t high) noexcept;
+
+    friend bool operator==(const Hash128&, const Hash128&) noexcept = default;
+    friend auto operator<=>(const Hash128&, const Hash128&) noexcept = default;
+
+    string ToHex() const;
+};
+
+static_assert(sizeof(Hash128) == 16);
+static_assert(std::is_standard_layout_v<Hash128> && std::is_trivially_copyable_v<Hash128>);
+
 size_t HashData(const void* data, size_t size) noexcept;
 uint64_t HashData64(const void* data, size_t size) noexcept;
-// Wide digest for identities that are compared across processes or persisted, where a 64-bit
-// value's collision odds are not good enough. Byte order of the result is stable.
-array<uint8_t, 16> HashData128(const void* data, size_t size) noexcept;
+// XXH3-128, low word then high word, both little-endian.
+Hash128 HashData128(const void* data, size_t size) noexcept;
 
 template <class T>
 struct PodHasher {

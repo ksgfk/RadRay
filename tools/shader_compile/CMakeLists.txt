@@ -1,5 +1,5 @@
 add_executable(radray_shader_compile shader_compile.cpp)
-target_link_libraries(radray_shader_compile PRIVATE radrayshadercompiler)
+target_link_libraries(radray_shader_compile PRIVATE radrayshader)
 radray_default_compile_flags(radray_shader_compile)
 radray_optimize_flags_binary(radray_shader_compile)
 radray_set_build_path(radray_shader_compile)

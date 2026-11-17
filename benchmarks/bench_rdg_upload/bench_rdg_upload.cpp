@@ -9,7 +9,7 @@
 
 namespace {
 using namespace radray;
-using namespace radray::render;
+using namespace radray::gpu;
 
 struct Probe {
     uint64_t Copies{0}, CopyBytes{0}, Barriers{0}, Creates{0}, Maps{0}, Flushes{0};

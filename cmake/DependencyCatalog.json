@@ -258,7 +258,7 @@
     "targets": [
       "Vulkan::Headers"
     ],
-    "component": "render",
+    "component": "gpu_impl",
     "when": "RADRAY_ENABLE_VULKAN",
     "requires": [],
     "options": {
@@ -273,7 +273,7 @@
     "targets": [
       "volk::volk_headers"
     ],
-    "component": "render",
+    "component": "gpu_impl",
     "when": "RADRAY_ENABLE_VULKAN",
     "requires": [
       "Vulkan-Headers"
@@ -292,7 +292,7 @@
     "targets": [
       "GPUOpen::VulkanMemoryAllocator"
     ],
-    "component": "render",
+    "component": "gpu_impl",
     "when": "RADRAY_ENABLE_VULKAN",
     "requires": [],
     "options": {
@@ -309,7 +309,7 @@
       "Microsoft::DirectX-Guids"
     ],
     "component": "graphics_headers",
-    "when": "RADRAY_ENABLE_D3D12 OR ( WIN32 AND RADRAY_BUILD_SHADER_COMPILER )",
+    "when": "RADRAY_ENABLE_D3D12 OR ( WIN32 AND RADRAY_BUILD_SHADER )",
     "requires": [],
     "options": {
       "DXHEADERS_INSTALL": "ON",
@@ -328,7 +328,7 @@
     "targets": [
       "GPUOpen::D3D12MemoryAllocator"
     ],
-    "component": "render",
+    "component": "gpu_impl",
     "when": "RADRAY_ENABLE_D3D12",
     "requires": [
       "DirectX-Headers"

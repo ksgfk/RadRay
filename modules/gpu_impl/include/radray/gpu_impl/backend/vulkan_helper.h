@@ -1,0 +1,337 @@
+#pragma once
+
+#ifdef RADRAY_ENABLE_VULKAN
+
+#include <span>
+
+#include <radray/types.h>
+#include <radray/logger.h>
+#include <radray/utility.h>
+#include <radray/gpu/types.h>
+
+#ifdef RADRAY_PLATFORM_WINDOWS
+#include <radray/platform/win32_headers.h>
+#define VK_USE_PLATFORM_WIN32_KHR
+#elif RADRAY_PLATFORM_APPLE
+#define VK_USE_PLATFORM_METAL_EXT
+#else
+#error "unknown platform"
+#endif
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
+#include <volk.h>
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#ifdef _MSC_VER
+#pragma warning(push, 1)
+#endif
+#include <vk_mem_alloc.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+namespace radray::gpu::vulkan {
+
+VkImageCreateInfo MakeTextureImageCreateInfo(const TextureDescriptor& desc, bool allowFormatReinterpretation) noexcept;
+VkImageSubresourceRange MakeExternalTextureRange(const TextureDescriptor& desc) noexcept;
+
+struct DeviceFeaturesVulkan {
+    DeviceFeaturesVulkan() noexcept;
+
+    VkPhysicalDeviceFeatures Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+enum class FeatureRequirementVulkan {
+    Disabled,
+    Optional,
+    Required
+};
+
+struct FeatureRequestsVulkan {
+    FeatureRequirementVulkan FullDrawIndexUint32{};
+    FeatureRequirementVulkan ImageCubeArray{};
+    FeatureRequirementVulkan DepthClamp{};
+    FeatureRequirementVulkan DepthBiasClamp{};
+    FeatureRequirementVulkan FillModeNonSolid{};
+    FeatureRequirementVulkan IndependentBlend{};
+    FeatureRequirementVulkan DualSrcBlend{};
+    FeatureRequirementVulkan MultiDrawIndirect{};
+    FeatureRequirementVulkan DrawIndirectFirstInstance{};
+    FeatureRequirementVulkan SamplerAnisotropy{};
+    FeatureRequirementVulkan VertexPipelineStoresAndAtomics{};
+    FeatureRequirementVulkan FragmentStoresAndAtomics{};
+    FeatureRequirementVulkan ShaderStorageImageWriteWithoutFormat{};
+    FeatureRequirementVulkan TimelineSemaphore{};
+    FeatureRequirementVulkan SamplerMirrorClampToEdge{};
+    FeatureRequirementVulkan SamplerFilterMinmax{};
+    FeatureRequirementVulkan ImagelessFramebuffer{};
+    FeatureRequirementVulkan SeparateDepthStencilLayouts{};
+};
+
+struct FeatureSelectionVulkan {
+    DeviceFeaturesVulkan Enabled;
+    vector<std::string_view> MissingRequired;
+    vector<std::string_view> EnabledNames;
+};
+
+class FeatureChainVulkan {
+public:
+    explicit FeatureChainVulkan(const DeviceFeaturesVulkan& features = {}) noexcept;
+    FeatureChainVulkan(const FeatureChainVulkan&) = delete;
+    FeatureChainVulkan& operator=(const FeatureChainVulkan&) = delete;
+
+    DeviceFeaturesVulkan Snapshot() const noexcept;
+
+    void ApplyTo(VkDeviceCreateInfo& createInfo) const noexcept;
+
+    VkPhysicalDeviceFeatures2 Core{};
+    VkPhysicalDeviceVulkan11Features Vulkan11{};
+    VkPhysicalDeviceVulkan12Features Vulkan12{};
+};
+
+FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept;
+
+FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& supported, const FeatureRequestsVulkan& requested);
+
+std::string_view GetMissingDeviceFunctionVulkan(const VolkDeviceTable& functions) noexcept;
+
+bool AreViewFormatsCompatibleVulkan(TextureFormat image, TextureFormat view, VkImageCreateFlags flags) noexcept;
+
+VkImageUsageFlags MapImageViewUsageVulkan(TextureViewUsage usage) noexcept;
+
+uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept;
+uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept;
+VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept;
+bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept;
+VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept;
+
+template <class T>
+struct VulkanObjectTrait {
+    static_assert(false, "unknown vulkan object type");
+};
+
+template <class T>
+struct VulkanObjectTrait<T const> : VulkanObjectTrait<T> {};
+template <class T>
+struct VulkanObjectTrait<T volatile> : VulkanObjectTrait<T> {};
+template <class T>
+struct VulkanObjectTrait<T const volatile> : VulkanObjectTrait<T> {};
+
+template <>
+struct VulkanObjectTrait<VkInstance> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_INSTANCE;
+};
+template <>
+struct VulkanObjectTrait<VkPhysicalDevice> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PHYSICAL_DEVICE;
+};
+template <>
+struct VulkanObjectTrait<VkDevice> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DEVICE;
+};
+template <>
+struct VulkanObjectTrait<VkQueue> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_QUEUE;
+};
+template <>
+struct VulkanObjectTrait<VkSemaphore> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SEMAPHORE;
+};
+template <>
+struct VulkanObjectTrait<VkCommandBuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_COMMAND_BUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkFence> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_FENCE;
+};
+template <>
+struct VulkanObjectTrait<VkDeviceMemory> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DEVICE_MEMORY;
+};
+template <>
+struct VulkanObjectTrait<VkBuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_BUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkImage> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_IMAGE;
+};
+template <>
+struct VulkanObjectTrait<VkEvent> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_EVENT;
+};
+template <>
+struct VulkanObjectTrait<VkQueryPool> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_QUERY_POOL;
+};
+template <>
+struct VulkanObjectTrait<VkBufferView> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_BUFFER_VIEW;
+};
+template <>
+struct VulkanObjectTrait<VkImageView> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_IMAGE_VIEW;
+};
+template <>
+struct VulkanObjectTrait<VkShaderModule> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SHADER_MODULE;
+};
+template <>
+struct VulkanObjectTrait<VkPipelineCache> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_CACHE;
+};
+template <>
+struct VulkanObjectTrait<VkDescriptorSetLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
+};
+template <>
+struct VulkanObjectTrait<VkPipelineLayout> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE_LAYOUT;
+};
+template <>
+struct VulkanObjectTrait<VkRenderPass> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_RENDER_PASS;
+};
+template <>
+struct VulkanObjectTrait<VkPipeline> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE;
+};
+template <>
+struct VulkanObjectTrait<VkSampler> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_SAMPLER;
+};
+template <>
+struct VulkanObjectTrait<VkFramebuffer> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_FRAMEBUFFER;
+};
+template <>
+struct VulkanObjectTrait<VkCommandPool> {
+    static constexpr VkObjectType type = VK_OBJECT_TYPE_COMMAND_POOL;
+};
+
+template <typename T, typename TAllocator, typename TFunc, typename... Args>
+requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::invoke_result_t<TFunc, Args..., uint32_t*, T*>, void>
+auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&&... args) noexcept {
+    uint32_t count = 0;
+    f(std::forward<Args>(args)..., &count, nullptr);
+    out.clear();
+    if (count == 0) {
+        return;
+    }
+    out.resize(count);
+    f(std::forward<Args>(args)..., &count, out.data());
+    out.resize(count);
+    return;
+}
+
+template <typename T, typename TAllocator, typename TFunc, typename... Args>
+requires std::invocable<TFunc, Args..., uint32_t*, T*> && std::is_same_v<std::invoke_result_t<TFunc, Args..., uint32_t*, T*>, VkResult>
+auto EnumerateVectorFromVkFunc(std::vector<T, TAllocator>& out, TFunc&& f, Args&&... args) noexcept -> VkResult {
+    uint32_t count = 0;
+    VkResult err;
+    do {
+        err = f(std::forward<Args>(args)..., &count, nullptr);
+        if (err != VK_SUCCESS) {
+            return err;
+        }
+        if (count == 0) {
+            out.clear();
+            return VK_SUCCESS;
+        }
+        out.resize(count);
+        err = f(std::forward<Args>(args)..., &count, out.data());
+    } while (err == VK_INCOMPLETE);
+    if (err == VK_SUCCESS) out.resize(count);
+    return err;
+}
+
+template <class T, class N>
+void AddToHeadVulkanStruct(T& target, N& add) noexcept {
+    auto t = target.pNext;
+    target.pNext = &add;
+    add.pNext = t;
+}
+
+uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept;
+bool IsValidateExtensions(std::span<const char*> required, std::span<VkExtensionProperties> available) noexcept;
+bool IsValidateExtensions(std::string_view required, std::span<VkExtensionProperties> available) noexcept;
+bool IsValidateLayers(std::span<const char*> required, std::span<VkLayerProperties> available) noexcept;
+std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSurfaceKHR surface, std::span<VkFormat> preferred) noexcept;
+
+VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept;
+
+VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept;
+VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
+
+VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept;
+VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept;
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format = TextureFormat::UNKNOWN, TextureAspect aspect = TextureAspect::Auto, bool separate = false) noexcept;
+VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept;
+
+VkQueueFlags MapType(QueueType v) noexcept;
+VkFormat MapType(TextureFormat v) noexcept;
+VkImageType MapType(TextureDimension v) noexcept;
+VkSampleCountFlagBits MapSampleCount(uint32_t v) noexcept;
+VkImageViewType MapViewType(TextureDimension v) noexcept;
+VkAttachmentLoadOp MapType(LoadAction v) noexcept;
+VkAttachmentStoreOp MapType(StoreAction v) noexcept;
+VmaMemoryUsage MapType(MemoryType v) noexcept;
+VkShaderStageFlags MapType(ShaderStages v) noexcept;
+VkVertexInputRate MapType(VertexStepMode v) noexcept;
+VkFormat MapType(VertexFormat v) noexcept;
+VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept;
+VkPolygonMode MapType(PolygonMode v) noexcept;
+VkCullModeFlags MapType(CullMode v) noexcept;
+VkFrontFace MapType(FrontFace v) noexcept;
+VkCompareOp MapType(CompareFunction v) noexcept;
+VkStencilOpState MapType(StencilFaceState v, uint32_t readMask, uint32_t writeMask) noexcept;
+VkStencilOp MapType(StencilOperation v) noexcept;
+struct BlendComponentVulkan {
+    VkBlendOp op;
+    VkBlendFactor src;
+    VkBlendFactor dst;
+};
+BlendComponentVulkan MapType(BlendComponent v) noexcept;
+VkBlendOp MapType(BlendOperation v) noexcept;
+VkBlendFactor MapType(BlendFactor v) noexcept;
+VkColorComponentFlags MapType(ColorWrites v) noexcept;
+VkIndexType MapIndexType(uint32_t v) noexcept;
+VkFilter MapTypeFilter(FilterMode v) noexcept;
+VkSamplerMipmapMode MapTypeMipmapMode(FilterMode v) noexcept;
+VkSamplerAddressMode MapType(AddressMode v) noexcept;
+VkPresentModeKHR MapType(PresentMode v) noexcept;
+
+}  // namespace radray::gpu::vulkan
+
+namespace radray {
+template <>
+struct is_flags<VkQueueFlagBits> : std::true_type {};
+template <>
+struct is_flags<VkDebugUtilsMessageTypeFlagBitsEXT> : std::true_type {};
+}  // namespace radray
+namespace radray::gpu::vulkan {
+using VulkanQueueFlags = radray::EnumFlags<VkQueueFlagBits>;
+using VulkanDebugUtilsMessageTypeFlagsEXT = radray::EnumFlags<VkDebugUtilsMessageTypeFlagBitsEXT>;
+}  // namespace radray::gpu::vulkan
+
+std::string_view format_as(VkQueueFlagBits v) noexcept;
+std::string_view format_as(VkDebugUtilsMessageTypeFlagBitsEXT v) noexcept;
+std::string_view format_as(VkPhysicalDeviceType v) noexcept;
+std::string_view format_as(VkResult v) noexcept;
+std::string_view format_as(VkFormat v) noexcept;
+std::string_view format_as(VkPresentModeKHR v) noexcept;
+std::string_view format_as(VkDescriptorType v) noexcept;
+
+#endif

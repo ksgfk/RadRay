@@ -23,8 +23,8 @@ public:
 class MeshPassProcessorTest : public testing::Test {
 protected:
     MeshPassProcessorTest() {
-        Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
+        Input.Layouts.push_back({0, 12, gpu::VertexStepMode::Vertex});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, gpu::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
         Batch.VertexInput = &Input;
         Batch.Elements.push_back(Element(0));
@@ -33,8 +33,8 @@ protected:
         return {.IndexBuffer = &Indices, .FirstIndex = firstIndex, .IndexCount = 3};
     }
     void AddInstanceLayout() {
-        Input.Layouts.push_back({1, 16, render::VertexStepMode::Instance});
-        Input.Attributes.push_back({1, 0, "INSTANCE", 0, render::VertexFormat::FLOAT32X4});
+        Input.Layouts.push_back({1, 16, gpu::VertexStepMode::Instance});
+        Input.Attributes.push_back({1, 0, "INSTANCE", 0, gpu::VertexFormat::FLOAT32X4});
     }
     MeshBatchContext Context() const { return {Primitive, Batch}; }
     void Build(const MeshDrawCommandSharedState& state) {
@@ -43,8 +43,8 @@ protected:
     }
 
     FakePipeline Pipeline;
-    FakeBuffer Vertices{128, render::BufferUse::Vertex};
-    FakeBuffer Indices{128, render::BufferUse::Index};
+    FakeBuffer Vertices{128, gpu::BufferUse::Vertex};
+    FakeBuffer Indices{128, gpu::BufferUse::Index};
     VertexInput Input;
     PrimitiveSceneInfo Primitive;
     MeshBatch Batch;
@@ -271,7 +271,7 @@ TEST_F(MeshPassProcessorTest, SingleHighBitElementNeedsNoExtraElements) {
 }
 
 TEST_F(MeshPassProcessorTest, BatchBindsSharedStateOnceAndDrawsSelectedIndexBuffers) {
-    FakeBuffer otherIndices{128, render::BufferUse::Index};
+    FakeBuffer otherIndices{128, gpu::BufferUse::Index};
     Batch.Elements.push_back({.IndexBuffer = &otherIndices, .FirstIndex = 3, .IndexCount = 6, .VertexOffset = -2});
     Batch.Elements.push_back(Element(9));
     const array<byte, 4> bytes{};
@@ -312,10 +312,10 @@ TEST_F(MeshPassProcessorTest, All32ElementsDrawFromOneDynamicCommand) {
 }
 
 TEST_F(MeshPassProcessorTest, BuildStoresAllStreamsInOneSortedGroup) {
-    Input.Layouts.push_back({1, 16, render::VertexStepMode::Vertex});
-    Input.Layouts.push_back({2, 16, render::VertexStepMode::Vertex});
-    Input.Attributes.push_back({1, 0, "TEXCOORD", 0, render::VertexFormat::FLOAT32X4});
-    Input.Attributes.push_back({2, 0, "COLOR", 0, render::VertexFormat::FLOAT32X4});
+    Input.Layouts.push_back({1, 16, gpu::VertexStepMode::Vertex});
+    Input.Layouts.push_back({2, 16, gpu::VertexStepMode::Vertex});
+    Input.Attributes.push_back({1, 0, "TEXCOORD", 0, gpu::VertexFormat::FLOAT32X4});
+    Input.Attributes.push_back({2, 0, "COLOR", 0, gpu::VertexFormat::FLOAT32X4});
     Input.Streams = {{&Vertices, 64, 32, 2}, {&Vertices, 0, 32, 0}, {&Vertices, 32, 32, 1}};
     Build({.Pipeline = &Pipeline});
     ASSERT_EQ(Output.Commands.size(), 1u);
@@ -389,9 +389,9 @@ TEST_F(MeshPassProcessorTest, MergingRejectsStripMisalignmentDifferentInstancesA
         Visible.clear();
         Output.Clear();
     };
-    Batch.Topology = render::PrimitiveTopology::TriangleStrip;
+    Batch.Topology = gpu::PrimitiveTopology::TriangleStrip;
     verifySeparate();
-    Batch.Topology = render::PrimitiveTopology::TriangleList;
+    Batch.Topology = gpu::PrimitiveTopology::TriangleList;
     Batch.Elements[0].IndexCount = Batch.Elements[1].FirstIndex = 2;
     verifySeparate();
     Batch.Elements[0] = Element(0);
@@ -407,7 +407,7 @@ TEST_F(MeshPassProcessorTest, MergingRejectsStripMisalignmentDifferentInstancesA
 }
 
 TEST_F(MeshPassProcessorTest, MergingSupportsPointAndLineListsAndHighestAdjacentBits) {
-    for (const auto topology : {render::PrimitiveTopology::PointList, render::PrimitiveTopology::LineList}) {
+    for (const auto topology : {gpu::PrimitiveTopology::PointList, gpu::PrimitiveTopology::LineList}) {
         Batch.Topology = topology;
         Batch.Elements.clear();
         for (uint32_t i = 0; i < 32; ++i) Batch.Elements.emplace_back();
@@ -427,7 +427,7 @@ TEST_F(MeshPassProcessorTest, MergingSupportsPointAndLineListsAndHighestAdjacent
 
 TEST_F(MeshPassProcessorTest, CumulativeMergeCountCannotOverflowEvenWhenEachPairFits) {
     Indices.Desc.Size = uint64_t{1} << 36;
-    Batch.Topology = render::PrimitiveTopology::PointList;
+    Batch.Topology = gpu::PrimitiveTopology::PointList;
     Batch.Elements[0].IndexCount = 0x60000000;
     Batch.Elements.push_back(Element(0x60000000));
     Batch.Elements[1].IndexCount = 0x60000000;

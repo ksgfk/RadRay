@@ -1,0 +1,45 @@
+#pragma once
+
+#include <filesystem>
+#include <optional>
+#include <span>
+#include <string_view>
+
+#include <radray/dynamic_library.h>
+#include <radray/shader/shader_compiler_contract.h>
+
+namespace radray::shader {
+
+class Client {
+public:
+    explicit Client(std::string_view compilerLibraryName = "dxcompiler");
+
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
+
+    bool IsAvailable() const noexcept;
+
+    // Identity of the loaded compiler toolchain, validated once at construction. A cache keys compiled
+    // artifacts on it, so it has to be observable before anything is compiled.
+    std::optional<radray::Hash128> GetToolchainIdentity() const noexcept;
+
+    DiscoveryResult DiscoverSourceContract(
+        std::string_view sourceName,
+        std::span<const byte> source,
+        shader::ShaderTarget target,
+        std::span<const std::filesystem::path> includePaths) const;
+
+    DiscoveryResult DiscoverSourceContract(
+        const shader::SourceContractRequest& request,
+        std::span<const std::filesystem::path> includePaths) const;
+
+    shader::CompileVariantResult CompileVariant(
+        const shader::CompileVariantRequest& request,
+        std::span<const std::filesystem::path> includePaths) const;
+
+private:
+    DynamicLibrary _compilerLibrary;
+    std::optional<radray::Hash128> _toolchainIdentity;
+};
+
+}  // namespace radray::shader

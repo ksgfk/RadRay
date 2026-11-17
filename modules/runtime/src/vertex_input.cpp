@@ -1,4 +1,5 @@
 #include <radray/runtime/vertex_input.h>
+#include <radray/gpu_impl/validation.h>
 
 #include <algorithm>
 
@@ -13,7 +14,7 @@ bool ValidateVertexInputLayout(const VertexInput& input) noexcept {
     }
     for (size_t i = 0; i < input.Attributes.size(); ++i) {
         const auto& attribute = input.Attributes[i];
-        const auto size = render::GetVertexFormatSizeInBytes(attribute.Format);
+        const auto size = gpu::GetVertexFormatSizeInBytes(attribute.Format);
         const auto layout = std::find_if(input.Layouts.begin(), input.Layouts.end(), [&](const auto& l) { return l.Binding == attribute.BufferBinding; });
         if (attribute.Semantic.empty() || !size || layout == input.Layouts.end() ||
             attribute.Offset > layout->ArrayStride || size > layout->ArrayStride - attribute.Offset) return false;
@@ -25,8 +26,8 @@ bool ValidateVertexInputLayout(const VertexInput& input) noexcept {
 
 namespace {
 
-bool CompatibleVertexFormat(render::VertexFormat format, const ShaderVertexAttributeSignatureDesc& signature) noexcept {
-    using F = render::VertexFormat;
+bool CompatibleVertexFormat(gpu::VertexFormat format, const shader::ShaderVertexAttributeSignatureDesc& signature) noexcept {
+    using F = gpu::VertexFormat;
     shader::ShaderVertexComponentType kind = shader::ShaderVertexComponentType::Float;
     uint32_t count = 0;
     switch (format) {
@@ -91,7 +92,7 @@ bool CompatibleVertexFormat(render::VertexFormat format, const ShaderVertexAttri
 
 }  // namespace
 
-bool ResolveVertexInputState(const VertexInput& meshInput, std::span<const ShaderVertexAttributeSignatureDesc> shaderInputs, ResolvedVertexInputState& output) {
+bool ResolveVertexInputState(const VertexInput& meshInput, std::span<const shader::ShaderVertexAttributeSignatureDesc> shaderInputs, ResolvedVertexInputState& output) {
     if (!ValidateVertexInputLayout(meshInput)) return false;
     ResolvedVertexInputState candidate;
     candidate.Layouts = meshInput.Layouts;
@@ -102,7 +103,7 @@ bool ResolveVertexInputState(const VertexInput& meshInput, std::span<const Shade
         if (attribute == meshInput.Attributes.end() || !CompatibleVertexFormat(attribute->Format, input)) return false;
         candidate.Attributes.push_back({attribute->BufferBinding, attribute->Offset, attribute->Semantic, attribute->SemanticIndex, attribute->Format, input.Location});
     }
-    if (!render::ValidateVertexInputState({candidate.Layouts, candidate.Attributes})) return false;
+    if (!gpu::ValidateVertexInputState({candidate.Layouts, candidate.Attributes})) return false;
     output = std::move(candidate);
     return true;
 }

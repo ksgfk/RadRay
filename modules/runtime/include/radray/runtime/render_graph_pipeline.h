@@ -23,7 +23,7 @@ protected:
     // 执行回调可在 Record 期间借用管线输入；清理时不得访问它。
     virtual void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept = 0;
     virtual void ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept;
-    virtual void SubmitFrame(FrameSlot& slot, render::CommandBuffer& commandBuffer) noexcept = 0;
+    virtual void SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& commandBuffer) noexcept = 0;
 
 private:
     class SlotState;

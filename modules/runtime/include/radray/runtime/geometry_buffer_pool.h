@@ -29,7 +29,7 @@ public:
 
     explicit operator bool() const noexcept;
     const VertexInput& GetVertexInput() const noexcept;
-    render::Buffer* GetBuffer() const noexcept;
+    gpu::Buffer* GetBuffer() const noexcept;
     // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
     IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetVertexStride() const noexcept;
@@ -57,7 +57,7 @@ public:
     IndexBufferSubAllocation& operator=(const IndexBufferSubAllocation&) = delete;
 
     explicit operator bool() const noexcept;
-    render::Buffer* GetBuffer() const noexcept;
+    gpu::Buffer* GetBuffer() const noexcept;
     // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
     IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetIndexStride() const noexcept;
@@ -66,7 +66,7 @@ public:
     uint64_t GetByteOffset() const noexcept;
     uint64_t GetByteSize() const noexcept;
     // 返回整页视图，配合 GetFirstIndex() 使用；同页绘制可兼容同一次索引缓冲绑定。
-    render::IndexBufferView GetIndexBufferView() const noexcept;
+    gpu::IndexBufferView GetIndexBufferView() const noexcept;
 
 private:
     friend class IndexBufferPool;
@@ -81,8 +81,8 @@ struct VertexBufferPoolDescriptor {
     uint32_t VertexStride{0};
     uint32_t VertexStreamBinding{0};
     uint32_t PageVertexCapacity{150'000};
-    render::BufferUses AdditionalUsage{};
-    std::span<const render::VertexBufferLayout> Layouts{};
+    gpu::BufferUses AdditionalUsage{};
+    std::span<const gpu::VertexBufferLayout> Layouts{};
     std::span<const VertexInputAttribute> Attributes{};
     std::string_view DebugNamePrefix{"VertexBufferPool"};
 };
@@ -90,14 +90,14 @@ struct VertexBufferPoolDescriptor {
 struct IndexBufferPoolDescriptor {
     uint32_t IndexStride{4};
     uint32_t PageIndexCapacity{300'000};
-    render::BufferUses AdditionalUsage{};
+    gpu::BufferUses AdditionalUsage{};
     std::string_view DebugNamePrefix{"IndexBufferPool"};
 };
 
 // 池借用设备，保留全部页面直到自身销毁；所有调用必须串行。
 class VertexBufferPool final {
 public:
-    static Nullable<unique_ptr<VertexBufferPool>> Create(render::Device& device, const VertexBufferPoolDescriptor& desc);
+    static Nullable<unique_ptr<VertexBufferPool>> Create(gpu::Device& device, const VertexBufferPoolDescriptor& desc);
     ~VertexBufferPool() noexcept;
     VertexBufferPool(const VertexBufferPool&) = delete;
     VertexBufferPool& operator=(const VertexBufferPool&) = delete;
@@ -106,7 +106,7 @@ public:
     uint32_t GetPageCount() const noexcept;
     uint64_t GetFreeBytes() const noexcept;
     // 以 Common → Common 边界导入全部页面，包括保留的空页面。
-    void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state = render::BufferState::Vertex) const;
+    void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state = gpu::BufferState::Vertex) const;
 
 private:
     friend class VertexBufferSubAllocation;
@@ -117,7 +117,7 @@ private:
 
 class IndexBufferPool final {
 public:
-    static Nullable<unique_ptr<IndexBufferPool>> Create(render::Device& device, const IndexBufferPoolDescriptor& desc = {});
+    static Nullable<unique_ptr<IndexBufferPool>> Create(gpu::Device& device, const IndexBufferPoolDescriptor& desc = {});
     ~IndexBufferPool() noexcept;
     IndexBufferPool(const IndexBufferPool&) = delete;
     IndexBufferPool& operator=(const IndexBufferPool&) = delete;
@@ -125,7 +125,7 @@ public:
     std::optional<IndexBufferSubAllocation> Allocate(uint32_t indexCount);
     uint32_t GetPageCount() const noexcept;
     uint64_t GetFreeBytes() const noexcept;
-    void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state = render::BufferState::Index) const;
+    void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state = gpu::BufferState::Index) const;
 
 private:
     friend class IndexBufferSubAllocation;

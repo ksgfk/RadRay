@@ -1,5 +1,5 @@
 add_executable(radray_shader_reflect shader_reflect.cpp)
-target_link_libraries(radray_shader_reflect PRIVATE RadRay::shaderreflector)
+target_link_libraries(radray_shader_reflect PRIVATE RadRay::shader)
 radray_default_compile_flags(radray_shader_reflect)
 radray_optimize_flags_binary(radray_shader_reflect)
 radray_set_build_path(radray_shader_reflect)

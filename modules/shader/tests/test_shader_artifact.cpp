@@ -1,5 +1,8 @@
-#include <radray/shader/shader_metadata_wire.h>
+#include <radray/shader/shader_compiler_contract.h>
 #include <radray/shader/shader_artifact.h>
+#include <radray/gpu/types.h>
+
+#include "layout_test_data.h"
 
 #include <cstring>
 #include <filesystem>
@@ -62,15 +65,15 @@ struct SyntheticArtifact {
         Entries.push_back({.Name = Name(name), .Stage = static_cast<uint8_t>(stage), .InterfaceOffset = 0, .InterfaceSize = kBytecodeSize});
     }
 
-    ShaderArtifactBindingRecord& AddBinding(std::string_view name, ShaderBindingKind kind, uint32_t group, uint32_t binding) {
+    ShaderArtifactBindingRecord& AddBinding(std::string_view name, gpu::BindingKind kind, uint32_t group, uint32_t binding) {
         return Bindings.emplace_back(ShaderArtifactBindingRecord{
             .Name = Name(name),
             .Group = group,
             .Binding = binding,
-            .Type = static_cast<uint32_t>(kind),
+            .Type = EncodeBindingKind(kind).value(),
             .Count = 1,
             .StageMask = kPixelBit,
-            .BufferByteSize = kind == ShaderBindingKind::CBuffer ? 16u : 0u});
+            .BufferByteSize = kind == gpu::BindingKind::CBuffer ? 16u : 0u});
     }
 
     // Struct records get no scalar shape; every other kind is a float with one component per 4 bytes.
@@ -343,7 +346,7 @@ TEST(RadRayShaderArtifact, GetNameRejectsRangeOutsideBlob) {
 
 TEST(RadRayShaderArtifact, FindBindingLooksUpDeclarationName) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 1, 3);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 1, 3);
 
     const auto decoded = Decode(artifact);
 
@@ -358,8 +361,8 @@ TEST(RadRayShaderArtifact, FindBindingLooksUpDeclarationName) {
 
 TEST(RadRayShaderArtifact, DxilAllowsSameRegisterInDifferentNamespaces) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
-    artifact.AddBinding("Linear", ShaderBindingKind::Sampler, 0, 0);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0);
+    artifact.AddBinding("Linear", gpu::BindingKind::Sampler, 0, 0);
 
     const auto decoded = Decode(artifact);
 
@@ -368,8 +371,8 @@ TEST(RadRayShaderArtifact, DxilAllowsSameRegisterInDifferentNamespaces) {
 
 TEST(RadRayShaderArtifact, DxilRejectsSameRegisterInSameNamespace) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
-    artifact.AddBinding("Normals", ShaderBindingKind::StructuredBuffer, 0, 0);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0);
+    artifact.AddBinding("Normals", gpu::BindingKind::StructuredBuffer, 0, 0);
 
     const auto decoded = Decode(artifact);
 
@@ -379,8 +382,8 @@ TEST(RadRayShaderArtifact, DxilRejectsSameRegisterInSameNamespace) {
 
 TEST(RadRayShaderArtifact, SpirvRejectsSameBindingAcrossKinds) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
-    artifact.AddBinding("Linear", ShaderBindingKind::Sampler, 0, 0);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0);
+    artifact.AddBinding("Linear", gpu::BindingKind::Sampler, 0, 0);
 
     const auto decoded = Decode(artifact);
 
@@ -390,22 +393,47 @@ TEST(RadRayShaderArtifact, SpirvRejectsSameBindingAcrossKinds) {
 
 TEST(RadRayShaderArtifact, RejectsDuplicateBindingNames) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0);
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 1);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 1);
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
 
+TEST(RadRayShaderArtifact, BindingKindsUseSchema10CodesInBothDirections) {
+    using Gpu = gpu::BindingKind;
+    constexpr std::pair<uint32_t, Gpu> cases[]{
+        {1, Gpu::CBuffer},
+        {2, Gpu::TypedBuffer},
+        {3, Gpu::RWTypedBuffer},
+        {4, Gpu::StructuredBuffer},
+        {5, Gpu::RWStructuredBuffer},
+        {6, Gpu::RawBuffer},
+        {7, Gpu::RWRawBuffer},
+        {8, Gpu::Texture},
+        {9, Gpu::RWTexture},
+        {10, Gpu::Sampler},
+    };
+    for (const auto& [wireCode, kind] : cases) {
+        EXPECT_EQ(DecodeBindingKind(wireCode), kind) << wireCode;
+        EXPECT_EQ(EncodeBindingKind(kind), wireCode) << wireCode;
+    }
+    EXPECT_FALSE(DecodeBindingKind(0));
+    EXPECT_FALSE(DecodeBindingKind(11));
+    EXPECT_FALSE(DecodeBindingKind(UINT32_MAX));
+    EXPECT_FALSE(EncodeBindingKind(static_cast<Gpu>(10)));
+    EXPECT_FALSE(EncodeBindingKind(static_cast<Gpu>(UINT32_MAX)));
+}
+
 TEST(RadRayShaderArtifact, RejectsUnknownBindingKind) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).Type = 0;
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0).Type = 0;
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
 
 TEST(RadRayShaderArtifact, AcceptsRootDescriptorForSingleBuffer) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
+    artifact.AddBinding("Instances", gpu::BindingKind::StructuredBuffer, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
 
     const auto decoded = Decode(artifact);
 
@@ -414,7 +442,7 @@ TEST(RadRayShaderArtifact, AcceptsRootDescriptorForSingleBuffer) {
 
 TEST(RadRayShaderArtifact, RejectsRootDescriptorForTexture) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
 
     const auto decoded = Decode(artifact);
 
@@ -424,7 +452,7 @@ TEST(RadRayShaderArtifact, RejectsRootDescriptorForTexture) {
 
 TEST(RadRayShaderArtifact, RejectsRootDescriptorArray) {
     SyntheticArtifact artifact = MakeArtifact();
-    ShaderArtifactBindingRecord& binding = artifact.AddBinding("Instances", ShaderBindingKind::StructuredBuffer, 0, 0);
+    ShaderArtifactBindingRecord& binding = artifact.AddBinding("Instances", gpu::BindingKind::StructuredBuffer, 0, 0);
     binding.Placement = static_cast<uint32_t>(ShaderBindingPlacement::RootDescriptor);
     binding.Count = 2;
 
@@ -433,7 +461,7 @@ TEST(RadRayShaderArtifact, RejectsRootDescriptorArray) {
 
 TEST(RadRayShaderArtifact, DxilAcceptsStaticSamplerPlacement) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::DXIL);
-    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
+    artifact.AddBinding("Shadow", gpu::BindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
 
     const auto decoded = Decode(artifact);
 
@@ -442,7 +470,7 @@ TEST(RadRayShaderArtifact, DxilAcceptsStaticSamplerPlacement) {
 
 TEST(RadRayShaderArtifact, SpirvRejectsStaticSamplerPlacement) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
-    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
+    artifact.AddBinding("Shadow", gpu::BindingKind::Sampler, 0, 0).Placement = static_cast<uint32_t>(ShaderBindingPlacement::StaticSampler);
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
@@ -450,7 +478,7 @@ TEST(RadRayShaderArtifact, SpirvRejectsStaticSamplerPlacement) {
 TEST(RadRayShaderArtifact, SpirvSamplerReferencesImmutableState) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
     artifact.Samplers.push_back({.MagFilter = 1, .MinFilter = 1, .CompareEnable = 1, .CompareOp = 3});
-    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).SamplerIndex = 0;
+    artifact.AddBinding("Shadow", gpu::BindingKind::Sampler, 0, 0).SamplerIndex = 0;
 
     const auto decoded = Decode(artifact);
 
@@ -462,7 +490,7 @@ TEST(RadRayShaderArtifact, SpirvSamplerReferencesImmutableState) {
 
 TEST(RadRayShaderArtifact, RejectsSamplerIndexOutsideSamplerRecords) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
-    artifact.AddBinding("Shadow", ShaderBindingKind::Sampler, 0, 0).SamplerIndex = 0;
+    artifact.AddBinding("Shadow", gpu::BindingKind::Sampler, 0, 0).SamplerIndex = 0;
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
@@ -470,7 +498,7 @@ TEST(RadRayShaderArtifact, RejectsSamplerIndexOutsideSamplerRecords) {
 TEST(RadRayShaderArtifact, RejectsSamplerIndexOnNonSampler) {
     SyntheticArtifact artifact = MakeArtifact(ShaderTarget::SPIRV);
     artifact.Samplers.push_back({});
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).SamplerIndex = 0;
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0).SamplerIndex = 0;
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
@@ -498,8 +526,8 @@ TEST(RadRayShaderArtifact, CBuffersMayShareOnePayloadRoot) {
     SyntheticArtifact artifact = MakeArtifact();
     const uint32_t root = artifact.AddType("Shared", ShaderTypeKind::Struct, 16);
     artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
-    artifact.AddBinding("First", ShaderBindingKind::CBuffer, 0, 0).TypeIndex = root;
-    artifact.AddBinding("Second", ShaderBindingKind::CBuffer, 1, 0).TypeIndex = root;
+    artifact.AddBinding("First", gpu::BindingKind::CBuffer, 0, 0).TypeIndex = root;
+    artifact.AddBinding("Second", gpu::BindingKind::CBuffer, 1, 0).TypeIndex = root;
 
     const auto decoded = Decode(artifact);
 
@@ -513,7 +541,7 @@ TEST(RadRayShaderArtifact, CBuffersMayShareOnePayloadRoot) {
 
 TEST(RadRayShaderArtifact, RejectsCBufferWithoutPayloadRoot) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Constants", ShaderBindingKind::CBuffer, 0, 0);
+    artifact.AddBinding("Constants", gpu::BindingKind::CBuffer, 0, 0);
 
     const auto decoded = Decode(artifact);
 
@@ -525,7 +553,7 @@ TEST(RadRayShaderArtifact, RejectsCBufferOwnedByMemberRecord) {
     SyntheticArtifact artifact = MakeArtifact();
     const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 16);
     const uint32_t member = artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
-    artifact.AddBinding("Constants", ShaderBindingKind::CBuffer, 0, 0).TypeIndex = member;
+    artifact.AddBinding("Constants", gpu::BindingKind::CBuffer, 0, 0).TypeIndex = member;
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
 }
@@ -534,9 +562,50 @@ TEST(RadRayShaderArtifact, RejectsPayloadOwnerOnNonCBuffer) {
     SyntheticArtifact artifact = MakeArtifact();
     const uint32_t root = artifact.AddType("Root", ShaderTypeKind::Struct, 16);
     artifact.AddType("Value", ShaderTypeKind::Vector, 16, root);
-    artifact.AddBinding("Albedo", ShaderBindingKind::Texture, 0, 0).TypeIndex = root;
+    artifact.AddBinding("Albedo", gpu::BindingKind::Texture, 0, 0).TypeIndex = root;
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
+}
+
+TEST(RadRayShaderArtifact, ArtifactAndLayoutAgreeOnMatrixArrayAndInvalidTypeGraphs) {
+    auto layout = test::MatrixLayout();
+    auto check = [&](bool expected) {
+        auto artifact = MakeArtifact();
+        for (const auto& t : layout.Types) {
+            artifact.Types.push_back({
+                .Name = artifact.Name(t.Name), .ParentIndex = t.ParentIndex.value_or(kShaderNoType),
+                .Kind = static_cast<uint32_t>(t.Kind), .ElementCount = t.ElementCount, .Offset = t.Offset,
+                .Size = t.Size, .Stride = t.Stride, .Flags = t.RowMajor ? kShaderTypeFlagRowMajor : 0u,
+                .TypeIndex = t.TypeIndex.value_or(kShaderNoType), .ScalarKind = static_cast<uint32_t>(t.ScalarKind),
+                .RowCount = t.RowCount, .ColumnCount = t.ColumnCount, .ElementKind = static_cast<uint32_t>(t.ElementKind),
+                .ElementSize = t.ElementSize, .MatrixStride = t.MatrixStride});
+        }
+        EXPECT_EQ(Decode(artifact).Succeeded(), expected);
+        EXPECT_EQ(ValidateShaderPipelineLayoutDesc(layout), expected);
+    };
+    check(true);
+    auto overlapping = layout.Types[1];
+    overlapping.Name = "Other";
+    layout.Types.push_back(overlapping);
+    check(false);
+    layout.Types.pop_back();
+    layout.Types[1] = {.Name = "Child", .ParentIndex = 0, .Size = 92, .ElementSize = 92, .TypeIndex = 0};
+    check(false);
+}
+
+TEST(RadRayShaderArtifact, ArtifactAndLayoutAgreeOnVertexSignatures) {
+    auto artifact = MakeArtifact();
+    ShaderVariantInterfaceDesc program{.Name = "Program", .DXIL = ShaderVariantTargetInterfaceDesc{.Stages = gpu::ShaderStage::Vertex}};
+    auto add = [&](const char* name, uint32_t location) {
+        artifact.AddVertexInput(name, location);
+        program.DXIL->VertexInputs.push_back({name, 0, location, ShaderVertexComponentType::Float, 3});
+    };
+    add("Position", 0);
+    EXPECT_TRUE(Decode(artifact).Succeeded());
+    EXPECT_TRUE(ValidateShaderVariantInterfaceDesc(program));
+    add("Position", 1);
+    EXPECT_FALSE(Decode(artifact).Succeeded());
+    EXPECT_FALSE(ValidateShaderVariantInterfaceDesc(program));
 }
 
 TEST(RadRayShaderArtifact, RejectsUnknownTypeKind) {
@@ -699,7 +768,7 @@ TEST(RadRayShaderArtifact, RejectsRootConstantPayloadLargerThanRange) {
 
 TEST(RadRayShaderArtifact, RejectsRootConstantNamedLikeBinding) {
     SyntheticArtifact artifact = MakeArtifact();
-    artifact.AddBinding("Shared", ShaderBindingKind::Texture, 0, 0);
+    artifact.AddBinding("Shared", gpu::BindingKind::Texture, 0, 0);
     artifact.AddRootConstant("Shared", 16);
 
     EXPECT_FALSE(Decode(artifact).Succeeded());
@@ -757,7 +826,7 @@ TEST(RadRayShaderArtifact, FixtureBindingsUseTargetCoordinates) {
         ASSERT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
         const auto texture = decoded.Value->FindBinding("AlbedoTexture");
         ASSERT_TRUE(texture.has_value());
-        EXPECT_EQ(texture->Record.Type, static_cast<uint32_t>(ShaderBindingKind::Texture));
+        EXPECT_EQ(DecodeBindingKind(texture->Record.Type), gpu::BindingKind::Texture);
         EXPECT_EQ(texture->Record.Group, expected.Group);
         EXPECT_EQ(texture->Record.Binding, expected.Binding);
         EXPECT_EQ(texture->Record.StageMask, kPixelBit);

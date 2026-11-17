@@ -1,6 +1,6 @@
-"""Compile registered render/runtime test shaders to raw DXIL and SPIR-V.
+"""Compile registered gpu_impl/runtime test shaders to raw DXIL and SPIR-V.
 
-Each entry point becomes shader_bytecode/<source>.<entry>.<dxil|spirv>.bin. The render
+Each entry point becomes shader_bytecode/<source>.<entry>.<dxil|spirv>.bin. The gpu_impl
 tests read only these files, so a test process never loads DXC.
 """
 import argparse
@@ -8,14 +8,14 @@ from pathlib import Path
 import subprocess
 
 FIXTURES = (
-    ("render", "compute", "TransformInput", "cs_6_0"),
-    ("render", "compute", "ReadConstants", "cs_6_0"),
-    ("render", "compute", "ReadPushConstants", "cs_6_0"),
-    ("render", "compute", "SampleImage", "cs_6_0"),
-    ("render", "compute", "CombineGroups", "cs_6_0"),
-    ("render", "graphics", "FullscreenVS", "vs_6_0"),
-    ("render", "graphics", "SolidPS", "ps_6_0"),
-    ("render", "geometry", "VSMain", "vs_6_0"),
+    ("gpu_impl", "compute", "TransformInput", "cs_6_0"),
+    ("gpu_impl", "compute", "ReadConstants", "cs_6_0"),
+    ("gpu_impl", "compute", "ReadPushConstants", "cs_6_0"),
+    ("gpu_impl", "compute", "SampleImage", "cs_6_0"),
+    ("gpu_impl", "compute", "CombineGroups", "cs_6_0"),
+    ("gpu_impl", "graphics", "FullscreenVS", "vs_6_0"),
+    ("gpu_impl", "graphics", "SolidPS", "ps_6_0"),
+    ("gpu_impl", "geometry", "VSMain", "vs_6_0"),
     ("runtime", "texture_upload", "LoadUploadedTexture", "cs_6_0"),
 )
 
@@ -48,7 +48,7 @@ def main():
         parser.error(f"DXC not found: {args.dxc}; restore the SDK manually or pass --dxc")
     if not compile_fixtures(root, args.dxc.resolve(), args.output_dir.resolve()):
         parser.error("shader compilation failed; see DXC diagnostics above")
-    print("Raw render fixtures updated. Run tools/compile_test_shaders.py to prepare and verify the complete bundle.")
+    print("Raw GPU fixtures updated. Run tools/compile_test_shaders.py to prepare and verify the complete bundle.")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 // runtime 所有权契约见 docs/architecture/runtime.md。
 
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 
 namespace radray {
 
@@ -12,8 +12,8 @@ struct RDGDeviceConstraints;
 class DeviceContext final {
 public:
     DeviceContext(
-        shared_ptr<render::Device> device,
-        render::CommandQueue* directQueue) noexcept;
+        shared_ptr<gpu::Device> device,
+        gpu::CommandQueue* directQueue) noexcept;
     ~DeviceContext() noexcept;
 
     DeviceContext(const DeviceContext&) = delete;
@@ -26,14 +26,14 @@ public:
     [[nodiscard]] static Nullable<unique_ptr<DeviceContext>> Create(
         Environment& environment) noexcept;
 
-    render::Device& GetDevice() noexcept { return *_device; }
-    render::CommandQueue& GetQueue() noexcept { return *_directQueue; }
+    gpu::Device& GetDevice() noexcept { return *_device; }
+    gpu::CommandQueue& GetQueue() noexcept { return *_directQueue; }
     bool SupportsIndirect() const noexcept;
     RDGDeviceConstraints GetRDGConstraints() const noexcept;
 
 private:
-    shared_ptr<render::Device> _device;
-    render::CommandQueue* _directQueue;
+    shared_ptr<gpu::Device> _device;
+    gpu::CommandQueue* _directQueue;
 };
 
 }  // namespace radray

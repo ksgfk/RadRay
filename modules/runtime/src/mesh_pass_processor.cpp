@@ -130,8 +130,8 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
     bindings.AllElementsSharePrimaryIndexBuffer = std::all_of(bindings.ExtraElements.begin(), bindings.ExtraElements.end(), [&](const auto& element) {
         return element.IndexBuffer.Target == initializer.IndexBuffer.Target && element.IndexBuffer.Offset == initializer.IndexBuffer.Offset && element.IndexBuffer.Stride == initializer.IndexBuffer.Stride;
     });
-    const uint32_t primitiveSize = batch.Topology == render::PrimitiveTopology::TriangleList ? 3 : batch.Topology == render::PrimitiveTopology::LineList ? 2
-                                                                                               : batch.Topology == render::PrimitiveTopology::PointList  ? 1
+    const uint32_t primitiveSize = batch.Topology == gpu::PrimitiveTopology::TriangleList ? 3 : batch.Topology == gpu::PrimitiveTopology::LineList ? 2
+                                                                                               : batch.Topology == gpu::PrimitiveTopology::PointList  ? 1
                                                                                                                                                          : 0;
     if (sharedState.AllowElementMerging && primitiveSize != 0) {
         uint64_t runCount = batch.Elements.front().IndexCount;
@@ -157,7 +157,7 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
     if (sharedState.AllowDeferredInstanceStream) {
         size_t instanceLayouts = 0;
         for (const auto& layout : batch.VertexInput->Layouts) {
-            if (layout.StepMode != render::VertexStepMode::Instance) continue;
+            if (layout.StepMode != gpu::VertexStepMode::Instance) continue;
             ++instanceLayouts;
             bindings.InstanceStreamBinding = layout.Binding;
         }

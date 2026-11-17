@@ -1,6 +1,6 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或产品 pass
 > - 权威: 本文是 schema 10 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
+> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `modules/shader/tests/data/depth.hlsl`, `modules/shader/tests/data/compute.hlsl`
 
 # shaderlib
 
@@ -10,10 +10,10 @@ compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 作者不维护 sidecar metadata，active binding 与 type tree 随 concrete target lane artifact 生成。
 
 测试专用 shader 随所属模块放在 `modules/<module>/tests/`，不放入 `shaderlib/`。
-shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
+shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader/tests/data/`；
 测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
 runtime 的区域纹理上传 Load shader 位于 `modules/runtime/tests/data/texture_upload.hlsl`，
-与 render 夹具一起通过离线脚本生成原始 DXIL／SPIR-V；不进入生产 shader 源库。
+与 gpu_impl 夹具一起通过离线脚本生成原始 DXIL／SPIR-V；不进入生产 shader 源库。
 
 ## 分层
 

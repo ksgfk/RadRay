@@ -4,7 +4,7 @@
 #include <radray/inline_vector.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/vertex_input.h>
 #include <radray/runtime/scene_handle.h>
 
@@ -20,7 +20,7 @@ struct MeshSection {
 
 struct MeshBatchElement {
     // 借用索引缓冲；IndexCount 非零时必须提供；偏移单位为字节，步长只能为 2 或 4。
-    Nullable<render::Buffer*> IndexBuffer{nullptr};
+    Nullable<gpu::Buffer*> IndexBuffer{nullptr};
     uint32_t IndexBufferOffset{0};
     uint32_t IndexStride{4};
     // FirstIndex 相对 IndexBufferOffset，以索引个数为单位。
@@ -39,7 +39,7 @@ struct MeshBatch {
     Nullable<const radray::VertexInput*> VertexInput{nullptr};
     // 最多 32 项；掩码的第 i 位始终对应源索引，不因前面的空项改变。
     InlineVector<MeshBatchElement, 8> Elements;
-    render::PrimitiveTopology Topology{render::PrimitiveTopology::TriangleList};
+    gpu::PrimitiveTopology Topology{gpu::PrimitiveTopology::TriangleList};
 };
 
 struct PrimitiveSceneInfo {

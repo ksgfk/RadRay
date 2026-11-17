@@ -10,9 +10,9 @@
 #include <radray/file.h>
 #include <radray/json.h>
 #include <radray/logger.h>
-#include <radray/shader_reflector/shader_reflector.h>
+#include <radray/shader/shader_reflector.h>
 
-namespace radray::shader_reflector {
+namespace radray::shader {
 namespace {
 
 struct OwnedVariant {
@@ -164,8 +164,8 @@ int RunShaderReflect(int argc, char** argv) {
         Error(result.Diagnostics);
         return 1;
     }
-    auto json = WriteShaderFamilyLayoutJson(*result.Value);
-    auto binary = WriteShaderFamilyLayoutBinary(*result.Value);
+    auto json = shader::WriteShaderFamilyLayoutJson(*result.Value);
+    auto binary = shader::WriteShaderFamilyLayoutBinary(*result.Value);
     if (!json || !binary) {
         Error("cannot encode layout");
         return 1;
@@ -225,8 +225,8 @@ int RunShaderReflect(int argc, char** argv) {
     return 0;
 }
 
-}  // namespace radray::shader_reflector
+}  // namespace radray::shader
 
 #if !defined(RADRAY_SHADER_REFLECT_NO_MAIN)
-int main(int argc, char** argv) { return radray::shader_reflector::RunShaderReflect(argc, argv); }
+int main(int argc, char** argv) { return radray::shader::RunShaderReflect(argc, argv); }
 #endif

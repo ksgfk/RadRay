@@ -1,4 +1,4 @@
-#include <radray/shader/shader_metadata_wire.h>
+#include <radray/shader/shader_compiler_contract.h>
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -12,7 +12,7 @@
 #include <radray/file.h>
 #include <radray/json.h>
 #include <radray/logger.h>
-#include <radray/shader_compiler/client.h>
+#include <radray/shader/client.h>
 #include <radray/types.h>
 
 namespace {
@@ -180,13 +180,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    shader_compiler::Client client;
+    shader::Client client;
     if (!client.IsAvailable()) {
         PrintError("RadRay DXC compiler client is unavailable");
         return 1;
     }
 
-    const shader_compiler::DiscoveryResult discovery = client.DiscoverSourceContract(
+    const shader::DiscoveryResult discovery = client.DiscoverSourceContract(
         args->Source,
         *source,
         shader::ShaderTarget::DXIL,

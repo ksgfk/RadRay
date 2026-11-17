@@ -31,7 +31,7 @@ public:
     void SortVisibleCommands();
     void SetSortMode(MeshPassSortMode mode) noexcept;
     MeshPassSortMode GetSortMode() const noexcept { return DynamicContext.GetSortMode(); }
-    bool Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
+    bool Submit(gpu::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
     void Clear() noexcept;
 
     vector<VisibleMeshDrawCommand> VisibleCommands;
@@ -50,8 +50,8 @@ public:
     FrameSlot(FrameSlot&&) = delete;
     FrameSlot& operator=(FrameSlot&&) = delete;
 
-    render::Device& GetDevice() noexcept;
-    render::CommandQueue& GetQueue() noexcept;
+    gpu::Device& GetDevice() noexcept;
+    gpu::CommandQueue& GetQueue() noexcept;
     uint32_t GetIndex() const noexcept;
 
     // 调度器内的帧编号，由 BeginFrame 分配并保持到 Wait 结束。
@@ -99,13 +99,13 @@ public:
     // 在 Prepare 期间调用；每次借用本槽拥有的不同命令缓冲。
     // 本槽下次重置时，借用失效，命令缓冲可被复用。
     // 调用方负责 Begin/End；共享分配器同一时刻只允许一份命令缓冲处于录制状态。
-    Nullable<render::CommandBuffer*> AcquireCommandBuffer();
+    Nullable<gpu::CommandBuffer*> AcquireCommandBuffer();
 
 private:
     friend class FrameScheduler;
 
     static Nullable<unique_ptr<FrameSlot>> Create(DeviceContext& device, uint32_t index, Nullable<std::pmr::memory_resource*> memoryUpstream);
-    FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<render::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream);
+    FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<gpu::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream);
 
     // 要求使用已完成；共享资源所有者销毁前，所有引用它的命令分配器必须先重置。
     void ResetCommandStorage() noexcept;
@@ -128,8 +128,8 @@ private:
 
     DeviceContext& _device;
     uint64_t _frameId{0};
-    unique_ptr<render::CommandAllocator> _allocator;
-    vector<unique_ptr<render::CommandBuffer>> _commands;
+    unique_ptr<gpu::CommandAllocator> _allocator;
+    vector<unique_ptr<gpu::CommandBuffer>> _commands;
     HeapMemoryResource _memoryHeap;
     std::pmr::memory_resource& _memoryUpstream;
     std::pmr::unsynchronized_pool_resource _scratchPool;

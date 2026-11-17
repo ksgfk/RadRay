@@ -5,30 +5,30 @@
 #include <string_view>
 
 #include <radray/types.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/gpu_device.h>
 
 // runtime 所用 RHI 对象的 CPU 替身；各替身仅记录测试观察的数据。
 namespace radray::test {
 
-class FakeBuffer : public render::Buffer {
+class FakeBuffer : public gpu::Buffer {
 public:
-    FakeBuffer(uint64_t size, render::BufferUses usage) noexcept : Desc{.Size = size, .Usage = usage} {}
+    FakeBuffer(uint64_t size, gpu::BufferUses usage) noexcept : Desc{.Size = size, .Usage = usage} {}
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
     void* Map(uint64_t, uint64_t) noexcept override { return nullptr; }
     void Unmap() noexcept override {}
-    void FlushMappedRange(render::BufferRange) noexcept override {}
-    void InvalidateMappedRange(render::BufferRange) noexcept override {}
-    render::BufferDescriptor GetDesc() const noexcept override { return Desc; }
-    render::Device* GetDevice() const noexcept override { return nullptr; }
+    void FlushMappedRange(gpu::BufferRange) noexcept override {}
+    void InvalidateMappedRange(gpu::BufferRange) noexcept override {}
+    gpu::BufferDescriptor GetDesc() const noexcept override { return Desc; }
+    gpu::Device* GetDevice() const noexcept override { return nullptr; }
 
-    render::BufferDescriptor Desc;
+    gpu::BufferDescriptor Desc;
 };
 
-class FakePipeline final : public render::GraphicsPipelineState {
+class FakePipeline final : public gpu::GraphicsPipelineState {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -37,13 +37,13 @@ public:
 
 class FakeMappedBuffer final : public FakeBuffer {
 public:
-    FakeMappedBuffer(const render::BufferDescriptor& desc, bool failMap, std::function<void()>& onMap, std::function<void(render::BufferRange)>& onFlush)
+    FakeMappedBuffer(const gpu::BufferDescriptor& desc, bool failMap, std::function<void()>& onMap, std::function<void(gpu::BufferRange)>& onFlush)
         : FakeBuffer(desc.Size, desc.Usage), Bytes(static_cast<size_t>(desc.Size)), _failMap(failMap), _onMap(onMap), _onFlush(onFlush) { Desc = desc; }
     void* Map(uint64_t offset, uint64_t size) noexcept override {
         if (_onMap) _onMap();
         return !_failMap && offset <= Bytes.size() && size <= Bytes.size() - offset ? Bytes.data() + offset : nullptr;
     }
-    void FlushMappedRange(render::BufferRange range) noexcept override {
+    void FlushMappedRange(gpu::BufferRange range) noexcept override {
         if (_onFlush) _onFlush(range);
     }
     vector<byte> Bytes;
@@ -51,12 +51,12 @@ public:
 private:
     bool _failMap;
     std::function<void()>& _onMap;
-    std::function<void(render::BufferRange)>& _onFlush;
+    std::function<void(gpu::BufferRange)>& _onFlush;
 };
 
-class FakeTexture final : public render::Texture {
+class FakeTexture final : public gpu::Texture {
 public:
-    FakeTexture(render::Device& device, render::TextureDescriptor desc, std::function<void()>& onDestroy) noexcept
+    FakeTexture(gpu::Device& device, gpu::TextureDescriptor desc, std::function<void()>& onDestroy) noexcept
         : Desc(desc), _device(device), _onDestroy(onDestroy) {}
     ~FakeTexture() noexcept override {
         if (_onDestroy) _onDestroy();
@@ -64,36 +64,36 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    render::TextureDescriptor GetDesc() const noexcept override { return Desc; }
-    render::Device* GetDevice() const noexcept override { return &_device; }
-    render::TextureDescriptor Desc;
+    gpu::TextureDescriptor GetDesc() const noexcept override { return Desc; }
+    gpu::Device* GetDevice() const noexcept override { return &_device; }
+    gpu::TextureDescriptor Desc;
 
 private:
-    render::Device& _device;
+    gpu::Device& _device;
     std::function<void()>& _onDestroy;
 };
 
-class FakeTextureView final : public render::TextureView {
+class FakeTextureView final : public gpu::TextureView {
 public:
-    FakeTextureView(render::TextureViewDescriptor desc, std::function<void()>& onDestroy) noexcept : Desc(desc), _onDestroy(onDestroy) {}
+    FakeTextureView(gpu::TextureViewDescriptor desc, std::function<void()>& onDestroy) noexcept : Desc(desc), _onDestroy(onDestroy) {}
     ~FakeTextureView() noexcept override {
         if (_onDestroy) _onDestroy();
     }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    render::TextureViewDescriptor GetDesc() const noexcept override { return Desc; }
-    render::TextureViewDescriptor Desc;
+    gpu::TextureViewDescriptor GetDesc() const noexcept override { return Desc; }
+    gpu::TextureViewDescriptor Desc;
 
 private:
     std::function<void()>& _onDestroy;
 };
 
-class FakeParameterSet final : public render::ShaderParameterSet {
+class FakeParameterSet final : public gpu::ShaderParameterSet {
 public:
     bool IsValid() const noexcept override { return Valid; }
     void Destroy() noexcept override {}
-    bool Set(uint32_t, uint32_t, render::ShaderParameterValue) noexcept override { return true; }
+    bool Set(uint32_t, uint32_t, gpu::ShaderParameterValue) noexcept override { return true; }
     bool FlushWrites() noexcept override { return true; }
     void ResetBindingsForReuse() noexcept override {}
 
@@ -102,34 +102,34 @@ public:
 
 struct RecordedParameterBind {
     uint32_t Group;
-    render::ShaderParameterSet* Set;
-    vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
+    gpu::ShaderParameterSet* Set;
+    vector<gpu::ShaderParameterDynamicOffset> DynamicOffsets;
 };
 
-class RecordingEncoder final : public render::GraphicsCommandEncoder {
+class RecordingEncoder final : public gpu::GraphicsCommandEncoder {
 public:
     bool IsValid() const noexcept override { return Valid; }
     void Destroy() noexcept override {}
-    render::CommandBuffer* GetCommandBuffer() const noexcept override { return nullptr; }
+    gpu::CommandBuffer* GetCommandBuffer() const noexcept override { return nullptr; }
     void SetViewport(Viewport) noexcept override {}
     void SetScissor(Rect) noexcept override {}
     void SetStencilReference(uint8_t value) noexcept override {
         Order.emplace_back("stencil");
         Stencils.push_back(value);
     }
-    void BindGraphicsPipelineState(render::GraphicsPipelineState* value) noexcept override {
+    void BindGraphicsPipelineState(gpu::GraphicsPipelineState* value) noexcept override {
         Order.emplace_back("pipeline");
         Pipelines.push_back(value);
     }
-    void BindVertexBuffers(std::span<const render::VertexBufferBinding> values) noexcept override {
+    void BindVertexBuffers(std::span<const gpu::VertexBufferBinding> values) noexcept override {
         Order.emplace_back("vertex");
         VertexCalls.emplace_back(values.begin(), values.end());
     }
-    void BindIndexBuffer(render::IndexBufferView value) noexcept override {
+    void BindIndexBuffer(gpu::IndexBufferView value) noexcept override {
         Order.emplace_back("index");
         IndexBuffers.push_back(value);
     }
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets) noexcept override {
+    void BindShaderParameterSet(uint32_t group, gpu::ShaderParameterSet* set, std::span<const gpu::ShaderParameterDynamicOffset> offsets) noexcept override {
         Order.emplace_back("parameters");
         ParameterBinds.push_back({group, set, {offsets.begin(), offsets.end()}});
     }
@@ -143,22 +143,22 @@ public:
         Draws.push_back({indexCount, instanceCount, firstIndex, vertexOffset, firstInstance});
     }
     void Draw(uint32_t, uint32_t, uint32_t, uint32_t) noexcept override {}
-    void DrawIndirect(render::Buffer*, uint64_t, uint32_t) noexcept override {}
-    void DrawIndexedIndirect(render::Buffer*, uint64_t, uint32_t) noexcept override {}
+    void DrawIndirect(gpu::Buffer*, uint64_t, uint32_t) noexcept override {}
+    void DrawIndexedIndirect(gpu::Buffer*, uint64_t, uint32_t) noexcept override {}
 
     bool Valid{true};
     bool FailPushConstants{false};
     vector<std::string_view> Order;
-    vector<render::GraphicsPipelineState*> Pipelines;
-    vector<vector<render::VertexBufferBinding>> VertexCalls;
-    vector<render::IndexBufferView> IndexBuffers;
+    vector<gpu::GraphicsPipelineState*> Pipelines;
+    vector<vector<gpu::VertexBufferBinding>> VertexCalls;
+    vector<gpu::IndexBufferView> IndexBuffers;
     vector<uint8_t> Stencils;
     vector<RecordedParameterBind> ParameterBinds;
     vector<vector<byte>> Pushes;
-    vector<render::DrawIndexedIndirectArguments> Draws;
+    vector<gpu::DrawIndexedIndirectArguments> Draws;
 };
 
-class FakeCommandBuffer : public render::CommandBuffer {
+class FakeCommandBuffer : public gpu::CommandBuffer {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
@@ -167,23 +167,23 @@ public:
     void End() noexcept override {}
     void PushDebugGroup(std::string_view) noexcept override {}
     void PopDebugGroup() noexcept override {}
-    void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor>) noexcept override {}
-    Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return nullptr; }
-    void EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>) noexcept override {}
-    Nullable<unique_ptr<render::ComputeCommandEncoder>> BeginComputePass() noexcept override { return nullptr; }
-    void EndComputePass(unique_ptr<render::ComputeCommandEncoder>) noexcept override {}
-    void CopyBufferToBuffer(render::Buffer*, uint64_t, render::Buffer*, uint64_t, uint64_t) noexcept override {}
-    void CopyBufferToTexture(render::Texture*, render::SubresourceRange, render::Buffer*, uint64_t) noexcept override {}
-    bool CopyBufferToTextureRegion(const render::BufferToTextureCopyDescriptor&) noexcept override { return false; }
-    void CopyTextureToBuffer(render::Buffer*, uint64_t, render::Texture*, render::SubresourceRange) noexcept override {}
-    void CopyTextureToTexture(const render::TextureCopyDescriptor&) noexcept override {}
-    void ResolveTexture(const render::TextureResolveDescriptor&) noexcept override {}
-    void ResetQueryPool(render::QueryPool*, uint32_t, uint32_t) noexcept override {}
-    void WriteTimestamp(const render::QueryTimestampDescriptor&) noexcept override {}
-    void ResolveQueryData(const render::QueryResolveDescriptor&) noexcept override {}
+    void ResourceBarrier(std::span<const gpu::ResourceBarrierDescriptor>) noexcept override {}
+    Nullable<unique_ptr<gpu::GraphicsCommandEncoder>> BeginRenderPass(const gpu::RenderPassBeginDescriptor&) noexcept override { return nullptr; }
+    void EndRenderPass(unique_ptr<gpu::GraphicsCommandEncoder>) noexcept override {}
+    Nullable<unique_ptr<gpu::ComputeCommandEncoder>> BeginComputePass() noexcept override { return nullptr; }
+    void EndComputePass(unique_ptr<gpu::ComputeCommandEncoder>) noexcept override {}
+    void CopyBufferToBuffer(gpu::Buffer*, uint64_t, gpu::Buffer*, uint64_t, uint64_t) noexcept override {}
+    void CopyBufferToTexture(gpu::Texture*, gpu::SubresourceRange, gpu::Buffer*, uint64_t) noexcept override {}
+    bool CopyBufferToTextureRegion(const gpu::BufferToTextureCopyDescriptor&) noexcept override { return false; }
+    void CopyTextureToBuffer(gpu::Buffer*, uint64_t, gpu::Texture*, gpu::SubresourceRange) noexcept override {}
+    void CopyTextureToTexture(const gpu::TextureCopyDescriptor&) noexcept override {}
+    void ResolveTexture(const gpu::TextureResolveDescriptor&) noexcept override {}
+    void ResetQueryPool(gpu::QueryPool*, uint32_t, uint32_t) noexcept override {}
+    void WriteTimestamp(const gpu::QueryTimestampDescriptor&) noexcept override {}
+    void ResolveQueryData(const gpu::QueryResolveDescriptor&) noexcept override {}
 };
 
-class FakeCommandAllocator final : public render::CommandAllocator {
+class FakeCommandAllocator final : public gpu::CommandAllocator {
 public:
     explicit FakeCommandAllocator(std::function<void()>& onReset) noexcept : _onReset(onReset) {}
     bool IsValid() const noexcept override { return true; }
@@ -197,74 +197,74 @@ private:
     std::function<void()>& _onReset;
 };
 
-class FakeQueue final : public render::CommandQueue {
+class FakeQueue final : public gpu::CommandQueue {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    void Submit(const render::CommandQueueSubmitDescriptor&) noexcept override {}
+    void Submit(const gpu::CommandQueueSubmitDescriptor&) noexcept override {}
     void Wait() noexcept override {}
-    render::QueueType GetQueueType() const noexcept override { return render::QueueType::Direct; }
-    render::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
+    gpu::QueueType GetQueueType() const noexcept override { return gpu::QueueType::Direct; }
+    gpu::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
 };
 
 // 默认仅创建命令对象；上传测试可显式开启 host buffer 和纹理支持。
-class FakeDevice : public render::Device {
+class FakeDevice : public gpu::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    render::RenderBackend GetBackend() noexcept override { return render::RenderBackend::D3D12; }
-    Nullable<render::ExternalResourceExtension*> GetExternalResourceExtension() noexcept override { return nullptr; }
-    render::DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
-    const render::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
-    render::TextureSupport QueryTextureSupport(const render::TextureSupportQuery&) const noexcept override {
+    gpu::RenderBackend GetBackend() noexcept override { return gpu::RenderBackend::D3D12; }
+    Nullable<gpu::ExternalResourceExtension*> GetExternalResourceExtension() noexcept override { return nullptr; }
+    gpu::DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
+    const gpu::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
+    gpu::TextureSupport QueryTextureSupport(const gpu::TextureSupportQuery&) const noexcept override {
         if (!EnableTextures) return {};
-        return {.MaxResourceSize = std::numeric_limits<uint64_t>::max(), .MaxWidth = 16384, .MaxHeight = 16384, .MaxDepth = 1, .MaxArrayLayers = 2048, .MaxMipLevels = 15, .SampleCounts = render::SampleCount::X1, .Supported = true};
+        return {.MaxResourceSize = std::numeric_limits<uint64_t>::max(), .MaxWidth = 16384, .MaxHeight = 16384, .MaxDepth = 1, .MaxArrayLayers = 2048, .MaxMipLevels = 15, .SampleCounts = gpu::SampleCount::X1, .Supported = true};
     }
-    render::AttachmentResolveSupport QueryAttachmentResolveSupport(render::TextureFormat, uint32_t) const noexcept override { return {}; }
-    Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t) noexcept override { return &Queue; }
-    Nullable<unique_ptr<render::CommandAllocator>> CreateCommandAllocator(render::CommandQueue*) noexcept override {
+    gpu::AttachmentResolveSupport QueryAttachmentResolveSupport(gpu::TextureFormat, uint32_t) const noexcept override { return {}; }
+    Nullable<gpu::CommandQueue*> GetCommandQueue(gpu::QueueType, uint32_t) noexcept override { return &Queue; }
+    Nullable<unique_ptr<gpu::CommandAllocator>> CreateCommandAllocator(gpu::CommandQueue*) noexcept override {
         return make_unique<FakeCommandAllocator>(OnAllocatorReset);
     }
-    Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandAllocator*) noexcept override {
+    Nullable<unique_ptr<gpu::CommandBuffer>> CreateCommandBuffer(gpu::CommandAllocator*) noexcept override {
         if (FailCommandBuffers) return nullptr;
         return make_unique<FakeCommandBuffer>();
     }
-    Nullable<unique_ptr<render::Fence>> CreateFence() noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::QueryPool>> CreateQueryPool(const render::QueryPoolDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::SwapChain>> CreateSwapChain(const render::SwapChainDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override {
+    Nullable<unique_ptr<gpu::Fence>> CreateFence() noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::QueryPool>> CreateQueryPool(const gpu::QueryPoolDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::SwapChain>> CreateSwapChain(const gpu::SwapChainDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::Buffer>> CreateBuffer(const gpu::BufferDescriptor& desc) noexcept override {
         if (!EnableHostBuffers || BuffersUntilFailure == 0) return nullptr;
         if (BuffersUntilFailure > 0) --BuffersUntilFailure;
         if (OnCreateBuffer) OnCreateBuffer(desc);
         return make_unique<FakeMappedBuffer>(desc, FailMaps, OnMap, OnFlush);
     }
-    Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor& desc) noexcept override {
+    Nullable<unique_ptr<gpu::Texture>> CreateTexture(const gpu::TextureDescriptor& desc) noexcept override {
         if (!EnableTextures || FailTextures) return nullptr;
         return make_unique<FakeTexture>(*this, desc, OnTextureDestroyed);
     }
-    Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor& desc) noexcept override {
+    Nullable<unique_ptr<gpu::TextureView>> CreateTextureView(const gpu::TextureViewDescriptor& desc) noexcept override {
         if (!EnableTextures || FailViews) return nullptr;
         return make_unique<FakeTextureView>(desc, OnViewDestroyed);
     }
-    Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::BindingGroupLayout>> CreateBindingGroupLayout(const render::BindingGroupLayoutDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(const render::PipelineLayoutDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::ShaderParameterSet>> CreateShaderParameterSet(const render::ShaderParameterSetDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::GraphicsPipelineState>> CreateGraphicsPipelineState(const render::GraphicsPipelineStateDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::ComputePipelineState>> CreateComputePipelineState(const render::ComputePipelineStateDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::Sampler>> CreateSampler(const render::SamplerDescriptor&) noexcept override { return nullptr; }
-    Nullable<render::Sampler*> GetOrCreateSampler(const render::SamplerDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::Shader>> CreateShader(const gpu::ShaderDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::BindingGroupLayout>> CreateBindingGroupLayout(const gpu::BindingGroupLayoutDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::PipelineLayout>> CreatePipelineLayout(const gpu::PipelineLayoutDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::ShaderParameterSet>> CreateShaderParameterSet(const gpu::ShaderParameterSetDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::GraphicsPipelineState>> CreateGraphicsPipelineState(const gpu::GraphicsPipelineStateDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::ComputePipelineState>> CreateComputePipelineState(const gpu::ComputePipelineStateDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<gpu::Sampler>> CreateSampler(const gpu::SamplerDescriptor&) noexcept override { return nullptr; }
+    Nullable<gpu::Sampler*> GetOrCreateSampler(const gpu::SamplerDescriptor&) noexcept override { return nullptr; }
 
     FakeQueue Queue;
-    render::RenderDeviceCapabilities Capabilities{};
+    gpu::RenderDeviceCapabilities Capabilities{};
     std::function<void()> OnAllocatorReset;
     bool FailCommandBuffers{false};
     int32_t BuffersUntilFailure{-1};
     bool EnableHostBuffers{false}, EnableTextures{false};
     bool FailMaps{false}, FailTextures{false}, FailViews{false};
     std::function<void()> OnMap, OnTextureDestroyed, OnViewDestroyed;
-    std::function<void(render::BufferRange)> OnFlush;
-    std::function<void(const render::BufferDescriptor&)> OnCreateBuffer;
+    std::function<void(gpu::BufferRange)> OnFlush;
+    std::function<void(const gpu::BufferDescriptor&)> OnCreateBuffer;
 };
 
 // 将各阶段转发到可选的测试回调。

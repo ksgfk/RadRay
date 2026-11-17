@@ -1,76 +1,73 @@
 #pragma once
 #include "test_fakes.h"
+#include "../../shader/tests/layout_test_data.h"
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/pipeline_layout_cache.h>
 
 namespace radray::test {
-class AssetTestShader final : public render::Shader {
+class AssetTestShader final : public gpu::Shader {
 public:
-    AssetTestShader(render::ShaderStages stages, uint32_t& destroyed) : Stages(stages), Destroyed(destroyed) {}
+    AssetTestShader(gpu::ShaderStages stages, uint32_t& destroyed) : Stages(stages), Destroyed(destroyed) {}
     ~AssetTestShader() noexcept override { ++Destroyed; }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    render::ShaderStages GetStages() const noexcept override { return Stages; }
-    render::ShaderStages Stages;
+    gpu::ShaderStages GetStages() const noexcept override { return Stages; }
+    gpu::ShaderStages Stages;
     uint32_t& Destroyed;
 };
-class LayoutGroup final : public render::BindingGroupLayout {
+class LayoutGroup final : public gpu::BindingGroupLayout {
 public:
-    explicit LayoutGroup(std::span<const render::BindingDescriptor> entries) : Bindings(entries.begin(), entries.end()) {}
+    explicit LayoutGroup(std::span<const gpu::BindingDescriptor> entries, uint32_t& destroyed) : Bindings(entries.begin(), entries.end()), Destroyed(destroyed) {}
+    ~LayoutGroup() noexcept override { ++Destroyed; }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    render::BindingGroupLayoutDescriptor GetDesc() const noexcept override { return {Bindings}; }
-    vector<render::BindingDescriptor> Bindings;
+    gpu::BindingGroupLayoutDescriptor GetDesc() const noexcept override { return {Bindings}; }
+    vector<gpu::BindingDescriptor> Bindings;
+    uint32_t& Destroyed;
 };
 
-class LayoutPipeline final : public render::PipelineLayout {
+class LayoutPipeline final : public gpu::PipelineLayout {
 public:
-    explicit LayoutPipeline(const render::PipelineLayoutDescriptor& desc)
-        : Groups(desc.Groups.begin(), desc.Groups.end()), Pushes(desc.PushConstants.begin(), desc.PushConstants.end()) {}
+    explicit LayoutPipeline(const gpu::PipelineLayoutDescriptor& desc, uint32_t& destroyed)
+        : Groups(desc.Groups.begin(), desc.Groups.end()), Pushes(desc.PushConstants.begin(), desc.PushConstants.end()), Destroyed(destroyed) {}
+    ~LayoutPipeline() noexcept override { ++Destroyed; }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    render::PipelineLayoutDescriptor GetDesc() const noexcept override { return {Groups, Pushes}; }
-    vector<render::PipelineLayoutGroupDescriptor> Groups;
-    vector<render::PushConstantDescriptor> Pushes;
+    gpu::PipelineLayoutDescriptor GetDesc() const noexcept override { return {Groups, Pushes}; }
+    vector<gpu::PipelineLayoutGroupDescriptor> Groups;
+    vector<gpu::PushConstantDescriptor> Pushes;
+    uint32_t& Destroyed;
 };
 
 class LayoutDevice final : public test::FakeDevice {
 public:
     uint32_t ShaderCreates{0}, GroupCreates{0}, LayoutCreates{0}, ShaderDestroys{0};
+    uint32_t GroupDestroys{0}, LayoutDestroys{0};
     uint32_t FailShaderAt{0};
     bool FailGroup{false}, FailLayout{false};
-    Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor& desc) noexcept override {
+    Nullable<unique_ptr<gpu::Shader>> CreateShader(const gpu::ShaderDescriptor& desc) noexcept override {
         ++ShaderCreates;
         if (FailShaderAt == ShaderCreates) return nullptr;
         return make_unique<AssetTestShader>(desc.Stages, ShaderDestroys);
     }
-    render::RenderBackend Backend{render::RenderBackend::D3D12};
-    render::RenderBackend GetBackend() noexcept override { return Backend; }
-    Nullable<unique_ptr<render::BindingGroupLayout>> CreateBindingGroupLayout(const render::BindingGroupLayoutDescriptor& desc) noexcept override {
+    gpu::RenderBackend Backend{gpu::RenderBackend::D3D12};
+    gpu::RenderBackend GetBackend() noexcept override { return Backend; }
+    Nullable<unique_ptr<gpu::BindingGroupLayout>> CreateBindingGroupLayout(const gpu::BindingGroupLayoutDescriptor& desc) noexcept override {
         ++GroupCreates;
         if (FailGroup) return nullptr;
-        return make_unique<LayoutGroup>(desc.Bindings);
+        return make_unique<LayoutGroup>(desc.Bindings, GroupDestroys);
     }
-    Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(const render::PipelineLayoutDescriptor& desc) noexcept override {
+    Nullable<unique_ptr<gpu::PipelineLayout>> CreatePipelineLayout(const gpu::PipelineLayoutDescriptor& desc) noexcept override {
         ++LayoutCreates;
         if (FailLayout) return nullptr;
-        return make_unique<LayoutPipeline>(desc);
+        return make_unique<LayoutPipeline>(desc, LayoutDestroys);
     }
 };
 
-inline ShaderPipelineLayoutDesc MatrixLayout() {
-    ShaderPipelineLayoutDesc desc;
-    desc.Types.push_back({.Name = "Payload", .Size = 92, .ElementSize = 92});
-    desc.Types.push_back({.Name = "Matrices", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Array, .ElementKind = shader::ShaderTypeKind::Matrix, .ElementCount = 2, .Size = 92, .ElementSize = 44, .Stride = 48, .MatrixStride = 16, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 3, .ColumnCount = 3});
-    ShaderBindingGroupDesc group{.Name = "Material", .GroupSlot = 2};
-    group.Bindings.push_back({.Name = "Constants", .Binding = {.BindingId = 7, .Kind = render::BindingKind::CBuffer, .Stages = render::ShaderStage::Compute, .D3D12 = render::D3D12BindingDescriptor{}, .Vulkan = render::VulkanBindingDescriptor{.Set = 4}}, .TypeIndex = 0, .BufferByteSize = 96});
-    desc.Groups.push_back(std::move(group));
-    return desc;
-}
 
-inline ShaderPipelineLayoutDesc MaterialLayout() {
+
+inline shader::ShaderPipelineLayoutDesc MaterialLayout() {
     auto desc = MatrixLayout();
     desc.Types.clear();
     desc.Types.push_back({.Name = "MaterialData", .Size = 32, .ElementSize = 32});
@@ -81,27 +78,21 @@ inline ShaderPipelineLayoutDesc MaterialLayout() {
     return desc;
 }
 
-inline ShaderPipelineLayoutDesc ResourceLayout() {
-    ShaderPipelineLayoutDesc desc;
-    ShaderBindingGroupDesc group{.Name = "Resources", .GroupSlot = 0};
-    for (uint32_t id = 0; id < 2; ++id) group.Bindings.push_back({.Name = id == 0 ? "First" : "Second", .Binding = {.BindingId = id, .Kind = render::BindingKind::Texture, .Stages = render::ShaderStage::Pixel, .D3D12 = render::D3D12BindingDescriptor{render::BindingRegisterClass::SRV, id}, .Vulkan = render::VulkanBindingDescriptor{0, id}}});
-    desc.Groups.push_back(std::move(group));
-    return desc;
-}
 
-inline ShaderAssetDesc MakeShaderDesc(ShaderPipelineLayoutDesc layout = {}, render::RenderBackend backend = render::RenderBackend::D3D12) {
+
+inline ShaderAssetDesc MakeShaderDesc(shader::ShaderPipelineLayoutDesc layout = {}, gpu::RenderBackend backend = gpu::RenderBackend::D3D12) {
     ShaderAssetDesc desc;
     desc.Family.SharedLayout = std::move(layout);
-    ShaderProgramInterfaceDesc program;
+    shader::ShaderVariantInterfaceDesc program;
     program.Name = "Default";
-    ShaderTargetProgramInterfaceDesc interface;
-    interface.Stages = render::ShaderStage::Vertex | render::ShaderStage::Pixel;
-    if (backend == render::RenderBackend::D3D12)
+    shader::ShaderVariantTargetInterfaceDesc interface;
+    interface.Stages = gpu::ShaderStage::Vertex | gpu::ShaderStage::Pixel;
+    if (backend == gpu::RenderBackend::D3D12)
         program.DXIL = interface;
     else
         program.SPIRV = interface;
     desc.Family.Variants.push_back(program);
-    desc.Stages = {{0, backend, render::ShaderStage::Vertex, "VS", {byte{1}}}, {0, backend, render::ShaderStage::Pixel, "PS", {byte{2}}}};
+    desc.Stages = {{0, backend, gpu::ShaderStage::Vertex, "VS", {byte{1}}}, {0, backend, gpu::ShaderStage::Pixel, "PS", {byte{2}}}};
     return desc;
 }
 inline MaterialAssetDesc MakeMaterialDesc(AssetHandle<ShaderAsset> shader, vector<MaterialParameter> parameters = {}, vector<string> subset = {}, string block = {}) {

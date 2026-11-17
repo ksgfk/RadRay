@@ -68,7 +68,7 @@ void MeshPassFrameDrawList::SortVisibleCommands() {
     if (source != VisibleCommands.data()) std::copy_n(source, VisibleCommands.size(), VisibleCommands.data());
 }
 
-bool MeshPassFrameDrawList::Submit(render::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
+bool MeshPassFrameDrawList::Submit(gpu::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
     return SubmitMeshDrawCommands(encoder, VisibleCommands, submitArgs);
 }
 
@@ -90,7 +90,7 @@ Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_
     return unique_ptr<FrameSlot>{new FrameSlot{device, index, allocator.Release(), memoryUpstream}};
 }
 
-FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<render::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream)
+FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<gpu::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream)
     : _device(device), _allocator(std::move(allocator)),
       _memoryUpstream(memoryUpstream ? *memoryUpstream : _memoryHeap),
       _scratchPool(std::pmr::pool_options{.max_blocks_per_chunk = 4096, .largest_required_pool_block = 64 * 1024}, &_memoryUpstream), _index(index) {}
@@ -102,9 +102,9 @@ FrameSlot::~FrameSlot() noexcept {
     if (_initialBuffer) _memoryUpstream.deallocate(_initialBuffer.Get(), _initialCapacity, alignof(std::max_align_t));
 }
 
-render::Device& FrameSlot::GetDevice() noexcept { return _device.GetDevice(); }
+gpu::Device& FrameSlot::GetDevice() noexcept { return _device.GetDevice(); }
 
-render::CommandQueue& FrameSlot::GetQueue() noexcept { return _device.GetQueue(); }
+gpu::CommandQueue& FrameSlot::GetQueue() noexcept { return _device.GetQueue(); }
 
 uint32_t FrameSlot::GetIndex() const noexcept { return _index; }
 
@@ -133,7 +133,7 @@ std::pmr::memory_resource& FrameSlot::GetMemoryResource() {
 }
 std::pmr::memory_resource& FrameSlot::GetScratchMemoryResource() noexcept { return _scratchPool; }
 
-Nullable<render::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
+Nullable<gpu::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.AcquireCommandBuffer");
     if (_nextCommandIndex == _commands.size()) {
         RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.CreateCommandBuffer");

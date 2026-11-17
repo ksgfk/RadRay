@@ -4,7 +4,7 @@
 
 namespace radray {
 
-AssetManager::AssetManager(render::Device& device) noexcept : _device(device) {}
+AssetManager::AssetManager(gpu::Device& device) noexcept : _device(device) {}
 AssetManager::~AssetManager() noexcept = default;
 std::optional<AssetHandle<ShaderAsset>> AssetManager::CreateShader(const ShaderAssetDesc& desc) {
     auto asset = ShaderAsset::Create(_device, desc);

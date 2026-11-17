@@ -35,7 +35,7 @@ TEST_F(FrameSlotTest, AcquireReusesBuffersAfterSlotReset) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
     const array<size_t, 3> counts{2, 1, 2};
-    vector<vector<render::CommandBuffer*>> frames;
+    vector<vector<gpu::CommandBuffer*>> frames;
     Pipeline->OnPrepare = [&](FrameSlot& slot) {
         auto& acquired = frames.emplace_back();
         for (size_t index = 0; index < counts[frames.size() - 1]; ++index) acquired.push_back(slot.AcquireCommandBuffer().Get());
@@ -143,8 +143,8 @@ TEST(MeshPassFrameDrawListTest, ClearEmptiesAllCommandsAndKeepsCapacity) {
 
 TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
     FakePipeline pipeline;
-    FakeBuffer vertices{128, render::BufferUse::Vertex};
-    FakeBuffer indices{128, render::BufferUse::Index};
+    FakeBuffer vertices{128, gpu::BufferUse::Vertex};
+    FakeBuffer indices{128, gpu::BufferUse::Index};
     MeshDrawCommand command;
     command.Pipeline = &pipeline;
     MeshDrawCommandBindingStorage storage;
@@ -168,9 +168,9 @@ TEST(MeshPassFrameDrawListTest, SubmitDrawsCachedAndDynamicCommands) {
 
 TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings) {
     FakePipeline pipeline;
-    FakeBuffer vertices{128, render::BufferUse::Vertex};
-    FakeBuffer instances{128, render::BufferUse::Vertex};
-    FakeBuffer indices{128, render::BufferUse::Index};
+    FakeBuffer vertices{128, gpu::BufferUse::Vertex};
+    FakeBuffer instances{128, gpu::BufferUse::Vertex};
+    FakeBuffer indices{128, gpu::BufferUse::Index};
     test::FakeParameterSet parameters;
     MeshDrawCommand command;
     command.Pipeline = &pipeline;
@@ -190,7 +190,7 @@ TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings
     const MeshShaderParameterBinding passBinding{0, &parameters, {}};
     const MeshPassSubmitArgs args{
         .ParameterSets = std::span{&passBinding, 1},
-        .InstanceStream = render::VertexBufferBinding{1, {&instances, 0, 128}}};
+        .InstanceStream = gpu::VertexBufferBinding{1, {&instances, 0, 128}}};
     RecordingEncoder encoder;
     ASSERT_TRUE(list.Submit(encoder, args));
     ASSERT_EQ(encoder.Draws.size(), 2u);
@@ -208,7 +208,7 @@ TEST(MeshPassFrameDrawListTest, SubmitBorrowedAndDynamicCommandsWithPassBindings
 
 TEST(MeshPassFrameDrawListTest, SortFreezesDynamicPointersForReadOnlySubmitAndClearAllowsNextFrame) {
     FakePipeline pipeline;
-    FakeBuffer indices{1024, render::BufferUse::Index};
+    FakeBuffer indices{1024, gpu::BufferUse::Index};
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
@@ -240,7 +240,7 @@ TEST(MeshPassFrameDrawListTest, SortFreezesDynamicPointersForReadOnlySubmitAndCl
 
 TEST(MeshPassFrameDrawListTest, FinalizedDynamicBindingsSurviveListMoveAndGrowth) {
     FakePipeline pipeline;
-    FakeBuffer indices{128, render::BufferUse::Index};
+    FakeBuffer indices{128, gpu::BufferUse::Index};
     const PrimitiveSceneInfo primitive;
     MeshBatch batch;
     batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});

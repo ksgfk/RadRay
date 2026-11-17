@@ -260,7 +260,7 @@ bool MeshDrawingFramePipeline::PreparePass(PassData& data, RDGPrepareContext& co
     if (bound.Buffer != constants.Buffer || bound.Offset != constants.Offset || bound.Size != constants.Size) {
         auto& parameters = *data.Resources->PassParameterSets[index];
         parameters.ResetBindingsForReuse();
-        if (!parameters.Set(0, 0, render::ShaderBufferBinding{constants.Buffer.Get(), {constants.Offset, constants.Size}, 0}) || !parameters.FlushWrites()) return false;
+        if (!parameters.Set(0, 0, gpu::ShaderBufferBinding{constants.Buffer.Get(), {constants.Offset, constants.Size}, 0}) || !parameters.FlushWrites()) return false;
         bound = constants;
     }
     return true;
@@ -272,7 +272,7 @@ bool MeshDrawingFramePipeline::RecordPass(const PassData& data, RDGRasterPassCon
     encoder.SetScissor(data.View.Scissor);
     const MeshShaderParameterBinding binding{0, data.Resources->PassParameterSets[data.Pass.Value == 2 ? 1 : 0].Get(), {}};
     const MeshPassSubmitArgs args{.ParameterSets = std::span{&binding, 1},
-                                  .InstanceStream = render::VertexBufferBinding{1, {data.InstanceSlice.Buffer.Get(), data.InstanceSlice.Offset, data.InstanceSlice.Size}}};
+                                  .InstanceStream = gpu::VertexBufferBinding{1, {data.InstanceSlice.Buffer.Get(), data.InstanceSlice.Offset, data.InstanceSlice.Size}}};
     return SubmitMeshDrawCommands(encoder, context.GetVisibleCommands(data.Pass), args);
 }
 
@@ -309,34 +309,34 @@ void MeshDrawingFramePipeline::ExtractFrameData(FrameSlot& slot) noexcept {
 void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept {
     const auto slotIndex = slot.GetIndex();
     auto& resources = *_frames[slotIndex];
-    const auto vb = graph.ImportBuffer(_gpu.VertexBuffer.Get(), _geometrySubmitted ? render::BufferState::Vertex : render::BufferState::Undefined,
-                                       render::BufferState::Vertex);
-    const auto ib = graph.ImportBuffer(_gpu.IndexBuffer.Get(), _geometrySubmitted ? render::BufferState::Index : render::BufferState::Undefined,
-                                       render::BufferState::Index);
+    const auto vb = graph.ImportBuffer(_gpu.VertexBuffer.Get(), _geometrySubmitted ? gpu::BufferState::Vertex : gpu::BufferState::Undefined,
+                                       gpu::BufferState::Vertex);
+    const auto ib = graph.ImportBuffer(_gpu.IndexBuffer.Get(), _geometrySubmitted ? gpu::BufferState::Index : gpu::BufferState::Undefined,
+                                       gpu::BufferState::Index);
     if (!_geometrySubmitted) {
         graph.UploadBuffer(vb, 0, RDGUploadSource::BorrowedBytes(_gpu.PendingVertexBytes));
         graph.UploadBuffer(ib, 0, RDGUploadSource::BorrowedBytes(_gpu.PendingIndexBytes));
         graph.MarkOutput(vb);
         graph.MarkOutput(ib);
     }
-    const auto instances = graph.CreateBuffer(RDGDynamicBufferDescriptor{_candidates.size() * sizeof(InstanceData), render::BufferUse::Vertex},
+    const auto instances = graph.CreateBuffer(RDGDynamicBufferDescriptor{_candidates.size() * sizeof(InstanceData), gpu::BufferUse::Vertex},
                                               RDGUploadSource::Generated(_candidates.size() * sizeof(InstanceData), InstanceGenerator{_input.Get(), _candidates, {}}, &WriteInstances, &PrepareInstances));
     array<RDGBufferHandle, 2> constants;
     for (size_t i = 0; i < constants.size(); ++i) {
-        constants[i] = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(PassConstants), render::BufferUse::CBuffer},
+        constants[i] = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(PassConstants), gpu::BufferUse::CBuffer},
                                           RDGUploadSource::Generated(sizeof(PassConstants), ConstantGenerator{&_view, i == 0 ? 1.0f : 1.12f}, &WriteConstants));
     }
-    const auto depth = graph.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::D32_FLOAT_S8_UINT, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::DepthStencilWrite});
-    const auto color = graph.CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Memory = render::MemoryType::Device, .Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource});
-    const auto readback = graph.ImportBuffer(resources.Readback.Get(), resources.CompletionValue == 0 ? render::BufferState::Undefined : render::BufferState::HostRead,
-                                             render::BufferState::HostRead);
+    const auto depth = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::D32_FLOAT_S8_UINT, .Memory = gpu::MemoryType::Device, .Usage = gpu::TextureUse::DepthStencilWrite});
+    const auto color = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Memory = gpu::MemoryType::Device, .Usage = gpu::TextureUse::RenderTarget | gpu::TextureUse::CopySource});
+    const auto readback = graph.ImportBuffer(resources.Readback.Get(), resources.CompletionValue == 0 ? gpu::BufferState::Undefined : gpu::BufferState::HostRead,
+                                             gpu::BufferState::HostRead);
     const array<std::string_view, 4> names{"Tutorial Depth", "Tutorial Color", "Tutorial Outline", "Tutorial Transparent"};
     for (uint32_t index = 0; index < names.size(); ++index) {
         auto pass = graph.AddRasterPass(names[index], PassData{&resources, _view, {index}, instances, constants[index == 2 ? 1 : 0]}, &RecordPass, &PreparePass);
-        const auto load = index == 0 ? render::LoadAction::Clear : render::LoadAction::Load;
-        pass.UseMeshPass({index}).ReadBuffer(vb, render::BufferState::Vertex).ReadBuffer(ib, render::BufferState::Index).ReadBuffer(instances, render::BufferState::Vertex).ReadBuffer(constants[index == 2 ? 1 : 0], render::BufferState::CBuffer).SetDepthStencil(depth, render::TextureState::DepthWrite, load, render::StoreAction::Store, load, render::StoreAction::Store, {1.0f, 0});
-        if (index != 0) pass.WriteColor(0, color, index == 1 ? render::LoadAction::Clear : render::LoadAction::Load,
-                                        render::StoreAction::Store, {{0.035f, 0.055f, 0.085f, 1.0f}});
+        const auto load = index == 0 ? gpu::LoadAction::Clear : gpu::LoadAction::Load;
+        pass.UseMeshPass({index}).ReadBuffer(vb, gpu::BufferState::Vertex).ReadBuffer(ib, gpu::BufferState::Index).ReadBuffer(instances, gpu::BufferState::Vertex).ReadBuffer(constants[index == 2 ? 1 : 0], gpu::BufferState::CBuffer).SetDepthStencil(depth, gpu::TextureState::DepthWrite, load, gpu::StoreAction::Store, load, gpu::StoreAction::Store, {1.0f, 0});
+        if (index != 0) pass.WriteColor(0, color, index == 1 ? gpu::LoadAction::Clear : gpu::LoadAction::Load,
+                                        gpu::StoreAction::Store, {{0.035f, 0.055f, 0.085f, 1.0f}});
     }
     struct ReadbackData {
         RDGTextureHandle Color;
@@ -354,7 +354,7 @@ void MeshDrawingFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot& slot,
     RADRAY_INFO_LOG("步骤 6：Frame={} Slot={} MeshPass={}，{} 条单实例 Draw", slot.GetFrameId(), slot.GetIndex(), pass.Value, drawList.VisibleCommands.size());
 }
 
-void MeshDrawingFramePipeline::SubmitFrame(FrameSlot& slot, render::CommandBuffer& command) noexcept {
+void MeshDrawingFramePipeline::SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& command) noexcept {
     auto& resources = *_frames[slot.GetIndex()];
     if (resources.CompletionValue >= std::numeric_limits<uint64_t>::max() - 1) RADRAY_ABORT("MeshDrawingFramePipeline: fence values exhausted");
     array submitted{&command};

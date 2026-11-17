@@ -7,6 +7,23 @@
 namespace radray {
 namespace {
 
+TEST(BinaryIoTest, U16UsesTwoLittleEndianBytesAndTruncationIsAtomic) {
+    BinaryWriter writer;
+    writer.U16(0x1234);
+    ASSERT_EQ(writer.GetSize(), 2u);
+    EXPECT_EQ(writer.GetData()[0], byte{0x34});
+    EXPECT_EQ(writer.GetData()[1], byte{0x12});
+    uint16_t value = 0xabcd;
+    BinaryReader prefix{writer.GetData().first(1)};
+    EXPECT_FALSE(prefix.U16(value));
+    EXPECT_EQ(prefix.Remaining(), 1u);
+    EXPECT_EQ(value, 0xabcdu);
+    BinaryReader full{writer.GetData()};
+    EXPECT_TRUE(full.U16(value));
+    EXPECT_TRUE(full.AtEnd());
+    EXPECT_EQ(value, 0x1234u);
+}
+
 TEST(BinaryIoTest, WriterEncodesLittleEndian) {
     BinaryWriter writer;
 

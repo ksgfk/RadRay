@@ -17,12 +17,12 @@ def file_hash(path):
 def source_hash(root):
     files = [root / "tools/compile_test_shaders.py",
              root / "tools/compile_render_fixtures.py",
-             root / "modules/shader_compiler/tests/shader_fixture_generator.cpp",
+             root / "modules/core/include/radray/hash.h",
+             root / "modules/core/src/hash.cpp",
+             root / "modules/shader/tests/shader_fixture_generator.cpp",
              root / "project_manifest.json"]
-    for directory in ("shaderlib", "modules/shader/include", "modules/shader/src",
-                      "modules/shader_compiler/include", "modules/shader_compiler/src",
-                      "modules/shader/tests/data/shader_sources",
-                      "modules/shader_compiler/tests/data", "modules/render/tests/data", "modules/runtime/tests/data"):
+    for directory in ("shaderlib", "modules/shader/include", "modules/shader/src", "modules/gpu/include",
+                      "modules/shader/tests/data", "modules/gpu_impl/tests/data", "modules/runtime/tests/data"):
         files.extend(path for path in (root / directory).rglob("*")
                      if path.suffix in (".h", ".cpp", ".hlsl", ".hlsli"))
     digest = hashlib.sha256()
@@ -76,7 +76,7 @@ def read_cache(path):
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--build-dir", type=Path, help="Configured compiler-enabled RadRay build directory")
+    parser.add_argument("--build-dir", type=Path, help="Configured shader-enabled RadRay build directory")
     parser.add_argument("--config", default="Debug", choices=("Debug", "Release"))
     parser.add_argument("--output-dir", type=Path, default=root / "build/test_shaders")
     parser.add_argument("--dxc", type=Path, default=root / "SDKs/radray_dxc/extracted/bin/dxc.exe")
@@ -89,7 +89,7 @@ def main():
         problem = check_outputs(output, sources)
         if problem:
             parser.error(f"{problem} in {output}. Generate fixtures first: python tools/compile_test_shaders.py "
-                         f'--build-dir <compiler-enabled-build> --config {args.config} --output-dir "{output}". '
+                         f'--build-dir <shader-enabled-build> --config {args.config} --output-dir "{output}". '
                          "Compiler-disabled builds consume these pre-generated files; they do not require DXC.")
         print(f"Test shader fixtures verified: {output}")
         return
@@ -99,15 +99,15 @@ def main():
                      "Copy a generated fixture directory from Windows and use --check on this host.")
     if args.build_dir is None or not (args.build_dir / "CMakeCache.txt").is_file():
         parser.error("--build-dir must be a configured RadRay directory with "
-                     "RADRAY_BUILD_SHADER_COMPILER=ON and RADRAY_BUILD_TESTS=ON. Configure first; no dependencies are downloaded.")
+                     "RADRAY_BUILD_SHADER=ON and RADRAY_BUILD_TESTS=ON. Configure first; no dependencies are downloaded.")
     build = args.build_dir.resolve()
     cache = read_cache(build / "CMakeCache.txt")
     if Path(cache.get("RadRay_SOURCE_DIR", "")).resolve() != root:
         parser.error("--build-dir must belong to this RadRay checkout")
-    for option in ("RADRAY_BUILD_SHADER_COMPILER", "RADRAY_BUILD_TESTS"):
+    for option in ("RADRAY_BUILD_SHADER", "RADRAY_BUILD_TESTS"):
         if cache.get(option, "OFF").upper() not in ("ON", "1", "TRUE", "YES"):
-            parser.error(f"{option}=ON is required to generate fixtures. Use a separate compiler-enabled build; "
-                         "keep the consumer build compiler-disabled.")
+            parser.error(f"{option}=ON is required to generate fixtures. Use a separate shader-enabled build; "
+                         "keep the consumer build shader-disabled.")
     configurations = cache.get("CMAKE_CONFIGURATION_TYPES", cache.get("CMAKE_BUILD_TYPE", "")).split(";")
     if args.config not in configurations:
         parser.error(f"{args.config} is not configured in {build}: {configurations}")

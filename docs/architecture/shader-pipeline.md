@@ -1,26 +1,26 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 shader compile 工具
 > - 权威: 本文描述 schema 10 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/shader/include/radray/shader/shader_metadata_wire.h`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `tools/CMakeLists.txt`, `CMakePresets.json`
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/src/shader_compiler_contract.cpp`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/shader/include/radray/shader/client.h`, `tools/CMakeLists.txt`, `CMakePresets.json`
 
 # Shader pipeline
 
 ## 当前边界
 
-HLSL 是 compiler 的 pass source authoring 输入。shader 模块定义 wire contract、decoder 与拥有型类型树，compiler 模块
-通过 RadRay DXC fork 生成独立 target lanes。render 是独立的薄 RHI，只依赖 core，接收原始 stage 字节码
-和调用方显式提供的绑定布局。`shaderreflector → runtime/shader` 将已解码 artifact 合并为 runtime 拥有型布局；
-runtime 依赖 shader/render，ShaderAsset 接收手写描述或离线布局索引并创建当前后端的 Shader；无需 DXC。RHI 本身不消费 metadata。
-布局与参数 ABI、变体之间的稳定槽位、原生兼容性及共享策略由调用方负责，见 [RHI 绑定模型](render-rhi.md#绑定模型)。
+HLSL 是 compiler client 的 pass source authoring 输入。统一 shader 模块通过 RadRay DXC fork 生成独立
+target lanes，将已解码 artifact 合并为拥有型布局。runtime 的 ShaderAsset 接收手写描述或离线布局索引，
+创建当前后端的 Shader；加载阶段不调用 DXC。RHI 本身不消费 metadata。
+布局与参数 ABI、稳定槽位、原生兼容性和共享策略由调用方负责，见 [RHI 绑定模型](render-rhi.md#绑定模型)。
 
 当前 metadata schema 为 10，decoder 拒绝其他 schema 版本。
 RadRay DXC package 为 `1.9.2609.radray.4`（基于 upstream `v1.9.2609`），extension ABI 为 5，
 wire 的 `kShaderToolchainIdentity` 为 `0x0000000001090216`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
 
-正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
-`RadRayDXC::Headers` 编译、以 canonical library name 加载 `RadRayDXC::Compiler` 的 runtime，
-再通过 `dxcapi_radrayext.h` 的 CLSID、ABI/schema 和 toolchain identity handshake 创建 fork
-extension。`RadRayShaderCompilerClient` 测试覆盖 fork ABI/package handshake；不提供 stock DXC fallback。
-client 的实际编译实现仅在 Windows 启用；其他平台的 `IsAvailable()` 返回 false，discovery/compile 返回失败诊断。
+正式 SDK 是独立构建并安装的 RadRay DXC fork package。
+`radrayshader` / `RadRay::shader` 统一提供编译契约、DXC client、artifact 解码、类型树、布局和家族反射，
+公共 API 位于 `radray::shader`。唯一自有直接依赖是纯头文件 `RadRay::gpu`，通过它使用 core。
+DXC SDK 只用于私有实现编译，构造 client 时动态加载；解码、反射和 runtime 资产加载不调用 DXC。
+`RadRay::gpu_impl` 接收原始 stage 字节码与显式布局，不依赖 shader。runtime 依赖 shader 与 gpu_impl，
+负责 GPU 资产与布局注册表。布局 ABI、稳定槽位和共享策略仍由调用方负责。
 
 ## 诊断结果
 
@@ -57,6 +57,12 @@ Variant 是一组 target-independent keyword assignments；Compiled Variant arti
 `DiscoverSourceContract` 输出 kind、entry topology、keyword domain 和 `ContractHash`。caller
 把相对调用方 source root 的逻辑 `SourceName` 传给 compiler；它可与 `shaderlib/` include root 不同，
 不使用物理绝对路径作 source identity。`CompileVariant` 会重新 discovery 并拒绝 `ExpectedContract` 漂移。
+
+编译契约中的 `ContractHash`、`BytecodeHash`、`BasePipelineLayoutHash` 和 `GpuArtifactHash` 都是 core 类型 `radray::Hash128` 的别名。
+`<radray/shader/shader_compiler_contract.h>` 提供 discovery 请求编码 `EncodeSourceContractRequest` 和结果解码 `DecodeWireShaderContract`。
+解码时按 kind、keyword group 名称和值、entry 名称及 stage 的顺序重算契约摘要。
+每段文本以字节 `0xff` 结束，stage 占一个字节。core 的通用 `HashData128` 使用 XXH3-128，
+也返回 `Hash128`，原始字节可从 `Bytes` 读取。[core 哈希接口](../../modules/core/include/radray/hash.h)
 
 entry topology 在合法 keyword domain 内保持不变；keyword 可以改变资源使用和函数体，不能
 让 entry 声明只在部分 Variant 出现。discovery 与 compile 共享 Defines、CompilePolicy 和
@@ -130,8 +136,8 @@ DXC 的 `DXC_OUT_ROOT_SIGNATURE` carrier；最终 DXIL object 通过 `-Qstrip_ro
 包含 RootSignature policy lower 后的 Vulkan records。
 
 Envelope 为 152 字节；entry、binding、type、push/root、vertex input、sampler 记录分别为
-20、36、44、32、20、20 字节。`shader_metadata_wire.h/.cpp` 显式按小端读写字段，
-不转储 C++ 对象或使用 C++ bitfield。解码后的 `ShaderArtifact*Record` 是普通逻辑记录，
+20、36、44、32、20、20 字节。`<radray/shader/shader_compiler_contract.h>` 声明 envelope 和这六类记录的编解码接口，
+实现按固定偏移以小端顺序读写字段。解码后的 `ShaderArtifact*Record` 是普通逻辑记录，
 其 `sizeof` 不代表 wire stride；`GetShaderMetadataRecordSize` 返回对应序列化尺寸。
 记录编解码接口检查位宽与保留位，失败保留输出；完整 artifact decoder 另行验证枚举、引用和布局语义。
 
@@ -174,14 +180,14 @@ RootSignature policy identity、entry 名称/阶段、资源名称/位置/种类
 `BytecodeDigest` 继续对 stage 顺序拼接的原始字节码使用既有算法；CPU 描述变化若同时改变编译器输出字节码，
 GPU artifact identity 仍随实际字节码变化。修改 wire schema 需重生成 artifact 与可信 manifest。
 
-`radrayshader` 只做 wire safety 检查和 target-specific decode；它不链接 DXC 或 render。
+artifact decoder 只做 wire safety 检查和 target-specific decode，不调用 DXC 或 gpu_impl。
 调用方提供可信的 `ExpectedGpuArtifact`，decoder 与 envelope 比较。需要 metadata 的上层自行消费 decoder；
 RHI 不接收这个 envelope，不进行 artifact hash、名称或 carrier 校验。
 
 编译返回的 `CompileTargetLane::Stages` 包含各 stage 的独立 bytecode 与 entry name；调用方把匹配后端的
 原始 bytes 交给 `Device::CreateShader(ShaderDescriptor)`，在 PSO 的 `ShaderEntry` 中选择 entry。
 创建 shader 不生成布局。`BindingGroupLayoutDescriptor` 和 `PipelineLayoutDescriptor` 由调用方另外提供，
-即使某变体裁掉资源也不会缩减这些描述。render 不提供 artifact bridge、target layout resolver/modifier、
+即使某变体裁掉资源也不会缩减这些描述。gpu_impl 不提供 artifact bridge、target layout resolver/modifier、
 按名称的绑定查询或布局身份 handle；shader decoder 的 `FindBinding(name)` 仅查询 metadata。
 
 type tree 属于 artifact 的 CPU upload schema。类型记录保留 `Kind`、`ElementKind`、
@@ -214,9 +220,38 @@ Decoder 校验跨度公式、整数溢出、父子关系、同级名称和范围
 CBuffer owner 必须是有效根 Struct，PushConstant 的可选类型不能超过其范围；非 CBuffer 不携带类型块。
 类型树没有独立 schema hash，也不参与 GPU artifact identity。
 
+## Shader 布局
+
+`ShaderPipelineLayoutDesc` 描述资源布局。`ShaderVariantInterfaceDesc` 描述一个变体，其中 DXIL 和 SPIR-V 各有可选的
+`ShaderVariantTargetInterfaceDesc`。`ShaderFamilyLayoutDesc` 持有共享资源布局和变体列表。绑定与 push constant 使用 RHI 描述，
+拥有型类型表使用 `ShaderTypeRecord`，顶点签名使用 `ShaderVertexComponentType`。
+
+原先包含 `shader_type_tree.h` 的调用方改用 `<radray/shader/shader_layout.h>`。该头文件同时提供 `ValidateShaderTypeRecords`
+和 `FindShaderTypeMember`。成员路径支持 `a.b[i].c`，查询结果包含绝对偏移、数组和矩阵步长及 padding 信息。
+原 C++ 类型 `ShaderProgramInterfaceDesc`、`ShaderTargetProgramInterfaceDesc` 分别迁移到 `ShaderVariantInterfaceDesc`、
+`ShaderVariantTargetInterfaceDesc`。变体校验入口为 `ValidateShaderVariantInterfaceDesc`，变体 Binary/JSON 的读写函数名也将
+`ShaderProgramInterface` 替换为 `ShaderVariantInterface`。
+独立变体接口的 v1 JSON 读写均使用 `"Kind": "ShaderVariantInterface"`。使用旧标记 `"ShaderProgramInterface"` 的文件需将顶层 `Kind` 改为新值后才能读取。
+
+三类布局描述保留版本 1 的 JSON/Binary 读写，失败不改变输出；二进制显式编码小端字段。
+原有顶点类型编号 Float=0、Sint=1、Uint=2 和 JSON 的 Sint/Uint 名称保持不变，读写时显式映射到 shader 枚举。
+校验覆盖名称/ID 唯一、原生映射冲突、数量、溢出、类型引用和跨度及变体引用。
+artifact 解码和布局读取共享类型树跨度、成员范围、循环引用及顶点签名校验。解码器另行验证名称池范围和保留位。
+原先使用 `shader::ShaderBindingKind` 的调用方统一改用 `gpu::BindingKind`。读取 metadata 时，用
+`<radray/shader/shader_compiler_contract.h>` 中的 `DecodeBindingKind(record.Type)` 替代 `TryMapBindingKind`。
+构造 metadata 记录时，将同一头文件中 `EncodeBindingKind(kind)` 返回的编号写入 `Type`。
+调用方需要使用 `gpu::BindingKind::Texture` 等枚举成员时，包含 `<radray/gpu/types.h>`。
+两个函数共用 schema 10 的编号表，遇到未知值均返回 `std::nullopt`。布局 v1 二进制单独使用 GPU 枚举值。
+原先调用 shader 侧寄存器类别、root descriptor 或可写性 helper 的代码，在转换成功后分别调用
+`gpu::GetBindingRegisterClass`、`gpu::CanBeRootDescriptor`、`gpu::IsWritableBinding`。
+纹理、常量缓冲和 typed buffer 分类直接比较转换后的 `gpu::BindingKind`。
+离线布局检查每个已提供的后端映射。RHI 对当前后端使用同一组设备无关规则，再检查设备能力。
+绑定和 push constant 共用全局名称空间；结构体成员仅在所属结构内唯一。
+类型跨度见 [Shader pipeline](shader-pipeline.md#artifact-wire)。
+
 ## 家族反射
 
-`modules/shader_reflector/` 导出 `RadRay::shaderreflector`。`ReflectShaderVariant` 和
+家族反射属于 `RadRay::shader`。`ReflectShaderVariant` 和
 `ReflectShaderFamily` 接收已解码的强类型 DXIL/SPIR-V artifact，不调用或链接 DXC，返回
 `DiagnosticResult<ShaderFamilyLayoutDesc>`。输出拥有字符串和类型表，不借用输入 artifact。
 
@@ -248,19 +283,16 @@ buffer slot、attribute location、offset/stride 和重复声明必须自洽。�
 PSO。调用方可以直接提供 RHI 状态，也可先通过 runtime 的 `ResolveVertexInputState`
 按 semantic 配对几何与后端签名，解析后的状态仍经过相同 RHI 校验。
 原生 shader entry、pipeline layout 与资源寿命由调用方管理，compiler client 不负责创建 PSO。
-render 测试覆盖手写显式布局和双后端真实 compute PSO、dispatch/读回；wire/contract 测试位于 shader 模块。
+gpu_impl 测试覆盖手写显式布局和双后端真实 compute PSO、dispatch/读回；wire/contract 测试位于 shader 模块。
 测试入口与 compiler-free fixture 边界见[构建与测试](../guide/build-test.md#测试)。
 
 ## Build boundary
 
-默认 `win-x64-debug` 开启 compiler 和 shader tools。通过独立 `-B` 目录和
-`-DRADRAY_BUILD_SHADER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF -DRADRAY_BUILD_SHADER_TOOLS=OFF`
-验证完全独立的 render，不查找 DXC 包。关闭 shader 会自动关闭 runtime，独立 render 配置还需关闭 examples；只关闭 compiler 时 shader 与 runtime 仍可保留；已开启的 tools 必须显式关闭。
-compiler 要求 shader，编译 tools 要求 compiler，非法开关组合配置失败。
-`RADRAY_BUILD_SHADER_REFLECTOR` 依赖 runtime 与 shader，依赖缺失时自动关闭；
-`RADRAY_BUILD_SHADER_REFLECTOR_TOOLS` 独立控制反射 CLI，依赖 reflector。
-仅构建工具可关闭 tests/window/render/benchmarks/examples，再构建 `radray_shader_compile` target。
-runtime 要求 render 与 shader，examples 要求 runtime；二者均有独立构建开关，当前不提供 runtime shader JIT 选项。
+默认构建统一 shader 及两个 CLI；编译能力没有独立关闭开关。`RADRAY_BUILD_SHADER=ON` 时需要 DXC SDK。
+`RADRAY_BUILD_SHADER_TOOLS` 和 `RADRAY_BUILD_SHADER_REFLECTOR_TOOLS` 分别控制 compile/reflect CLI，均依赖 shader。
+关闭 gpu_impl、runtime、window、benchmarks、examples 可单独构建 shader 和 CLI，不构建 GPU 后端。
+以 `-DRADRAY_BUILD_SHADER=OFF -DRADRAY_BUILD_EXAMPLES=OFF` 验证独立 gpu_impl；runtime 和 CLI 自动关闭，不查找 DXC。
+runtime 要求 gpu_impl 与 shader；examples 要求 runtime。gpu 随 core 提供，没有独立构建开关。
 
 compiler 配置通过 `find_package(RadRayDXC CONFIG REQUIRED GLOBAL COMPONENTS Headers Compiler)`
 查找 fork 包，核对完整版本标识 `1.9.2609.radray.4` 和 Compiler/Validator 运行库。仓库 preset 设置依赖三元组后，
@@ -275,14 +307,14 @@ client handshake 校验 RadRay extension 的 ABI、schema、工具链主次版�
 它不将整个 128 位身份与固定值比较。artifact decoder 只在调用方传入非零 `ExpectedToolchainIdentity` 时
 比较 wire 的 64 位工具链身份，该选项默认 0。stock DXC
 不会被当作兼容 compiler，`RADRAY_SHADER_COMPILER_FORK` 在 compiler 构建中恒定义。
-子工程默认开启 compiler、关闭 shader CLI；功能开关和宿主示例见
+子工程默认开启 shader、关闭 shader CLI；功能开关和宿主示例见
 [作为子工程引用](../guide/build-test.md#作为子工程引用)。
 
-`radray_shader_compile` 只链接 compiler，接受重复 `--keyword NAME=VALUE`；名称、值和重复项
+`radray_shader_compile` 链接 shader，接受重复 `--keyword NAME=VALUE`；名称、值和重复项
 均校验，未指定组仍取声明中的首值。`--manifest <file>` 可输出版本 1 的编译结果 manifest，
 其中包含默认变体名 Default、相对 artifact 路径、GPU artifact hash 与 toolchain identity。
 
-`radray_shader_reflect --manifest <file> --output <prefix>` 只依赖 reflector。manifest 形态为：
+`radray_shader_reflect --manifest <file> --output <prefix>` 链接 shader。manifest 形态为：
 
 ```json
 {
@@ -306,19 +338,19 @@ artifact 自抄。所有路径相对 manifest。工具先读取、解码和反�
 索引记录变体、后端、入口、阶段和文件；写入前移除旧成功索引，失败返回非零且不发布成功索引。
 编译结果 manifest 同样在全部 lane 写入成功后发布。可将多次编译的 variants 汇入一个 manifest 反射家族。
 
-RadRay 安装包导出 `RadRay::shadercompiler`、`RadRay::shaderreflector` 与各自可选 CLI，不加载优化探测。
-`shaderreflector` 组件只加载 runtime/shader；`reflector_tools` 不继承编译工具的 DXC 依赖。
-普通安装不复制 SDK；安装后的 CLI 通过外部运行库搜索路径加载 compiler。
-可独立运行的完整 SDK 或工具发布包由打包步骤收集 DXC 运行库，日常构建不承担该职责。
+RadRay 安装包导出 `RadRay::gpu`、`RadRay::gpu_impl`、`RadRay::shader` 与各自可选 CLI。
+shader 组件只加载 gpu/core，两个 CLI 组件加载 shader；DXC 头是构建阶段依赖，安装消费不查找 DXC SDK。
+只有实际调用编译能力时才需要外部 DXC 运行库搜索路径；普通构建和安装均不复制 DXC DLL。
+包配置不执行优化探测，独立 SDK 发布包由打包步骤收集运行库。
 调用方显式传入 `RadRay_SHADERLIB_DIR`。包组件和安装布局见
 [安装与包消费](../guide/build-test.md#安装与包消费)。
 
 反射 CLI 发布本地布局和索引；fork SDK autobuild 只发布 compiler package。
-shader 测试读取本地生成的 artifact，对 metadata 做结构化断言，不比较 golden hash；render 测试只读取
+shader 测试读取本地生成的 artifact，对 metadata 做结构化断言，不比较 golden hash；gpu_impl 测试只读取
 独立的 raw stage 字节码。生成的 `.bin` 不入库，统一由 `tools/compile_test_shaders.py` 显式准备到
 被忽略的 `build/test_shaders/`（CMake 缓存变量 `RADRAY_TEST_SHADER_DIR` 可改写）。脚本组合 compiler 侧
 `EXCLUDE_FROM_ALL` 的 `radray_shader_fixture_generator`（`shader_artifacts/`）与
 `tools/compile_render_fixtures.py` 的 raw DXC 配方（`shader_bytecode/`）；普通测试构建只验证
-源指纹和产物，不构建/调用生成器。compiler 关闭的消费者需预先准备夹具，但仍不查找或加载 DXC。
+源指纹和产物，不构建/调用生成器。shader 关闭的 gpu_impl 消费者需预先准备夹具，但仍不查找或加载 DXC。
 生成依赖、增量校验与干净检出步骤见[本地测试 shader](../guide/build-test.md#本地测试-shader)。
 这些 fixture 不代表产品 artifact 发布链，也不参与产品安装。

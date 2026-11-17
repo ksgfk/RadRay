@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <algorithm>
 #include <chrono>
 #include <radray/file.h>
 #include <radray/json.h>
@@ -26,10 +25,15 @@ TEST(ShaderAsset, CreationAndQueriesDoNotCreateNativeLayouts) {
     EXPECT_EQ(device.ShaderCreates, 2u);
     EXPECT_EQ(device.GroupCreates, 0u);
     EXPECT_EQ(device.LayoutCreates, 0u);
-    EXPECT_FALSE(asset->FindBinding("Constants")->ActiveOnDevice);
+    const auto constants = asset->FindBinding("Constants");
+    ASSERT_TRUE(constants);
+    const auto& group = desc.Family.SharedLayout.Groups.front();
+    EXPECT_EQ(constants->Reference.GroupSlot, group.GroupSlot);
+    EXPECT_EQ(constants->Reference.BindingId, group.Bindings.front().Binding.BindingId);
+    EXPECT_FALSE(constants->ActiveOnDevice);
     EXPECT_EQ(asset->FindBufferMember("Constants", "Tint")->AbsoluteOffset, 16u);
-    EXPECT_EQ(asset->GetStage(0, render::ShaderStage::Vertex)->EntryPoint, "VS");
-    EXPECT_FALSE(asset->GetStage(0, render::ShaderStage::Compute));
+    EXPECT_EQ(asset->GetStage(0, gpu::ShaderStage::Vertex)->EntryPoint, "VS");
+    EXPECT_FALSE(asset->GetStage(0, gpu::ShaderStage::Compute));
     EXPECT_FALSE(asset->GetVariantInterface(1));
 }
 TEST(ShaderAsset, InvalidStagesFailBeforeGpuCreationAndPartialCreationIsReleased) {
@@ -85,84 +89,6 @@ TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
     EXPECT_EQ(device->ShaderDestroys, 2u);
 }
 
-TEST(PipelineLayoutCache, OwnsKeysAndReusesLayoutsAcrossFamiliesAndOrdering) {
-    LayoutDevice device;
-    PipelineLayoutCache cache{device};
-    render::PipelineLayout* first;
-    {
-        const auto desc = ResourceLayout();
-        const auto result = cache.Acquire(desc);
-        ASSERT_TRUE(result);
-        first = result.Get();
-    }
-    auto desc = ResourceLayout();
-    desc.Groups[0].Name = "Renamed";
-    desc.Groups[0].Bindings[0].Name = "Other";
-    desc.Groups[0].Bindings[0].Binding.Vulkan->Binding = 99;
-    std::reverse(desc.Groups[0].Bindings.begin(), desc.Groups[0].Bindings.end());
-    EXPECT_EQ(cache.Acquire(desc).Get(), first);
-    EXPECT_EQ(device.GroupCreates, 1u);
-    EXPECT_EQ(device.LayoutCreates, 1u);
-    desc.Groups[0].GroupSlot = 8;
-    const auto another = cache.Acquire(desc);
-    ASSERT_TRUE(another);
-    EXPECT_NE(another.Get(), first);
-    EXPECT_EQ(another->GetDesc().Groups[0].Layout, first->GetDesc().Groups[0].Layout);
-    EXPECT_EQ(device.GroupCreates, 1u);
-}
-TEST(PipelineLayoutCache, SeparatesStagesNativeLocationsAndPushConstants) {
-    LayoutDevice device;
-    PipelineLayoutCache cache{device};
-    auto desc = ResourceLayout();
-    const auto first = cache.Acquire(desc);
-    ASSERT_TRUE(first);
-    desc.Groups[0].Bindings[0].Binding.Stages = render::ShaderStage::Vertex;
-    EXPECT_NE(cache.Acquire(desc).Get(), first.Get());
-    desc = ResourceLayout();
-    desc.Groups[0].Bindings[0].Binding.D3D12->Space = 1;
-    EXPECT_NE(cache.Acquire(desc).Get(), first.Get());
-    desc = ResourceLayout();
-    desc.PushConstants.push_back({"Push", {.PushId = 0, .Size = 4, .Stages = render::ShaderStage::Vertex, .D3D12 = render::PushConstantDescriptor::D3D12Location{}}, {}});
-    const auto push = cache.Acquire(desc);
-    ASSERT_TRUE(push);
-    EXPECT_NE(push.Get(), first.Get());
-    EXPECT_EQ(push->GetDesc().Groups[0].Layout, first->GetDesc().Groups[0].Layout);
-    desc.PushConstants[0].Push.Size = 8;
-    EXPECT_NE(cache.Acquire(desc).Get(), push.Get());
-}
-TEST(PipelineLayoutCache, SamplerHashRespectsEqualityAndStateDifferences) {
-    LayoutDevice device;
-    PipelineLayoutCache cache{device};
-    auto desc = ResourceLayout();
-    desc.Groups[0].Bindings.resize(1);
-    auto& binding = desc.Groups[0].Bindings[0].Binding;
-    binding.Kind = render::BindingKind::Sampler;
-    binding.D3D12->RegisterType = render::BindingRegisterClass::Sampler;
-    binding.ImmutableSampler.emplace();
-    const auto first = cache.Acquire(desc);
-    ASSERT_TRUE(first);
-    binding.ImmutableSampler->MipLodBias = -0.0f;
-    EXPECT_EQ(cache.Acquire(desc).Get(), first.Get());
-    binding.ImmutableSampler->MipLodBias = 1.0f;
-    EXPECT_NE(cache.Acquire(desc).Get(), first.Get());
-}
-TEST(PipelineLayoutCache, FailedCreationCanBeRetriedAndInvalidDescriptionsCreateNothing) {
-    LayoutDevice device;
-    PipelineLayoutCache cache{device};
-    auto desc = ResourceLayout();
-    device.FailGroup = true;
-    EXPECT_FALSE(cache.Acquire(desc));
-    device.FailGroup = false;
-    device.FailLayout = true;
-    EXPECT_FALSE(cache.Acquire(desc));
-    device.FailLayout = false;
-    EXPECT_TRUE(cache.Acquire(desc));
-    EXPECT_EQ(device.GroupCreates, 2u);
-    EXPECT_EQ(device.LayoutCreates, 2u);
-    desc.Groups[0].Bindings[1].Binding.BindingId = 0;
-    EXPECT_FALSE(cache.Acquire(desc));
-    EXPECT_EQ(device.LayoutCreates, 2u);
-}
 class ShaderAssetFiles : public testing::Test {
 protected:
     std::filesystem::path Directory;
@@ -180,7 +106,7 @@ protected:
     void Write(bool duplicate = false, bool missing = false, uint32_t version = 1) {
         auto desc = MakeShaderDesc(MaterialLayout());
         desc.Family.Variants[0].SPIRV = desc.Family.Variants[0].DXIL;
-        const auto layout = WriteShaderFamilyLayoutBinary(desc.Family);
+        const auto layout = shader::WriteShaderFamilyLayoutBinary(desc.Family);
         ASSERT_TRUE(layout);
         ASSERT_TRUE(WriteBinaryFile(Directory / "layout.bin", *layout));
         JsonWriter writer;

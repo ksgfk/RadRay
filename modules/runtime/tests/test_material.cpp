@@ -67,7 +67,7 @@ TEST_F(MaterialAssetTest, RejectsInvalidExplicitSubsetsAndPrograms) {
 TEST_F(MaterialAssetTest, DifferentFamiliesUseIndependentExplicitSubsets) {
     const auto second = Assets.CreateShader(MakeShaderDesc(ResourceLayout()));
     ASSERT_TRUE(second);
-    Desc.Parameters.push_back({"First", Nullable<render::TextureView*>{nullptr}});
+    Desc.Parameters.push_back({"First", Nullable<gpu::TextureView*>{nullptr}});
     Desc.Programs.push_back({"Other", *second, 0, "VS", "PS"});
     Desc.Families.push_back({*second, {}, {"First"}});
     const auto handle = Assets.CreateMaterial(Desc);
@@ -121,11 +121,11 @@ TEST_F(MaterialAssetTest, DebugRejectsDifferentMaterialIdentity) {
     EXPECT_DEATH(map->WriteConstants(proxy, bytes), "");
 #endif
 }
-class ParameterProbe final : public render::ShaderParameterSet {
+class ParameterProbe final : public gpu::ShaderParameterSet {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    bool Set(uint32_t id, uint32_t, render::ShaderParameterValue) noexcept override {
+    bool Set(uint32_t id, uint32_t, gpu::ShaderParameterValue) noexcept override {
         Written.push_back(id);
         return !Fail;
     }
@@ -144,7 +144,7 @@ TEST(MaterialBindingMap, PreflightsResourcesAndReportsPartialSetFailure) {
     ASSERT_TRUE(shader);
     std::function<void()> destroyed;
     FakeTextureView view{{}, destroyed};
-    auto desc = MakeMaterialDesc(*shader, {{"First", Nullable<render::TextureView*>{&view}}, {"Second", Nullable<render::TextureView*>{nullptr}}}, {"First", "Second"});
+    auto desc = MakeMaterialDesc(*shader, {{"First", Nullable<gpu::TextureView*>{&view}}, {"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"First", "Second"});
     const auto material = assets.CreateMaterial(desc);
     ASSERT_TRUE(material);
     const auto map = assets.Get(*material)->GetBindingMap(*shader);
@@ -154,8 +154,8 @@ TEST(MaterialBindingMap, PreflightsResourcesAndReportsPartialSetFailure) {
     ParameterProbe set;
     EXPECT_FALSE(map->BindResources(proxy, 0, set));
     EXPECT_TRUE(set.Written.empty());
-    EXPECT_FALSE(instance.SetParameter(assets, 1, Nullable<render::Sampler*>{nullptr}));
-    ASSERT_TRUE(instance.SetParameter(assets, 1, Nullable<render::TextureView*>{&view}));
+    EXPECT_FALSE(instance.SetParameter(assets, 1, Nullable<gpu::Sampler*>{nullptr}));
+    ASSERT_TRUE(instance.SetParameter(assets, 1, Nullable<gpu::TextureView*>{&view}));
     ASSERT_TRUE(proxy.Update(assets, instance));
     set.Fail = true;
     EXPECT_FALSE(map->BindResources(proxy, 0, set));
@@ -174,26 +174,26 @@ TEST(MaterialBindingMap, RejectsArraysAndImmutableSamplerParameters) {
         layout.Groups[0].Bindings.resize(1);
         auto& binding = layout.Groups[0].Bindings[0].Binding;
         if (sampler) {
-            binding.Kind = render::BindingKind::Sampler;
-            binding.D3D12->RegisterType = render::BindingRegisterClass::Sampler;
-            binding.ImmutableSampler = render::SamplerDescriptor{};
+            binding.Kind = gpu::BindingKind::Sampler;
+            binding.D3D12->RegisterType = gpu::BindingRegisterClass::Sampler;
+            binding.ImmutableSampler = gpu::SamplerDescriptor{};
         } else
             binding.Count = 2;
         const auto shader = assets.CreateShader(MakeShaderDesc(layout));
         ASSERT_TRUE(shader);
-        const MaterialParameterValue value = sampler ? MaterialParameterValue{Nullable<render::Sampler*>{nullptr}} : MaterialParameterValue{Nullable<render::TextureView*>{nullptr}};
+        const MaterialParameterValue value = sampler ? MaterialParameterValue{Nullable<gpu::Sampler*>{nullptr}} : MaterialParameterValue{Nullable<gpu::TextureView*>{nullptr}};
         EXPECT_FALSE(assets.CreateMaterial(MakeMaterialDesc(*shader, {{"First", value}}, {"First"})));
     }
 }
 TEST(MaterialBindingMap, SkipsInactiveResourcesAndRejectsInactiveConstants) {
     LayoutDevice device;
-    device.Backend = render::RenderBackend::Vulkan;
+    device.Backend = gpu::RenderBackend::Vulkan;
     AssetManager assets{device};
     auto desc = ResourceLayout();
     desc.Groups[0].Bindings[1].Binding.Vulkan.reset();
     const auto shader = assets.CreateShader(MakeShaderDesc(desc, device.Backend));
     ASSERT_TRUE(shader);
-    const auto material = assets.CreateMaterial(MakeMaterialDesc(*shader, {{"Second", Nullable<render::TextureView*>{nullptr}}}, {"Second"}));
+    const auto material = assets.CreateMaterial(MakeMaterialDesc(*shader, {{"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"Second"}));
     ASSERT_TRUE(material);
     MaterialRenderProxy proxy;
     ASSERT_TRUE(proxy.Update(assets, *material));

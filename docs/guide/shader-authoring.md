@@ -1,6 +1,6 @@
 > - 适用: 新增或修改 HLSL 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是 schema 10 当前 HLSL authoring 契约；wire 与 compiler/RHI 边界见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/platform.hlsli`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
+> - 锚点: `shaderlib/core/platform.hlsli`, `modules/shader/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
 
@@ -16,7 +16,7 @@ header；include 必须使用 root-relative、尖括号路径：
 
 不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统绝对路径作为 `SourceName`。
 `SourceName` 相对 caller 的 source root，它与 include root 可以不同；以 `shaderlib/` 为 source
-root 时使用相对此根的路径；例如以 `modules/shader_compiler/tests/data/` 为 source root 时，其中的 `.hlsl` 文件
+root 时使用相对此根的路径；例如以 `modules/shader/tests/data/` 为 source root 时，其中的 `.hlsl` 文件
 是有效逻辑名称，会进入诊断和 compile input identity。
 测试与示例专用 source 的归属与路径配置见 [Shaderlib](../architecture/shaderlib.md)。
 
@@ -138,7 +138,7 @@ BindingId 和完整布局的 GroupSlot 可以另外选值。数字命名空间�
 
 ## 调用方定义绑定 ABI
 
-编写 shader 时维护显式组布局和 push 描述，或通过离线 reflector 生成 runtime 布局文件。布局可以是覆盖多个变体的稳定超集，
+编写 shader 时维护显式组布局和 push 描述，或通过 shader 的离线反射工具生成布局文件供 runtime 消费。布局可以是覆盖多个变体的稳定超集，
 不能因某次编译裁掉未使用资源而自动收缩。RootSignature policy 和 metadata 都不会自动写入 RHI；
 原始字节码与显式布局匹配、跨 pipeline 参数集兼容由调用方保证。
 
@@ -159,7 +159,7 @@ group 的语义属于具体调用方，不是 shaderlib 全局规则。
 
 ## 编译器测试
 
-`RadRayShaderLibPass` 使用 `modules/shader_compiler/tests/data/` 中的独立 depth/compute source，
+`RadRayShaderLibPass` 使用 `modules/shader/tests/data/` 中的独立 depth/compute source，
 执行 discovery 并同时编译 DXIL/SPIR-V。测试覆盖 vertex-only topology、storage buffer、keyword domain、
 entry 数量、active binding、stage visibility 和 target-specific binding facts，不依赖已删除的产品 shader。
 
@@ -170,5 +170,5 @@ cmake --build --preset win-x64-debug --parallel 24
 ctest --preset win-x64-debug -R "RadRayShaderLibPass"
 ```
 
-render 布局测试使用预编译原始 stage 字节码和手写布局，执行双后端 compute PSO、dispatch/读回；
+gpu_impl 布局测试使用预编译原始 stage 字节码和手写布局，执行双后端 compute PSO、dispatch/读回；
 artifact/contract 测试在 shader 模块。测试入口及后端缺失、初始化失败与 skip 规则见[构建与测试](build-test.md#测试)。

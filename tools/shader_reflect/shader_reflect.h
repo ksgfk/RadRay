@@ -1,7 +1,7 @@
 #pragma once
 
-namespace radray::shader_reflector {
+namespace radray::shader {
 
 int RunShaderReflect(int argc, char** argv);
 
-}  // namespace radray::shader_reflector
+}  // namespace radray::shader

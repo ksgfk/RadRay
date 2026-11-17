@@ -8,28 +8,28 @@
 namespace radray {
 namespace {
 template <typename T>
-bool AssetActive(const T& value, render::RenderBackend backend) noexcept {
-    return backend == render::RenderBackend::D3D12 ? value.D3D12.has_value() : value.Vulkan.has_value();
+bool AssetActive(const T& value, gpu::RenderBackend backend) noexcept {
+    return backend == gpu::RenderBackend::D3D12 ? value.D3D12.has_value() : value.Vulkan.has_value();
 }
 }  // namespace
 
-std::optional<ShaderAsset> ShaderAsset::Create(render::Device& device, const ShaderAssetDesc& desc) {
+std::optional<ShaderAsset> ShaderAsset::Create(gpu::Device& device, const ShaderAssetDesc& desc) {
     string diagnostic;
     const auto backend = device.GetBackend();
-    if ((backend != render::RenderBackend::D3D12 && backend != render::RenderBackend::Vulkan) ||
-        desc.Family.Variants.empty() || !ValidateShaderFamilyLayoutDesc(desc.Family, &diagnostic)) {
+    if ((backend != gpu::RenderBackend::D3D12 && backend != gpu::RenderBackend::Vulkan) ||
+        desc.Family.Variants.empty() || !shader::ValidateShaderFamilyLayoutDesc(desc.Family, &diagnostic)) {
         RADRAY_ERR_LOG("Invalid shader asset family: {}", diagnostic);
         return std::nullopt;
     }
-    vector<render::ShaderStages> stages(desc.Family.Variants.size());
+    vector<gpu::ShaderStages> stages(desc.Family.Variants.size());
     for (size_t i = 0; i < desc.Stages.size(); ++i) {
         const auto& entry = desc.Stages[i];
         if (entry.VariantIndex >= desc.Family.Variants.size() || entry.Entry.empty() || entry.Bytecode.empty() ||
-            (entry.Stage != render::ShaderStage::Vertex && entry.Stage != render::ShaderStage::Pixel && entry.Stage != render::ShaderStage::Compute)) {
+            (entry.Stage != gpu::ShaderStage::Vertex && entry.Stage != gpu::ShaderStage::Pixel && entry.Stage != gpu::ShaderStage::Compute)) {
             RADRAY_ERR_LOG("Invalid shader stage record {}", i);
             return std::nullopt;
         }
-        const auto target = GetShaderTargetInterface(desc.Family.Variants[entry.VariantIndex], entry.Backend);
+        const auto target = shader::GetShaderTargetInterface(desc.Family.Variants[entry.VariantIndex], entry.Backend);
         if (!target || !target->Stages.HasFlag(entry.Stage)) return std::nullopt;
         for (size_t j = 0; j < i; ++j)
             if (desc.Stages[j].VariantIndex == entry.VariantIndex && desc.Stages[j].Backend == entry.Backend && desc.Stages[j].Stage == entry.Stage) {
@@ -40,12 +40,12 @@ std::optional<ShaderAsset> ShaderAsset::Create(render::Device& device, const Sha
     }
     bool available = false;
     for (size_t i = 0; i < stages.size(); ++i) {
-        const auto target = GetShaderTargetInterface(desc.Family.Variants[i], backend);
+        const auto target = shader::GetShaderTargetInterface(desc.Family.Variants[i], backend);
         if (!target) continue;
         const auto expected = target->Stages;
         if (stages[i] != expected ||
-            (expected.HasFlag(render::ShaderStage::Compute) ? expected != render::ShaderStages{render::ShaderStage::Compute}
-                                                            : !expected.HasFlag(render::ShaderStage::Vertex))) {
+            (expected.HasFlag(gpu::ShaderStage::Compute) ? expected != gpu::ShaderStages{gpu::ShaderStage::Compute}
+                                                            : !expected.HasFlag(gpu::ShaderStage::Vertex))) {
             RADRAY_ERR_LOG("Missing or invalid shader stages for variant {}", desc.Family.Variants[i].Name);
             return std::nullopt;
         }
@@ -57,7 +57,7 @@ std::optional<ShaderAsset> ShaderAsset::Create(render::Device& device, const Sha
     result._backend = backend;
     for (const auto& entry : desc.Stages) {
         if (entry.Backend != backend) continue;
-        auto shader = device.CreateShader({entry.Bytecode, backend == render::RenderBackend::D3D12 ? render::ShaderBlobCategory::DXIL : render::ShaderBlobCategory::SPIRV, entry.Stage});
+        auto shader = device.CreateShader({entry.Bytecode, backend == gpu::RenderBackend::D3D12 ? gpu::ShaderBlobCategory::DXIL : gpu::ShaderBlobCategory::SPIRV, entry.Stage});
         if (!shader) {
             RADRAY_ERR_LOG("Cannot create shader entry {}", entry.Entry);
             return std::nullopt;
@@ -67,7 +67,7 @@ std::optional<ShaderAsset> ShaderAsset::Create(render::Device& device, const Sha
     return result;
 }
 
-std::optional<ShaderAsset> ShaderAsset::Load(render::Device& device, const std::filesystem::path& indexPath) {
+std::optional<ShaderAsset> ShaderAsset::Load(gpu::Device& device, const std::filesystem::path& indexPath) {
     const auto document = JsonDocument::ParseFile(indexPath);
     if (!document) {
         RADRAY_ERR_LOG("Cannot read shader index {}", indexPath.generic_string());
@@ -80,7 +80,7 @@ std::optional<ShaderAsset> ShaderAsset::Load(render::Device& device, const std::
         !DeserializeJsonValue(root["layoutBinary"], layoutFile) || layoutFile.empty() || !root["stages"].IsArray()) return std::nullopt;
     ShaderAssetDesc desc;
     const auto bytes = ReadBinaryFile(indexPath.parent_path() / layoutFile);
-    if (!bytes || !ReadShaderFamilyLayoutBinary(*bytes, desc.Family)) return std::nullopt;
+    if (!bytes || !shader::ReadShaderFamilyLayoutBinary(*bytes, desc.Family)) return std::nullopt;
     const auto backend = device.GetBackend();
     const auto records = root["stages"];
     vector<ShaderStageBytecode> inventory;
@@ -95,11 +95,11 @@ std::optional<ShaderAsset> ShaderAsset::Load(render::Device& device, const std::
             (stage != "vertex" && stage != "pixel" && stage != "compute")) return std::nullopt;
         ShaderStageBytecode code;
         code.VariantIndex = static_cast<uint32_t>(found - desc.Family.Variants.begin());
-        code.Backend = target == "dxil" ? render::RenderBackend::D3D12 : render::RenderBackend::Vulkan;
-        code.Stage = stage == "vertex" ? render::ShaderStage::Vertex : stage == "pixel" ? render::ShaderStage::Pixel
-                                                                                        : render::ShaderStage::Compute;
+        code.Backend = target == "dxil" ? gpu::RenderBackend::D3D12 : gpu::RenderBackend::Vulkan;
+        code.Stage = stage == "vertex" ? gpu::ShaderStage::Vertex : stage == "pixel" ? gpu::ShaderStage::Pixel
+                                                                                        : gpu::ShaderStage::Compute;
         code.Entry = std::move(entry);
-        const auto interface = GetShaderTargetInterface(*found, code.Backend);
+        const auto interface = shader::GetShaderTargetInterface(*found, code.Backend);
         if (!interface || !interface->Stages.HasFlag(code.Stage)) return std::nullopt;
         for (const auto& old : inventory)
             if (old.VariantIndex == code.VariantIndex && old.Backend == code.Backend && old.Stage == code.Stage) return std::nullopt;
@@ -116,22 +116,25 @@ std::optional<ShaderAsset> ShaderAsset::Load(render::Device& device, const std::
     return Create(device, desc);
 }
 
-const ShaderPipelineLayoutDesc& ShaderAsset::GetLayoutDesc() const noexcept { return _family.SharedLayout; }
-const ShaderFamilyLayoutDesc& ShaderAsset::GetFamilyDesc() const noexcept { return _family; }
-render::RenderBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
-Nullable<const ShaderTargetProgramInterfaceDesc*> ShaderAsset::GetVariantInterface(uint32_t variant) const noexcept {
-    return variant < _family.Variants.size() ? GetShaderTargetInterface(_family.Variants[variant], _backend) : nullptr;
+const shader::ShaderPipelineLayoutDesc& ShaderAsset::GetLayoutDesc() const noexcept { return _family.SharedLayout; }
+const shader::ShaderFamilyLayoutDesc& ShaderAsset::GetFamilyDesc() const noexcept { return _family; }
+gpu::RenderBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
+Nullable<const shader::ShaderVariantTargetInterfaceDesc*> ShaderAsset::GetVariantInterface(uint32_t variant) const noexcept {
+    return variant < _family.Variants.size() ? shader::GetShaderTargetInterface(_family.Variants[variant], _backend) : nullptr;
 }
-std::optional<render::ShaderEntry> ShaderAsset::GetStage(uint32_t variant, render::ShaderStage stage) const noexcept {
+std::optional<gpu::ShaderEntry> ShaderAsset::GetStage(uint32_t variant, gpu::ShaderStage stage) const noexcept {
     for (const auto& entry : _stages)
-        if (entry.VariantIndex == variant && entry.Stage == stage) return render::ShaderEntry{entry.Object.get(), entry.Entry};
+        if (entry.VariantIndex == variant && entry.Stage == stage) return gpu::ShaderEntry{entry.Object.get(), entry.Entry};
     return std::nullopt;
 }
 std::optional<ShaderBindingLocation> ShaderAsset::FindBinding(std::string_view name) const noexcept {
     for (const auto& group : _family.SharedLayout.Groups)
         for (const auto& entry : group.Bindings)
-            if (entry.Name == name) return ShaderBindingLocation{group.GroupSlot, entry.Binding.BindingId, entry.Binding.Kind, entry.Binding.Count,
-                                                                 entry.TypeIndex, entry.BufferByteSize, entry.Binding.ImmutableSampler.has_value(), AssetActive(entry.Binding, _backend)};
+            if (entry.Name == name)
+                return ShaderBindingLocation{
+                    .Reference = {group.GroupSlot, entry.Binding.BindingId}, .Kind = entry.Binding.Kind,
+                    .Count = entry.Binding.Count, .TypeIndex = entry.TypeIndex, .BufferByteSize = entry.BufferByteSize,
+                    .ImmutableSampler = entry.Binding.ImmutableSampler.has_value(), .ActiveOnDevice = AssetActive(entry.Binding, _backend)};
     return std::nullopt;
 }
 std::optional<ShaderPushConstantLocation> ShaderAsset::FindPushConstant(std::string_view name) const noexcept {

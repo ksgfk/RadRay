@@ -5,7 +5,7 @@
 
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/mesh_batch.h>
 #include <radray/runtime/mesh_draw_command.h>
@@ -24,7 +24,7 @@ struct MeshBatchContext {
 };
 
 struct MeshDrawCommandSharedState {
-    render::GraphicsPipelineState* Pipeline;
+    gpu::GraphicsPipelineState* Pipeline;
     uint8_t StencilReference{0};
     std::optional<uint32_t> CustomStateSortKey{};
     std::span<const MeshShaderParameterBinding> ParameterSets{};

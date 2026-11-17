@@ -6,8 +6,8 @@
 
 namespace radray {
 
-bool PrepareMaterialVertexInput(const ShaderTargetProgramInterfaceDesc& interface, const VertexInput& meshInput, ResolvedVertexInputState& output) {
-    return interface.Stages.HasFlag(render::ShaderStage::Vertex) && ResolveVertexInputState(meshInput, interface.VertexInputs, output);
+bool PrepareMaterialVertexInput(const shader::ShaderVariantTargetInterfaceDesc& interface, const VertexInput& meshInput, ResolvedVertexInputState& output) {
+    return interface.Stages.HasFlag(gpu::ShaderStage::Vertex) && ResolveVertexInputState(meshInput, interface.VertexInputs, output);
 }
 
 std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, const MaterialAssetDesc& desc) {
@@ -22,8 +22,8 @@ std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, c
     for (const auto& program : desc.Programs) {
         const auto shader = assets.Get(program.Shader);
         if (program.Name.empty() || !names.insert(program.Name).second || !shader || !shader->GetVariantInterface(program.VariantIndex)) return std::nullopt;
-        const auto vs = shader->GetStage(program.VariantIndex, render::ShaderStage::Vertex);
-        const auto ps = shader->GetStage(program.VariantIndex, render::ShaderStage::Pixel);
+        const auto vs = shader->GetStage(program.VariantIndex, gpu::ShaderStage::Vertex);
+        const auto ps = shader->GetStage(program.VariantIndex, gpu::ShaderStage::Pixel);
         if (!vs || program.VertexEntry != vs->EntryPoint || (!program.PixelEntry.empty() && (!ps || program.PixelEntry != ps->EntryPoint))) {
             RADRAY_ERR_LOG("Invalid material program entry: {}", program.Name);
             return std::nullopt;

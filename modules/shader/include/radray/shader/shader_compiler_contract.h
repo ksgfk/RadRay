@@ -1,12 +1,17 @@
 #pragma once
 
-#include <cstddef>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
+#include <radray/hash.h>
 #include <radray/types.h>
 #include <radray/shader/diagnostic_result.h>
+
+namespace radray::gpu {
+enum class BindingKind : uint32_t;
+}  // namespace radray::gpu
 
 namespace radray::shader {
 
@@ -25,6 +30,19 @@ inline constexpr uint32_t kShaderNoType = 0xffffffffu;
 inline constexpr uint32_t kShaderNoSampler = 0xffffffffu;
 inline constexpr uint32_t kShaderTypeFlagRowMajor = 0x1u;
 inline constexpr uint32_t kShaderTypeFlagMask = kShaderTypeFlagRowMajor;
+
+// Schema 10 sampler fields encode Vulkan enumerants. The reflector converts them to the RHI sampler state.
+inline constexpr uint32_t kShaderSamplerMaxFilter = 1;         // NEAREST, LINEAR
+inline constexpr uint32_t kShaderSamplerMaxMipmapMode = 1;     // NEAREST, LINEAR
+inline constexpr uint32_t kShaderSamplerMaxAddressMode = 4;    // REPEAT .. MIRROR_CLAMP_TO_EDGE
+inline constexpr uint32_t kShaderSamplerMaxCompareOp = 7;      // NEVER .. ALWAYS
+inline constexpr uint32_t kShaderSamplerMaxBorderColor = 5;    // FLOAT_TRANSPARENT_BLACK .. INT_OPAQUE_WHITE
+inline constexpr uint32_t kShaderSamplerMaxReductionMode = 2;  // WEIGHTED_AVERAGE, MIN, MAX
+inline constexpr uint32_t kShaderSamplerAddressModeMirrorClampToEdge = 4;
+inline constexpr uint32_t kShaderSamplerReductionModeWeightedAverage = 0;
+inline constexpr uint32_t kShaderSamplerFlagUnnormalizedCoordinates = 0x1u;
+inline constexpr uint32_t kShaderSamplerFlagMask = kShaderSamplerFlagUnnormalizedCoordinates;
+inline constexpr float kShaderSamplerLodClampNone = 1000.0f;
 
 enum class ShaderTarget : uint8_t {
     DXIL = 0,
@@ -55,21 +73,6 @@ enum class ShaderStage : uint8_t {
 enum class ShaderKind : uint8_t {
     Graphics = 0,
     Compute = 1,
-};
-
-// Persisted values used by ShaderArtifactBindingRecord::Type. These are the logical resource kinds the
-// compiler's declaration table saw; each target decides on its own how a kind lands.
-enum class ShaderBindingKind : uint32_t {
-    CBuffer = 1,
-    TypedBuffer = 2,
-    RWTypedBuffer = 3,
-    StructuredBuffer = 4,
-    RWStructuredBuffer = 5,
-    RawBuffer = 6,
-    RWRawBuffer = 7,
-    Texture = 8,
-    RWTexture = 9,
-    Sampler = 10,
 };
 
 // Persisted values used by ShaderArtifactBindingRecord::Placement: where the [RootSignature] policy put
@@ -110,24 +113,12 @@ enum class SpirvTargetEnvironment : uint32_t {
     Vulkan1_2 = 0,
 };
 
-struct Hash128 {
-    array<uint8_t, 16> Bytes{};
-
-    friend bool operator==(const Hash128&, const Hash128&) noexcept = default;
-    friend auto operator<=>(const Hash128&, const Hash128&) noexcept = default;
-
-    string ToHex() const;
-};
-
 using ContractHash = Hash128;
 using BytecodeHash = Hash128;
 // Digest of the target-independent layout the compiler published. The resolved, target-typed
 // layout is derived from it and digested separately, so this is not a program identity on its own.
 using BasePipelineLayoutHash = Hash128;
 using GpuArtifactHash = Hash128;
-
-static_assert(sizeof(Hash128) == 16);
-static_assert(std::is_standard_layout_v<Hash128> && std::is_trivially_copyable_v<Hash128>);
 
 struct WireBlobRange {
     uint32_t Offset{0};
@@ -140,87 +131,7 @@ struct WireBlobRange {
     }
 };
 
-// Maps a wire binding Type code (ShaderArtifactBindingRecord::Type) to its binding namespace. This is
-// part of the persisted wire contract so both the decoder and backend layout conversion agree.
-inline constexpr uint32_t GetWireBindingNamespace(uint32_t type) noexcept {
-    switch (static_cast<ShaderBindingKind>(type)) {
-        case ShaderBindingKind::CBuffer:
-            return 0;
-        case ShaderBindingKind::TypedBuffer:
-        case ShaderBindingKind::StructuredBuffer:
-        case ShaderBindingKind::RawBuffer:
-        case ShaderBindingKind::Texture:
-            return 1;
-        case ShaderBindingKind::RWTypedBuffer:
-        case ShaderBindingKind::RWStructuredBuffer:
-        case ShaderBindingKind::RWRawBuffer:
-        case ShaderBindingKind::RWTexture:
-            return 2;
-        case ShaderBindingKind::Sampler:
-            return 3;
-    }
-    return 0xffffffffu;
-}
-
-// A root descriptor is bound by GPU address, so only single-declaration buffers can take that
-// placement. Textures and typed buffers need a descriptor either way.
-constexpr bool CanBeRootDescriptor(ShaderBindingKind kind) noexcept {
-    switch (kind) {
-        case ShaderBindingKind::CBuffer:
-        case ShaderBindingKind::StructuredBuffer:
-        case ShaderBindingKind::RWStructuredBuffer:
-        case ShaderBindingKind::RawBuffer:
-        case ShaderBindingKind::RWRawBuffer:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Logical resource kind classification. These are properties of the wire kind itself, so they are
-// named once here instead of being re-derived by every backend that has to pick a native descriptor
-// type or a required buffer usage.
-constexpr bool IsUniformBufferKind(ShaderBindingKind kind) noexcept {
-    return kind == ShaderBindingKind::CBuffer;
-}
-
-constexpr bool IsTexelBufferKind(ShaderBindingKind kind) noexcept {
-    return kind == ShaderBindingKind::TypedBuffer || kind == ShaderBindingKind::RWTypedBuffer;
-}
-
-constexpr bool IsImageKind(ShaderBindingKind kind) noexcept {
-    return kind == ShaderBindingKind::Texture || kind == ShaderBindingKind::RWTexture;
-}
-
-constexpr bool IsWritableKind(ShaderBindingKind kind) noexcept {
-    switch (kind) {
-        case ShaderBindingKind::RWTypedBuffer:
-        case ShaderBindingKind::RWStructuredBuffer:
-        case ShaderBindingKind::RWRawBuffer:
-        case ShaderBindingKind::RWTexture:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Vulkan enumerant ranges the wire is allowed to carry, plus the one flag bit and the "no clamp"
-// LOD value. radrayshader cannot include volk, so the bounds are named here: the decoder validates
-// against them and radrayrender static_asserts them against the real Vulkan enums, which is what
-// keeps the two definitions from drifting apart.
-inline constexpr uint32_t kShaderSamplerMaxFilter = 1;         // NEAREST, LINEAR
-inline constexpr uint32_t kShaderSamplerMaxMipmapMode = 1;     // NEAREST, LINEAR
-inline constexpr uint32_t kShaderSamplerMaxAddressMode = 4;    // REPEAT .. MIRROR_CLAMP_TO_EDGE
-inline constexpr uint32_t kShaderSamplerMaxCompareOp = 7;      // NEVER .. ALWAYS
-inline constexpr uint32_t kShaderSamplerMaxBorderColor = 5;    // FLOAT_TRANSPARENT_BLACK .. INT_OPAQUE_WHITE
-inline constexpr uint32_t kShaderSamplerMaxReductionMode = 2;  // WEIGHTED_AVERAGE, MIN, MAX
-inline constexpr uint32_t kShaderSamplerAddressModeMirrorClampToEdge = 4;
-inline constexpr uint32_t kShaderSamplerReductionModeWeightedAverage = 0;
-inline constexpr uint32_t kShaderSamplerFlagUnnormalizedCoordinates = 0x1u;
-inline constexpr uint32_t kShaderSamplerFlagMask = kShaderSamplerFlagUnnormalizedCoordinates;
-inline constexpr float kShaderSamplerLodClampNone = 1000.0f;
-
-// Metadata envelope and decoded logical records. Disk encoding is defined in shader_metadata_wire.h.
+// Metadata envelope and decoded logical records.
 struct WireMetadataEnvelope {
     uint32_t Magic{kShaderWireMagic};
     uint16_t SchemaVersion{kShaderMetadataSchemaVersion};
@@ -260,7 +171,7 @@ struct ShaderArtifactBindingRecord {
     WireBlobRange Name{};
     uint32_t Group{0};
     uint32_t Binding{0};
-    uint32_t Type{0};
+    uint32_t Type{0};  // Schema 10 binding kind code. See DecodeBindingKind and EncodeBindingKind.
     uint32_t Count{0};
     uint32_t StageMask{0};
     uint32_t Placement{static_cast<uint32_t>(ShaderBindingPlacement::Table)};
@@ -303,9 +214,7 @@ struct ShaderArtifactRootConstantRecord {
     uint32_t TypeIndex{kShaderNoType};
 };
 
-// A static sampler state in Vulkan terms: every field holds the official Vulkan enumerant value
-// so the backend consumes it without a second mapping table. The shader module deliberately does
-// not include volk; radrayrender static_asserts these against the real enums.
+// Full immutable sampler state encoded in Vulkan terms.
 struct ShaderArtifactSamplerRecord {
     uint32_t MagFilter{0};
     uint32_t MinFilter{0};
@@ -346,11 +255,6 @@ struct ShaderArtifactVertexInputRecord {
 static_assert(sizeof(WireBlobRange) == 8);
 static_assert(sizeof(WireMetadataEnvelope) == 152);
 static_assert(std::is_trivially_copyable_v<WireMetadataEnvelope>);
-
-bool ValidateWireMetadataEnvelope(
-    std::span<const byte> blob,
-    ShaderTarget expectedTarget,
-    const GpuArtifactHash& expectedGpuArtifact) noexcept;
 
 struct KeywordGroup {
     string Name;
@@ -426,6 +330,7 @@ struct CompileTargetLane {
     vector<byte> Metadata;
 };
 
+using DiscoveryResult = DiagnosticResult<ShaderContract>;
 using CompileVariantResult = DiagnosticResult<vector<CompileTargetLane>>;
 
 bool IsLogicalSourceName(std::string_view sourceName) noexcept;
@@ -441,5 +346,43 @@ DiagnosticResult<vector<byte>> EncodeCanonicalCompileVariantRequest(
 
 DiagnosticResult<vector<byte>> EncodeSourceContractRequest(
     const SourceContractRequest& request);
+
+DiscoveryResult DecodeWireShaderContract(std::span<const byte> blob);
+
+// Convert between the schema 10 code in ShaderArtifactBindingRecord::Type and a GPU kind. Unknown inputs return nullopt.
+std::optional<gpu::BindingKind> DecodeBindingKind(uint32_t wireCode) noexcept;
+std::optional<uint32_t> EncodeBindingKind(gpu::BindingKind kind) noexcept;
+
+// Schema 10, explicit little-endian encoding. No C++ object layout is persisted.
+// Record encoders check representable ranges; artifact validation checks semantic constraints.
+// Input/output spans must match the record size. Failure leaves output unchanged.
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactEntryRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactEntryRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactEntryRecord& output) noexcept;
+
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactBindingRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactBindingRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactBindingRecord& output) noexcept;
+
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactTypeRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactTypeRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactTypeRecord& output) noexcept;
+
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactRootConstantRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactRootConstantRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactRootConstantRecord& output) noexcept;
+
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactVertexInputRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactVertexInputRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactVertexInputRecord& output) noexcept;
+
+uint32_t GetShaderMetadataRecordSize(const ShaderArtifactSamplerRecord& record) noexcept;
+bool EncodeShaderMetadataRecord(const ShaderArtifactSamplerRecord& record, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataRecord(std::span<const byte> input, ShaderArtifactSamplerRecord& output) noexcept;
+
+bool EncodeShaderMetadataEnvelope(const WireMetadataEnvelope& envelope, std::span<byte> output) noexcept;
+bool DecodeShaderMetadataEnvelope(std::span<const byte> input, WireMetadataEnvelope& output) noexcept;
+
+bool ValidateWireMetadataEnvelope(std::span<const byte> blob, ShaderTarget expectedTarget, const GpuArtifactHash& expectedGpuArtifact) noexcept;
 
 }  // namespace radray::shader

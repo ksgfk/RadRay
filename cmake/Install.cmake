@@ -9,7 +9,7 @@ foreach(directory CMAKE_INSTALL_INCLUDEDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_BI
     endif()
 endforeach()
 set(RADRAY_AVAILABLE_COMPONENTS "")
-foreach(component core shader window render runtime shadercompiler shaderreflector)
+foreach(component core gpu gpu_impl shader window runtime)
     if (TARGET radray${component})
         list(APPEND RADRAY_AVAILABLE_COMPONENTS ${component})
     endif()
@@ -63,11 +63,6 @@ foreach(component IN LISTS RADRAY_AVAILABLE_COMPONENTS)
         install(TARGETS radray${component} EXPORT RadRay_${component}
             ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/$<CONFIG>")
         set(module "${component}")
-        if (component STREQUAL "shadercompiler")
-            set(module shader_compiler)
-        elseif (component STREQUAL "shaderreflector")
-            set(module shader_reflector)
-        endif()
         install(DIRECTORY "${RADRAY_SOURCE_ROOT}/modules/${module}/include/radray"
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")
     endif()
@@ -77,8 +72,7 @@ foreach(component IN LISTS RADRAY_AVAILABLE_COMPONENTS)
         set(owner "${RADRAY_DEP_${name}_component}")
         if (owner STREQUAL component OR
             (owner STREQUAL "graphics_headers" AND
-                ((component STREQUAL "render" AND RADRAY_ENABLE_D3D12) OR
-                 (component STREQUAL "shadercompiler" AND WIN32))))
+                (component STREQUAL "gpu_impl" AND RADRAY_ENABLE_D3D12)))
             string(APPEND RADRAY_FIND_${component}
                 "    find_dependency(${RADRAY_DEP_${name}_package} ${RADRAY_DEP_${name}_mode})\n"
                 "    radray_check_package_targets(${RADRAY_DEP_${name}_package} ${RADRAY_DEP_${name}_targets})\n")

@@ -20,7 +20,7 @@ struct GeometryPage {
 };
 
 struct GeometryPoolStorage {
-    GeometryPoolStorage(render::Device& device, uint32_t stride, uint32_t capacity, render::BufferUses usage, std::string_view name)
+    GeometryPoolStorage(gpu::Device& device, uint32_t stride, uint32_t capacity, gpu::BufferUses usage, std::string_view name)
         : Device(device), Stride(stride), PageCapacity(capacity), Usage(usage), Name(name) {}
     ~GeometryPoolStorage() noexcept {
         for (const auto& page : Pages) {
@@ -28,18 +28,18 @@ struct GeometryPoolStorage {
             (void)page;
         }
     }
-    render::Device& Device;
+    gpu::Device& Device;
     uint32_t Stride;
     uint32_t PageCapacity;
-    render::BufferUses Usage;
+    gpu::BufferUses Usage;
     string Name;
     vector<unique_ptr<GeometryPage>> Pages;
 };
 
-bool ValidAdditionalUsage(render::BufferUses usage) noexcept {
-    constexpr auto kDeviceUsage = render::BufferUse::Common | render::BufferUse::CopySource | render::BufferUse::CopyDestination |
-                                  render::BufferUse::Vertex | render::BufferUse::Index | render::BufferUse::CBuffer |
-                                  render::BufferUse::Resource | render::BufferUse::UnorderedAccess | render::BufferUse::Indirect;
+bool ValidAdditionalUsage(gpu::BufferUses usage) noexcept {
+    constexpr auto kDeviceUsage = gpu::BufferUse::Common | gpu::BufferUse::CopySource | gpu::BufferUse::CopyDestination |
+                                  gpu::BufferUse::Vertex | gpu::BufferUse::Index | gpu::BufferUse::CBuffer |
+                                  gpu::BufferUse::Resource | gpu::BufferUse::UnorderedAccess | gpu::BufferUse::Indirect;
     return !(usage & ~kDeviceUsage);
 }
 
@@ -57,7 +57,7 @@ std::optional<std::pair<uint32_t, BestFitAllocator::Allocation>> AllocateRange(G
     auto page = make_unique<GeometryPage>(buffer.Release(), capacity);
     if (input) {
         page->Input = *input;
-        const auto vertex = std::find_if(input->Layouts.begin(), input->Layouts.end(), [](const auto& layout) { return layout.StepMode == render::VertexStepMode::Vertex; });
+        const auto vertex = std::find_if(input->Layouts.begin(), input->Layouts.end(), [](const auto& layout) { return layout.StepMode == gpu::VertexStepMode::Vertex; });
         page->Input.Streams = {{page->Buffer->GetBuffer(), 0, bytes, vertex->Binding}};
         if (!ValidateVertexInput(page->Input, true)) return std::nullopt;
     }
@@ -73,7 +73,7 @@ uint64_t FreeBytes(const GeometryPoolStorage& storage) noexcept {
     return bytes;
 }
 
-void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state) {
+void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) {
     for (const auto& page : storage.Pages) {
         pass.ReadBuffer(ImportPersistentOwned(graph, page->Buffer), state);
     }
@@ -83,26 +83,26 @@ void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRas
 
 class VertexBufferPool::Impl : public GeometryPoolStorage {
 public:
-    Impl(render::Device& device, const VertexBufferPoolDescriptor& desc)
-        : GeometryPoolStorage(device, desc.VertexStride, desc.PageVertexCapacity, render::BufferUse::Vertex | render::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix),
+    Impl(gpu::Device& device, const VertexBufferPoolDescriptor& desc)
+        : GeometryPoolStorage(device, desc.VertexStride, desc.PageVertexCapacity, gpu::BufferUse::Vertex | gpu::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix),
           Input{{desc.Layouts.begin(), desc.Layouts.end()}, {desc.Attributes.begin(), desc.Attributes.end()}, {}} {}
     VertexInput Input;
 };
 
 class IndexBufferPool::Impl : public GeometryPoolStorage {
 public:
-    Impl(render::Device& device, const IndexBufferPoolDescriptor& desc)
-        : GeometryPoolStorage(device, desc.IndexStride, desc.PageIndexCapacity, render::BufferUse::Index | render::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix) {}
+    Impl(gpu::Device& device, const IndexBufferPoolDescriptor& desc)
+        : GeometryPoolStorage(device, desc.IndexStride, desc.PageIndexCapacity, gpu::BufferUse::Index | gpu::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix) {}
 };
 
-Nullable<unique_ptr<VertexBufferPool>> VertexBufferPool::Create(render::Device& device, const VertexBufferPoolDescriptor& desc) {
+Nullable<unique_ptr<VertexBufferPool>> VertexBufferPool::Create(gpu::Device& device, const VertexBufferPoolDescriptor& desc) {
     uint32_t vertices = 0, instances = 0;
     if (!desc.VertexStride || !desc.PageVertexCapacity || uint64_t{desc.VertexStride} * desc.PageVertexCapacity > std::numeric_limits<uint32_t>::max() || !ValidAdditionalUsage(desc.AdditionalUsage)) return nullptr;
     for (const auto& layout : desc.Layouts) {
-        if (layout.StepMode == render::VertexStepMode::Vertex) {
+        if (layout.StepMode == gpu::VertexStepMode::Vertex) {
             if (layout.Binding != desc.VertexStreamBinding || layout.ArrayStride != desc.VertexStride) return nullptr;
             ++vertices;
-        } else if (layout.StepMode == render::VertexStepMode::Instance) {
+        } else if (layout.StepMode == gpu::VertexStepMode::Instance) {
             ++instances;
         } else {
             return nullptr;
@@ -126,9 +126,9 @@ std::optional<VertexBufferSubAllocation> VertexBufferPool::Allocate(uint32_t ver
 
 uint32_t VertexBufferPool::GetPageCount() const noexcept { return static_cast<uint32_t>(_impl->Pages.size()); }
 uint64_t VertexBufferPool::GetFreeBytes() const noexcept { return FreeBytes(*_impl); }
-void VertexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
+void VertexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
 
-Nullable<unique_ptr<IndexBufferPool>> IndexBufferPool::Create(render::Device& device, const IndexBufferPoolDescriptor& desc) {
+Nullable<unique_ptr<IndexBufferPool>> IndexBufferPool::Create(gpu::Device& device, const IndexBufferPoolDescriptor& desc) {
     if ((desc.IndexStride != 2 && desc.IndexStride != 4) || !desc.PageIndexCapacity || !ValidAdditionalUsage(desc.AdditionalUsage)) return nullptr;
     return unique_ptr<IndexBufferPool>{new IndexBufferPool{make_unique<Impl>(device, desc)}};
 }
@@ -145,7 +145,7 @@ std::optional<IndexBufferSubAllocation> IndexBufferPool::Allocate(uint32_t index
 
 uint32_t IndexBufferPool::GetPageCount() const noexcept { return static_cast<uint32_t>(_impl->Pages.size()); }
 uint64_t IndexBufferPool::GetFreeBytes() const noexcept { return FreeBytes(*_impl); }
-void IndexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, render::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
+void IndexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
 
 VertexBufferSubAllocation::VertexBufferSubAllocation(VertexBufferPool& pool, uint32_t page, BestFitAllocator::Allocation allocation) noexcept
     : _pool(&pool), _page(page), _allocation(allocation) {}
@@ -167,7 +167,7 @@ void VertexBufferSubAllocation::Reset() noexcept {
 }
 VertexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
 const VertexInput& VertexBufferSubAllocation::GetVertexInput() const noexcept { return _pool->_impl->Pages[_page]->Input; }
-render::Buffer* VertexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
+gpu::Buffer* VertexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
 IntrusivePtr<GpuBuffer> VertexBufferSubAllocation::GetGpuBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer; }
 uint32_t VertexBufferSubAllocation::GetVertexStride() const noexcept { return _pool->_impl->Stride; }
 uint32_t VertexBufferSubAllocation::GetFirstVertex() const noexcept { return _allocation.Offset; }
@@ -194,13 +194,13 @@ void IndexBufferSubAllocation::Reset() noexcept {
     _pool = nullptr;
 }
 IndexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
-render::Buffer* IndexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
+gpu::Buffer* IndexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
 IntrusivePtr<GpuBuffer> IndexBufferSubAllocation::GetGpuBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer; }
 uint32_t IndexBufferSubAllocation::GetIndexStride() const noexcept { return _pool->_impl->Stride; }
 uint32_t IndexBufferSubAllocation::GetFirstIndex() const noexcept { return _allocation.Offset; }
 uint32_t IndexBufferSubAllocation::GetIndexCount() const noexcept { return _allocation.Count; }
 uint64_t IndexBufferSubAllocation::GetByteOffset() const noexcept { return uint64_t{_allocation.Offset} * GetIndexStride(); }
 uint64_t IndexBufferSubAllocation::GetByteSize() const noexcept { return uint64_t{_allocation.Count} * GetIndexStride(); }
-render::IndexBufferView IndexBufferSubAllocation::GetIndexBufferView() const noexcept { return {GetBuffer(), 0, GetIndexStride()}; }
+gpu::IndexBufferView IndexBufferSubAllocation::GetIndexBufferView() const noexcept { return {GetBuffer(), 0, GetIndexStride()}; }
 
 }  // namespace radray

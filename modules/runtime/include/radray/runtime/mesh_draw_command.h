@@ -9,7 +9,7 @@
 
 #include <radray/inline_vector.h>
 #include <radray/sparse_set.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/vertex_input.h>
 
 namespace radray {
@@ -28,8 +28,8 @@ public:
 
 struct MeshShaderParameterBinding {
     uint32_t GroupIndex{0};
-    Nullable<render::ShaderParameterSet*> ParameterSet{nullptr};
-    InlineVector<render::ShaderParameterDynamicOffset, 2> DynamicOffsets;
+    Nullable<gpu::ShaderParameterSet*> ParameterSet{nullptr};
+    InlineVector<gpu::ShaderParameterDynamicOffset, 2> DynamicOffsets;
 };
 
 struct MeshPushConstantBinding {
@@ -49,7 +49,7 @@ class MeshDrawCommandBindingStorage;
 struct VisibleMeshDrawCommand;
 
 struct MeshDrawElement {
-    render::IndexBufferView IndexBuffer{};
+    gpu::IndexBufferView IndexBuffer{};
     uint32_t IndexCount{0};
     uint32_t FirstIndex{0};
     int32_t VertexOffset{0};
@@ -74,8 +74,8 @@ constexpr uint64_t ComposeMeshDrawSortKey(MeshPassSortMode mode, uint32_t stateS
 
 // 副本借用绑定；仅所有者可以释放其持有的引用。
 struct alignas(64) MeshDrawCommand {
-    Nullable<render::GraphicsPipelineState*> Pipeline{nullptr};
-    render::IndexBufferView IndexBuffer{};
+    Nullable<gpu::GraphicsPipelineState*> Pipeline{nullptr};
+    gpu::IndexBufferView IndexBuffer{};
     Nullable<const MeshDrawCommandBindingStorage*> BindingStorage{nullptr};
     uint32_t IndexCount{0};
     uint32_t FirstIndex{0};
@@ -96,7 +96,7 @@ using MeshParameterSetBindings = InlineVector<MeshShaderParameterBinding, 2>;
 
 // 命令构建数据；Store 复制字节、偏移与元素，并对顶点绑定排序。
 struct MeshDrawCommandBindings {
-    InlineVector<render::VertexBufferBinding, 4> VertexBuffers;
+    InlineVector<gpu::VertexBufferBinding, 4> VertexBuffers;
     MeshParameterSetBindings ParameterSets;
     std::optional<MeshPushConstantCommandBinding> PushConstants{};
     std::optional<uint32_t> InstanceStreamBinding{};
@@ -109,7 +109,7 @@ struct MeshDrawCommandBindings {
 
 struct MeshVertexBufferBindings {
     // 按 Binding 严格递增保存；不得将主顶点流从此数组中拆出。
-    InlineVector<render::VertexBufferBinding, 4> Bindings;
+    InlineVector<gpu::VertexBufferBinding, 4> Bindings;
     std::optional<uint32_t> InstanceStreamBinding{};
 };
 
@@ -168,7 +168,7 @@ private:
     Pool<MeshDrawCommandPayload> _payloads;
     vector<std::optional<MeshDrawCommandElements>> _elements;
     vector<uint32_t> _freeElements;
-    unordered_map<render::GraphicsPipelineState*, uint32_t> _pipelineBuckets;
+    unordered_map<gpu::GraphicsPipelineState*, uint32_t> _pipelineBuckets;
 };
 
 struct PassBatchCacheSlot {
@@ -225,7 +225,7 @@ static_assert(sizeof(VisibleMeshDrawCommand) == 32 && std::is_trivially_copyable
 struct MeshPassSubmitArgs {
     std::span<const MeshShaderParameterBinding> ParameterSets{};
     // 仅可填充或替换命令已声明的实例流绑定槽。
-    std::optional<render::VertexBufferBinding> InstanceStream{};
+    std::optional<gpu::VertexBufferBinding> InstanceStream{};
 };
 
 bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStream = false) noexcept;
@@ -239,7 +239,7 @@ bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawComma
 // Debug 预检整个列表；Release 依赖命令与提交参数已经过校验。
 // 本次调用内复用已绑定状态；失败时须丢弃可能仅完成部分录制的命令。
 // Pass 边界、视口、裁剪与提交由调用方负责。
-bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
+bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
                             std::span<const VisibleMeshDrawCommand> visibleCommands,
                             const MeshPassSubmitArgs& submitArgs = {}) noexcept;
 

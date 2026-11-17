@@ -9,7 +9,7 @@
 
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/material_tag.h>
 #include <radray/runtime/vertex_input.h>
 #include <radray/runtime/asset_handle.h>
@@ -20,13 +20,13 @@ namespace radray {
 // 材质默认状态；每个 Pass 显式选择沿用或覆盖哪些字段。
 // 附件格式、采样与几何拓扑由 Pass 提供。
 struct MaterialRenderState {
-    render::CullMode Cull{render::CullMode::Back};
-    std::optional<render::BlendState> Blend;
-    render::ColorWrites ColorWriteMask{render::ColorWrite::All};
+    gpu::CullMode Cull{gpu::CullMode::Back};
+    std::optional<gpu::BlendState> Blend;
+    gpu::ColorWrites ColorWriteMask{gpu::ColorWrite::All};
 
-    render::CompareFunction DepthCompare{render::CompareFunction::LessEqual};
-    render::DepthBiasState DepthBias{};
-    std::optional<render::StencilState> Stencil;
+    gpu::CompareFunction DepthCompare{gpu::CompareFunction::LessEqual};
+    gpu::DepthBiasState DepthBias{};
+    std::optional<gpu::StencilState> Stencil;
 
     // 字节大小的字段集中放在自然对齐的状态字段之后。
     bool DepthTestEnable{true};
@@ -47,18 +47,19 @@ struct MaterialShaderProgram {
     string PixelEntry;
 };
 
-bool PrepareMaterialVertexInput(const ShaderTargetProgramInterfaceDesc& interface, const VertexInput& meshInput, ResolvedVertexInputState& output);
+using MaterialParameterValue = std::variant<float, array<float, 4>, Nullable<gpu::TextureView*>, Nullable<gpu::Sampler*>>;
 
-using MaterialParameterValue = std::variant<float, array<float, 4>, Nullable<render::TextureView*>, Nullable<render::Sampler*>>;
 struct MaterialParameter {
     string Name;
     MaterialParameterValue DefaultValue;
 };
+
 struct MaterialFamilyParameters {
     AssetHandle<ShaderAsset> Shader;
     string ConstantBlockName;
     vector<string> Parameters;
 };
+
 struct MaterialAssetDesc {
     MaterialProperties Properties;
     vector<MaterialShaderProgram> Programs;
@@ -120,5 +121,7 @@ private:
     AssetHandle<MaterialAsset> _material;
     vector<MaterialParameterValue> _parameters;
 };
+
+bool PrepareMaterialVertexInput(const shader::ShaderVariantTargetInterfaceDesc& interface, const VertexInput& meshInput, ResolvedVertexInputState& output);
 
 }  // namespace radray

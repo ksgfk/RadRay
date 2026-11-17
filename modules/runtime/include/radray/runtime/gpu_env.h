@@ -5,7 +5,7 @@
 #include <string_view>
 #include <thread>
 
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 
 namespace radray {
 
@@ -19,29 +19,29 @@ public:
 
     // 失败时记录日志并返回空所有者；不创建 GPU 设备。
     [[nodiscard]] static Nullable<unique_ptr<Environment>> Create(
-        render::RenderBackend backend, bool validation,
+        gpu::RenderBackend backend, bool validation,
         std::string_view appName = "RadRay") noexcept;
 
-    render::RenderBackend GetBackend() const noexcept { return _backend; }
+    gpu::RenderBackend GetBackend() const noexcept { return _backend; }
     bool IsValidationEnabled() const noexcept { return _validation; }
     bool IsOwnerThread() const noexcept;
 
 private:
     friend class DeviceContext;
     // 仅可调用已选后端的访问器；返回的借用在环境销毁时失效。
-    render::DXGIFactory& GetFactory() noexcept { return *_factory; }
-    render::InstanceVulkan& GetVulkanInstance() noexcept { return *_instance; }
+    gpu::DXGIFactory& GetFactory() noexcept { return *_factory; }
+    gpu::InstanceVulkan& GetVulkanInstance() noexcept { return *_instance; }
 
 private:
     Environment(
-        render::RenderBackend backend, bool validation,
-        unique_ptr<render::DXGIFactory> factory,
-        Nullable<render::InstanceVulkan*> instance) noexcept;
+        gpu::RenderBackend backend, bool validation,
+        unique_ptr<gpu::DXGIFactory> factory,
+        Nullable<gpu::InstanceVulkan*> instance) noexcept;
 
-    render::RenderBackend _backend;
+    gpu::RenderBackend _backend;
     std::thread::id _owner;
-    unique_ptr<render::DXGIFactory> _factory;
-    Nullable<render::InstanceVulkan*> _instance;
+    unique_ptr<gpu::DXGIFactory> _factory;
+    Nullable<gpu::InstanceVulkan*> _instance;
     bool _validation;
 };
 

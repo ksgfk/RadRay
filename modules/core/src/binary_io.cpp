@@ -23,6 +23,11 @@ void BinaryWriter::U8(uint8_t value) {
     _data.emplace_back(static_cast<byte>(value));
 }
 
+void BinaryWriter::U16(uint16_t value) {
+    const array<byte, 2> bytes{static_cast<byte>(value & 0xffu), static_cast<byte>(value >> 8)};
+    Bytes(bytes);
+}
+
 void BinaryWriter::U32(uint32_t value) {
     const std::array<byte, 4> bytes{
         static_cast<byte>(value & 0xffu),
@@ -92,6 +97,13 @@ bool BinaryReader::U8(uint8_t& value) noexcept {
     if (Remaining() < sizeof(uint8_t)) return false;
     value = std::to_integer<uint8_t>(_data[_offset]);
     ++_offset;
+    return true;
+}
+
+bool BinaryReader::U16(uint16_t& value) noexcept {
+    std::span<const byte> bytes;
+    if (!Bytes(2, bytes)) return false;
+    value = static_cast<uint16_t>(std::to_integer<uint16_t>(bytes[0]) | (std::to_integer<uint16_t>(bytes[1]) << 8));
     return true;
 }
 

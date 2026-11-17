@@ -190,7 +190,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 ## 性能采样宏
 
 `profiler.h` 是全仓库唯一的插桩入口，后端是 Tracy（`third_party/tracy`）；业务代码不 include `tracy/*`，
-只有 render 后端为 GPU 时间戳直接使用 `TracyD3D12.hpp` / `TracyVulkan.hpp`。
+只有 gpu_impl 后端为 GPU 时间戳直接使用 `TracyD3D12.hpp` / `TracyVulkan.hpp`。
 `RADRAY_ENABLE_PROFILER` 未定义时所有宏展开为空。开关、viewer 与采样步骤见
 [性能测量](../guide/performance.md#性能采样tracy)。
 
@@ -320,7 +320,7 @@ RadRay 通用内存接口的后续实现变化产生不一致。该路径不依�
 `DecomposeTransform`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
 可以直接 `radray::format("{}", mat)`。
 
-`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 只需包含 `viewport.h`，无需包含 `basic_math.h`。
+`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `types.h` 只需包含 `viewport.h`，无需包含 `basic_math.h`。
 `basic_math.h` 会包含 `viewport.h`，已有数学调用方仍能看见这两个类型。
 
 `AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；

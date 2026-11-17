@@ -519,10 +519,10 @@ TEST_F(FrameSchedulerTest, MovedTargetsOutliveLaterRegisteredViews) {
     Gpu.Device->OnTextureDestroyed = [&] { ++targets; EXPECT_GE(views, targets); };
     auto scheduler = Create(2);
     Pipeline->OnExtract = [&](FrameSlot& slot) {
-        auto texture = Gpu.Device->CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 4, .Height = 4, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM, .Usage = render::TextureUse::Resource}).Unwrap();
-        auto view = Gpu.Device->CreateTextureView({texture.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::Resource}).Unwrap();
-        slot.Emplace<unique_ptr<render::Texture>>(std::move(texture));
-        slot.Emplace<unique_ptr<render::TextureView>>(std::move(view));
+        auto texture = Gpu.Device->CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = 4, .Height = 4, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Usage = gpu::TextureUse::Resource}).Unwrap();
+        auto view = Gpu.Device->CreateTextureView({texture.get(), gpu::TextureDimension::Dim2D, gpu::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, gpu::TextureViewUsage::Resource}).Unwrap();
+        slot.Emplace<unique_ptr<gpu::Texture>>(std::move(texture));
+        slot.Emplace<unique_ptr<gpu::TextureView>>(std::move(view));
     };
     scheduler->RunFrame();
     scheduler->RunFrame();

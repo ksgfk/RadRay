@@ -1,4 +1,5 @@
 #include <radray/runtime/gpu_env.h>
+#include <radray/gpu_impl/factory.h>
 
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
@@ -6,17 +7,17 @@
 namespace radray {
 
 Environment::Environment(
-    render::RenderBackend backend,
+    gpu::RenderBackend backend,
     bool validation,
-    unique_ptr<render::DXGIFactory> factory,
-    Nullable<render::InstanceVulkan*> instance) noexcept
+    unique_ptr<gpu::DXGIFactory> factory,
+    Nullable<gpu::InstanceVulkan*> instance) noexcept
     : _backend(backend), _owner(std::this_thread::get_id()),
       _factory(std::move(factory)), _instance(instance), _validation(validation) {}
 
 Environment::~Environment() noexcept {
     _factory.reset();
 #if defined(RADRAY_ENABLE_VULKAN)
-    if (_instance) render::InstanceVulkan::ShutdownEnv();
+    if (_instance) gpu::ShutdownVulkanEnv();
 #endif
     RADRAY_INFO_LOG("Environment: destroyed");
 }
@@ -26,30 +27,30 @@ bool Environment::IsOwnerThread() const noexcept {
 }
 
 Nullable<unique_ptr<Environment>> Environment::Create(
-    render::RenderBackend backend, bool validation,
+    gpu::RenderBackend backend, bool validation,
     std::string_view appName) noexcept {
-    Nullable<render::InstanceVulkan*> instance = nullptr;
+    Nullable<gpu::InstanceVulkan*> instance = nullptr;
     auto cleanup = MakeScopeGuard([&]() noexcept {
 #if defined(RADRAY_ENABLE_VULKAN)
-        if (instance) render::InstanceVulkan::ShutdownEnv();
+        if (instance) gpu::ShutdownVulkanEnv();
 #endif
     });
-    unique_ptr<render::DXGIFactory> factory;
+    unique_ptr<gpu::DXGIFactory> factory;
     switch (backend) {
 #if defined(RADRAY_ENABLE_D3D12)
-        case render::RenderBackend::D3D12: {
+        case gpu::RenderBackend::D3D12: {
             RADRAY_INFO_LOG("Environment: creating DXGI factory");
-            render::DXGIFactoryDescriptor desc{};
+            gpu::DXGIFactoryDescriptor desc{};
             desc.IsEnableDebugLayer = validation;
             if (validation) {
-                auto diagnostics = render::DXGIDiagnosticContext::Create();
+                auto diagnostics = gpu::CreateDXGIDiagnosticContext();
                 if (!diagnostics) {
                     RADRAY_ERR_LOG("D3D12: cannot create diagnostic context");
                     return nullptr;
                 }
                 desc.DiagnosticContext = diagnostics.Release();
             }
-            auto created = render::DXGIFactory::Create(desc);
+            auto created = gpu::CreateDXGIFactory(desc);
             if (!created) {
                 RADRAY_ERR_LOG("D3D12: DXGI factory creation failed; see preceding RadRay diagnostics");
                 return nullptr;
@@ -59,14 +60,14 @@ Nullable<unique_ptr<Environment>> Environment::Create(
         }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-        case render::RenderBackend::Vulkan: {
+        case gpu::RenderBackend::Vulkan: {
             RADRAY_INFO_LOG("Environment: creating Vulkan environment");
-            render::VulkanInstanceDescriptor desc{};
+            gpu::VulkanInstanceDescriptor desc{};
             desc.AppName = appName;
             desc.EngineName = "RadRay";
             desc.IsEnableDebugLayer = validation;
             desc.IsEnableSynchronizationValidation = validation;
-            auto created = render::InstanceVulkan::InitEnv(desc);
+            auto created = gpu::InitVulkanEnv(desc);
             if (!created) {
                 RADRAY_ERR_LOG("Vulkan: environment creation failed (loader, instance or active environment)");
                 return nullptr;

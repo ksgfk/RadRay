@@ -7,10 +7,10 @@ namespace radray {
 
 class RenderGraphFramePipeline::SlotState {
 public:
-    SlotState(render::Device& device, uint64_t pageSize) noexcept : TransientPool(device), Uploads(device, pageSize) {}
+    SlotState(gpu::Device& device, uint64_t pageSize) noexcept : TransientPool(device), Uploads(device, pageSize) {}
     RDGTransientResourcePool TransientPool;
     UploadArena Uploads;
-    Nullable<render::CommandBuffer*> Command{nullptr};
+    Nullable<gpu::CommandBuffer*> Command{nullptr};
     Nullable<CompiledRDG*> CompiledGraph{nullptr};
 };
 

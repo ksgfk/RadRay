@@ -1,6 +1,6 @@
 > - 适用: 编写、重写或评审 RadRay 的 GTest 单元测试与 GPU 测试
 > - 权威: 本文负责测试的取舍、组织与 TDD 流程；构建与运行命令见 build-test
-> - 锚点: `modules/*/tests/`, `modules/render/tests/gpu_test_fixture.h`, `cmake/TestShaders.cmake`, `tools/compile_test_shaders.py`
+> - 锚点: `modules/*/tests/`, `modules/gpu_impl/tests/gpu_test_fixture.h`, `cmake/TestShaders.cmake`, `tools/compile_test_shaders.py`
 
 # 编写测试
 
@@ -35,7 +35,7 @@
 
 ## GPU 测试
 
-render 测试链接进 `test_radray_render`，共用 [gpu_test_fixture.h](../../modules/render/tests/gpu_test_fixture.h)：
+gpu_impl 测试链接进 `test_radray_gpu_impl`，共用 [gpu_test_fixture.h](../../modules/gpu_impl/tests/gpu_test_fixture.h)：
 
 - 每个后端各实例化一次（参数 `D3D12`、`Vulkan`）。后端未编译、所需 validation 环境不可用或没有可用适配器时跳过；
   `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 把跳过变为失败。

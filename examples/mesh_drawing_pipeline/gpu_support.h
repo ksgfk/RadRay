@@ -10,7 +10,7 @@
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/vertex_input.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/pipeline_layout_cache.h>
+#include <radray/runtime/pipeline_layout_registry.h>
 #include <radray/runtime/rdg.h>
 
 namespace radray::examples::mesh_drawing {
@@ -43,10 +43,10 @@ struct MaterialTagFilter {
 // 同一材质资源仍需结合顶点输入、Pass 附件和深度状态生成不同 PSO。
 struct MaterialPipelines {
     AssetHandle<MaterialAsset> Material;
-    render::PipelineLayout* Layout;
-    Nullable<unique_ptr<render::GraphicsPipelineState>> Depth{nullptr};
-    Nullable<unique_ptr<render::GraphicsPipelineState>> Color{nullptr};
-    Nullable<unique_ptr<render::GraphicsPipelineState>> Outline{nullptr};
+    shared_ptr<GpuPipelineLayout> Layout;
+    Nullable<unique_ptr<gpu::GraphicsPipelineState>> Depth{nullptr};
+    Nullable<unique_ptr<gpu::GraphicsPipelineState>> Color{nullptr};
+    Nullable<unique_ptr<gpu::GraphicsPipelineState>> Outline{nullptr};
 };
 
 // 资源按依赖顺序声明，析构时逆序释放；仅供本教学样例使用。
@@ -55,7 +55,7 @@ struct GpuResources {
     GpuResources(const GpuResources&) = delete;
     GpuResources& operator=(const GpuResources&) = delete;
 
-    bool Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory);
+    bool Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory);
     // Creates Device buffers and retains CPU bytes for the first frame's graph upload.
     bool PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
     bool CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
@@ -64,15 +64,15 @@ struct GpuResources {
     uint32_t Height{600};
     Nullable<unique_ptr<Environment>> Env{nullptr};
     Nullable<unique_ptr<DeviceContext>> Device{nullptr};
-    Nullable<unique_ptr<render::Buffer>> VertexBuffer{nullptr};
-    Nullable<unique_ptr<render::Buffer>> IndexBuffer{nullptr};
+    Nullable<unique_ptr<gpu::Buffer>> VertexBuffer{nullptr};
+    Nullable<unique_ptr<gpu::Buffer>> IndexBuffer{nullptr};
     vector<byte> PendingVertexBytes;
     vector<byte> PendingIndexBytes;
     MaterialTagTable MaterialTags;
-    unique_ptr<PipelineLayoutCache> LayoutCache;
+    unique_ptr<PipelineLayoutRegistry> LayoutRegistry;
     unique_ptr<AssetManager> Assets;
     AssetHandle<ShaderAsset> Shader;
-    Nullable<render::BindingGroupLayout*> PassGroupLayout{nullptr};
+    Nullable<shared_ptr<gpu::BindingGroupLayout>> PassGroupLayout{nullptr};
     MaterialTag OpaqueTag;
     MaterialTag TransparentTag;
     MaterialTag OutlineTag;
@@ -92,9 +92,10 @@ struct GpuFrameResources {
     uint32_t Height{0};
     uint64_t RowPitch{0};
     array<RDGBufferSlice, 2> BoundConstants{};
-    Nullable<unique_ptr<render::Buffer>> Readback{nullptr};
-    array<Nullable<unique_ptr<render::ShaderParameterSet>>, 2> PassParameterSets{};
-    Nullable<unique_ptr<render::Fence>> CompletionFence{nullptr};
+    Nullable<unique_ptr<gpu::Buffer>> Readback{nullptr};
+    Nullable<shared_ptr<gpu::BindingGroupLayout>> PassGroupLayout;
+    array<Nullable<unique_ptr<gpu::ShaderParameterSet>>, 2> PassParameterSets{};
+    Nullable<unique_ptr<gpu::Fence>> CompletionFence{nullptr};
     uint64_t CompletionValue{0};
 };
 

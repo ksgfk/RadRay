@@ -17,16 +17,16 @@ using test::RecordingEncoder;
 class VertexInputTest : public testing::Test {
 protected:
     VertexInputTest() {
-        Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
+        Input.Layouts.push_back({0, 12, gpu::VertexStepMode::Vertex});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, gpu::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
     }
     void AddInstanceLayout(uint32_t binding, uint32_t location) {
-        Input.Layouts.push_back({binding, 16, render::VertexStepMode::Instance});
-        Input.Attributes.push_back({binding, 0, "INSTANCE", location, render::VertexFormat::FLOAT32X4});
+        Input.Layouts.push_back({binding, 16, gpu::VertexStepMode::Instance});
+        Input.Attributes.push_back({binding, 0, "INSTANCE", location, gpu::VertexFormat::FLOAT32X4});
     }
 
-    FakeBuffer Vertices{128, render::BufferUse::Vertex};
+    FakeBuffer Vertices{128, gpu::BufferUse::Vertex};
     VertexInput Input;
 };
 
@@ -92,9 +92,9 @@ protected:
     }
 
     FakePipeline Pipeline;
-    FakeBuffer Vertices{128, render::BufferUse::Vertex};
-    FakeBuffer Instances{128, render::BufferUse::Vertex};
-    FakeBuffer Indices{128, render::BufferUse::Index};
+    FakeBuffer Vertices{128, gpu::BufferUse::Vertex};
+    FakeBuffer Instances{128, gpu::BufferUse::Vertex};
+    FakeBuffer Indices{128, gpu::BufferUse::Index};
     FakeParameterSet Parameters;
 };
 
@@ -159,13 +159,13 @@ TEST_F(MeshDrawCommandTest, RejectsPushConstantsNotFourByteAligned) {
 TEST_F(MeshDrawCommandTest, DeclaredInstanceStreamMustBeSuppliedWhenMissing) {
     auto command = MakeCommand();
     command.Bindings.InstanceStreamBinding = 1;
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{1, {&Instances, 0, 64}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 64}}};
     EXPECT_FALSE(Validate(command));
     EXPECT_TRUE(Validate(command, {}, args));
 }
 
 TEST_F(MeshDrawCommandTest, RejectsInstanceStreamForUndeclaredSlot) {
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{0, {&Instances, 0, 64}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{0, {&Instances, 0, 64}}};
     EXPECT_FALSE(Validate(MakeCommand(), {}, args));
     EXPECT_FALSE(Validate(MakeInstancedCommand(), {}, args));
 }
@@ -187,7 +187,7 @@ TEST_F(MeshDrawCommandTest, BindingStorageOwnsOverflowPayloads) {
     EXPECT_EQ(push->Offset, 4u);
     EXPECT_EQ((vector<byte>{push->Data.begin(), push->Data.end()}), (vector<byte>(80, byte{0x37})));
     ASSERT_EQ(parameters[0].DynamicOffsets.size(), 6u);
-    EXPECT_EQ(parameters[0].DynamicOffsets[5], (render::ShaderParameterDynamicOffset{5, 0, 80}));
+    EXPECT_EQ(parameters[0].DynamicOffsets[5], (gpu::ShaderParameterDynamicOffset{5, 0, 80}));
     EXPECT_TRUE(ValidateMeshDrawCommand(command, storage));
 }
 
@@ -292,7 +292,7 @@ TEST_F(SubmitMeshDrawCommandsTest, PipelineChangeRebindsPassParametersAndVertexB
     FakeParameterSet passParameters;
     const MeshShaderParameterBinding pass{0, &passParameters, {}};
     ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, {.ParameterSets = std::span{&pass, 1}}));
-    EXPECT_EQ(Encoder.Pipelines, (vector<render::GraphicsPipelineState*>{&Pipeline, &other}));
+    EXPECT_EQ(Encoder.Pipelines, (vector<gpu::GraphicsPipelineState*>{&Pipeline, &other}));
     EXPECT_EQ(Encoder.ParameterBinds.size(), 2u);
     EXPECT_EQ(Encoder.VertexCalls.size(), 2u);
     EXPECT_EQ(Encoder.IndexBuffers.size(), 1u);
@@ -319,7 +319,7 @@ TEST_F(SubmitMeshDrawCommandsTest, VertexSlotsBindWithoutOverwritingUnchangedSlo
 TEST_F(SubmitMeshDrawCommandsTest, SubmitInstanceStreamReplacesDeclaredSlot) {
     const array commands{MakeInstancedCommand()};
     const auto visible = Dynamic(commands[0]);
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{1, {&Instances, 16, 48}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 16, 48}}};
     ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, args));
     ASSERT_EQ(Encoder.VertexCalls.size(), 2u);
     ASSERT_EQ(Encoder.VertexCalls[0].size(), 1u);
@@ -398,7 +398,7 @@ TEST_F(SubmitMeshDrawCommandsTest, SharedHandlesRebindAfterPipelineChangeAndAcro
     auto other = *first.CachedCommand;
     other.Pipeline = &otherPipeline;
     const array visible{first, first, VisibleMeshDrawCommand{.CachedCommand = &other}, first};
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{1, {&Instances, 16, 48}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 16, 48}}};
     for (uint32_t call = 0; call < 2; ++call) ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, args));
     EXPECT_EQ(Encoder.Draws.size(), 8u);
     EXPECT_EQ(Encoder.Pipelines.size(), 6u);
@@ -430,7 +430,7 @@ TEST_F(SubmitMeshDrawCommandsTest, ExtendedInstanceBindingDoesNotTruncate) {
     auto source = MakeCommand();
     source.Bindings.InstanceStreamBinding = 255;
     const auto visible = Dynamic(source);
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{255, {&Instances, 16, 48}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{255, {&Instances, 16, 48}}};
     EXPECT_TRUE(ValidateMeshDrawCommand(*visible.CachedCommand, Storage, visible, args));
     ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, args));
     ASSERT_EQ(Encoder.VertexCalls.size(), 2u);
@@ -508,7 +508,7 @@ TEST_F(SubmitMeshDrawCommandsTest, InstanceOverrideSplitsAContiguousGroupWithout
     auto second = *first.CachedCommand;
     second.FirstIndex = 3;
     const array visible{first, VisibleMeshDrawCommand{.CachedCommand = &second}};
-    const MeshPassSubmitArgs args{.InstanceStream = render::VertexBufferBinding{1, {&Instances, 16, 48}}};
+    const MeshPassSubmitArgs args{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 16, 48}}};
     ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, args));
     ASSERT_EQ(Encoder.VertexCalls.size(), 3u);
     ASSERT_EQ(Encoder.VertexCalls[0].size(), 1u);

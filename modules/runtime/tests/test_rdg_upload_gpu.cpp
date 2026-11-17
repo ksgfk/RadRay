@@ -1,4 +1,4 @@
-#include "../../render/tests/gpu_test_fixture.h"
+#include "../../gpu_impl/tests/gpu_test_fixture.h"
 
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/gpu_device.h>
@@ -8,7 +8,7 @@
 namespace radray {
 namespace {
 
-using namespace render;
+using namespace gpu;
 
 class UploadPipeline final : public RenderGraphFramePipeline {
 public:
@@ -36,15 +36,15 @@ bool RecordBufferCopy(const BufferCopyData& data, RDGCopyPassContext& context) n
     return true;
 }
 
-class BufferUploadGpuTest : public render::test::BackendTest {
+class BufferUploadGpuTest : public gpu::test::BackendTest {
 protected:
     void VerifyUploads(uint32_t slots) {
         auto& device = GetDevice();
-        auto& queue = render::test::DirectQueue(device);
+        auto& queue = gpu::test::DirectQueue(device);
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
         auto buffer = GpuBuffer::Create(device, {.Size = 32, .Usage = BufferUse::CopySource}).Unwrap();
-        auto middle = render::test::CreateReadbackBuffer(device, 32).Unwrap();
-        auto output = render::test::CreateReadbackBuffer(device, 32).Unwrap();
+        auto middle = gpu::test::CreateReadbackBuffer(device, 32).Unwrap();
+        auto output = gpu::test::CreateReadbackBuffer(device, 32).Unwrap();
         auto pipeline = make_unique<UploadPipeline>(context, slots);
         auto* runner = pipeline.get();
         auto scheduler = FrameScheduler::Create(context, std::move(pipeline), slots).Unwrap();
@@ -66,8 +66,8 @@ protected:
         };
         scheduler->RunFrame();
         scheduler->WaitIdle();
-        EXPECT_EQ(render::test::MapAndRead(*middle), original);
-        EXPECT_EQ(render::test::MapAndRead(*output), expected);
+        EXPECT_EQ(gpu::test::MapAndRead(*middle), original);
+        EXPECT_EQ(gpu::test::MapAndRead(*output), expected);
         const array tail{byte{101}, byte{102}, byte{103}};
         for (uint32_t frame = 0; frame <= slots; ++frame) {
             runner->Build = [&](RDGBuilder& graph, FrameSlot&) {
@@ -83,7 +83,7 @@ protected:
         }
         scheduler->WaitIdle();
         std::copy(tail.begin(), tail.end(), expected.begin() + 28);
-        EXPECT_EQ(render::test::MapAndRead(*output), expected);
+        EXPECT_EQ(gpu::test::MapAndRead(*output), expected);
     }
 };
 
@@ -92,12 +92,12 @@ TEST_P(BufferUploadGpuTest, OverlapIntermediateConsumerTailAndOwnershipThreeSlot
 
 TEST_P(BufferUploadGpuTest, ManySmallMixedUploadsAndOverlappingTilesReadBack) {
     auto& device = GetDevice();
-    auto& queue = render::test::DirectQueue(device);
+    auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
     auto buffer = GpuBuffer::Create(device, {.Size = 2048, .Usage = BufferUse::CopySource}).Unwrap();
     auto texture = device.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 32, .Height = 16, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::CopyDestination | TextureUse::CopySource | TextureUse::Resource}).Unwrap();
-    auto middle = render::test::CreateReadbackBuffer(device, 2048).Unwrap();
-    auto output = render::test::CreateReadbackBuffer(device, 2048).Unwrap();
+    auto middle = gpu::test::CreateReadbackBuffer(device, 2048).Unwrap();
+    auto output = gpu::test::CreateReadbackBuffer(device, 2048).Unwrap();
     vector<uint32_t> original(512), expected(512);
     for (uint32_t i = 0; i < 512; ++i) original[i] = i | 0xff000000;
     expected = original;
@@ -126,23 +126,23 @@ TEST_P(BufferUploadGpuTest, ManySmallMixedUploadsAndOverlappingTilesReadBack) {
     auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
     scheduler->RunFrame();
     scheduler->WaitIdle();
-    EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::MapAndRead(*middle)), original);
-    EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::MapAndRead(*output)), expected);
+    EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::MapAndRead(*middle)), original);
+    EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::MapAndRead(*output)), expected);
     EXPECT_EQ(buffer->GetSubmittedState(), BufferStates{BufferState::Common});
-    EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::ReadTexture(device, *texture, TextureState::ShaderRead)), expected);
+    EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::ReadTexture(device, *texture, TextureState::ShaderRead)), expected);
 }
 
 TEST_P(BufferUploadGpuTest, ExternalSubmissionPublishesCopyDestinationForRdgReadback) {
     auto& device = GetDevice();
-    auto& queue = render::test::DirectQueue(device);
+    auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
     const array<uint32_t, 4> values{17, 29, 41, 53};
     const auto bytes = std::as_bytes(std::span{values});
     auto buffer = GpuBuffer::Create(device, {.Size = bytes.size(), .Usage = BufferUse::CopySource}).Unwrap();
-    auto source = render::test::CreateUploadBuffer(device, bytes, BufferUse::CopySource).Unwrap();
-    auto readback = render::test::CreateReadbackBuffer(device, bytes.size()).Unwrap();
-    auto external = render::test::BeginRecording(device);
-    render::test::Barrier(*external.Commands, {
+    auto source = gpu::test::CreateUploadBuffer(device, bytes, BufferUse::CopySource).Unwrap();
+    auto readback = gpu::test::CreateReadbackBuffer(device, bytes.size()).Unwrap();
+    auto external = gpu::test::BeginRecording(device);
+    gpu::test::Barrier(*external.Commands, {
         BarrierBufferDescriptor{source.get(), BufferState::HostWrite, BufferState::CopySource},
         BarrierBufferDescriptor{buffer->GetBuffer(), BufferState::Common, BufferState::CopyDestination}});
     external.Commands->CopyBufferToBuffer(buffer->GetBuffer(), 0, source.get(), 0, bytes.size());
@@ -162,14 +162,14 @@ TEST_P(BufferUploadGpuTest, ExternalSubmissionPublishesCopyDestinationForRdgRead
     scheduler->RunFrame();
     EXPECT_EQ(buffer->GetSubmittedState(), BufferStates{BufferState::Common});
     scheduler->WaitIdle();
-    EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::MapAndRead(*readback)), (vector<uint32_t>{values.begin(), values.end()}));
+    EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::MapAndRead(*readback)), (vector<uint32_t>{values.begin(), values.end()}));
 }
 
 TEST_P(BufferUploadGpuTest, DynamicCopyUsesNonzeroSliceOffsetWithoutDeviceUploadCopy) {
     auto& device = GetDevice();
-    auto& queue = render::test::DirectQueue(device);
+    auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
-    auto output = render::test::CreateReadbackBuffer(device, 16).Unwrap();
+    auto output = gpu::test::CreateReadbackBuffer(device, 16).Unwrap();
     auto pipeline = make_unique<UploadPipeline>(context, 1);
     pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
         const array<byte, 16> first{byte{1}}, second{byte{42}};
@@ -185,22 +185,22 @@ TEST_P(BufferUploadGpuTest, DynamicCopyUsesNonzeroSliceOffsetWithoutDeviceUpload
     auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
     scheduler->RunFrame();
     scheduler->WaitIdle();
-    EXPECT_EQ(render::test::MapAndRead(*output)[0], byte{42});
+    EXPECT_EQ(gpu::test::MapAndRead(*output)[0], byte{42});
 }
 
 TEST_P(BufferUploadGpuTest, ConstantsUseNonzeroOffsetsAcrossPagesAndReuseParameterSets) {
     auto& device = GetDevice();
-    auto& queue = render::test::DirectQueue(device);
+    auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
     auto result = device.CreateBuffer({.Size = 8, .Usage = BufferUse::UnorderedAccess | BufferUse::CopySource}).Unwrap();
-    auto readback = render::test::CreateReadbackBuffer(device, 8).Unwrap();
+    auto readback = gpu::test::CreateReadbackBuffer(device, 8).Unwrap();
     const array bindings{
         BindingDescriptor{.BindingId = 0, .Kind = BindingKind::RWStructuredBuffer, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = D3D12BindingDescriptor{GetBindingRegisterClass(BindingKind::RWStructuredBuffer), 0, 0, D3D12BufferPlacement::Table}, .Vulkan = VulkanBindingDescriptor{0, 0}},
         BindingDescriptor{.BindingId = 2, .Kind = BindingKind::CBuffer, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = D3D12BindingDescriptor{GetBindingRegisterClass(BindingKind::CBuffer), 0, 0, D3D12BufferPlacement::Table}, .Vulkan = VulkanBindingDescriptor{0, 2}}};
     auto group = device.CreateBindingGroupLayout({bindings}).Unwrap();
     const PipelineLayoutGroupDescriptor layoutGroup{0, group.get()};
     auto layout = device.CreatePipelineLayout({.Groups = std::span{&layoutGroup, 1}, .PushConstants = {}}).Unwrap();
-    auto shader = render::test::LoadShader(device, "compute", "ReadConstants", ShaderStage::Compute).Unwrap();
+    auto shader = gpu::test::LoadShader(device, "compute", "ReadConstants", ShaderStage::Compute).Unwrap();
     auto kernel = device.CreateComputePipelineState({.PipelineLayout = layout.get(), .CS = ShaderEntry{shader.get(), "ReadConstants"}}).Unwrap();
     array<unique_ptr<ShaderParameterSet>, 2> sets{device.CreateShaderParameterSet({group.get()}).Unwrap(), device.CreateShaderParameterSet({group.get()}).Unwrap()};
     auto pipeline = make_unique<UploadPipeline>(context, 1, 512);
@@ -243,19 +243,19 @@ TEST_P(BufferUploadGpuTest, ConstantsUseNonzeroOffsetsAcrossPagesAndReuseParamet
         };
         scheduler->RunFrame();
         scheduler->WaitIdle();
-        EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::MapAndRead(*readback)), (vector<uint32_t>{42 + frame, 91 + frame}));
+        EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::MapAndRead(*readback)), (vector<uint32_t>{42 + frame, 91 + frame}));
     }
     for (auto& set : sets) set->ResetBindingsForReuse();
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, BufferUploadGpuTest, testing::ValuesIn(render::test::AllBackends), render::test::BackendParamName);
+INSTANTIATE_TEST_SUITE_P(Backends, BufferUploadGpuTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
-class TextureUploadGpuTest : public render::test::BackendTest {
+class TextureUploadGpuTest : public gpu::test::BackendTest {
 protected:
     enum class Initialization { Upload, CopyPass, ExternalCopy };
     void VerifyTexture(Initialization initialization) {
         auto& device = GetDevice();
-        auto& queue = render::test::DirectQueue(device);
+        auto& queue = gpu::test::DirectQueue(device);
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
         auto texture = GpuTexture::Create(device, {.Dim = TextureDimension::Dim2DArray, .Width = 4, .Height = 4, .ArrayLayers = 2, .MipLevels = 3, .Format = TextureFormat::R32_UINT}).Unwrap();
         vector<uint32_t> expected;
@@ -268,7 +268,7 @@ protected:
         }
         const auto byteSize = expected.size() * 4;
         auto output = device.CreateBuffer({.Size = byteSize, .Usage = BufferUse::UnorderedAccess | BufferUse::CopySource}).Unwrap();
-        auto readback = render::test::CreateReadbackBuffer(device, byteSize).Unwrap();
+        auto readback = gpu::test::CreateReadbackBuffer(device, byteSize).Unwrap();
         const array bindings{
             BindingDescriptor{.BindingId = 0, .Kind = BindingKind::Texture, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = D3D12BindingDescriptor{GetBindingRegisterClass(BindingKind::Texture), 0, 0, D3D12BufferPlacement::Table}, .Vulkan = VulkanBindingDescriptor{0, 0}},
             BindingDescriptor{.BindingId = 1, .Kind = BindingKind::RWStructuredBuffer, .Count = 1, .Stages = ShaderStage::Compute, .D3D12 = D3D12BindingDescriptor{GetBindingRegisterClass(BindingKind::RWStructuredBuffer), 0, 0, D3D12BufferPlacement::Table}, .Vulkan = VulkanBindingDescriptor{0, 1}}};
@@ -276,14 +276,14 @@ protected:
         const PipelineLayoutGroupDescriptor layoutGroup{0, group.get()};
         const PushConstantDescriptor push{.PushId = 0, .Size = 16, .Stages = ShaderStage::Compute, .D3D12 = PushConstantDescriptor::D3D12Location{0, 0}, .Vulkan = PushConstantDescriptor::VulkanLocation{0}};
         auto layout = device.CreatePipelineLayout({std::span{&layoutGroup, 1}, std::span{&push, 1}}).Unwrap();
-        auto shader = render::test::LoadShader(device, "texture_upload", "LoadUploadedTexture", ShaderStage::Compute).Unwrap();
+        auto shader = gpu::test::LoadShader(device, "texture_upload", "LoadUploadedTexture", ShaderStage::Compute).Unwrap();
         auto kernel = device.CreateComputePipelineState({.PipelineLayout = layout.get(), .CS = ShaderEntry{shader.get(), "LoadUploadedTexture"}}).Unwrap();
         auto parameters = device.CreateShaderParameterSet({group.get()}).Unwrap();
         ASSERT_TRUE(parameters->Set(0, 0, texture->GetDefaultView()));
         ASSERT_TRUE(parameters->Set(1, 0, ShaderBufferBinding{output.get(), {0, byteSize}, 4}));
         ASSERT_TRUE(parameters->FlushWrites());
         vector<unique_ptr<Buffer>> externalSources;
-        std::optional<render::test::Recording> external;
+        std::optional<gpu::test::Recording> external;
         auto pipeline = make_unique<UploadPipeline>(context, 2);
         auto* runner = pipeline.get();
         auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 2).Unwrap();
@@ -332,17 +332,17 @@ protected:
             graph.MarkOutput(image);
         };
         if (initialization == Initialization::ExternalCopy) {
-            external.emplace(render::test::BeginRecording(device));
-            render::test::Barrier(*external->Commands, {BarrierTextureDescriptor{texture->GetTexture(), TextureState::Undefined, TextureState::CopyDestination}});
+            external.emplace(gpu::test::BeginRecording(device));
+            gpu::test::Barrier(*external->Commands, {BarrierTextureDescriptor{texture->GetTexture(), TextureState::Undefined, TextureState::CopyDestination}});
             for (uint32_t layer = 0; layer < 2; ++layer) {
                 for (uint32_t mip = 0; mip < 3; ++mip) {
                     const auto width = 4u >> mip;
-                    const auto pitch = render::test::CopyRowPitch(device, width, 4);
+                    const auto pitch = gpu::test::CopyRowPitch(device, width, 4);
                     vector<byte> bytes(pitch * (width - 1) + width * 4);
                     for (uint32_t row = 0; row < width; ++row)
                         std::memcpy(bytes.data() + row * pitch, expected.data() + offsets[layer][mip] + row * width, width * 4);
-                    auto source = render::test::CreateUploadBuffer(device, bytes, BufferUse::CopySource).Unwrap();
-                    render::test::Barrier(*external->Commands, {BarrierBufferDescriptor{source.get(), BufferState::HostWrite, BufferState::CopySource}});
+                    auto source = gpu::test::CreateUploadBuffer(device, bytes, BufferUse::CopySource).Unwrap();
+                    gpu::test::Barrier(*external->Commands, {BarrierBufferDescriptor{source.get(), BufferState::HostWrite, BufferState::CopySource}});
                     ASSERT_TRUE(external->Commands->CopyBufferToTextureRegion({source.get(), texture->GetTexture(), {0, pitch, {mip, layer, 0, 0, width, width}}}));
                     externalSources.push_back(std::move(source));
                 }
@@ -387,7 +387,7 @@ protected:
         expected[6] = 9002;
         expected[9] = 9003;
         expected[10] = 9004;
-        EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::MapAndRead(*readback)), expected);
+        EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::MapAndRead(*readback)), expected);
         EXPECT_EQ(texture->GetSubmittedState(), TextureState::ShaderRead);
     }
 };
@@ -396,7 +396,7 @@ TEST_P(TextureUploadGpuTest, MipsLayersSourcePaddingAndNextFrameTile) { VerifyTe
 TEST_P(TextureUploadGpuTest, OrdinaryCopyInitializationPublishesStateForNextFrameTileAndSampling) { VerifyTexture(Initialization::CopyPass); }
 TEST_P(TextureUploadGpuTest, ExternalSubmissionPublishesStateForTileUpdateAndSampling) { VerifyTexture(Initialization::ExternalCopy); }
 
-INSTANTIATE_TEST_SUITE_P(Backends, TextureUploadGpuTest, testing::ValuesIn(render::test::AllBackends), render::test::BackendParamName);
+INSTANTIATE_TEST_SUITE_P(Backends, TextureUploadGpuTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
 }  // namespace
 }  // namespace radray

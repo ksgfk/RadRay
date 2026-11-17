@@ -17,6 +17,7 @@ public:
     void ReserveAdditional(size_t size);
 
     void U8(uint8_t value);
+    void U16(uint16_t value);
     void U32(uint32_t value);
     void U64(uint64_t value);
     void Size32(size_t value);
@@ -41,6 +42,7 @@ public:
     explicit BinaryReader(std::span<const byte> data) noexcept;
 
     bool U8(uint8_t& value) noexcept;
+    bool U16(uint16_t& value) noexcept;
     bool U32(uint32_t& value) noexcept;
     bool U64(uint64_t& value) noexcept;
     bool I32(int32_t& value) noexcept;

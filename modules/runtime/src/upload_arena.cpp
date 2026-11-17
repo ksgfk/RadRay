@@ -7,7 +7,7 @@
 
 namespace radray {
 
-UploadArena::UploadArena(render::Device& device, uint64_t pageSize) noexcept : _device(device), _pageSize(pageSize) {}
+UploadArena::UploadArena(gpu::Device& device, uint64_t pageSize) noexcept : _device(device), _pageSize(pageSize) {}
 UploadArena::~UploadArena() noexcept { Clear(); }
 
 void UploadArena::Reset() noexcept {
@@ -22,11 +22,11 @@ void UploadArena::Clear() noexcept {
     _pages.clear();
 }
 
-std::optional<UploadAllocation> UploadArena::Allocate(uint64_t size, uint64_t alignment, uint64_t reservedSize, render::BufferStates reads) {
+std::optional<UploadAllocation> UploadArena::Allocate(uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads) {
     RADRAY_PROFILE_SCOPE_N("RadRay.UploadArena.Allocate");
     if (!size) return UploadAllocation{};
-    constexpr auto allowed = render::BufferState::CopySource | render::BufferState::Vertex | render::BufferState::Index |
-                             render::BufferState::CBuffer | render::BufferState::ShaderRead | render::BufferState::Indirect;
+    constexpr auto allowed = gpu::BufferState::CopySource | gpu::BufferState::Vertex | gpu::BufferState::Index |
+                             gpu::BufferState::CBuffer | gpu::BufferState::ShaderRead | gpu::BufferState::Indirect;
     if (!alignment || reservedSize < size || reservedSize > std::numeric_limits<size_t>::max() || !reads || (reads & ~allowed)) return std::nullopt;
     const auto allocate = [&](Page& page) -> std::optional<UploadAllocation> {
         const auto padding = (alignment - page.Cursor % alignment) % alignment;
@@ -46,9 +46,9 @@ std::optional<UploadAllocation> UploadArena::Allocate(uint64_t size, uint64_t al
     if (maximum && reservedSize > maximum) return std::nullopt;
     const auto capacity = std::max(maximum ? std::min(_pageSize, maximum) : _pageSize, reservedSize);
     if (!capacity || capacity > std::numeric_limits<size_t>::max()) return std::nullopt;
-    const auto usage = render::BufferUse::CopySource | render::BufferUse::Vertex | render::BufferUse::Index |
-                       render::BufferUse::CBuffer | render::BufferUse::Resource | render::BufferUse::Indirect | render::BufferUse::MapWrite;
-    auto buffer = _device.CreateBuffer({.Size = capacity, .Memory = render::MemoryType::Upload, .Usage = usage, .Hints = render::ResourceHint::PersistentMap});
+    const auto usage = gpu::BufferUse::CopySource | gpu::BufferUse::Vertex | gpu::BufferUse::Index |
+                       gpu::BufferUse::CBuffer | gpu::BufferUse::Resource | gpu::BufferUse::Indirect | gpu::BufferUse::MapWrite;
+    auto buffer = _device.CreateBuffer({.Size = capacity, .Memory = gpu::MemoryType::Upload, .Usage = usage, .Hints = gpu::ResourceHint::PersistentMap});
     if (!buffer) return std::nullopt;
     auto* data = static_cast<byte*>(buffer->Map(0, capacity));
     if (!data) return std::nullopt;

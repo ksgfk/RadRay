@@ -10,10 +10,10 @@
 namespace radray {
 namespace {
 
-bool ValidateVertexBuffer(const render::VertexBufferView& view) noexcept {
+bool ValidateVertexBuffer(const gpu::VertexBufferView& view) noexcept {
     if (!view.Target || !view.Target->IsValid() || view.Size == 0 || view.Size > std::numeric_limits<uint32_t>::max()) return false;
     const auto desc = view.Target->GetDesc();
-    return desc.Usage.HasFlag(render::BufferUse::Vertex) && view.Offset <= desc.Size && view.Size <= desc.Size - view.Offset;
+    return desc.Usage.HasFlag(gpu::BufferUse::Vertex) && view.Offset <= desc.Size && view.Size <= desc.Size - view.Offset;
 }
 
 bool ValidateParameterSets(std::span<const MeshShaderParameterBinding> bindings) noexcept {
@@ -38,11 +38,11 @@ bool ValidateSubmitArgs(const MeshPassSubmitArgs& submitArgs) noexcept {
            (!submitArgs.InstanceStream || ValidateVertexBuffer(submitArgs.InstanceStream->View));
 }
 
-bool SameVertexBufferView(const render::VertexBufferView& a, const render::VertexBufferView& b) noexcept {
+bool SameVertexBufferView(const gpu::VertexBufferView& a, const gpu::VertexBufferView& b) noexcept {
     return a.Target == b.Target && a.Offset == b.Offset && a.Size == b.Size;
 }
 
-bool SameIndexBufferView(const render::IndexBufferView& a, const render::IndexBufferView& b) noexcept {
+bool SameIndexBufferView(const gpu::IndexBufferView& a, const gpu::IndexBufferView& b) noexcept {
     return a.Target == b.Target && a.Offset == b.Offset && a.Stride == b.Stride;
 }
 
@@ -51,10 +51,10 @@ bool SameParameterBinding(const MeshShaderParameterBinding& a, const MeshShaderP
 }
 
 struct MeshDrawCommandStateCache {
-    Nullable<render::GraphicsPipelineState*> Pipeline{nullptr};
-    std::optional<render::IndexBufferView> IndexBuffer{};
+    Nullable<gpu::GraphicsPipelineState*> Pipeline{nullptr};
+    std::optional<gpu::IndexBufferView> IndexBuffer{};
     std::optional<uint8_t> StencilReference{};
-    array<render::VertexBufferView, 32> BoundVertexSlots{};
+    array<gpu::VertexBufferView, 32> BoundVertexSlots{};
     uint32_t BoundVertexMask{0};
     Nullable<const MeshDrawCommandBindingStorage*> LastVertexStorage{nullptr};
     uint32_t LastVertexBuffersIndex{kInvalidBindingIndex};
@@ -63,7 +63,7 @@ struct MeshDrawCommandStateCache {
     Nullable<const MeshPushConstantCommandBinding*> LastPushConstants{nullptr};
     InlineVector<MeshShaderParameterBinding, 4> CommandParameterSets;
 
-    void OnPipelineChanged(render::GraphicsPipelineState* pipeline) noexcept {
+    void OnPipelineChanged(gpu::GraphicsPipelineState* pipeline) noexcept {
         Pipeline = pipeline;
         BoundVertexMask = 0;
         LastVertexStorage = nullptr;
@@ -74,7 +74,7 @@ struct MeshDrawCommandStateCache {
         CommandParameterSets.clear();
     }
 
-    bool UpdateVertexBuffer(const render::VertexBufferBinding& binding) noexcept {
+    bool UpdateVertexBuffer(const gpu::VertexBufferBinding& binding) noexcept {
         if (binding.Binding >= BoundVertexSlots.size()) return true;
         const auto bit = uint32_t{1} << binding.Binding;
         auto& slot = BoundVertexSlots[binding.Binding];
@@ -342,13 +342,13 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
     size_t instanceLayouts = 0;
     size_t deferredStreams = 0;
     for (const auto& layout : input.Layouts) {
-        if (layout.StepMode != render::VertexStepMode::Vertex && layout.StepMode != render::VertexStepMode::Instance) return false;
-        if (layout.StepMode == render::VertexStepMode::Instance) ++instanceLayouts;
+        if (layout.StepMode != gpu::VertexStepMode::Vertex && layout.StepMode != gpu::VertexStepMode::Instance) return false;
+        if (layout.StepMode == gpu::VertexStepMode::Instance) ++instanceLayouts;
         const auto stream = std::find_if(input.Streams.begin(), input.Streams.end(), [&](const VertexInputStream& value) {
             return value.Binding == layout.Binding;
         });
         if (stream == input.Streams.end()) {
-            if (allowDeferredInstanceStream && layout.StepMode == render::VertexStepMode::Instance) {
+            if (allowDeferredInstanceStream && layout.StepMode == gpu::VertexStepMode::Instance) {
                 ++deferredStreams;
                 continue;
             }
@@ -360,7 +360,7 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
     for (size_t index = 0; index < input.Streams.size(); ++index) {
         const auto& stream = input.Streams[index];
         if (!ValidateVertexBuffer({stream.Buffer.Get(), stream.Offset, stream.Size}) ||
-            std::none_of(input.Layouts.begin(), input.Layouts.end(), [&](const render::VertexBufferLayout& layout) { return layout.Binding == stream.Binding; })) return false;
+            std::none_of(input.Layouts.begin(), input.Layouts.end(), [&](const gpu::VertexBufferLayout& layout) { return layout.Binding == stream.Binding; })) return false;
         for (size_t previous = 0; previous < index; ++previous) {
             if (input.Streams[previous].Binding == stream.Binding) return false;
         }
@@ -371,7 +371,7 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
 namespace {
 
 // 调用方已经校验整个 Pass 共用的参数。
-bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const render::VertexBufferBinding> vertexBuffers,
+bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const gpu::VertexBufferBinding> vertexBuffers,
                                  std::span<const MeshShaderParameterBinding> parameterSets,
                                  Nullable<const MeshPushConstantCommandBinding*> pushConstants, std::optional<uint32_t> instanceStreamBinding,
                                  const MeshPassSubmitArgs& submitArgs, bool validateGeometry = true) noexcept {
@@ -382,7 +382,7 @@ bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const
             (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
         const auto desc = indices.Target->GetDesc();
         const uint64_t end = uint64_t{indices.Offset} + (uint64_t{command.FirstIndex} + command.IndexCount) * indices.Stride;
-        if (!desc.Usage.HasFlag(render::BufferUse::Index) || end > desc.Size) return false;
+        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) || end > desc.Size) return false;
     }
     bool hasDefaultInstanceStream = false;
     for (size_t index = 0; index < vertexBuffers.size(); ++index) {
@@ -424,7 +424,7 @@ bool ValidateElements(const MeshDrawCommand& command, std::span<const MeshDrawEl
         if (!indices.Target || !indices.Target->IsValid() || element.IndexCount == 0 ||
             (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
         const auto desc = indices.Target->GetDesc();
-        if (!desc.Usage.HasFlag(render::BufferUse::Index) ||
+        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
             uint64_t{indices.Offset} + (uint64_t{element.FirstIndex} + element.IndexCount) * indices.Stride > desc.Size) return false;
     }
     for (const auto& instance : instances) {
@@ -456,7 +456,7 @@ bool ValidateStoredMeshDrawCommand(const MeshDrawCommand& command,
         }
     }
     return ValidateMeshDrawCommandImpl(command,
-                                       vertices ? std::span<const render::VertexBufferBinding>{vertices->Bindings.data(), vertices->Bindings.size()} : std::span<const render::VertexBufferBinding>{},
+                                       vertices ? std::span<const gpu::VertexBufferBinding>{vertices->Bindings.data(), vertices->Bindings.size()} : std::span<const gpu::VertexBufferBinding>{},
                                        payload ? std::span<const MeshShaderParameterBinding>{payload->ParameterSets.data(), payload->ParameterSets.size()} : std::span<const MeshShaderParameterBinding>{},
                                        payload && payload->PushConstants ? &*payload->PushConstants : nullptr,
                                        vertices ? vertices->InstanceStreamBinding : std::nullopt, submitArgs) &&
@@ -483,7 +483,7 @@ bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawComma
            ValidateSubmitArgs(submitArgs) && ValidateStoredMeshDrawCommand(command, visibleCommand, submitArgs);
 }
 
-bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
+bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
                             std::span<const VisibleMeshDrawCommand> visibleCommands,
                             const MeshPassSubmitArgs& submitArgs) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.MeshDraw.Submit");
@@ -524,7 +524,7 @@ bool SubmitMeshDrawCommands(render::GraphicsCommandEncoder& encoder,
         if (stateCache.LastVertexStorage != storage || stateCache.LastVertexBuffersIndex != command.VertexBuffersIndex) {
             if (command.VertexBuffersIndex != kInvalidBindingIndex) {
                 const auto& vertices = *storage->GetVertexBuffers(command.VertexBuffersIndex);
-                const std::span<const render::VertexBufferBinding> bindings{vertices.Bindings.data(), vertices.Bindings.size()};
+                const std::span<const gpu::VertexBufferBinding> bindings{vertices.Bindings.data(), vertices.Bindings.size()};
                 size_t runStart = bindings.size();
                 for (size_t index = 0; index < bindings.size(); ++index) {
                     const auto& binding = bindings[index];

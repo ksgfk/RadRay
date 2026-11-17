@@ -34,7 +34,7 @@ static_assert(!std::is_constructible_v<PrimitiveHandle, SparseSetHandle> &&
 
 class RecordingProcessor final : public MeshPassProcessor {
 public:
-    explicit RecordingProcessor(render::GraphicsPipelineState& pipeline) noexcept
+    explicit RecordingProcessor(gpu::GraphicsPipelineState& pipeline) noexcept
         : _pipeline(&pipeline) {}
 
     void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
@@ -48,14 +48,14 @@ public:
     uint32_t SortKey{0};
 
 private:
-    render::GraphicsPipelineState* _pipeline;
+    gpu::GraphicsPipelineState* _pipeline;
 };
 
 class SceneTest : public testing::Test {
 protected:
     SceneTest() {
-        Input.Layouts.push_back({0, 12, render::VertexStepMode::Vertex});
-        Input.Attributes.push_back({0, 0, "POSITION", 0, render::VertexFormat::FLOAT32X3});
+        Input.Layouts.push_back({0, 12, gpu::VertexStepMode::Vertex});
+        Input.Attributes.push_back({0, 0, "POSITION", 0, gpu::VertexFormat::FLOAT32X3});
         Input.Streams.push_back({&Vertices, 0, 48, 0});
         Material = World.AddMaterial({});
         Primitive = World.AddPrimitive();
@@ -82,8 +82,8 @@ protected:
 
     static constexpr MeshPassId Pass{0};
     FakePipeline Pipeline;
-    FakeBuffer Vertices{128, render::BufferUse::Vertex};
-    FakeBuffer Indices{128, render::BufferUse::Index};
+    FakeBuffer Vertices{128, gpu::BufferUse::Vertex};
+    FakeBuffer Indices{128, gpu::BufferUse::Index};
     VertexInput Input;
     RecordingProcessor Processor{Pipeline};
     Scene World;
@@ -669,14 +669,14 @@ TEST_F(SceneTest, SyncRevalidatesBorrowedVerticesOnlyInDebug) {
     class DescribedBuffer final : public FakeBuffer {
     public:
         using FakeBuffer::FakeBuffer;
-        render::BufferDescriptor GetDesc() const noexcept override {
+        gpu::BufferDescriptor GetDesc() const noexcept override {
             ++Descriptions;
             return Desc;
         }
         mutable uint32_t Descriptions{0};
     };
-    DescribedBuffer indices{128, render::BufferUse::Index};
-    DescribedBuffer vertices{128, render::BufferUse::Vertex};
+    DescribedBuffer indices{128, gpu::BufferUse::Index};
+    DescribedBuffer vertices{128, gpu::BufferUse::Vertex};
     Input.Streams[0].Buffer = &vertices;
     auto batch = MakeBatch(3);
     for (auto& element : batch.Elements) element.IndexBuffer = &indices;

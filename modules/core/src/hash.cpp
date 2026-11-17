@@ -1,8 +1,29 @@
 #include <radray/hash.h>
 
+#include <iterator>
+
+#include <fmt/format.h>
 #include <xxhash.h>
 
 namespace radray {
+
+Hash128 Hash128::FromWords(uint64_t low, uint64_t high) noexcept {
+    Hash128 digest{};
+    for (size_t index = 0; index < 8; ++index) {
+        digest.Bytes[index] = static_cast<uint8_t>(low >> (index * 8));
+        digest.Bytes[index + 8] = static_cast<uint8_t>(high >> (index * 8));
+    }
+    return digest;
+}
+
+string Hash128::ToHex() const {
+    string result;
+    result.reserve(Bytes.size() * 2);
+    for (const uint8_t value : Bytes) {
+        fmt::format_to(std::back_inserter(result), "{:02x}", value);
+    }
+    return result;
+}
 
 size_t HashData(const void* data, size_t size) noexcept {
     if constexpr (sizeof(size_t) == sizeof(uint32_t)) {
@@ -18,15 +39,9 @@ uint64_t HashData64(const void* data, size_t size) noexcept {
     return XXH64(data, size, 0);
 }
 
-array<uint8_t, 16> HashData128(const void* data, size_t size) noexcept {
+Hash128 HashData128(const void* data, size_t size) noexcept {
     const XXH128_hash_t value = XXH3_128bits(data, size);
-    array<uint8_t, 16> result{};
-    // Written little-endian by hand so the digest does not depend on the host byte order.
-    for (size_t index = 0; index < 8; ++index) {
-        result[index] = static_cast<uint8_t>(value.low64 >> (index * 8));
-        result[index + 8] = static_cast<uint8_t>(value.high64 >> (index * 8));
-    }
-    return result;
+    return Hash128::FromWords(value.low64, value.high64);
 }
 
 }  // namespace radray

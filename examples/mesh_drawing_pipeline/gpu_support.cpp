@@ -11,7 +11,7 @@
 #include <radray/scope_guard.h>
 
 namespace radray::examples::mesh_drawing {
-bool GpuResources::Initialize(render::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
+bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
     RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证，读取预编译 shader", backend);
     Env = Environment::Create(backend, true, "RadRay Mesh Drawing tutorial");
     if (!Env) {
@@ -24,7 +24,7 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
         return false;
     }
     auto& device = Device->GetDevice();
-    LayoutCache = make_unique<PipelineLayoutCache>(device);
+    LayoutRegistry = make_unique<PipelineLayoutRegistry>(device);
     Assets = make_unique<AssetManager>(device);
     const auto shader = Assets->LoadShader(shaderDirectory / "cube.index.json");
     if (!shader) return false;
@@ -32,7 +32,7 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     const auto shaderAsset = Assets->Get(Shader);
     const auto pass = shaderAsset->FindBinding("Pass");
     const auto push = shaderAsset->FindPushConstant("MaterialPush");
-    if (!pass || pass->GroupSlot != 0 || pass->BindingId != 0 || !push || push->PushId != 0) return false;
+    if (!pass || pass->Reference.GroupSlot != 0 || pass->Reference.BindingId != 0 || !push || push->PushId != 0) return false;
     MaterialAssetDesc opaqueDesc;
     opaqueDesc.Programs = {{"Depth", Shader, 0, "VSMain", ""}, {"Color", Shader, 0, "VSMain", "PSMain"}};
     opaqueDesc.Parameters = {{"BaseColor", array<float, 4>{0.72f, 0.25f, 0.09f, 1}}, {"Brightness", 1.0f}};
@@ -52,17 +52,17 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
     auto twoSidedDesc = opaqueDesc;
     if (!twoSidedDesc.Properties.Tags.Set(*outline, *enabled)) return false;
     auto& twoSided = twoSidedDesc.Properties.RenderState;
-    twoSided.Cull = render::CullMode::None;
-    twoSided.Stencil = render::StencilState::Default();
-    twoSided.Stencil->Front.PassOp = twoSided.Stencil->Back.PassOp = render::StencilOperation::Replace;
+    twoSided.Cull = gpu::CullMode::None;
+    twoSided.Stencil = gpu::StencilState::Default();
+    twoSided.Stencil->Front.PassOp = twoSided.Stencil->Back.PassOp = gpu::StencilOperation::Replace;
     twoSided.StencilReference = 7;
     auto transparentDesc = opaqueDesc;
     if (!transparentDesc.Properties.Tags.Set(*surface, *transparent)) return false;
     auto& translucent = transparentDesc.Properties.RenderState;
     translucent.DepthWriteEnable = false;
-    translucent.Blend = render::BlendState{
-        {render::BlendFactor::SrcAlpha, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add},
-        {render::BlendFactor::One, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add}};
+    translucent.Blend = gpu::BlendState{
+        {gpu::BlendFactor::SrcAlpha, gpu::BlendFactor::OneMinusSrcAlpha, gpu::BlendOperation::Add},
+        {gpu::BlendFactor::One, gpu::BlendFactor::OneMinusSrcAlpha, gpu::BlendOperation::Add}};
     const auto a = Assets->CreateMaterial(opaqueDesc), b = Assets->CreateMaterial(twoSidedDesc), c = Assets->CreateMaterial(transparentDesc);
     if (!a || !b || !c) return false;
     OpaqueMaterial = *a;
@@ -75,8 +75,8 @@ bool GpuResources::Initialize(render::RenderBackend backend, const std::filesyst
 
 bool GpuResources::PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices) {
     // Scene 可以引用尚未写入的 Device 缓冲；字节由首帧 RDG 的 Staging Copy 上传。
-    VertexBuffer = Device->GetDevice().CreateBuffer({.Size = vertices.size(), .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Vertex | render::BufferUse::CopyDestination});
-    IndexBuffer = Device->GetDevice().CreateBuffer({.Size = indices.size_bytes(), .Memory = render::MemoryType::Device, .Usage = render::BufferUse::Index | render::BufferUse::CopyDestination});
+    VertexBuffer = Device->GetDevice().CreateBuffer({.Size = vertices.size(), .Memory = gpu::MemoryType::Device, .Usage = gpu::BufferUse::Vertex | gpu::BufferUse::CopyDestination});
+    IndexBuffer = Device->GetDevice().CreateBuffer({.Size = indices.size_bytes(), .Memory = gpu::MemoryType::Device, .Usage = gpu::BufferUse::Index | gpu::BufferUse::CopyDestination});
     PendingVertexBytes.assign(vertices.begin(), vertices.end());
     const auto indexBytes = std::as_bytes(indices);
     PendingIndexBytes.assign(indexBytes.begin(), indexBytes.end());
@@ -88,10 +88,11 @@ bool GpuFrameResources::Initialize(const GpuResources& shared) {
     Height = shared.Height;
     auto& device = shared.Device->GetDevice();
     RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
-    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
+    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = gpu::MemoryType::ReadBack, .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
     if (!Readback) return false;
+    PassGroupLayout = shared.PassGroupLayout;
     for (auto& parameters : PassParameterSets) {
-        parameters = device.CreateShaderParameterSet({shared.PassGroupLayout.Get()});
+        parameters = device.CreateShaderParameterSet({PassGroupLayout.Get()});
         if (!parameters) return false;
     }
     CompletionFence = device.CreateFence();
@@ -116,33 +117,29 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
     const auto& colorProgram = *resource->GetProgram(*colorIndex);
     const auto depthShader = Assets->Get(depthProgram.Shader), colorShader = Assets->Get(colorProgram.Shader);
     if (!depthShader || !colorShader) return false;
-    const auto vs = depthShader->GetStage(depthProgram.VariantIndex, render::ShaderStage::Vertex);
-    const auto colorVs = colorShader->GetStage(colorProgram.VariantIndex, render::ShaderStage::Vertex);
-    const auto ps = colorShader->GetStage(colorProgram.VariantIndex, render::ShaderStage::Pixel);
+    const auto vs = depthShader->GetStage(depthProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto colorVs = colorShader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto ps = colorShader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Pixel);
     if (!vs || !colorVs || !ps || vs->Target != colorVs->Target || !depthProgram.PixelEntry.empty()) return false;
-    const auto layout = LayoutCache->Acquire(depthShader->GetLayoutDesc());
-    const auto colorLayout = LayoutCache->Acquire(colorShader->GetLayoutDesc());
+    auto layout = LayoutRegistry->Acquire(depthShader->GetLayoutDesc());
+    const auto colorLayout = LayoutRegistry->Acquire(colorShader->GetLayoutDesc());
     if (!layout || !colorLayout || layout.Get() != colorLayout.Get()) return false;
-    for (const auto& group : layout->GetDesc().Groups)
-        if (group.GroupSlot == 0) {
-            if (PassGroupLayout && PassGroupLayout.Get() != group.Layout) return false;
-            PassGroupLayout = group.Layout;
-        }
-    if (!PassGroupLayout) return false;
+    auto passGroup = layout->GetGroupLayout(0);
+    if (!passGroup || (PassGroupLayout && PassGroupLayout.Get() != passGroup.Get())) return false;
     auto& device = Device->GetDevice();
     ResolvedVertexInputState depthInput, colorInput;
     if (!PrepareMaterialVertexInput(*depthShader->GetVariantInterface(depthProgram.VariantIndex), input, depthInput) ||
         !PrepareMaterialVertexInput(*colorShader->GetVariantInterface(colorProgram.VariantIndex), input, colorInput)) return false;
-    auto primitive = render::PrimitiveState::Default();
+    auto primitive = gpu::PrimitiveState::Default();
     const auto& state = resource->GetProperties().RenderState;
     primitive.Cull = state.Cull;
     primitive.UnclippedDepth = false;
-    auto depth = render::DepthStencilState::Default();  // Depth Pass：Less、测试/写入开启、模板关闭。
-    depth.Format = render::TextureFormat::D32_FLOAT_S8_UINT;
+    auto depth = gpu::DepthStencilState::Default();  // Depth Pass：Less、测试/写入开启、模板关闭。
+    depth.Format = gpu::TextureFormat::D32_FLOAT_S8_UINT;
     depth.DepthBias = state.DepthBias;
-    render::GraphicsPipelineStateDescriptor descriptor{
-        .PipelineLayout = layout.Get(), .VS = *vs, .VertexInput = {depthInput.Layouts, depthInput.Attributes}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = render::MultiSampleState::Default()};
-    MaterialPipelines pipelines{material, layout.Get()};
+    gpu::GraphicsPipelineStateDescriptor descriptor{
+        .PipelineLayout = &layout->GetLayout(), .VS = *vs, .VertexInput = {depthInput.Layouts, depthInput.Attributes}, .Primitive = primitive, .DepthStencil = depth, .MultiSample = gpu::MultiSampleState::Default()};
+    MaterialPipelines pipelines{material, layout.Release()};
     if (resource->GetProperties().Tags.Matches(OpaqueTag.Key, OpaqueTag.Value)) {
         pipelines.Depth = device.CreateGraphicsPipelineState(descriptor);
         if (!pipelines.Depth) return false;
@@ -154,7 +151,7 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
     depth.DepthTestEnable = state.DepthTestEnable;
     depth.DepthWriteEnable = state.DepthWriteEnable;
     depth.Stencil = state.Stencil;
-    auto color = render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM);
+    auto color = gpu::ColorTargetState::Default(gpu::TextureFormat::RGBA8_UNORM);
     color.Blend = state.Blend;
     color.WriteMask = state.ColorWriteMask;
     descriptor.VertexInput = {colorInput.Layouts, colorInput.Attributes};
@@ -169,17 +166,17 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
         // UE5 对照：Renderer/Private/CustomDepthRendering.cpp 的 TryAddMeshBatch 设置模板状态和参考值。
         // 本例简化：共用主深度/模板，以放大几何绘制外壳；不等同于 UE CustomDepth/Stencil + 后处理描边。
         // 放大后的正面比原表面更近，仍能通过深度测试；必须依靠模板拒绝内部，不能只靠深度做出这个效果。
-        descriptor.Primitive.Cull = render::CullMode::None;
+        descriptor.Primitive.Cull = gpu::CullMode::None;
         depth.DepthTestEnable = true;
         depth.DepthWriteEnable = false;
-        depth.DepthCompare = render::CompareFunction::LessEqual;
+        depth.DepthCompare = gpu::CompareFunction::LessEqual;
         depth.DepthBias = {};
-        depth.Stencil = render::StencilState::Default();
-        depth.Stencil->Front.Compare = depth.Stencil->Back.Compare = render::CompareFunction::NotEqual;
+        depth.Stencil = gpu::StencilState::Default();
+        depth.Stencil->Front.Compare = depth.Stencil->Back.Compare = gpu::CompareFunction::NotEqual;
         depth.Stencil->WriteMask = 0;
         descriptor.DepthStencil = depth;
         color.Blend = std::nullopt;
-        color.WriteMask = render::ColorWrite::All;
+        color.WriteMask = gpu::ColorWrite::All;
         pipelines.Outline = device.CreateGraphicsPipelineState(descriptor);
         if (!pipelines.Outline) return false;
     }
@@ -187,6 +184,7 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
                     static_cast<int32_t>(state.Cull), state.Blend.has_value(), state.DepthWriteEnable, state.StencilReference,
                     pipelines.Depth.HasValue(), pipelines.Color.HasValue(), pipelines.Outline.HasValue());
     Pipelines.push_back(std::move(pipelines));
+    PassGroupLayout = std::move(passGroup);
     return true;
 }
 

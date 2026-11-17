@@ -11,7 +11,7 @@
 #include <variant>
 
 #include <radray/intrusive_ptr.h>
-#include <radray/render/rhi.h>
+#include <radray/gpu/types.h>
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/upload_arena.h>
 
@@ -38,14 +38,14 @@ struct RDGCompileOptions {
 };
 
 struct RDGBufferSlice {
-    Nullable<render::Buffer*> Buffer{nullptr};
+    Nullable<gpu::Buffer*> Buffer{nullptr};
     uint64_t Offset{0};
     uint64_t Size{0};
 };
 
 struct RDGDynamicBufferDescriptor {
     uint64_t MaxSize{0};
-    render::BufferUses Usage{render::BufferUse::CBuffer};
+    gpu::BufferUses Usage{gpu::BufferUse::CBuffer};
     uint64_t Alignment{1};
 };
 
@@ -156,18 +156,18 @@ public:
 };
 
 struct RDGTransientTextureAllocation {
-    Nullable<render::Texture*> Texture{nullptr};
-    render::TextureState LastState{render::TextureState::Undefined};
+    Nullable<gpu::Texture*> Texture{nullptr};
+    gpu::TextureState LastState{gpu::TextureState::Undefined};
 };
 
 struct RDGTransientBufferAllocation {
-    Nullable<render::Buffer*> Buffer{nullptr};
-    render::BufferStates LastState{render::BufferState::Undefined};
+    Nullable<gpu::Buffer*> Buffer{nullptr};
+    gpu::BufferStates LastState{gpu::BufferState::Undefined};
 };
 
 class RDGTransientResourcePool final {
 public:
-    explicit RDGTransientResourcePool(render::Device& device) noexcept;
+    explicit RDGTransientResourcePool(gpu::Device& device) noexcept;
     ~RDGTransientResourcePool() noexcept;
     RDGTransientResourcePool(const RDGTransientResourcePool&) = delete;
     RDGTransientResourcePool& operator=(const RDGTransientResourcePool&) = delete;
@@ -176,11 +176,11 @@ public:
     void BeginFrame() noexcept;
     // 释放池内资源所有者前，所有引用它们的命令存储必须先重置。
     void Clear() noexcept;
-    RDGTransientTextureAllocation AcquireTexture(const render::TextureDescriptor& desc);
-    RDGTransientBufferAllocation AcquireBuffer(const render::BufferDescriptor& desc);
-    void CommitTextureState(render::Texture* texture, render::TextureState finalState) noexcept;
-    void CommitBufferState(render::Buffer* buffer, render::BufferStates finalState) noexcept;
-    Nullable<render::TextureView*> AcquireTextureView(const render::TextureViewDescriptor& desc);
+    RDGTransientTextureAllocation AcquireTexture(const gpu::TextureDescriptor& desc);
+    RDGTransientBufferAllocation AcquireBuffer(const gpu::BufferDescriptor& desc);
+    void CommitTextureState(gpu::Texture* texture, gpu::TextureState finalState) noexcept;
+    void CommitBufferState(gpu::Buffer* buffer, gpu::BufferStates finalState) noexcept;
+    Nullable<gpu::TextureView*> AcquireTextureView(const gpu::TextureViewDescriptor& desc);
 
 private:
     class Impl;
@@ -192,8 +192,8 @@ public:
     explicit RDGPrepareContext(detail::RDGExecution& execution) noexcept;
     FrameSlot& GetSlot() noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
-    render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
-    Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
+    gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
 
 private:
     detail::RDGExecution& _execution;
@@ -201,46 +201,46 @@ private:
 
 class RDGRasterPassContext final {
 public:
-    render::GraphicsCommandEncoder& GetEncoder() noexcept;
+    gpu::GraphicsCommandEncoder& GetEncoder() noexcept;
     uint64_t GetFrameId() const noexcept;
     uint32_t GetSlotIndex() const noexcept;
     std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
     // 仅可解析本 Pass 已声明的资源；借用随命令 epoch 结束而失效。
-    render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
+    gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
-    Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
 
 private:
     friend class CompiledRDG;
-    RDGRasterPassContext(detail::RDGExecution& execution, render::GraphicsCommandEncoder& encoder) noexcept;
+    RDGRasterPassContext(detail::RDGExecution& execution, gpu::GraphicsCommandEncoder& encoder) noexcept;
     detail::RDGExecution& _execution;
-    render::GraphicsCommandEncoder& _encoder;
+    gpu::GraphicsCommandEncoder& _encoder;
 };
 
 class RDGComputePassContext final {
 public:
-    render::ComputeCommandEncoder& GetEncoder() noexcept;
+    gpu::ComputeCommandEncoder& GetEncoder() noexcept;
     uint64_t GetFrameId() const noexcept;
     uint32_t GetSlotIndex() const noexcept;
     std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
-    render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
+    gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
-    Nullable<render::TextureView*> ResolveView(RDGTextureHandle handle, render::TextureViewUsage usage) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
 
 private:
     friend class CompiledRDG;
-    RDGComputePassContext(detail::RDGExecution& execution, render::ComputeCommandEncoder& encoder) noexcept;
+    RDGComputePassContext(detail::RDGExecution& execution, gpu::ComputeCommandEncoder& encoder) noexcept;
     detail::RDGExecution& _execution;
-    render::ComputeCommandEncoder& _encoder;
+    gpu::ComputeCommandEncoder& _encoder;
 };
 
 class RDGCopyPassContext final {
 public:
-    render::CommandBuffer& GetCommandBuffer() noexcept;
+    gpu::CommandBuffer& GetCommandBuffer() noexcept;
     uint64_t GetFrameId() const noexcept;
     uint32_t GetSlotIndex() const noexcept;
     std::span<const VisibleMeshDrawCommand> GetVisibleCommands(MeshPassId pass) const noexcept;
-    render::Texture& Resolve(RDGTextureHandle handle) const noexcept;
+    gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
 
 private:
@@ -252,19 +252,19 @@ private:
 class RDGRasterPassBuilder final {
 public:
     RDGRasterPassBuilder& UseMeshPass(MeshPassId pass);
-    RDGRasterPassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferStates state);
-    RDGRasterPassBuilder& WriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
-    RDGRasterPassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
-    RDGRasterPassBuilder& ReadTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::ShaderRead);
-    RDGRasterPassBuilder& WriteTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::UnorderedAccess);
-    RDGRasterPassBuilder& ReadWriteTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::UnorderedAccess);
-    RDGRasterPassBuilder& WriteColor(uint32_t slot, RDGTextureHandle texture, render::LoadAction load, render::StoreAction store,
-                                     render::ColorClearValue clear = {}, Nullable<render::TextureView*> explicitView = nullptr);
-    RDGRasterPassBuilder& SetDepthStencil(RDGTextureHandle texture, render::TextureState state,
-                                          render::LoadAction depthLoad, render::StoreAction depthStore,
-                                          render::LoadAction stencilLoad = render::LoadAction::DontCare,
-                                          render::StoreAction stencilStore = render::StoreAction::Discard,
-                                          render::DepthStencilClearValue clear = {}, Nullable<render::TextureView*> explicitView = nullptr);
+    RDGRasterPassBuilder& ReadBuffer(RDGBufferHandle buffer, gpu::BufferStates state);
+    RDGRasterPassBuilder& WriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
+    RDGRasterPassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
+    RDGRasterPassBuilder& ReadTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::ShaderRead);
+    RDGRasterPassBuilder& WriteTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::UnorderedAccess);
+    RDGRasterPassBuilder& ReadWriteTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::UnorderedAccess);
+    RDGRasterPassBuilder& WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                     gpu::ColorClearValue clear = {}, Nullable<gpu::TextureView*> explicitView = nullptr);
+    RDGRasterPassBuilder& SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
+                                          gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
+                                          gpu::LoadAction stencilLoad = gpu::LoadAction::DontCare,
+                                          gpu::StoreAction stencilStore = gpu::StoreAction::Discard,
+                                          gpu::DepthStencilClearValue clear = {}, Nullable<gpu::TextureView*> explicitView = nullptr);
     RDGRasterPassBuilder& NeverCull() noexcept;
 
 private:
@@ -276,12 +276,12 @@ private:
 
 class RDGComputePassBuilder final {
 public:
-    RDGComputePassBuilder& ReadBuffer(RDGBufferHandle buffer, render::BufferStates state = render::BufferState::ShaderRead);
-    RDGComputePassBuilder& WriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
-    RDGComputePassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, render::BufferState state = render::BufferState::UnorderedAccess);
-    RDGComputePassBuilder& ReadTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::ShaderRead);
-    RDGComputePassBuilder& WriteTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::UnorderedAccess);
-    RDGComputePassBuilder& ReadWriteTexture(RDGTextureHandle texture, render::TextureState state = render::TextureState::UnorderedAccess);
+    RDGComputePassBuilder& ReadBuffer(RDGBufferHandle buffer, gpu::BufferStates state = gpu::BufferState::ShaderRead);
+    RDGComputePassBuilder& WriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
+    RDGComputePassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
+    RDGComputePassBuilder& ReadTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::ShaderRead);
+    RDGComputePassBuilder& WriteTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::UnorderedAccess);
+    RDGComputePassBuilder& ReadWriteTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::UnorderedAccess);
     RDGComputePassBuilder& NeverCull() noexcept;
 
 private:
@@ -314,7 +314,7 @@ public:
     // 失败使本帧不可恢复；不支持重试、状态回滚或部分提交。
     ~CompiledRDG() noexcept;
     bool Prepare(FrameSlot& slot, RDGTransientResourcePool& transientPool, UploadArena& uploadArena) noexcept;
-    bool Record(render::CommandBuffer& commandBuffer) noexcept;
+    bool Record(gpu::CommandBuffer& commandBuffer) noexcept;
     void CommitSubmittedStates() noexcept;
 
 private:
@@ -345,19 +345,19 @@ public:
     RDGBuilder(const RDGBuilder&) = delete;
     RDGBuilder& operator=(const RDGBuilder&) = delete;
 
-    RDGTextureHandle ImportTexture(render::Texture* texture, render::TextureState initialState,
-                                   std::optional<render::TextureState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
-    RDGBufferHandle ImportBuffer(render::Buffer* buffer, render::BufferStates initialState,
-                                 std::optional<render::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
-    RDGTextureHandle CreateTexture(const render::TextureDescriptor& desc);
-    RDGBufferHandle CreateBuffer(const render::BufferDescriptor& desc);
+    RDGTextureHandle ImportTexture(gpu::Texture* texture, gpu::TextureState initialState,
+                                   std::optional<gpu::TextureState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
+    RDGBufferHandle ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates initialState,
+                                 std::optional<gpu::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
+    RDGTextureHandle CreateTexture(const gpu::TextureDescriptor& desc);
+    RDGBufferHandle CreateBuffer(const gpu::BufferDescriptor& desc);
     RDGBufferHandle CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
     RDGBufferHandle ImportPersistentBorrowed(GpuBuffer& buffer);
     RDGTextureHandle ImportPersistentBorrowed(GpuTexture& texture);
     RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuBuffer>& buffer);
     RDGTextureHandle ImportPersistentOwned(const IntrusivePtr<GpuTexture>& texture);
     void UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGUploadSource source);
-    void UploadTexture(RDGTextureHandle dst, const render::TextureRegion2D& region, RDGTextureUploadSource source);
+    void UploadTexture(RDGTextureHandle dst, const gpu::TextureRegion2D& region, RDGTextureUploadSource source);
     void MarkOutput(RDGTextureHandle texture);
     void MarkOutput(RDGBufferHandle buffer);
 

@@ -17,7 +17,7 @@
 | 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `Viewport::Height` |
 | `constexpr` 常量 | `k` 前缀 + PascalCase | `kShaderMetadataSchemaVersion`, `kShaderToolchainIdentity` |
 | 宏 | ALL_CAPS | `RADRAY_ABORT`, `RADRAY_PROFILE_SCOPE` |
-| 命名空间 | 全小写 | `radray`, `radray::render`, `radray::detail` |
+| 命名空间 | 全小写 | `radray`, `radray::gpu`, `radray::detail` |
 
 **没有 `m_` 前缀**，一律 `_`。公开数据成员用 PascalCase 是刻意的：它让 descriptor struct
 的字段读起来像"属性"而非局部变量。
@@ -88,15 +88,15 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 
 用于继承的基类必须声明虚析构函数，派生类显式声明析构时标记 `override`，避免通过基类销毁时遗漏派生资源。
 
-**RHI 与 window 层用「接口 + 静态 Create 工厂」**，返回 `Nullable<unique_ptr/shared_ptr>`：
+**GPU 对象采用抽象接口，设备与环境工厂位于 gpu_impl 的 `factory.h/.cpp`**，返回 `Nullable<unique_ptr/shared_ptr>`：
 
 ```cpp
-// Device 类内的工厂声明。
-static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc,
-                                          const RhiValidationOptions& validation = {});
+auto device = gpu::CreateDevice(descriptor, {.IsEnabled = true});
 ```
 
-**两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
+gpu 头文件只包含契约与无后端的内联操作。window 继续使用接口类内的静态 `Create` 工厂。
+
+**两段式析构（`Destroy()` + `DestroyImpl()`）集中在 gpu_impl 后端实现类**，理由见
 [RHI 所有权](../architecture/render-rhi.md)。普通资源包装使用析构函数与成员声明顺序。
 
 RAII 包装类使用表达职责的名称，例如 `ScopeGuard`、`TaskScope`；
@@ -122,7 +122,7 @@ RAII 包装类使用表达职责的名称，例如 `ScopeGuard`、`TaskScope`；
 ## 测试
 
 测试源码放 `modules/<module>/tests/test_<topic>.cpp`。同一模块的这些源文件链进一个可执行文件
-（`test_radray_core`、`test_radray_render`、`test_radray_shader_compiler`），
+（`test_radray_core`、`test_radray_gpu_impl`、`test_radray_shader`），
 `gtest_main` 和被测库只链接一次。CTest 仍按每个 `TEST()` 启动进程。只有不能和其它用例共享进程映像的测试另开 exe：
 目前是 `test_inline_vector`，它替换全局 `operator new` / `operator delete`。`EXPECT_DEATH` / `EXPECT_EXIT`
 已经在子进程里跑断言，不因此再拆可执行文件。
@@ -159,11 +159,11 @@ gtest_discover_tests(test_radray_core)
 | 设施 | 在哪 | 用途 |
 |---|---|---|
 | `ScopedTempDirectory`、`ScopedTempFile` | 各测试文件的匿名命名空间 | 临时目录 / 临时文件，析构时删除 |
-| `GpuTest`、`BackendTest`、`LoadShader`、`ReadBuffer`/`ReadTexture` 等 | `modules/render/tests/gpu_test_fixture.h` | 后端参数化、设备创建、字节码加载、上传与读回 |
+| `GpuTest`、`BackendTest`、`LoadShader`、`ReadBuffer`/`ReadTexture` 等 | `modules/gpu_impl/tests/gpu_test_fixture.h` | 后端参数化、设备创建、字节码加载、上传与读回 |
 | `FakeDevice`、`FakeGpu`、`RecordingEncoder` 等 | `modules/runtime/tests/test_fakes.h` | runtime 测试的 CPU fake，不需要 GPU |
-| `DiscoverAndCompile`、`DecodeLane` 等 | `modules/shader_compiler/tests/compiler_test_utils.h` | 编译 shaderlib 源并解码各 target 的 artifact |
+| `DiscoverAndCompile`、`DecodeLane` 等 | `modules/shader/tests/compiler_test_utils.h` | 编译 shaderlib 源并解码各 target 的 artifact |
 
-需要仓库根路径的测试使用编译期定义 `RADRAY_PROJECT_DIR`，目前只有 shader_compiler 测试与 fixture 生成器使用。
+需要仓库根路径的测试使用编译期定义 `RADRAY_PROJECT_DIR`，目前只有 shader 测试与 fixture 生成器使用。
 本地测试 shader 的目录由编译期定义 `RADRAY_TEST_SHADER_DIR` 提供。
 
 ## 格式化

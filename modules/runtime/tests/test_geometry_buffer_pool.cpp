@@ -6,7 +6,7 @@
 #include "test_fakes.h"
 
 using namespace radray;
-using namespace radray::render;
+using namespace radray::gpu;
 
 namespace {
 

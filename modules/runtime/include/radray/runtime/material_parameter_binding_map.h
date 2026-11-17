@@ -10,9 +10,8 @@ class MaterialRenderProxy;
 
 struct MaterialParameterResourceTarget {
     size_t ParameterIndex{0};
-    uint32_t GroupSlot{0};
-    uint32_t BindingId{0};
-    render::BindingKind Kind{render::BindingKind::Texture};
+    shader::ShaderBindingReference Reference{};
+    gpu::BindingKind Kind{gpu::BindingKind::Texture};
     bool ActiveOnDevice{false};
 };
 
@@ -30,7 +29,7 @@ public:
     bool WriteConstants(const MaterialRenderProxy& proxy, std::span<byte> destination) const noexcept;
     // parameterSet 必须属于 shader 描述的对应组且可写；Set 失败后调用方重置或丢弃参数集。
     // 本接口不隐式 Reset、Flush，也不填充未映射的超集绑定。
-    bool BindResources(const MaterialRenderProxy& proxy, uint32_t groupSlot, render::ShaderParameterSet& parameterSet) const noexcept;
+    bool BindResources(const MaterialRenderProxy& proxy, uint32_t groupSlot, gpu::ShaderParameterSet& parameterSet) const noexcept;
 
 private:
     friend class MaterialAsset;

@@ -1,4 +1,4 @@
-#include "../../render/tests/gpu_test_fixture.h"
+#include "../../gpu_impl/tests/gpu_test_fixture.h"
 #include "test_fakes.h"
 
 #include <radray/runtime/geometry_buffer_pool.h>
@@ -7,13 +7,13 @@
 namespace radray {
 namespace {
 
-using namespace render;
+using namespace gpu;
 
-class GeometryUploadGpuTest : public render::test::BackendTest {
+class GeometryUploadGpuTest : public gpu::test::BackendTest {
 protected:
     void DrawPooledGeometry(bool separateUploadFrame, bool dynamic = false) {
         auto& device = GetDevice();
-        auto& queue = render::test::DirectQueue(device);
+        auto& queue = gpu::test::DirectQueue(device);
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
         const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
         const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
@@ -28,8 +28,8 @@ protected:
         const array positions{-1.f, -1.f, 0.5f, 3.f, -1.f, 0.5f, -1.f, 3.f, 0.5f};
         const array<uint32_t, 3> order{0, 1, 2};
 
-        auto vs = render::test::LoadShader(device, "geometry", "VSMain", ShaderStage::Vertex).Unwrap();
-        auto ps = render::test::LoadShader(device, "graphics", "SolidPS", ShaderStage::Pixel).Unwrap();
+        auto vs = gpu::test::LoadShader(device, "geometry", "VSMain", ShaderStage::Vertex).Unwrap();
+        auto ps = gpu::test::LoadShader(device, "graphics", "SolidPS", ShaderStage::Pixel).Unwrap();
         struct DrawData {
             array<float, 4> Color;
             float Depth;
@@ -62,8 +62,8 @@ protected:
             if (uploadFrame && !dynamic) {
                 const auto vb = graph.ImportPersistentOwned(vertex->GetGpuBuffer());
                 const auto ib = graph.ImportPersistentOwned(index->GetGpuBuffer());
-                graph.UploadBuffer(vb, vertex->GetByteOffset(), RDGUploadSource::BorrowedBytes(render::test::AsBytes(positions)));
-                graph.UploadBuffer(ib, index->GetByteOffset(), RDGUploadSource::BorrowedBytes(render::test::AsBytes(order)));
+                graph.UploadBuffer(vb, vertex->GetByteOffset(), RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
+                graph.UploadBuffer(ib, index->GetByteOffset(), RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(order)));
                 graph.MarkOutput(vb);
                 graph.MarkOutput(ib);
             }
@@ -72,8 +72,8 @@ protected:
                 graph.MarkOutput(color);
                 struct PassData {
                     GraphicsPipelineState* Pipeline;
-                    render::VertexBufferBinding Vertex;
-                    render::IndexBufferView Index;
+                    gpu::VertexBufferBinding Vertex;
+                    gpu::IndexBufferView Index;
                     uint32_t Count, First;
                     int32_t Base;
                     DrawData Constants;
@@ -84,12 +84,12 @@ protected:
                     const array<byte, 8> padding{};
                     const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{8, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(padding));
                     graph.MarkOutput(prefix);
-                    dynamicVertex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(positions), BufferUse::Vertex, 4}, RDGUploadSource::BorrowedBytes(render::test::AsBytes(positions)));
+                    dynamicVertex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(positions), BufferUse::Vertex, 4}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
                     const auto spacer = graph.CreateBuffer(RDGDynamicBufferDescriptor{32, BufferUse::CopySource}, RDGUploadSource::Generated(32, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext& write) noexcept {
                         std::fill(write.Bytes.begin(), write.Bytes.end(), byte{0});
                         return true; }));
                     graph.MarkOutput(spacer);
-                    dynamicIndex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(order), BufferUse::Index, 32}, RDGUploadSource::BorrowedBytes(render::test::AsBytes(order)));
+                    dynamicIndex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(order), BufferUse::Index, 32}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(order)));
                 }
                 auto pass = graph.AddRasterPass("draw pooled triangle", PassData{pso.get(), {0, {vertex->GetBuffer(), 0, vertex->GetBuffer()->GetDesc().Size}}, index->GetIndexBufferView(), index->GetIndexCount(), index->GetFirstIndex(), static_cast<int32_t>(vertex->GetFirstVertex()), draw, dynamicVertex, dynamicIndex}, +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
                         auto& encoder = ctx.GetEncoder();
@@ -108,7 +108,7 @@ protected:
                         }
                         encoder.BindVertexBuffers(std::span{&vertex, 1});
                         encoder.BindIndexBuffer(index);
-                        if (!encoder.SetPushConstants(0, 0, render::test::AsBytes(data.Constants))) return false;
+                        if (!encoder.SetPushConstants(0, 0, gpu::test::AsBytes(data.Constants))) return false;
                         encoder.DrawIndexed(data.Count, 1, data.DynamicVertex.IsValid() ? 0 : data.First, data.DynamicVertex.IsValid() ? 0 : data.Base, 0);
                         return true; });
                 pass.WriteColor(0, color, LoadAction::Clear, StoreAction::Store);
@@ -148,9 +148,9 @@ protected:
             scheduler->RunFrame();
         }
         scheduler->WaitIdle();
-        EXPECT_EQ(render::test::FromBytes<uint32_t>(render::test::ReadTexture(device, *target, TextureState::Common)), vector<uint32_t>(16, 0xff0000ff));
+        EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::ReadTexture(device, *target, TextureState::Common)), vector<uint32_t>(16, 0xff0000ff));
         if (dynamic) return;
-        const auto actual = render::test::ReadBuffer(device, *vertex->GetBuffer(), BufferState::Common, vertex->GetBuffer()->GetDesc().Size);
+        const auto actual = gpu::test::ReadBuffer(device, *vertex->GetBuffer(), BufferState::Common, vertex->GetBuffer()->GetDesc().Size);
         ASSERT_GE(actual.size(), vertex->GetByteOffset() + sizeof(positions));
         EXPECT_EQ(std::memcmp(actual.data() + vertex->GetByteOffset(), positions.data(), sizeof(positions)), 0);
     }
@@ -163,7 +163,7 @@ TEST_P(GeometryUploadGpuTest, DynamicVertexAndIndexUseSliceOffsetsAcrossPages) {
 
 TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferRelease) {
     auto& device = GetDevice();
-    auto& queue = render::test::DirectQueue(device);
+    auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
     auto upload = device.CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::CopySource | BufferUse::MapWrite, .Hints = ResourceHint::PersistentMap}).Unwrap();
     const array<byte, 16> expected{byte{42}, byte{7}};
@@ -178,7 +178,7 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferReleas
     pipeline->OnRecord = [&](FrameSlot&) {
         auto* command = recorded.Get();
         command->Begin();
-        render::test::Barrier(*command, {BarrierBufferDescriptor{upload.get(), BufferState::HostWrite, BufferState::CopySource},
+        gpu::test::Barrier(*command, {BarrierBufferDescriptor{upload.get(), BufferState::HostWrite, BufferState::CopySource},
                                          BarrierBufferDescriptor{destination.get(), BufferState::Common, BufferState::CopyDestination}});
         command->CopyBufferToBuffer(destination.get(), 0, upload.get(), 0, expected.size());
         command->End();
@@ -193,11 +193,11 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferReleas
     scheduler->BeginFrame();
     upload->Unmap();
     upload.reset();
-    const auto actual = render::test::ReadBuffer(device, *destination, BufferState::CopyDestination, expected.size());
+    const auto actual = gpu::test::ReadBuffer(device, *destination, BufferState::CopyDestination, expected.size());
     EXPECT_EQ(actual, (vector<byte>{expected.begin(), expected.end()}));
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, GeometryUploadGpuTest, testing::ValuesIn(render::test::AllBackends), render::test::BackendParamName);
+INSTANTIATE_TEST_SUITE_P(Backends, GeometryUploadGpuTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
 }  // namespace
 }  // namespace radray

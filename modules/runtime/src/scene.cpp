@@ -18,7 +18,7 @@ bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
             element.IndexBufferOffset % element.IndexStride != 0 ||
             uint64_t{element.FirstInstance} + element.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
         const auto desc = element.IndexBuffer->GetDesc();
-        if (!desc.Usage.HasFlag(render::BufferUse::Index) ||
+        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
             uint64_t{element.IndexBufferOffset} + (uint64_t{element.FirstIndex} + element.IndexCount) * element.IndexStride > desc.Size) return false;
     }
     return true;

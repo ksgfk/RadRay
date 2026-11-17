@@ -1,4 +1,4 @@
-#include <radray/shader/shader_metadata_wire.h>
+#include <radray/shader/shader_compiler_contract.h>
 
 #include <algorithm>
 #include <limits>

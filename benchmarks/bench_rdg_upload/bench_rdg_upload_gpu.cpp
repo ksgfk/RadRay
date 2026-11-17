@@ -15,7 +15,7 @@
 
 namespace {
 using namespace radray;
-using namespace radray::render;
+using namespace radray::gpu;
 using Clock = std::chrono::steady_clock;
 
 class WaitPipeline final : public FramePipeline {

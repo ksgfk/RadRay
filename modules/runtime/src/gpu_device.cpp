@@ -1,4 +1,5 @@
 #include <radray/runtime/gpu_device.h>
+#include <radray/gpu_impl/factory.h>
 #include <radray/runtime/rdg.h>
 
 #include <radray/logger.h>
@@ -15,8 +16,8 @@ RDGDeviceConstraints DeviceContext::GetRDGConstraints() const noexcept {
 }
 
 DeviceContext::DeviceContext(
-    shared_ptr<render::Device> device,
-    render::CommandQueue* directQueue) noexcept
+    shared_ptr<gpu::Device> device,
+    gpu::CommandQueue* directQueue) noexcept
     : _device(std::move(device)),
       _directQueue(directQueue) {}
 
@@ -34,24 +35,24 @@ bool DeviceContext::SupportsIndirect() const noexcept {
 Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
     Environment& environment) noexcept {
     const auto backend = environment.GetBackend();
-    shared_ptr<render::Device> device;
+    shared_ptr<gpu::Device> device;
     RADRAY_INFO_LOG("DeviceContext: creating {}", backend);
 
     switch (backend) {
 #if defined(RADRAY_ENABLE_D3D12)
-        case render::RenderBackend::D3D12: {
+        case gpu::RenderBackend::D3D12: {
             auto* factory = &environment.GetFactory();
             auto adapter = factory->SelectHighPerformanceAdapter();
             if (!adapter) {
                 RADRAY_ERR_LOG("D3D12: no suitable high-performance adapter");
                 return nullptr;
             }
-            render::D3D12DeviceDescriptor desc{};
+            gpu::D3D12DeviceDescriptor desc{};
             desc.Factory = factory;
             desc.AdapterIndex = adapter;
             desc.QueueCounts = {1, 0, 0};
             RADRAY_INFO_LOG("DeviceContext: creating D3D12 device on adapter {}", *adapter);
-            auto createdDevice = render::Device::Create(render::DeviceDescriptor{desc});
+            auto createdDevice = gpu::CreateDevice(gpu::DeviceDescriptor{desc});
             if (!createdDevice) {
                 RADRAY_ERR_LOG("D3D12: device creation failed; see preceding RadRay diagnostics");
                 return nullptr;
@@ -61,19 +62,19 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
         }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-        case render::RenderBackend::Vulkan: {
+        case gpu::RenderBackend::Vulkan: {
             auto* instance = &environment.GetVulkanInstance();
             auto adapter = instance->SelectHighPerformancePhysicalDevice();
             if (!adapter) {
                 RADRAY_ERR_LOG("Vulkan: no suitable high-performance physical device");
                 return nullptr;
             }
-            const render::VulkanCommandQueueDescriptor queues[]{{render::QueueType::Direct, 1}};
-            render::VulkanDeviceDescriptor desc{};
+            const gpu::VulkanCommandQueueDescriptor queues[]{{gpu::QueueType::Direct, 1}};
+            gpu::VulkanDeviceDescriptor desc{};
             desc.PhysicalDeviceIndex = adapter;
             desc.Queues = queues;
             RADRAY_INFO_LOG("DeviceContext: creating Vulkan device on adapter {}", *adapter);
-            auto createdDevice = render::Device::Create(render::DeviceDescriptor{desc});
+            auto createdDevice = gpu::CreateDevice(gpu::DeviceDescriptor{desc});
             if (!createdDevice) {
                 RADRAY_ERR_LOG("Vulkan: device creation failed; see preceding RadRay diagnostics");
                 return nullptr;
@@ -87,7 +88,7 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
             return nullptr;
     }
 
-    auto directQueue = device->GetCommandQueue(render::QueueType::Direct, 0);
+    auto directQueue = device->GetCommandQueue(gpu::QueueType::Direct, 0);
     if (!directQueue) {
         RADRAY_ERR_LOG("RHI Direct queue is unavailable");
         return nullptr;
@@ -99,7 +100,7 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
     }
     RADRAY_INFO_LOG("DeviceContext: ready backend={} GPU={} Direct queues=1 RHI validation={} driver validation={}",
                     runtime->_device->GetBackend(), runtime->_device->GetCapabilities().Detail.GpuName,
-                    render::RhiValidationOptions{}.IsEnabled, environment.IsValidationEnabled());
+                    gpu::RhiValidationOptions{}.IsEnabled, environment.IsValidationEnabled());
     return runtime;
 }
 

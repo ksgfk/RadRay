@@ -9,7 +9,7 @@ namespace radray {
 // The device, external material resources and tags must outlive their users.
 class AssetManager final {
 public:
-    explicit AssetManager(render::Device& device) noexcept;
+    explicit AssetManager(gpu::Device& device) noexcept;
     // All CPU/GPU users must be finished; this object does not wait for GPU completion.
     ~AssetManager() noexcept;
     AssetManager(const AssetManager&) = delete;
@@ -23,7 +23,7 @@ public:
     Nullable<const MaterialAsset*> Get(AssetHandle<MaterialAsset> handle) const noexcept;
 
 private:
-    render::Device& _device;
+    gpu::Device& _device;
     SparseSet<ShaderAsset> _shaders;
     SparseSet<MaterialAsset> _materials;
 };

@@ -1,6 +1,8 @@
 add_executable(test_radray_runtime
+    test_pipeline_layout_registry.cpp
     test_shader_asset.cpp
-    test_shader_layout.cpp
+    test_shader_vertex_input.cpp
+    test_shader_layout_gpu.cpp
     test_material_tag.cpp
     test_material.cpp
     test_mesh_draw_command.cpp
@@ -12,7 +14,7 @@ add_executable(test_radray_runtime
     test_upload_arena.cpp
     test_rdg_upload_gpu.cpp
     test_geometry_upload_gpu.cpp
-    ../../render/tests/gpu_test_fixture.cpp
+    ../../gpu_impl/tests/gpu_test_fixture.cpp
     test_rdg.cpp
     test_gpu_device.cpp)
 target_link_libraries(test_radray_runtime PRIVATE RadRay::runtime GTest::gtest_main)
