@@ -75,13 +75,13 @@ TEST(ManualCoroutineSchedulerTest, CallbackCanCancelAnotherWaiterAndAppendForNex
     KeyedRecord* canceled = records.Back();
     const uint64_t canceledSequence = canceled->Sequence;
 
-    records.DispatchReady(kAll);
+    EXPECT_EQ(records.DispatchReady(kAll), 1u);
     EXPECT_EQ(completed, (vector<int>{1}));
     EXPECT_FALSE(records.IsAlive(canceled, canceledSequence));
     ASSERT_EQ(records.Count(), 1u);
     EXPECT_GT(records.Front()->Sequence, canceledSequence);
 
-    records.DispatchReady(kAll);
+    EXPECT_EQ(records.DispatchReady(kAll), 1u);
     EXPECT_EQ(completed, (vector<int>{1, 3}));
 }
 

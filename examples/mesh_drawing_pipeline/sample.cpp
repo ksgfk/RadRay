@@ -57,9 +57,9 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
         !gpu.CreatePipelines(vertexInput, gpu.TransparentMaterial)) return 3;
     RADRAY_INFO_LOG("步骤 1：一份顶点/索引缓冲，两个 Section，已准备 Depth/Color/Outline/Transparent 所需 PSO");
 
-    const auto opaqueMaterial = gpu.OpaqueMaterial;
-    const auto twoSidedMaterial = gpu.TwoSidedMaterial;
-    const auto transparentMaterial = gpu.TransparentMaterial;
+    const auto opaqueMaterial = gpu.OpaqueMaterial.GetHandle();
+    const auto twoSidedMaterial = gpu.TwoSidedMaterial.GetHandle();
+    const auto transparentMaterial = gpu.TransparentMaterial.GetHandle();
     const auto baseColorIndex = gpu.Assets->Get(opaqueMaterial)->FindParameter("BaseColor");
     const auto brightnessIndex = gpu.Assets->Get(opaqueMaterial)->FindParameter("Brightness");
     if (!baseColorIndex || !brightnessIndex) return 4;

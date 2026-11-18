@@ -1,5 +1,6 @@
 add_executable(test_radray_runtime
     test_pipeline_layout_registry.cpp
+    test_asset_manager.cpp
     test_shader_asset.cpp
     test_shader_vertex_input.cpp
     test_shader_layout_gpu.cpp

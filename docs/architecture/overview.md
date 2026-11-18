@@ -79,7 +79,7 @@ gpu_impl 接收原始字节码与显式布局，不依赖 shader。发布边界�
 | Shader 家族反射 | `modules/shader/include/radray/shader/shader_reflector.h` |
 | Shader 布局文件、类型树与成员寻址 | `modules/shader/include/radray/shader/shader_layout.h` |
 | Runtime Shader 资产与布局注册表 | `modules/runtime/include/radray/runtime/shader_asset.h`、`modules/runtime/include/radray/runtime/gpu_pipeline_layout.h`、`modules/runtime/include/radray/runtime/pipeline_layout_registry.h` |
-| Runtime 资产句柄与管理 | `modules/runtime/include/radray/runtime/asset_handle.h`、`asset_manager.h` |
+| Runtime 资产句柄、依赖加载与回收 | `modules/runtime/include/radray/runtime/asset_handle.h`、`asset_manager.h` |
 | Compiler client | `modules/shader/include/radray/shader/client.h` |
 
 当前能力与限制在各子系统页面说明。

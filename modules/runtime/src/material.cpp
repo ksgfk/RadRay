@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <radray/logger.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/shader_asset.h>
 
 namespace radray {
 
@@ -10,7 +11,17 @@ bool PrepareMaterialVertexInput(const shader::ShaderVariantTargetInterfaceDesc& 
     return interface.Stages.HasFlag(gpu::ShaderStage::Vertex) && ResolveVertexInputState(meshInput, interface.VertexInputs, output);
 }
 
-std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, const MaterialAssetDesc& desc) {
+AssetRef<MaterialAsset> CreateMaterial(AssetManager& assets, const MaterialAssetDesc& desc, AssetId id) {
+    vector<UntypedAssetHandle> deps;
+    deps.reserve(desc.Families.size());
+    for (const auto& family : desc.Families) deps.push_back(family.Shader.Untyped());
+    return assets.EmplaceWithHandle<MaterialAsset>(deps, id, [&](AssetHandle<MaterialAsset> self) {
+        return MaterialAsset::Create(assets, desc, self);
+    });
+}
+
+std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self) {
+    RADRAY_ASSERT(self.IsValid());
     unordered_set<string> names;
     for (const auto& parameter : desc.Parameters)
         if (parameter.Name.empty() || !names.insert(parameter.Name).second) {
@@ -39,6 +50,7 @@ std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, c
         if (!shader) return std::nullopt;
         auto map = MaterialParameterBindingMap::Create(desc.Parameters, *shader, family.Parameters, family.ConstantBlockName);
         if (!map) return std::nullopt;
+        map->_material = self;
         result._bindings.push_back({family.Shader, std::move(*map)});
     }
     result._properties = desc.Properties;

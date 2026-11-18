@@ -1,8 +1,9 @@
-#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material.h>
 #include <radray/runtime/pipeline_layout_registry.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/shader/shader_reflector.h>
 #include <radray/runtime/material_parameter_binding_map.h>
+#include <radray/runtime/shader_asset.h>
 #include <radray/basic_math.h>
 #include "../../gpu_impl/tests/gpu_test_fixture.h"
 
@@ -177,14 +178,15 @@ TEST_P(ShaderLayoutGpuTest, ResolvedVertexLocationsDrawKnownColor) {
     ASSERT_TRUE(pair.SPIRV.Succeeded()) << pair.SPIRV.Diagnostics;
     auto reflected = shader::ReflectShaderVariant(pair.Variant("Default"));
     ASSERT_TRUE(reflected.Succeeded()) << reflected.Diagnostics;
-    AssetManager assets{device};
-    const auto shader = assets.CreateShader(GpuAssetDesc(pair, *reflected.Value, device.GetBackend()));
-    ASSERT_TRUE(shader);
-    const auto asset = assets.Get(*shader);
+    AssetManager assets;
+    auto value = ShaderAsset::Create(device, GpuAssetDesc(pair, *reflected.Value, device.GetBackend()));
+    ASSERT_TRUE(value);
+    const auto shader = assets.Emplace(std::move(*value));
+    const auto asset = shader.Get();
     MaterialAssetDesc materialDesc;
-    materialDesc.Programs = {{"Color", *shader, 0, "VSMain", "PSMain"}};
-    materialDesc.Families = {{*shader, {}, {}}};
-    const auto material = assets.CreateMaterial(materialDesc);
+    materialDesc.Programs = {{"Color", shader.GetHandle(), 0, "VSMain", "PSMain"}};
+    materialDesc.Families = {{shader.GetHandle(), {}, {}}};
+    const auto material = CreateMaterial(assets, materialDesc);
     ASSERT_TRUE(material);
     PipelineLayoutRegistry registry{device};
     const auto layout = registry.Acquire(asset->GetLayoutDesc());

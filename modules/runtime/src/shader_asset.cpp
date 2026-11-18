@@ -150,4 +150,13 @@ std::optional<shader::ShaderResolvedMember> ShaderAsset::FindBufferMember(std::s
     return std::nullopt;
 }
 
+ShaderAssetLoader::ShaderAssetLoader(gpu::Device& device, Nullable<const ShaderAsset*> fallback) noexcept
+    : _device(device), _fallback(fallback) {}
+
+task<std::optional<ShaderAsset>> ShaderAssetLoader::LoadAsync(AssetLoadContext& context) {
+    co_return ShaderAsset::Load(_device, context.GetMeta().Path);
+}
+
+Nullable<const ShaderAsset*> ShaderAssetLoader::GetFallback() const noexcept { return _fallback; }
+
 }  // namespace radray

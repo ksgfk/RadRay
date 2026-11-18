@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <radray/shader/shader_layout.h>
+#include <radray/runtime/asset_manager.h>
 
 namespace radray {
 
@@ -66,6 +67,17 @@ private:
     shader::ShaderFamilyLayoutDesc _family;
     gpu::RenderBackend _backend{gpu::RenderBackend::D3D12};
     vector<StageObject> _stages;
+};
+
+class ShaderAssetLoader final : public AssetLoader<ShaderAsset> {
+public:
+    explicit ShaderAssetLoader(gpu::Device& device, Nullable<const ShaderAsset*> fallback = nullptr) noexcept;
+    task<std::optional<ShaderAsset>> LoadAsync(AssetLoadContext& context) override;
+    Nullable<const ShaderAsset*> GetFallback() const noexcept override;
+
+private:
+    gpu::Device& _device;
+    Nullable<const ShaderAsset*> _fallback;
 };
 
 }  // namespace radray

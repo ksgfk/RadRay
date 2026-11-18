@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include "test_asset_fakes.h"
+#include <radray/runtime/shader_asset.h>
 
 namespace radray {
 namespace {
@@ -8,21 +9,20 @@ using namespace test;
 class MaterialAssetTest : public testing::Test {
 protected:
     LayoutDevice Device;
-    AssetManager Assets{Device};
-    AssetHandle<ShaderAsset> Shader;
+    AssetManager Assets;
+    AssetRef<ShaderAsset> Shader;
     MaterialAssetDesc Desc;
     void SetUp() override {
-        const auto shader = Assets.CreateShader(MakeShaderDesc(MaterialLayout()));
-        ASSERT_TRUE(shader);
-        Shader = *shader;
+        Shader = CreateTestShader(Assets, Device, MakeShaderDesc(MaterialLayout()));
+        ASSERT_TRUE(Shader);
         Desc = MakeMaterialDesc(Shader, {{"Roughness", 0.25f}, {"Metallic", 0.75f}, {"Tint", array<float, 4>{1, 2, 3, 4}}},
                                 {"Roughness", "Tint"}, "Constants");
     }
 };
 TEST_F(MaterialAssetTest, PreparesSubsetWithoutCreatingNativeLayouts) {
-    const auto handle = Assets.CreateMaterial(Desc);
+    const auto handle = CreateMaterial(Assets, Desc);
     ASSERT_TRUE(handle);
-    const auto material = Assets.Get(*handle);
+    const auto material = handle.Get();
     EXPECT_EQ(material->FindProgram("Depth"), 1u);
     EXPECT_FALSE(material->FindProgram("Missing"));
     EXPECT_FALSE(material->GetProgram(2));
@@ -33,7 +33,7 @@ TEST_F(MaterialAssetTest, PreparesSubsetWithoutCreatingNativeLayouts) {
     EXPECT_EQ(Device.GroupCreates, 0u);
     EXPECT_EQ(Device.LayoutCreates, 0u);
     MaterialRenderProxy proxy;
-    ASSERT_TRUE(proxy.Update(Assets, *handle));
+    ASSERT_TRUE(proxy.Update(Assets, handle.GetHandle()));
     array<byte, 32> bytes;
     bytes.fill(byte{0x5a});
     ASSERT_TRUE(map->WriteConstants(proxy, bytes));
@@ -45,7 +45,7 @@ TEST_F(MaterialAssetTest, PreparesSubsetWithoutCreatingNativeLayouts) {
     EXPECT_FALSE(map->WriteConstants(proxy, std::span{bytes}.first(16)));
 }
 TEST_F(MaterialAssetTest, RejectsInvalidExplicitSubsetsAndPrograms) {
-    auto check = [&](auto edit) { auto desc = Desc; edit(desc); EXPECT_FALSE(Assets.CreateMaterial(desc)); };
+    auto check = [&](auto edit) { auto desc = Desc; edit(desc); EXPECT_FALSE(CreateMaterial(Assets, desc)); };
     check([](auto& d) { d.Families.clear(); });
     check([](auto& d) { d.Families.push_back(d.Families[0]); });
     check([](auto& d) { d.Families[0].Shader = {}; });
@@ -62,25 +62,25 @@ TEST_F(MaterialAssetTest, RejectsInvalidExplicitSubsetsAndPrograms) {
     check([](auto& d) { d.Programs[1].Name = d.Programs[0].Name; });
     Desc.Families[0].Parameters.clear();
     Desc.Families[0].ConstantBlockName.clear();
-    EXPECT_TRUE(Assets.CreateMaterial(Desc));
+    EXPECT_TRUE(CreateMaterial(Assets, Desc));
 }
 TEST_F(MaterialAssetTest, DifferentFamiliesUseIndependentExplicitSubsets) {
-    const auto second = Assets.CreateShader(MakeShaderDesc(ResourceLayout()));
+    const auto second = CreateTestShader(Assets, Device, MakeShaderDesc(ResourceLayout()));
     ASSERT_TRUE(second);
     Desc.Parameters.push_back({"First", Nullable<gpu::TextureView*>{nullptr}});
-    Desc.Programs.push_back({"Other", *second, 0, "VS", "PS"});
-    Desc.Families.push_back({*second, {}, {"First"}});
-    const auto handle = Assets.CreateMaterial(Desc);
+    Desc.Programs.push_back({"Other", second.GetHandle(), 0, "VS", "PS"});
+    Desc.Families.push_back({second.GetHandle(), {}, {"First"}});
+    const auto handle = CreateMaterial(Assets, Desc);
     ASSERT_TRUE(handle);
-    const auto material = Assets.Get(*handle);
+    const auto material = handle.Get();
     EXPECT_EQ(material->GetBindingMap(Shader)->GetConstantTargets().size(), 2u);
-    EXPECT_TRUE(material->GetBindingMap(*second)->GetConstantTargets().empty());
-    EXPECT_EQ(material->GetBindingMap(*second)->GetResourceTargets().size(), 1u);
+    EXPECT_TRUE(material->GetBindingMap(second.GetHandle())->GetConstantTargets().empty());
+    EXPECT_EQ(material->GetBindingMap(second.GetHandle())->GetResourceTargets().size(), 1u);
 }
 TEST_F(MaterialAssetTest, InstanceOverridesAndSnapshotsAreIndependent) {
-    const auto handle = Assets.CreateMaterial(Desc);
+    const auto handle = CreateMaterial(Assets, Desc);
     ASSERT_TRUE(handle);
-    MaterialInstance first{*handle}, second{*handle};
+    MaterialInstance first{handle.GetHandle()}, second{handle.GetHandle()};
     ASSERT_TRUE(first.SetParameter(Assets, 0, 0.5f));
     EXPECT_FALSE(first.SetParameter(Assets, 0, array<float, 4>{}));
     EXPECT_FALSE(first.SetParameter(Assets, 99, 0.0f));
@@ -93,30 +93,42 @@ TEST_F(MaterialAssetTest, InstanceOverridesAndSnapshotsAreIndependent) {
     EXPECT_FLOAT_EQ(std::get<float>(*proxy.GetParameter(0)), 0.5f);
     EXPECT_FLOAT_EQ(std::get<float>(*first.GetParameter(Assets, 0)), 0.25f);
     EXPECT_FALSE(proxy.Update(Assets, AssetHandle<MaterialAsset>{}));
-    EXPECT_EQ(proxy.GetMaterial(), *handle);
+    EXPECT_EQ(proxy.GetMaterial(), handle.GetHandle());
     EXPECT_FLOAT_EQ(std::get<float>(*proxy.GetParameter(0)), 0.5f);
     ASSERT_TRUE(proxy.Update(Assets, first));
     EXPECT_FLOAT_EQ(std::get<float>(*proxy.GetParameter(0)), 0.25f);
 }
+TEST_F(MaterialAssetTest, MaterialKeepsItsShaderUntilCollected) {
+    const auto weak = Shader.GetHandle();
+    auto material = CreateMaterial(Assets, Desc);
+    ASSERT_TRUE(material);
+    Shader.Reset();
+    EXPECT_EQ(Assets.CollectGarbage(), 0u);
+    EXPECT_TRUE(Assets.Get(weak));
+    material.Reset();
+    EXPECT_EQ(Assets.CollectGarbage(), 2u);
+    EXPECT_FALSE(Assets.Get(weak));
+}
+
 TEST_F(MaterialAssetTest, HandlesAndMappingsSurviveRegistryGrowth) {
-    const auto first = Assets.CreateMaterial(Desc);
+    const auto first = CreateMaterial(Assets, Desc);
     ASSERT_TRUE(first);
-    MaterialInstance instance{*first};
+    MaterialInstance instance{first.GetHandle()};
     for (size_t i = 0; i < 100; ++i) {
-        ASSERT_TRUE(Assets.CreateShader(MakeShaderDesc()));
-        ASSERT_TRUE(Assets.CreateMaterial(Desc));
+        ASSERT_TRUE(CreateTestShader(Assets, Device, MakeShaderDesc()));
+        ASSERT_TRUE(CreateMaterial(Assets, Desc));
     }
     EXPECT_FLOAT_EQ(std::get<float>(*instance.GetParameter(Assets, 0)), 0.25f);
-    EXPECT_TRUE(Assets.Get(*first)->GetBindingMap(Shader));
-    EXPECT_TRUE(Assets.Get(Shader)->FindBinding("Constants"));
+    EXPECT_TRUE(first.Get()->GetBindingMap(Shader));
+    EXPECT_TRUE(Shader.Get()->FindBinding("Constants"));
 }
 TEST_F(MaterialAssetTest, DebugRejectsDifferentMaterialIdentity) {
 #if RADRAY_IS_DEBUG
-    const auto first = Assets.CreateMaterial(Desc), second = Assets.CreateMaterial(Desc);
+    const auto first = CreateMaterial(Assets, Desc), second = CreateMaterial(Assets, Desc);
     ASSERT_TRUE(first && second);
-    const auto map = Assets.Get(*first)->GetBindingMap(Shader);
+    const auto map = first.Get()->GetBindingMap(Shader);
     MaterialRenderProxy proxy;
-    ASSERT_TRUE(proxy.Update(Assets, *second));
+    ASSERT_TRUE(proxy.Update(Assets, second.GetHandle()));
     array<byte, 32> bytes{};
     EXPECT_DEATH(map->WriteConstants(proxy, bytes), "");
 #endif
@@ -139,16 +151,16 @@ public:
 };
 TEST(MaterialBindingMap, PreflightsResourcesAndReportsPartialSetFailure) {
     LayoutDevice device;
-    AssetManager assets{device};
-    const auto shader = assets.CreateShader(MakeShaderDesc(ResourceLayout()));
+    AssetManager assets;
+    const auto shader = CreateTestShader(assets, device, MakeShaderDesc(ResourceLayout()));
     ASSERT_TRUE(shader);
     std::function<void()> destroyed;
     FakeTextureView view{{}, destroyed};
-    auto desc = MakeMaterialDesc(*shader, {{"First", Nullable<gpu::TextureView*>{&view}}, {"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"First", "Second"});
-    const auto material = assets.CreateMaterial(desc);
+    auto desc = MakeMaterialDesc(shader.GetHandle(), {{"First", Nullable<gpu::TextureView*>{&view}}, {"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"First", "Second"});
+    const auto material = CreateMaterial(assets, desc);
     ASSERT_TRUE(material);
-    const auto map = assets.Get(*material)->GetBindingMap(*shader);
-    MaterialInstance instance{*material};
+    const auto map = material.Get()->GetBindingMap(shader.GetHandle());
+    MaterialInstance instance{material.GetHandle()};
     MaterialRenderProxy proxy;
     ASSERT_TRUE(proxy.Update(assets, instance));
     ParameterProbe set;
@@ -169,7 +181,7 @@ TEST(MaterialBindingMap, PreflightsResourcesAndReportsPartialSetFailure) {
 TEST(MaterialBindingMap, RejectsArraysAndImmutableSamplerParameters) {
     for (bool sampler : {false, true}) {
         LayoutDevice device;
-        AssetManager assets{device};
+        AssetManager assets;
         auto layout = ResourceLayout();
         layout.Groups[0].Bindings.resize(1);
         auto& binding = layout.Groups[0].Bindings[0].Binding;
@@ -179,32 +191,32 @@ TEST(MaterialBindingMap, RejectsArraysAndImmutableSamplerParameters) {
             binding.ImmutableSampler = gpu::SamplerDescriptor{};
         } else
             binding.Count = 2;
-        const auto shader = assets.CreateShader(MakeShaderDesc(layout));
+        const auto shader = CreateTestShader(assets, device, MakeShaderDesc(layout));
         ASSERT_TRUE(shader);
         const MaterialParameterValue value = sampler ? MaterialParameterValue{Nullable<gpu::Sampler*>{nullptr}} : MaterialParameterValue{Nullable<gpu::TextureView*>{nullptr}};
-        EXPECT_FALSE(assets.CreateMaterial(MakeMaterialDesc(*shader, {{"First", value}}, {"First"})));
+        EXPECT_FALSE(CreateMaterial(assets, MakeMaterialDesc(shader.GetHandle(), {{"First", value}}, {"First"})));
     }
 }
 TEST(MaterialBindingMap, SkipsInactiveResourcesAndRejectsInactiveConstants) {
     LayoutDevice device;
     device.Backend = gpu::RenderBackend::Vulkan;
-    AssetManager assets{device};
+    AssetManager assets;
     auto desc = ResourceLayout();
     desc.Groups[0].Bindings[1].Binding.Vulkan.reset();
-    const auto shader = assets.CreateShader(MakeShaderDesc(desc, device.Backend));
+    const auto shader = CreateTestShader(assets, device, MakeShaderDesc(desc, device.Backend));
     ASSERT_TRUE(shader);
-    const auto material = assets.CreateMaterial(MakeMaterialDesc(*shader, {{"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"Second"}));
+    const auto material = CreateMaterial(assets, MakeMaterialDesc(shader.GetHandle(), {{"Second", Nullable<gpu::TextureView*>{nullptr}}}, {"Second"}));
     ASSERT_TRUE(material);
     MaterialRenderProxy proxy;
-    ASSERT_TRUE(proxy.Update(assets, *material));
+    ASSERT_TRUE(proxy.Update(assets, material.GetHandle()));
     ParameterProbe set;
-    EXPECT_TRUE(assets.Get(*material)->GetBindingMap(*shader)->BindResources(proxy, 0, set));
+    EXPECT_TRUE(material.Get()->GetBindingMap(shader.GetHandle())->BindResources(proxy, 0, set));
     EXPECT_TRUE(set.Written.empty());
     auto constants = MaterialLayout();
     constants.Groups[0].Bindings[0].Binding.Vulkan.reset();
-    const auto other = assets.CreateShader(MakeShaderDesc(constants, device.Backend));
+    const auto other = CreateTestShader(assets, device, MakeShaderDesc(constants, device.Backend));
     ASSERT_TRUE(other);
-    EXPECT_FALSE(assets.CreateMaterial(MakeMaterialDesc(*other, {{"Roughness", 1.0f}}, {"Roughness"}, "Constants")));
+    EXPECT_FALSE(CreateMaterial(assets, MakeMaterialDesc(other.GetHandle(), {{"Roughness", 1.0f}}, {"Roughness"}, "Constants")));
 }
 }  // namespace
 }  // namespace radray

@@ -67,6 +67,8 @@ struct MaterialAssetDesc {
     vector<MaterialFamilyParameters> Families;
 };
 
+AssetRef<MaterialAsset> CreateMaterial(AssetManager& assets, const MaterialAssetDesc& desc, AssetId id = {});
+
 class MaterialAsset final {
 public:
     MaterialAsset(MaterialAsset&&) noexcept = default;
@@ -83,9 +85,9 @@ public:
     Nullable<const MaterialParameterBindingMap*> GetBindingMap(AssetHandle<ShaderAsset> shader) const noexcept;
 
 private:
-    friend class AssetManager;
+    friend AssetRef<MaterialAsset> CreateMaterial(AssetManager&, const MaterialAssetDesc&, AssetId);
     MaterialAsset() = default;
-    static std::optional<MaterialAsset> Create(const AssetManager& assets, const MaterialAssetDesc& desc);
+    static std::optional<MaterialAsset> Create(const AssetManager& assets, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self);
     struct FamilyBinding {
         AssetHandle<ShaderAsset> Shader;
         MaterialParameterBindingMap Map;

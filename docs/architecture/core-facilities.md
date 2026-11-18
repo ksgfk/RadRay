@@ -157,7 +157,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 
 记录的 `Sequence` 由所属 ManualCoroutineScheduler 分配，在该实例内单调递增且不回绕。
 `DispatchReady` 先按无副作用的谓词冻结就绪记录的地址与序号，再恢复续体；回调取消其他记录或
-新建记录时，旧地址不会误派发给新的等待。恢复后仍存活的原记录由调度器摘除。
+新建记录时，旧地址不会误派发给新的等待。恢复后仍存活的原记录由调度器摘除。返回值是本批直接处理的存活记录数，排除被先前续体取消并移除的记录。记录可在 `ResumeContinuation` 中为同步恢复设置所属对象的回调作用域。
 跨多个等待表派发时，先分别捕获 `GetSequenceBoundary()` 的排他截止，再逐表派发。
 
 `TaskScope` 不可拷贝不可移动，且析构会阻塞。它必须在任务依赖的服务之前析构，

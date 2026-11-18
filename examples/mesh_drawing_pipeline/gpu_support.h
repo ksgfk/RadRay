@@ -9,9 +9,10 @@
 #include <radray/runtime/gpu_env.h>
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/vertex_input.h>
-#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material.h>
 #include <radray/runtime/pipeline_layout_registry.h>
 #include <radray/runtime/rdg.h>
+#include <radray/runtime/shader_asset.h>
 
 namespace radray::examples::mesh_drawing {
 
@@ -71,14 +72,14 @@ struct GpuResources {
     MaterialTagTable MaterialTags;
     unique_ptr<PipelineLayoutRegistry> LayoutRegistry;
     unique_ptr<AssetManager> Assets;
-    AssetHandle<ShaderAsset> Shader;
+    AssetRef<ShaderAsset> Shader;
     Nullable<shared_ptr<gpu::BindingGroupLayout>> PassGroupLayout{nullptr};
     MaterialTag OpaqueTag;
     MaterialTag TransparentTag;
     MaterialTag OutlineTag;
-    AssetHandle<MaterialAsset> OpaqueMaterial;
-    AssetHandle<MaterialAsset> TwoSidedMaterial;
-    AssetHandle<MaterialAsset> TransparentMaterial;
+    AssetRef<MaterialAsset> OpaqueMaterial;
+    AssetRef<MaterialAsset> TwoSidedMaterial;
+    AssetRef<MaterialAsset> TransparentMaterial;
     vector<MaterialPipelines> Pipelines;
 };
 

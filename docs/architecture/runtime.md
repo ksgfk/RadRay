@@ -28,8 +28,8 @@
 | `vertex_input.h` | 几何描述、`ValidateVertexInputLayout`、`ResolveVertexInputState` | 有 |
 | `shader_asset.h` | `ShaderAsset`、内存与离线索引加载 | 有 |
 | `gpu_pipeline_layout.h`、`pipeline_layout_registry.h` | `GpuPipelineLayout` 持有原生布局，`PipelineLayoutRegistry` 按签名复用组布局和完整布局 | 有 |
-| `asset_handle.h` | `AssetHandle<T>` | 无 |
-| `asset_manager.h` | `AssetManager`、Shader/Material 资产登记与查询 | 有 |
+| `asset_handle.h` | `AssetId`、`AssetState`、类型化和擦除类型的弱句柄 | 无 |
+| `asset_manager.h` | `AssetManager`、`AssetRef<T>`、`AssetLoader<T>`、依赖加载与回收 | 有 |
 | `material_parameter_binding_map.h` | `MaterialParameterBindingMap`、常量写入与资源绑定 | 有 |
 | `mesh_draw_command.h` | `MeshPassId`、命令绑定、`MeshDrawCommand`、`PassBatchCacheSlot`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`；`ValidateVertexInput`、`ValidateMeshDrawCommand`、`SubmitMeshDrawCommands` | 有 |
 | `mesh_batch.h` | `MeshSection`、`MeshBatchElement`、`MeshBatch`、`PrimitiveSceneInfo` | 无 |
@@ -665,17 +665,17 @@ GroupSlot 独立于 space/set；过滤后空组不创建。
 
 ### 资产登记与生命周期
 
-`AssetManager` 仅借用 Device，按类型用 SparseSet 登记 `ShaderAsset` 和 `MaterialAsset`。
-`CreateShader` / `LoadShader` / `CreateMaterial` 返回 8 字节 `AssetHandle<T>`（索引与代次）；
-失败不发布句柄。句柄只属于创建它的 manager，不可跨 manager 解析。
-`Get(handle)` 返回只读指针，最多有效到下一次同类型资产登记；不要长期保存该地址。
-Scene 同步、帧录制期间不得登记资产。
+`AssetManager` 在 owner 线程串行使用。`UntypedAssetHandle` 用两个 32 位字段保存所属 manager 的槽位索引和代次。`AssetHandle<T>` 在同一份 8 字节表示上提供类型约束，`Acquire` 校验存活与类型后取得强引用。`AssetRef<T>` 在 64 位平台占 16 字节，允许拷贝、移动和显式释放。`Get` 返回就绪资产的只读借用，持有相应强引用可覆盖借用期间。`Resolve` 对无法取得真实资产的句柄查询对应 loader 的 fallback。Fallback 由 loader 或应用保活至所有借用它的帧槽完成重置。
 
-当前登记后只读，没有卸载、替换、Clear、热重载、资产间引用计数或纹理资产。
-材质引用 Shader 的句柄；参数资源及标签表仍由外部持有。
-所有资产 owner 保留到 manager 析构，manager 不隐式等待 GPU。
-关闭时先由 Scheduler 等待所有 frame slot 并重置命令存储，再销毁 CPU 命令缓存、PSO 与参数集，
-最后销毁资产与布局注册表，Device 最后释放；不能只等待其中一个使用过该资源的槽。
+`MakeAssetId` 对非空逻辑路径的原始字节做 64 位哈希，零 ID 用于匿名内存资产。`RegisterMeta<T>` 登记 ID、类型、物理路径与直接依赖，每种类型注册一个 loader。`Emplace` 登记内存资产，`EmplaceWithHandle` 在工厂执行前预留 ID 与槽位。预留期间无法按 ID 请求或提升该句柄，失败会撤销预留并推进代次。`FindLoaded` 返回已发布的具名槽位，可用 `GetState` 区分 Loading、Ready 和 Failed。
+
+`Request<T>` 只排队，同 ID、同类型的请求共用槽位。`Pump()` 启动待加载任务，按批派发已就绪等待者，直到本次没有可推进的工作。若 loader 仍等待外部事件，`HasPendingWork()` 可以继续为真。`ShaderAssetLoader` 借用 Device，在 Pump 期间同步读索引并创建当前后端的 Shader。场景同步和命令录制与资产登记、加载和 GC 由调用方串行安排。
+
+`LoadAsync<T>` 在调用方预取消时传播 stopped，在缓存命中时立即返回强引用，缺失或加载失败时返回空引用。取消单个等待者只释放该等待者的引用。静态依赖先全部请求，就绪后调用 loader。已发布的具名内存资产可以直接作为依赖，冷加载按元数据确定类型。动态请求通过 `AssetLoadContext::LoadDependencyAsync` 建边，静态和动态依赖均在等待前检查环路。同一直接依赖保活一次，成功边保留至父资产销毁，失败立即归还全部依赖。context 的借用仅在本次 loader 调用内有效。Failed 槽位在回收后可以按原 ID 重试。
+
+强引用归零时进入槽内回收链，Loading 状态推迟到加载结束。`CollectGarbage()` 跳过已复活的槽位，回收时先撤销身份，再销毁资产并级联释放依赖。每个实际使用资产的在途帧槽可在 `FrameSlot::Emplace` 中持有一份强引用，直至 GPU 等待与该槽的命令存储重置完成。材质参数资源与标签表继续由外部持有。
+
+`Shutdown()` 由 owner 线程在回调外调用，可重复执行。它关闭注册、创建、请求和弱转强入口，取消并汇合加载；已持有的强引用仍可查询、拷贝、释放和回收。外部事件在 owner 线程通过 `DispatchExternal` 同步恢复 loader，所有挂起点须响应 stop，关闭不依赖下一次 Pump。manager 必须晚于外部强引用及使用它们的帧槽销毁；析构时会检查残留引用。设备应覆盖其创建的所有 GPU 对象。
 
 ### 顶点接口解析
 
@@ -700,7 +700,7 @@ VertexInput 保存几何 layout、semantic、格式、步长与偏移，不保�
 
 ### 定义、实例与同步
 
-`AssetManager::CreateMaterial(desc)` 校验非空且唯一的参数/程序名、Shader 句柄、变体和入口。
+`CreateMaterial(assets, desc, id)` 校验非空且唯一的参数/程序名、Shader 句柄、变体和入口。
 每个被程序引用的 ShaderAsset 必须恰好提供一份 `MaterialFamilyParameters`，显式指定常量块名与参数名子集。
 子集允许为空；未知/重复参数、额外或缺失 family、与 shader 类型不兼容的映射拒绝创建。
 不同 family 可使用不同子集，未参与某个 family 的参数可以继续用于 CPU 逻辑。

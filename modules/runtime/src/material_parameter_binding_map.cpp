@@ -3,6 +3,7 @@
 #include <cstring>
 #include <algorithm>
 #include <radray/runtime/material.h>
+#include <radray/runtime/shader_asset.h>
 #include <radray/logger.h>
 
 namespace radray {

@@ -25,11 +25,14 @@ bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem:
     }
     auto& device = Device->GetDevice();
     LayoutRegistry = make_unique<PipelineLayoutRegistry>(device);
-    Assets = make_unique<AssetManager>(device);
-    const auto shader = Assets->LoadShader(shaderDirectory / "cube.index.json");
-    if (!shader) return false;
-    Shader = *shader;
-    const auto shaderAsset = Assets->Get(Shader);
+    Assets = make_unique<AssetManager>();
+    Assets->RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
+    const auto id = MakeAssetId("cube.index.json");
+    if (!Assets->RegisterMeta<ShaderAsset>({id, shaderDirectory / "cube.index.json", {}})) return false;
+    Shader = Assets->Request<ShaderAsset>(id);
+    Assets->Pump();
+    const auto shaderAsset = Shader.Get();
+    if (!shaderAsset) return false;
     const auto pass = shaderAsset->FindBinding("Pass");
     const auto push = shaderAsset->FindPushConstant("MaterialPush");
     if (!pass || pass->Reference.GroupSlot != 0 || pass->Reference.BindingId != 0 || !push || push->PushId != 0) return false;
@@ -63,11 +66,10 @@ bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem:
     translucent.Blend = gpu::BlendState{
         {gpu::BlendFactor::SrcAlpha, gpu::BlendFactor::OneMinusSrcAlpha, gpu::BlendOperation::Add},
         {gpu::BlendFactor::One, gpu::BlendFactor::OneMinusSrcAlpha, gpu::BlendOperation::Add}};
-    const auto a = Assets->CreateMaterial(opaqueDesc), b = Assets->CreateMaterial(twoSidedDesc), c = Assets->CreateMaterial(transparentDesc);
-    if (!a || !b || !c) return false;
-    OpaqueMaterial = *a;
-    TwoSidedMaterial = *b;
-    TransparentMaterial = *c;
+    OpaqueMaterial = CreateMaterial(*Assets, opaqueDesc);
+    TwoSidedMaterial = CreateMaterial(*Assets, twoSidedDesc);
+    TransparentMaterial = CreateMaterial(*Assets, transparentDesc);
+    if (!OpaqueMaterial || !TwoSidedMaterial || !TransparentMaterial) return false;
     RADRAY_INFO_LOG("材质标签登记：Surface=Opaque / Transparent，Outline=Enabled；描边物体写模板 7，透明材质启用 alpha 混合并关闭深度写入");
 
     return true;

@@ -3,6 +3,7 @@
 #include <radray/file.h>
 #include <radray/json.h>
 #include <radray/runtime/frame_scheduler.h>
+#include <radray/runtime/shader_asset.h>
 #include "test_asset_fakes.h"
 
 namespace radray {
@@ -10,18 +11,18 @@ namespace {
 using namespace test;
 TEST(ShaderAsset, EmptyFamilyCannotPublishAnAsset) {
     LayoutDevice device;
-    AssetManager assets{device};
-    EXPECT_FALSE(assets.CreateShader({}));
+    AssetManager assets;
+    EXPECT_FALSE(CreateTestShader(assets, device, {}));
     EXPECT_FALSE(assets.Get(AssetHandle<ShaderAsset>{}));
 }
 TEST(ShaderAsset, CreationAndQueriesDoNotCreateNativeLayouts) {
     LayoutDevice device;
-    AssetManager assets{device};
+    AssetManager assets;
     auto desc = MakeShaderDesc(MaterialLayout());
     desc.Family.SharedLayout.Groups[0].Bindings[0].Binding.D3D12.reset();
-    const auto handle = assets.CreateShader(desc);
+    const auto handle = CreateTestShader(assets, device, desc);
     ASSERT_TRUE(handle);
-    const auto asset = assets.Get(*handle);
+    const auto asset = handle.Get();
     EXPECT_EQ(device.ShaderCreates, 2u);
     EXPECT_EQ(device.GroupCreates, 0u);
     EXPECT_EQ(device.LayoutCreates, 0u);
@@ -38,36 +39,36 @@ TEST(ShaderAsset, CreationAndQueriesDoNotCreateNativeLayouts) {
 }
 TEST(ShaderAsset, InvalidStagesFailBeforeGpuCreationAndPartialCreationIsReleased) {
     LayoutDevice device;
-    AssetManager assets{device};
+    AssetManager assets;
     auto desc = MakeShaderDesc();
     desc.Stages.pop_back();
-    EXPECT_FALSE(assets.CreateShader(desc));
+    EXPECT_FALSE(CreateTestShader(assets, device, desc));
     EXPECT_EQ(device.ShaderCreates, 0u);
     desc = MakeShaderDesc();
     desc.Stages.push_back(desc.Stages.front());
-    EXPECT_FALSE(assets.CreateShader(desc));
+    EXPECT_FALSE(CreateTestShader(assets, device, desc));
     EXPECT_EQ(device.ShaderCreates, 0u);
     desc = MakeShaderDesc();
     device.FailShaderAt = 2;
-    EXPECT_FALSE(assets.CreateShader(desc));
+    EXPECT_FALSE(CreateTestShader(assets, device, desc));
     EXPECT_EQ(device.ShaderDestroys, 1u);
     device.FailShaderAt = 0;
-    const auto handle = assets.CreateShader(desc);
+    const auto handle = CreateTestShader(assets, device, desc);
     ASSERT_TRUE(handle);
-    EXPECT_EQ(handle->GetIndex(), 0u);
+    EXPECT_EQ(handle.GetHandle().GetIndex(), 0u);
 }
 TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
     auto device = make_shared<LayoutDevice>();
     DeviceContext context{device, &device->Queue};
-    auto assets = make_unique<AssetManager>(*device);
-    const auto handle = assets->CreateShader(MakeShaderDesc());
+    auto assets = make_unique<AssetManager>();
+    auto handle = CreateTestShader(*assets, *device, MakeShaderDesc());
     ASSERT_TRUE(handle);
     CallbackPipeline* pipeline{nullptr};
     auto scheduler = CreateScheduler(context, pipeline, 3);
     ASSERT_TRUE(scheduler);
     uint32_t waits = 0, resets = 0;
     pipeline->OnPrepare = [&](FrameSlot& slot) {
-        EXPECT_TRUE(assets->Get(*handle));
+        EXPECT_TRUE(handle.Get());
         EXPECT_EQ(device->ShaderDestroys, 0u);
         EXPECT_TRUE(slot.AcquireCommandBuffer());
     };
@@ -85,7 +86,46 @@ TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
     EXPECT_EQ(waits, 5u);
     EXPECT_GE(resets, 5u);
     scheduler.reset();
+    handle.Reset();
     assets.reset();
+    EXPECT_EQ(device->ShaderDestroys, 2u);
+}
+
+TEST(ShaderAsset, ExplicitShutdownRetainsShaderUntilBothSlotsReset) {
+    auto device = make_shared<LayoutDevice>();
+    DeviceContext context{device, &device->Queue};
+    auto fallback = ShaderAsset::Create(*device, MakeShaderDesc());
+    ASSERT_TRUE(fallback);
+    AssetManager assets;
+    assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(*device, &*fallback);
+    const auto id = MakeAssetId("pending");
+    ASSERT_TRUE(assets.RegisterMeta<ShaderAsset>({id, {}, {}}));
+    auto pending = assets.Request<ShaderAsset>(id);
+    const auto borrowed = pending.Resolve();
+    ASSERT_EQ(borrowed.Get(), &*fallback);
+    auto shader = CreateTestShader(assets, *device, MakeShaderDesc());
+    ASSERT_TRUE(shader);
+    CallbackPipeline* pipeline{nullptr};
+    auto scheduler = CreateScheduler(context, pipeline, 2);
+    ASSERT_TRUE(scheduler);
+    pipeline->OnPrepare = [&](FrameSlot& slot) {
+        slot.Emplace<AssetRef<ShaderAsset>>(shader);
+        slot.Emplace<AssetRef<ShaderAsset>>(pending);
+        EXPECT_TRUE(slot.AcquireCommandBuffer());
+    };
+    pipeline->OnWait = [&](FrameSlot&) { EXPECT_TRUE(borrowed->GetStage(0, gpu::ShaderStage::Vertex)); };
+    scheduler->RunFrame();
+    scheduler->RunFrame();
+    pipeline->OnPrepare = {};
+    shader.Reset();
+    pending.Reset();
+    assets.Shutdown();
+    EXPECT_EQ(assets.CollectGarbage(), 0u);
+    scheduler->RunFrame();
+    EXPECT_EQ(assets.CollectGarbage(), 0u);
+    EXPECT_EQ(device->ShaderDestroys, 0u);
+    scheduler->BeginFrame();
+    EXPECT_EQ(assets.CollectGarbage(), 2u);
     EXPECT_EQ(device->ShaderDestroys, 2u);
 }
 
@@ -98,10 +138,20 @@ protected:
         std::error_code error;
         ASSERT_TRUE(std::filesystem::create_directory(Directory, error));
         ASSERT_FALSE(error);
+        Assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(Device);
+        ASSERT_TRUE(Assets.RegisterMeta<ShaderAsset>({MakeAssetId("shader.index.json"), Directory / "shader.index.json", {}}));
     }
     void TearDown() override {
         std::error_code error;
         if (Directory.parent_path() == std::filesystem::temp_directory_path()) std::filesystem::remove_all(Directory, error);
+    }
+    AssetManager Assets;
+    bool Load() {
+        const auto id = MakeAssetId("shader.index.json");
+        Assets.CollectGarbage();
+        auto ref = Assets.Request<ShaderAsset>(id);
+        Assets.Pump();
+        return ref.IsReady();
     }
     void Write(bool duplicate = false, bool missing = false, uint32_t version = 1) {
         auto desc = MakeShaderDesc(MaterialLayout());
@@ -137,19 +187,17 @@ protected:
 };
 TEST_F(ShaderAssetFiles, LoadsRelativePathsWithoutOtherBackendFilesOrLayouts) {
     Write();
-    AssetManager assets{Device};
-    ASSERT_TRUE(assets.LoadShader(Directory / "shader.index.json"));
+    ASSERT_TRUE(Load());
     EXPECT_EQ(Device.ShaderCreates, 2u);
     EXPECT_EQ(Device.LayoutCreates, 0u);
 }
 TEST_F(ShaderAssetFiles, RejectsDuplicateMissingStagesAndUnsupportedIndex) {
-    AssetManager assets{Device};
     Write(true);
-    EXPECT_FALSE(assets.LoadShader(Directory / "shader.index.json"));
+    EXPECT_FALSE(Load());
     Write(false, true);
-    EXPECT_FALSE(assets.LoadShader(Directory / "shader.index.json"));
+    EXPECT_FALSE(Load());
     Write(false, false, 2);
-    EXPECT_FALSE(assets.LoadShader(Directory / "shader.index.json"));
+    EXPECT_FALSE(Load());
     EXPECT_EQ(Device.ShaderCreates, 0u);
 }
 }  // namespace

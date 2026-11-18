@@ -1,12 +1,14 @@
 #pragma once
 
+#include <radray/gpu/types.h>
+#include <radray/shader/shader_layout.h>
 #include <radray/runtime/asset_handle.h>
-#include <radray/runtime/shader_asset.h>
 
 namespace radray {
 
 struct MaterialParameter;
 class MaterialRenderProxy;
+class ShaderAsset;
 
 struct MaterialParameterResourceTarget {
     size_t ParameterIndex{0};
@@ -33,7 +35,6 @@ public:
 
 private:
     friend class MaterialAsset;
-    friend class AssetManager;
     MaterialParameterBindingMap() = default;
     static std::optional<MaterialParameterBindingMap> Create(std::span<const MaterialParameter> parameters, const ShaderAsset& shader,
                                                              std::span<const string> subset, std::string_view constantBlockName);

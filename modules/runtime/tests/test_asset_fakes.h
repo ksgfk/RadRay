@@ -1,7 +1,8 @@
 #pragma once
 #include "test_fakes.h"
 #include "../../shader/tests/layout_test_data.h"
-#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/material.h>
+#include <radray/runtime/shader_asset.h>
 
 namespace radray::test {
 class AssetTestShader final : public gpu::Shader {
@@ -95,6 +96,11 @@ inline ShaderAssetDesc MakeShaderDesc(shader::ShaderPipelineLayoutDesc layout = 
     desc.Stages = {{0, backend, gpu::ShaderStage::Vertex, "VS", {byte{1}}}, {0, backend, gpu::ShaderStage::Pixel, "PS", {byte{2}}}};
     return desc;
 }
+inline AssetRef<ShaderAsset> CreateTestShader(AssetManager& assets, gpu::Device& device, const ShaderAssetDesc& desc) {
+    auto shader = ShaderAsset::Create(device, desc);
+    return shader ? assets.Emplace(std::move(*shader)) : AssetRef<ShaderAsset>{};
+}
+
 inline MaterialAssetDesc MakeMaterialDesc(AssetHandle<ShaderAsset> shader, vector<MaterialParameter> parameters = {}, vector<string> subset = {}, string block = {}) {
     MaterialAssetDesc desc;
     desc.Programs = {{"Color", shader, 0, "VS", "PS"}, {"Depth", shader, 0, "VS", ""}};

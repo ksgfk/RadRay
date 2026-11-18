@@ -81,7 +81,7 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 已有异常还包括 `Nullable::Unwrap()` 的误用检测与 PMR 存储的分配失败。
 新增 `try`/`catch`/`throw` **要先问用户**（`AGENTS.md`）。
 
-访问器、析构和 RHI 虚接口广泛使用 `noexcept`；会分配的接口按实际失败契约决定，例如 `AssetManager::CreateMaterial` 不声明它。
+访问器、析构和 RHI 虚接口广泛使用 `noexcept`；会分配的接口按实际失败契约决定，例如 `CreateMaterial` 不声明它。
 但**不要为了保住 `noexcept` 而加 try/catch**——那是硬规则禁止的。
 
 ## 构造与析构

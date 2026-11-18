@@ -41,6 +41,9 @@ struct ManualCoroutineRecord {
     /// Set false while an external operation must finish before the coroutine can unwind.
     /// Cancellation still marks the record; its owner must resume it after that operation.
     bool ResumeOnCancel{true};
+
+    /// A record type may wrap the synchronous resume in its owner's callback scope.
+    void ResumeContinuation(std::coroutine_handle<> continuation) noexcept { continuation.resume(); }
 };
 
 template <class TRecord>
@@ -106,18 +109,21 @@ public:
     /// Predicate must not mutate this scheduler. Freeze ready identities before resuming
     /// any continuation; new records wait for a later dispatch. Survivors are erased.
     template <class TPredicate>
-    void DispatchReady(TPredicate&& ready, uint64_t boundary = std::numeric_limits<uint64_t>::max()) {
+    size_t DispatchReady(TPredicate&& ready, uint64_t boundary = std::numeric_limits<uint64_t>::max()) {
         vector<std::pair<TRecord*, uint64_t>> batch;
         for (const auto& entry : _records) {
             auto* record = &entry->Record;
             if (record->Stop.stop_requested()) record->Canceled = true;
             if (record->Sequence < boundary && ready(*record)) batch.emplace_back(record, record->Sequence);
         }
+        size_t dispatched = 0;
         for (auto [record, sequence] : batch) {
             if (!IsAlive(record, sequence)) continue;
+            ++dispatched;
             ResumeRecord(record);
             if (IsAlive(record, sequence)) Erase(record);
         }
+        return dispatched;
     }
 
     TRecord* At(size_t index) noexcept {
@@ -151,7 +157,7 @@ public:
         std::coroutine_handle<> continuation = record->Continuation;
         record->Continuation = {};
         if (continuation) {
-            continuation.resume();
+            record->ResumeContinuation(continuation);
         }
     }
 
