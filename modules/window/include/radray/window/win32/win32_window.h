@@ -2,8 +2,18 @@
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 
+#include <functional>
+#include <optional>
+#include <span>
+#include <string_view>
 #include <atomic>
 
+#include <Eigen/Core>
+#include <sigslot/signal.hpp>
+
+#include <radray/nullable.h>
+#include <radray/types.h>
+#include <radray/window/input.h>
 #include <radray/window/native_window.h>
 #include <radray/platform/win32_headers.h>
 

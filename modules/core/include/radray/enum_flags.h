@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstddef>
 #include <type_traits>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
 
+#include <magic_enum/magic_enum.hpp>
 #include <magic_enum/magic_enum_flags.hpp>
 
 #include <radray/logger.h>

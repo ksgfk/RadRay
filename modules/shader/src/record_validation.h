@@ -1,17 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string_view>
-#include <radray/types.h>
 
-namespace radray::shader {
-class ShaderArtifactView;
-struct ShaderArtifactTypeRecord;
-struct ShaderTypeRecord;
-struct ShaderVertexAttributeSignatureDesc;
-struct WireBlobRange;
-}  // namespace radray::shader
+#include <radray/types.h>
+#include <radray/shader/shader_artifact.h>
+#include <radray/shader/shader_compiler_contract.h>
+#include <radray/shader/shader_layout.h>
 
 namespace radray::shader::detail {
 

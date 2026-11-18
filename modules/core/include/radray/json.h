@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+#include <vector>
 #include <array>
 #include <concepts>
 #include <cstddef>

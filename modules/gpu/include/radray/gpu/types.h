@@ -2,6 +2,8 @@
 
 // GPU 契约与所有权见 docs/architecture/render-rhi.md。
 
+#include <cstddef>
+#include <type_traits>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -10,6 +12,8 @@
 #include <span>
 #include <string_view>
 #include <utility>
+
+#include <magic_enum/magic_enum.hpp>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -945,15 +949,12 @@ class ExternalResourceExtension;
 class CommandQueue;
 class CommandBuffer;
 class CommandAllocator;
-class CommandEncoder;
 class GraphicsCommandEncoder;
 class ComputeCommandEncoder;
 class Fence;
 class SwapChain;
 class SwapChainSyncObject;
-class SwapChainFrame;
 class Resource;
-class ResourceView;
 class Buffer;
 class Texture;
 class TextureView;
@@ -961,12 +962,10 @@ class Shader;
 class PipelineLayout;
 class BindingGroupLayout;
 class ShaderParameterSet;
-class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
 class Sampler;
 class QueryPool;
-class InstanceVulkan;
 class DXGIFactory;
 
 struct ColorClearValue {

@@ -2,12 +2,15 @@
 
 // 固定的 Extract/Prepare/Record/Submit 执行顺序见 docs/architecture/runtime.md。
 
+#include <radray/gpu/types.h>
+#include <radray/runtime/frame_slot.h>
+#include <radray/runtime/mesh_draw_command.h>
+#include <radray/types.h>
 #include <radray/runtime/frame_pipeline.h>
 #include <radray/runtime/rdg.h>
+#include <radray/runtime/gpu_device.h>
 
 namespace radray {
-
-class DeviceContext;
 
 class RenderGraphFramePipeline : public FramePipeline {
 public:

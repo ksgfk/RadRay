@@ -2,6 +2,9 @@
 
 // Scene 句柄的类型与归属契约见 docs/architecture/runtime.md。
 
+#include <fmt/format.h>
+
+#include <radray/types.h>
 #include <radray/sparse_set.h>
 
 namespace radray {

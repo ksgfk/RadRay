@@ -2,6 +2,11 @@
 
 // 上传页与帧生命周期契约见 docs/architecture/runtime.md。
 
+#include <optional>
+#include <vector>
+
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 namespace radray {

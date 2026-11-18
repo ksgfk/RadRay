@@ -1,9 +1,17 @@
 #pragma once
 
+#include <cstddef>
+#include <span>
+#include <utility>
 #include <functional>
 #include <limits>
 #include <string_view>
 
+#include <radray/nullable.h>
+#include <radray/runtime/frame_pipeline.h>
+#include <radray/runtime/frame_slot.h>
+#include <radray/runtime/mesh_pass_processor.h>
+#include <radray/viewport.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>
 #include <radray/runtime/frame_scheduler.h>

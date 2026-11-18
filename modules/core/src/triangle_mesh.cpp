@@ -1,6 +1,13 @@
 #include <radray/triangle_mesh.h>
 
+#include <cmath>
 #include <limits>
+#include <numbers>
+#include <utility>
+
+#include <Eigen/Geometry>
+
+#include <radray/basic_math.h>
 
 namespace radray {
 

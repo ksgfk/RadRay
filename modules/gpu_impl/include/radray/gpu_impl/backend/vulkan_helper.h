@@ -2,11 +2,16 @@
 
 #ifdef RADRAY_ENABLE_VULKAN
 
+#include <concepts>
+#include <optional>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
 #include <span>
 
+#include <radray/enum_flags.h>
 #include <radray/types.h>
-#include <radray/logger.h>
-#include <radray/utility.h>
 #include <radray/gpu/types.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS

@@ -2,6 +2,7 @@
 
 // 材质标签所有权与渲染边界见 docs/architecture/runtime.md。
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string_view>

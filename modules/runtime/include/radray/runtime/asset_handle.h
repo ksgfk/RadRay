@@ -1,10 +1,11 @@
 #pragma once
 
-#include <compare>
 #include <limits>
 #include <string_view>
 
 #include <fmt/format.h>
+
+#include <radray/types.h>
 #include <radray/hash.h>
 
 namespace radray {

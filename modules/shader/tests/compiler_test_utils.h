@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <ios>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -7,6 +9,8 @@
 #include <span>
 #include <string_view>
 
+#include <radray/shader/diagnostic_result.h>
+#include <radray/types.h>
 #include <radray/shader/shader_artifact.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/shader/client.h>

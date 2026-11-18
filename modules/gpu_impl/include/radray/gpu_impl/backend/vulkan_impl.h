@@ -2,9 +2,19 @@
 
 #ifdef RADRAY_ENABLE_VULKAN
 
+#include <cstddef>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <utility>
 #include <array>
 #include <mutex>
 
+#include <radray/nullable.h>
+#include <radray/types.h>
+#include <radray/viewport.h>
 #include <radray/allocator.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/gpu_impl/backend/vulkan_helper.h>
@@ -16,32 +26,18 @@ namespace radray::gpu::vulkan {
 
 using DeviceFuncTable = VolkDeviceTable;
 
-class InstanceVulkanImpl;
-class VMA;
 class DeviceVulkan;
 class QueueVulkan;
-class CommandAllocatorVulkan;
 class CommandBufferVulkan;
-class SimulateCommandEncoderVulkan;
 class LegacyFenceVulkan;
 class LegacySemaphoreVulkan;
-class FenceVulkan;
 class TimelineSemaphoreVulkan;
-class SurfaceVulkan;
-class SwapChainVulkan;
-class SwapChainSyncObjectVulkan;
-class BufferVulkan;
 class BufferViewVulkan;
 class ImageVulkan;
-class ImageViewVulkan;
 class PipelineLayoutVulkan;
-class BindingGroupLayoutVulkan;
-class ShaderParameterSetVulkan;
 class GraphicsPipelineVulkan;
 class ComputePipelineVulkan;
-class ShaderModuleVulkan;
 class SamplerVulkan;
-class QueryPoolVulkan;
 
 struct QueueIndexInFamily {
     uint32_t Family;

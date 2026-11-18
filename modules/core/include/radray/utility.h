@@ -1,9 +1,9 @@
 #pragma once
 
+#include <type_traits>
+#include <utility>
 #include <span>
 #include <memory>
-
-#include <sigslot/signal.hpp>
 
 #include <radray/types.h>
 

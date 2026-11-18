@@ -6,10 +6,11 @@
 #include <functional>
 #include <span>
 
+#include <Eigen/Core>
+#include <sigslot/signal.hpp>
+
 #include <radray/types.h>
 #include <radray/nullable.h>
-#include <radray/utility.h>
-#include <radray/basic_math.h>
 #include <radray/window/input.h>
 
 namespace radray {

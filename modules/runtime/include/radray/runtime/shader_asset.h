@@ -1,5 +1,11 @@
 #pragma once
 
+#include <optional>
+#include <string_view>
+
+#include <radray/coroutine.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 #include <filesystem>

@@ -2,6 +2,7 @@
 
 // Reference ownership and threading contracts: docs/architecture/core-facilities.md.
 
+#include <cstddef>
 #include <atomic>
 #include <compare>
 #include <functional>

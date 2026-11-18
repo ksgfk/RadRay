@@ -5,6 +5,8 @@
 #include <span>
 #include <string_view>
 
+#include <radray/hash.h>
+#include <radray/types.h>
 #include <radray/dynamic_library.h>
 #include <radray/shader/shader_compiler_contract.h>
 

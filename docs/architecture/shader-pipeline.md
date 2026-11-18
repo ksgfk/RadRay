@@ -350,7 +350,7 @@ shader 测试读取本地生成的 artifact，对 metadata 做结构化断言，
 独立的 raw stage 字节码。生成的 `.bin` 不入库，统一由 `tools/compile_test_shaders.py` 显式准备到
 被忽略的 `build/test_shaders/`（CMake 缓存变量 `RADRAY_TEST_SHADER_DIR` 可改写）。脚本组合 compiler 侧
 `EXCLUDE_FROM_ALL` 的 `radray_shader_fixture_generator`（`shader_artifacts/`）与
-`tools/compile_render_fixtures.py` 的 raw DXC 配方（`shader_bytecode/`）；普通测试构建只验证
-源指纹和产物，不构建/调用生成器。shader 关闭的 gpu_impl 消费者需预先准备夹具，但仍不查找或加载 DXC。
+`tools/compile_render_fixtures.py` 的 raw DXC 配方（`shader_bytecode/`）。测试目标在编译时接收夹具目录，
+在运行相关用例时读取产物。关闭 shader 的 gpu_impl 测试可使用预先准备的夹具。
 生成依赖、增量校验与干净检出步骤见[本地测试 shader](../guide/build-test.md#本地测试-shader)。
 这些 fixture 不代表产品 artifact 发布链，也不参与产品安装。

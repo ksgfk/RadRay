@@ -1,15 +1,17 @@
 #pragma once
 
+#include <cstddef>
+#include <string_view>
 #include <istream>
 #include <filesystem>
 #include <span>
 
+#include <Eigen/Core>
+
+#include <radray/triangle_mesh.h>
 #include <radray/types.h>
-#include <radray/basic_math.h>
 
 namespace radray {
-
-class TriangleMesh;
 
 struct WavefrontObjFace {
     int32_t V1, V2, V3;

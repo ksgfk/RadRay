@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <radray/runtime/pipeline_layout_registry.h>
+#include <radray/runtime/gpu_pipeline_layout.h>
 #include "test_asset_fakes.h"
 
 namespace radray {

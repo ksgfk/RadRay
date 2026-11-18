@@ -1,5 +1,6 @@
 #include <radray/runtime/material.h>
 #include <radray/runtime/pipeline_layout_registry.h>
+#include <radray/runtime/gpu_pipeline_layout.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/shader/shader_reflector.h>
 #include <radray/runtime/material_parameter_binding_map.h>

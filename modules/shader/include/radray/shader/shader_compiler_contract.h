@@ -7,11 +7,8 @@
 
 #include <radray/hash.h>
 #include <radray/types.h>
+#include <radray/gpu/types.h>
 #include <radray/shader/diagnostic_result.h>
-
-namespace radray::gpu {
-enum class BindingKind : uint32_t;
-}  // namespace radray::gpu
 
 namespace radray::shader {
 

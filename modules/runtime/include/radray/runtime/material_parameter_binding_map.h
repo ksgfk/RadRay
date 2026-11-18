@@ -1,5 +1,11 @@
 #pragma once
 
+#include <cstddef>
+#include <optional>
+#include <span>
+#include <string_view>
+
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 #include <radray/shader/shader_layout.h>
 #include <radray/runtime/asset_handle.h>

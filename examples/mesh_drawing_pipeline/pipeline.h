@@ -1,5 +1,22 @@
 #pragma once
 
+#include <cstddef>
+#include <filesystem>
+#include <span>
+#include <string_view>
+
+#include <Eigen/Core>
+
+#include <radray/gpu/types.h>
+#include <radray/logger.h>
+#include <radray/nullable.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/frame_slot.h>
+#include <radray/runtime/mesh_draw_command.h>
+#include <radray/runtime/rdg.h>
+#include <radray/runtime/scene_handle.h>
+#include <radray/types.h>
+#include <radray/viewport.h>
 #include <radray/runtime/mesh_pass_processor.h>
 #include <radray/runtime/render_graph_pipeline.h>
 #include <radray/runtime/scene.h>

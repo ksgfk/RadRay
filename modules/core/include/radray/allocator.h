@@ -1,5 +1,8 @@
 #pragma once
 
+#include <concepts>
+#include <cstddef>
+#include <utility>
 #include <optional>
 
 #include <radray/types.h>

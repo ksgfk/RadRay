@@ -1,6 +1,17 @@
 #pragma once
 #include "test_fakes.h"
 #include "../../shader/tests/layout_test_data.h"
+#include <span>
+#include <string_view>
+#include <utility>
+
+#include <radray/gpu/types.h>
+#include <radray/nullable.h>
+#include <radray/runtime/asset_handle.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/shader/shader_compiler_contract.h>
+#include <radray/shader/shader_layout.h>
+#include <radray/types.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/shader_asset.h>
 

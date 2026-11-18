@@ -2,11 +2,13 @@
 
 // runtime 所有权契约见 docs/architecture/runtime.md。
 
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/gpu/types.h>
+#include <radray/runtime/gpu_env.h>
 
 namespace radray {
 
-class Environment;
 struct RDGDeviceConstraints;
 
 class DeviceContext final {

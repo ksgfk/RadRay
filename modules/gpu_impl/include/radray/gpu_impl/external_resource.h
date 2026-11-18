@@ -1,7 +1,12 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <string_view>
+#include <variant>
 #include <limits>
 
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 namespace radray::gpu {

@@ -6,6 +6,9 @@
 #include <optional>
 #include <span>
 
+#include <radray/basic_math.h>
+#include <radray/nullable.h>
+#include <radray/runtime/scene_handle.h>
 #include <radray/sparse_set.h>
 #include <radray/types.h>
 #include <radray/runtime/material.h>

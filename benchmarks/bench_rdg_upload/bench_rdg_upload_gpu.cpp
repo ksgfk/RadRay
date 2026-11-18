@@ -8,10 +8,14 @@
 #include <fstream>
 
 #include <radray/profiler.h>
+#include <radray/runtime/frame_pipeline.h>
 #include <radray/runtime/frame_scheduler.h>
+#include <radray/runtime/frame_slot.h>
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/gpu_env.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/rdg.h>
+#include <radray/runtime/upload_arena.h>
 
 namespace {
 using namespace radray;

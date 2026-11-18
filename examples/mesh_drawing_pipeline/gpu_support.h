@@ -4,8 +4,13 @@
 #include <span>
 #include <string_view>
 
-#include <Eigen/Core>
-
+#include <radray/gpu/types.h>
+#include <radray/nullable.h>
+#include <radray/runtime/asset_handle.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/gpu_pipeline_layout.h>
+#include <radray/runtime/material_tag.h>
+#include <radray/types.h>
 #include <radray/runtime/gpu_env.h>
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/vertex_input.h>

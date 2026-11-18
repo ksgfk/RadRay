@@ -1,15 +1,20 @@
 #pragma once
 
+#include <algorithm>
+#include <cstddef>
+#include <ios>
+#include <string>
+#include <type_traits>
 #include <cmath>
 #include <numbers>
 #include <sstream>
 #include <ostream>
 
+#include <fmt/format.h>
 #include <Eigen/Dense>
 
 #include <radray/types.h>
 #include <radray/logger.h>
-#include <radray/viewport.h>
 
 namespace radray {
 

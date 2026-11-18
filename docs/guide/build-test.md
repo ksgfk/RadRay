@@ -477,9 +477,8 @@ python tools/compile_test_shaders.py --check
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug --force
 ```
 
-shader/render 测试的构建依赖 `radray_check_test_shaders`，只检查源指纹、清单与文件 SHA-256，不启动 DXC。
-夹具缺失或过期时构建失败并提示生成命令；configure 允许夹具尚未存在，因此可以先构建生成器。
-直接运行已有 exe/CTest 不触发该检查，修改输入或搬运产物后先运行 `--check`。
+即使夹具目录缺失或清单过期，也可以配置和构建测试目标。运行使用夹具的测试前准备对应的 `.bin`。
+需要核对源指纹、清单和文件 SHA-256 时，手动运行上面的 `--check` 命令。
 
 关闭 shader 的 gpu_impl 配置不查找 DXC；首次准备夹具须使用另一个 shader 与 tests 都开启的配置。
 纯库构建（`RADRAY_BUILD_TESTS=OFF`）不要求夹具或 Python 检查器。目前只在 Windows 生成夹具；

@@ -1,5 +1,6 @@
 #include <radray/gpu_impl/backend/d3d12_helper.h>
 
+#include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/text_encoding.h>
 

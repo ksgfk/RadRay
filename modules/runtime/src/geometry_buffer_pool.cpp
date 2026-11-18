@@ -1,5 +1,7 @@
 #include <radray/runtime/geometry_buffer_pool.h>
 
+#include <radray/runtime/rdg.h>
+
 #include <algorithm>
 #include <limits>
 #include <utility>

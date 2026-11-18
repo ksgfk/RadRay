@@ -2,18 +2,16 @@
 
 #ifdef RADRAY_ENABLE_D3D12
 
+#include <string_view>
 #include <optional>
 
 #include <radray/types.h>
-#include <radray/logger.h>
-#include <radray/utility.h>
 #include <radray/gpu/types.h>
 
 #include <radray/platform/win32_headers.h>
 #include <wrl.h>
 #include <dxgi1_6.h>
 #include <directx/d3dx12.h>
-#include <directx/d3d12shader.h>
 #define D3D12MA_D3D12_HEADERS_ALREADY_INCLUDED
 #include <D3D12MemAlloc.h>
 

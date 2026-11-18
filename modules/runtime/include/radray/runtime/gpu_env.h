@@ -5,6 +5,8 @@
 #include <string_view>
 #include <thread>
 
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 namespace radray {

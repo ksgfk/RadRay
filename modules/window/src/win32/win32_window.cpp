@@ -1,5 +1,6 @@
 #include <radray/window/win32/win32_window.h>
 
+#include <radray/basic_math.h>
 #include <radray/platform/win32_headers.h>
 #include <radray/text_encoding.h>
 #include <radray/logger.h>

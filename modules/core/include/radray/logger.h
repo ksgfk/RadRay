@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+#include <string_view>
 #include <utility>
 #include <cassert>
 #include <iterator>

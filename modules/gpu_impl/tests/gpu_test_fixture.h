@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include <radray/logger.h>
+#include <radray/nullable.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>
 

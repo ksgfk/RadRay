@@ -2,9 +2,12 @@
 
 // 帧循环与所有权契约见 docs/architecture/runtime.md。
 
-#include <radray/runtime/frame_slot.h>
+#include <span>
 
 namespace radray {
+
+class FrameSlot;
+struct MeshPassRegistration;
 
 class FramePipeline {
 public:

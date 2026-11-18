@@ -6,6 +6,7 @@
 // instead of depending on exec::task / stdexec::* directly. That keeps the
 // stdexec dependency behind a small facade.
 
+#include <cstddef>
 #include <concepts>
 #include <coroutine>
 #include <limits>

@@ -1,10 +1,13 @@
 #pragma once
 
+#include <cstddef>
 #include <concepts>
 #include <algorithm>
 #include <limits>
 #include <span>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include <radray/logger.h>
 #include <radray/types.h>

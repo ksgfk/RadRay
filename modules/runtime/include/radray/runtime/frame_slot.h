@@ -2,22 +2,24 @@
 
 // 帧循环与所有权契约见 docs/architecture/runtime.md。
 
+#include <cstddef>
 #include <memory>
 #include <memory_resource>
 #include <optional>
 #include <type_traits>
 #include <utility>
 
+#include <radray/gpu/types.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/memory.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/mesh_draw_command.h>
 #include <radray/runtime/mesh_pass_processor.h>
+#include <radray/runtime/gpu_device.h>
 
 namespace radray {
-
-class DeviceContext;
-class FrameScheduler;
 
 class MeshPassFrameDrawList {
 public:

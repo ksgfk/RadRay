@@ -2,6 +2,14 @@
 
 #ifdef RADRAY_PLATFORM_MACOS
 
+#include <string_view>
+
+#include <Eigen/Core>
+#include <sigslot/signal.hpp>
+
+#include <radray/nullable.h>
+#include <radray/types.h>
+#include <radray/window/input.h>
 #include <radray/window/native_window.h>
 
 namespace radray {

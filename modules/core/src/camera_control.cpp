@@ -3,6 +3,8 @@
 #include <cmath>
 #include <numbers>
 
+#include <radray/basic_math.h>
+
 namespace radray {
 
 static float NormalizeAngle(float angle) {

@@ -3,6 +3,9 @@
 #include <optional>
 #include <span>
 
+#include <radray/nullable.h>
+#include <radray/shader/diagnostic_result.h>
+#include <radray/types.h>
 #include <radray/shader/shader_layout.h>
 #include <radray/shader/shader_artifact.h>
 

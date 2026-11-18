@@ -1,5 +1,10 @@
 #pragma once
 
+#include <utility>
+
+#include <radray/gpu/types.h>
+#include <radray/shader/shader_compiler_contract.h>
+#include <radray/types.h>
 #include <radray/shader/shader_layout.h>
 
 namespace radray::test {

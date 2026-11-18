@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <concepts>
 #include <filesystem>
 #include <optional>
@@ -8,6 +9,8 @@
 #include <type_traits>
 #include <utility>
 
+#include <radray/logger.h>
+#include <radray/types.h>
 #include <radray/coroutine.h>
 #include <radray/nullable.h>
 #include <radray/scope_guard.h>

@@ -2,6 +2,8 @@
 
 #include <limits>
 
+#include <radray/runtime/frame_pipeline.h>
+#include <radray/runtime/frame_slot.h>
 #include <radray/logger.h>
 #include <radray/profiler.h>
 

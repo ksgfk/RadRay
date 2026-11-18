@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <radray/hash.h>
 #include <radray/logger.h>
+#include <radray/gpu/types.h>
+#include <radray/runtime/gpu_pipeline_layout.h>
+#include <radray/shader/shader_layout.h>
 
 namespace radray {
 namespace {

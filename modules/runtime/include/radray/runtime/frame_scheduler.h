@@ -2,9 +2,16 @@
 
 // 帧循环与所有权契约见 docs/architecture/runtime.md。
 
+#include <memory_resource>
+
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/runtime/frame_pipeline.h>
 
 namespace radray {
+
+class DeviceContext;
+class FrameSlot;
 
 class FrameScheduler final {
 public:

@@ -1,12 +1,21 @@
 #pragma once
 
-#include <radray/gpu_impl/factory.h>
-
 #ifdef RADRAY_ENABLE_D3D12
 
+#include <concepts>
+#include <cstddef>
+#include <iterator>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <array>
 #include <directx/d3d12sdklayers.h>
 
+#include <radray/nullable.h>
+#include <radray/types.h>
+#include <radray/viewport.h>
 #include <radray/allocator.h>
 
 #include <radray/gpu_impl/backend/d3d12_helper.h>
@@ -16,27 +25,13 @@
 
 namespace radray::gpu::d3d12 {
 
-class DescriptorHeap;
-struct DescriptorHeapView;
-class CpuDescriptorAllocator;
-class DXGIFactoryImpl;
 class DeviceD3D12;
 class CmdQueueD3D12;
 class FenceD3D12;
-class CmdListD3D12;
-class CommandAllocatorD3D12;
-class CmdRenderPassD3D12;
-class SwapChainD3D12;
-class BufferD3D12;
-class QueryPoolD3D12;
 class TextureD3D12;
-class TextureViewD3D12;
 class RootSigD3D12;
-class BindingGroupLayoutD3D12;
-class ShaderParameterSetD3D12;
 class GraphicsPsoD3D12;
 class ComputePsoD3D12;
-class SamplerD3D12;
 
 namespace detail {
 class DiagnosticSession;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/gpu_impl/backend/d3d12_helper.h>
 #include <radray/gpu/types.h>
 #include <directx/d3d12sdklayers.h>

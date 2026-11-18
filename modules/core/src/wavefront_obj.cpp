@@ -1,5 +1,8 @@
 #include <radray/wavefront_obj.h>
 
+#include <array>
+#include <optional>
+#include <utility>
 #include <fstream>
 #include <sstream>
 #include <cctype>

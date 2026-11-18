@@ -2,11 +2,13 @@
 
 // 材质所有权与 UE 对照见 docs/architecture/runtime.md。
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string_view>
 #include <variant>
 
+#include <radray/shader/shader_layout.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>

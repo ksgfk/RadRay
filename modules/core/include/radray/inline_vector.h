@@ -1,12 +1,13 @@
 #pragma once
 
+#include <cstddef>
+#include <utility>
 #include <algorithm>
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
-#include <span>
 #include <type_traits>
 
 #include <radray/logger.h>

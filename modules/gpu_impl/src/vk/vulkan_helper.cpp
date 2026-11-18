@@ -2,6 +2,8 @@
 
 #include <limits>
 
+#include <radray/utility.h>
+
 #ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"

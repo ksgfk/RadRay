@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 
+#include <radray/runtime/scene_handle.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>

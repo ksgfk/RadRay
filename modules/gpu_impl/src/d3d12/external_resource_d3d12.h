@@ -1,5 +1,7 @@
 #pragma once
 
+#include <radray/gpu/types.h>
+#include <radray/types.h>
 #include <radray/gpu_impl/external_resource.h>
 
 namespace radray::gpu::d3d12 {

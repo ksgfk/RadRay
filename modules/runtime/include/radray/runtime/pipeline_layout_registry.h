@@ -1,9 +1,19 @@
 #pragma once
 
-#include <radray/runtime/gpu_pipeline_layout.h>
-#include <radray/shader/shader_layout.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
+
+namespace radray::gpu {
+class Device;
+}
+
+namespace radray::shader {
+struct ShaderPipelineLayoutDesc;
+}
 
 namespace radray {
+
+class GpuPipelineLayout;
 
 class PipelineLayoutRegistry final {
 public:

@@ -2,10 +2,16 @@
 
 // GPU 资源所有权、上传与持久状态契约见 docs/architecture/runtime.md。
 
+#include <radray/gpu/types.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/intrusive_ptr.h>
-#include <radray/runtime/rdg.h>
 
 namespace radray {
+
+class RDGBuilder;
+class RDGBufferHandle;
+class RDGTextureHandle;
 
 struct GpuBufferDescriptor {
     uint64_t Size{0};

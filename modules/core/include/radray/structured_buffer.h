@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstddef>
+#include <limits>
+#include <string_view>
+#include <utility>
 #include <optional>
 #include <span>
 
@@ -25,8 +29,6 @@ struct StructuredBufferId {
     friend auto operator<=>(const StructuredBufferId&, const StructuredBufferId&) = default;
 };
 
-class StructuredBufferVariable;
-class StructuredBufferType;
 class StructuredBufferStorage;
 template <typename TStorage>
 class BasicStructuredBufferView;

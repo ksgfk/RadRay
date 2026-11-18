@@ -1,4 +1,6 @@
 #include <radray/runtime/gpu_resource.h>
+
+#include <radray/runtime/rdg.h>
 #include <radray/gpu_impl/validation.h>
 
 #include <radray/logger.h>

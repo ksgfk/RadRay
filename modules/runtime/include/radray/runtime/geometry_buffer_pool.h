@@ -6,13 +6,18 @@
 #include <span>
 #include <string_view>
 
+#include <radray/gpu/types.h>
+#include <radray/intrusive_ptr.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/allocator.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/rdg.h>
 #include <radray/runtime/vertex_input.h>
 
 namespace radray {
 
+class RDGBuilder;
+class RDGRasterPassBuilder;
 class VertexBufferPool;
 class IndexBufferPool;
 

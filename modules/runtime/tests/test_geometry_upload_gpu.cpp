@@ -3,6 +3,8 @@
 
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/rdg.h>
+#include <radray/runtime/upload_arena.h>
 
 namespace radray {
 namespace {

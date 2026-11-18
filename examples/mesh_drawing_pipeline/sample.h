@@ -2,6 +2,7 @@
 
 #include <filesystem>
 
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 namespace radray::examples::mesh_drawing {

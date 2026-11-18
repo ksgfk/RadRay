@@ -1,5 +1,9 @@
 #pragma once
 
+#include <optional>
+#include <utility>
+
+#include <radray/types.h>
 #include <radray/gpu/types.h>
 
 namespace radray::gpu {

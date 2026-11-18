@@ -10,6 +10,9 @@
 #include <utility>
 #include <variant>
 
+#include <radray/nullable.h>
+#include <radray/runtime/mesh_draw_command.h>
+#include <radray/types.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/gpu/types.h>
 #include <radray/runtime/frame_slot.h>

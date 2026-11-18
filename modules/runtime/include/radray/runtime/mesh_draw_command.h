@@ -2,13 +2,15 @@
 
 // 命令构建与资源生命周期见 docs/architecture/runtime.md。
 
+#include <cstddef>
 #include <limits>
 #include <optional>
 #include <span>
 #include <type_traits>
 
+#include <radray/nullable.h>
+#include <radray/types.h>
 #include <radray/inline_vector.h>
-#include <radray/sparse_set.h>
 #include <radray/gpu/types.h>
 #include <radray/runtime/vertex_input.h>
 

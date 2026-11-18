@@ -5,6 +5,7 @@
 #include <string_view>
 #include <utility>
 
+#include <radray/shader/diagnostic_result.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/types.h>
 
