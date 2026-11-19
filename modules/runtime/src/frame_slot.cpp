@@ -171,4 +171,8 @@ void FrameSlot::ResetFrameData() noexcept {
     if (_memory) _memory.emplace(_initialBuffer.Get(), _initialCapacity, &_memoryUpstream);
 }
 
+MeshPassSortMode MeshPassFrameDrawList::GetSortMode() const noexcept {
+    return DynamicContext.GetSortMode();
+}
+
 }  // namespace radray

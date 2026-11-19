@@ -24,15 +24,15 @@ public:
         gpu::RenderBackend backend, bool validation,
         std::string_view appName = "RadRay") noexcept;
 
-    gpu::RenderBackend GetBackend() const noexcept { return _backend; }
-    bool IsValidationEnabled() const noexcept { return _validation; }
+    gpu::RenderBackend GetBackend() const noexcept;
+    bool IsValidationEnabled() const noexcept;
     bool IsOwnerThread() const noexcept;
 
 private:
     friend class DeviceContext;
     // 仅可调用已选后端的访问器；返回的借用在环境销毁时失效。
-    gpu::DXGIFactory& GetFactory() noexcept { return *_factory; }
-    gpu::InstanceVulkan& GetVulkanInstance() noexcept { return *_instance; }
+    gpu::DXGIFactory& GetFactory() noexcept;
+    gpu::InstanceVulkan& GetVulkanInstance() noexcept;
 
 private:
     Environment(

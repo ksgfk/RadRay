@@ -459,4 +459,98 @@ JsonArrayWriter JsonWriteContext::BeginArray() noexcept {
     return JsonArrayWriter{_doc, array};
 }
 
+JsonValue::JsonValue(yyjson_val* val) noexcept : _val(val) {}
+
+bool JsonValue::IsValid() const noexcept {
+    return _val != nullptr;
+}
+
+bool JsonDocument::IsValid() const noexcept {
+    return _doc != nullptr;
+}
+
+JsonDocument::JsonDocument(yyjson_doc* doc) noexcept : _doc(doc) {}
+
+JsonRef::JsonRef(yyjson_mut_doc* doc, yyjson_mut_val* val) noexcept : _doc(doc), _val(val) {}
+
+bool JsonRef::IsValid() const noexcept {
+    return _doc != nullptr && _val != nullptr;
+}
+
+bool JsonWriter::IsValid() const noexcept {
+    return _doc != nullptr;
+}
+
+bool JsonObjectWriter::IsValid() const noexcept {
+    return _doc != nullptr && _object != nullptr;
+}
+
+JsonObjectWriter::JsonObjectWriter(yyjson_mut_doc* doc, yyjson_mut_val* object) noexcept
+    : _doc(doc), _object(object) {}
+
+bool JsonArrayWriter::IsValid() const noexcept {
+    return _doc != nullptr && _array != nullptr;
+}
+
+JsonArrayWriter::JsonArrayWriter(yyjson_mut_doc* doc, yyjson_mut_val* array) noexcept
+    : _doc(doc), _array(array) {}
+
+bool JsonSerializer<std::nullptr_t>::Write(JsonWriteContext& context, std::nullptr_t) noexcept {
+    return context.Null();
+}
+
+bool JsonSerializer<bool>::Write(JsonWriteContext& context, bool value) noexcept {
+    return context.Bool(value);
+}
+
+bool JsonSerializer<Uri>::Write(JsonWriteContext& context, const Uri& uri) noexcept {
+    return context.String(uri.AsString());
+}
+
+bool JsonDeserializer<Uri>::Read(const JsonValue& value, Uri& uri) noexcept {
+    std::string_view text;
+    return value.TryGetString(text) && Uri::TryParse(text, UriKind::RelativeOrAbsolute, uri);
+}
+
+bool JsonSerializer<std::string_view>::Write(JsonWriteContext& context, std::string_view value) noexcept {
+    return context.String(value);
+}
+
+JsonObjectReader::JsonObjectReader(JsonValue value) noexcept : _object(value) {}
+
+bool JsonObjectReader::IsValid() const noexcept {
+    return _object.IsObject();
+}
+
+bool JsonObjectReader::Has(std::string_view name) const noexcept {
+    return IsValid() && _object.Has(name);
+}
+
+JsonArrayReader::JsonArrayReader(JsonValue value) noexcept : _array(value) {}
+
+bool JsonArrayReader::IsValid() const noexcept {
+    return _array.IsArray();
+}
+
+size_t JsonArrayReader::Size() const noexcept {
+    return IsValid() ? _array.Size() : 0;
+}
+
+bool JsonDeserializer<std::nullptr_t>::Read(const JsonValue& value, std::nullptr_t& output) noexcept {
+    if (!value.IsNull()) {
+        return false;
+    }
+    output = nullptr;
+    return true;
+}
+
+bool JsonDeserializer<bool>::Read(const JsonValue& value, bool& output) noexcept {
+    bool decoded = false;
+    if (!value.TryGetBool(decoded)) {
+        return false;
+    }
+    output = decoded;
+    return true;
+}
+
 }  // namespace radray

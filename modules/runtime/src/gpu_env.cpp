@@ -91,4 +91,20 @@ Nullable<unique_ptr<Environment>> Environment::Create(
     return environment;
 }
 
+gpu::RenderBackend Environment::GetBackend() const noexcept {
+    return _backend;
+}
+
+bool Environment::IsValidationEnabled() const noexcept {
+    return _validation;
+}
+
+gpu::DXGIFactory& Environment::GetFactory() noexcept {
+    return *_factory;
+}
+
+gpu::InstanceVulkan& Environment::GetVulkanInstance() noexcept {
+    return *_instance;
+}
+
 }  // namespace radray

@@ -52,7 +52,7 @@ struct AffineTransform {
     template <class Derived>
     AffineTransform(const Eigen::MatrixBase<Derived>& matrix) noexcept : AffineTransform(Eigen::Matrix4f{matrix}) {}
     Eigen::Matrix4f ToMatrix() const noexcept;
-    float operator()(size_t row, size_t column) const noexcept { return row == 3 ? (column == 3 ? 1.0f : 0.0f) : Values[column * 3 + row]; }
+    float operator()(size_t row, size_t column) const noexcept;
 };
 
 static_assert(sizeof(AffineTransform) == 48);

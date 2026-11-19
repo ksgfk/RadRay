@@ -150,9 +150,9 @@ public:
     Nullable<const MeshDrawCommandElements*> GetExtraElements(uint32_t index) const noexcept;
     Nullable<const MeshDrawCommandPayload*> GetPayload(uint32_t index) const noexcept;
     uint32_t GetStateSortKey(const MeshDrawCommand& command);
-    size_t GetVertexBufferCount() const noexcept { return _vertices.Entries.size() - _vertices.Free.size(); }
-    size_t GetPayloadCount() const noexcept { return _payloads.Entries.size() - _payloads.Free.size(); }
-    size_t GetExtraElementsCount() const noexcept { return _elements.size() - _freeElements.size(); }
+    size_t GetVertexBufferCount() const noexcept;
+    size_t GetPayloadCount() const noexcept;
+    size_t GetExtraElementsCount() const noexcept;
 
 private:
     friend class MeshPassProcessor;
@@ -188,11 +188,11 @@ public:
     CachedPassMeshDrawList& operator=(CachedPassMeshDrawList&& other) noexcept;
     CachedPassMeshDrawList(const CachedPassMeshDrawList&) = delete;
     CachedPassMeshDrawList& operator=(const CachedPassMeshDrawList&) = delete;
-    std::span<const MeshDrawCommand> GetCommands() const noexcept { return _commands; }
-    const MeshDrawCommandBindingStorage& GetBindings() const noexcept { return _bindings; }
+    std::span<const MeshDrawCommand> GetCommands() const noexcept;
+    const MeshDrawCommandBindingStorage& GetBindings() const noexcept;
     Nullable<const PassBatchCacheSlot*> GetBatchSlot(uint32_t batchIndex) const noexcept;
     Nullable<const MeshDrawCommand*> GetCommand(uint32_t batchIndex) const noexcept;
-    MeshPassSortMode GetSortMode() const noexcept { return _sortMode; }
+    MeshPassSortMode GetSortMode() const noexcept;
 
 private:
     friend class Scene;

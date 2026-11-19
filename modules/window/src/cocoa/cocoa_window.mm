@@ -534,6 +534,10 @@ KeyCode MapCocoaKeyCodeToKeyCode(unsigned short keyCode) noexcept {
     }
 }
 
+NativeWindowType CocoaWindow::GetType() const noexcept {
+    return NativeWindowType::CocoaNSWindow;
+}
+
 }  // namespace radray
 
 @implementation RadrayCocoaWindowBridgeDelegate

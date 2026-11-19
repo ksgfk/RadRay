@@ -34,6 +34,8 @@
 
 头文件一律 `#pragma once`，没有 include guard。
 
+函数定义的位置与内联例外见 [AGENTS.md 的硬规则](../../AGENTS.md#硬规则)。
+
 include 顺序没有工具强制（`.clang-format` 里 `SortIncludes: false`），惯例是：
 
 ```cpp

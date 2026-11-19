@@ -135,4 +135,8 @@ Aabb Aabb::Transform(const AffineTransform& transform) const noexcept {
     return result;
 }
 
+float AffineTransform::operator()(size_t row, size_t column) const noexcept {
+    return row == 3 ? (column == 3 ? 1.0f : 0.0f) : Values[column * 3 + row];
+}
+
 }  // namespace radray

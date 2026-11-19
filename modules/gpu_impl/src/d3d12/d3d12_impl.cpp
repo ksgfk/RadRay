@@ -3771,4 +3771,44 @@ void SamplerD3D12::SetDebugName(std::string_view name) noexcept {
     _name = string(name);
 }
 
+ID3D12DescriptorHeap* GpuDescriptorAllocator::GetNative() const noexcept {
+    return _heap->Get();
+}
+
+DescriptorHeap* GpuDescriptorAllocator::GetHeap() const noexcept {
+    return _heap.get();
+}
+
+bool DXGIFactoryImpl::IsValidationEnabled() const noexcept {
+    return _validationEnabled;
+}
+
+RenderBackend DeviceD3D12::GetBackend() noexcept {
+    return RenderBackend::D3D12;
+}
+
+const RenderDeviceCapabilities& DeviceD3D12::GetCapabilities() const noexcept {
+    return _capabilities;
+}
+
+Device* BufferD3D12::GetDevice() const noexcept {
+    return _device;
+}
+
+Device* TextureD3D12::GetDevice() const noexcept {
+    return _device;
+}
+
+TextureViewDescriptor TextureViewD3D12::GetDesc() const noexcept {
+    return _desc;
+}
+
+ShaderStages Dxil::GetStages() const noexcept {
+    return _stages;
+}
+
+bool ShaderParameterSetLayoutEntryD3D12::IsRootDescriptor() const noexcept {
+    return Placement == D3D12BufferPlacement::RootDescriptor;
+}
+
 }  // namespace radray::gpu::d3d12

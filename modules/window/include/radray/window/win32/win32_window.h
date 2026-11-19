@@ -105,7 +105,7 @@ public:
 
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
-    NativeWindowType GetType() const noexcept override { return NativeWindowType::Win32HWND; }
+    NativeWindowType GetType() const noexcept override;
 
     bool ShouldClose() const noexcept override;
     void* GetNativeHandler() const noexcept override;
@@ -131,7 +131,7 @@ public:
     float GetDpiScale() const noexcept override;
     Eigen::Vector2i ClientToScreen(Eigen::Vector2i pos) const noexcept override;
     Eigen::Vector2i ScreenToClient(Eigen::Vector2i pos) const noexcept override;
-    NativeDesktopCapabilities GetDesktopCapabilities() const noexcept override { return {true, true, true, true, true, true}; }
+    NativeDesktopCapabilities GetDesktopCapabilities() const noexcept override;
     bool SetCursor(NativeCursor cursor) noexcept override;
     std::optional<Eigen::Vector2i> GetDesktopMousePosition() const noexcept override;
     bool SetDesktopMousePosition(Eigen::Vector2i position) noexcept override;

@@ -384,4 +384,15 @@ void AssetManager::Shutdown() noexcept {
     _loadScope.WaitUntilEmpty();
 }
 
+const AssetMeta& AssetLoadContext::GetMeta() const noexcept {
+    return _meta;
+}
+
+stop_token AssetLoadContext::GetStopToken() const noexcept {
+    return _manager._loadScope.GetStopToken();
+}
+
+AssetLoadContext::AssetLoadContext(AssetManager& manager, UntypedAssetHandle target, const AssetMeta& meta) noexcept
+    : _manager(manager), _target(target), _meta(meta) {}
+
 }  // namespace radray

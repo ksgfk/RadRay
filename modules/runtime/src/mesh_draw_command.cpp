@@ -593,4 +593,28 @@ bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
     return true;
 }
 
+size_t MeshDrawCommandBindingStorage::GetVertexBufferCount() const noexcept {
+    return _vertices.Entries.size() - _vertices.Free.size();
+}
+
+size_t MeshDrawCommandBindingStorage::GetPayloadCount() const noexcept {
+    return _payloads.Entries.size() - _payloads.Free.size();
+}
+
+size_t MeshDrawCommandBindingStorage::GetExtraElementsCount() const noexcept {
+    return _elements.size() - _freeElements.size();
+}
+
+std::span<const MeshDrawCommand> CachedPassMeshDrawList::GetCommands() const noexcept {
+    return _commands;
+}
+
+const MeshDrawCommandBindingStorage& CachedPassMeshDrawList::GetBindings() const noexcept {
+    return _bindings;
+}
+
+MeshPassSortMode CachedPassMeshDrawList::GetSortMode() const noexcept {
+    return _sortMode;
+}
+
 }  // namespace radray

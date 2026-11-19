@@ -1530,4 +1530,12 @@ bool Win32Window::SetImePosition(Eigen::Vector2i position, int lineHeight, bool 
     return true;
 }
 
+NativeWindowType Win32Window::GetType() const noexcept {
+    return NativeWindowType::Win32HWND;
+}
+
+NativeDesktopCapabilities Win32Window::GetDesktopCapabilities() const noexcept {
+    return {true, true, true, true, true, true};
+}
+
 }  // namespace radray

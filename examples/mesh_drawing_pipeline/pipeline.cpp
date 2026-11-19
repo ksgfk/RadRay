@@ -381,4 +381,13 @@ std::optional<ImageData> MeshDrawingFramePipeline::ReadImage(uint32_t slotIndex)
     return resources.ReadImage();
 }
 
+void MeshDrawingFramePipeline::SetInput(const Scene& scene) noexcept {
+    if (&scene != &_scene) RADRAY_ABORT("MeshDrawingFramePipeline: unexpected source scene");
+    _input = &scene;
+}
+
+void MeshDrawingFramePipeline::ClearInput() noexcept {
+    _input = nullptr;
+}
+
 }  // namespace radray::examples::mesh_drawing

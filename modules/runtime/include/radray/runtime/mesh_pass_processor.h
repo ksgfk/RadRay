@@ -40,7 +40,7 @@ public:
     virtual ~MeshPassDrawListContext() noexcept = default;
 
     virtual MeshDrawCommandBindingStorage& GetBindingStorage() noexcept = 0;
-    bool HasValidatedElements(const MeshBatch& batch) const noexcept { return _validatedBatch.Get() == &batch; }
+    bool HasValidatedElements(const MeshBatch& batch) const noexcept;
 
     // 从已组装完成的 initializer 转移绑定引用所有权，并结合主元素默认实例范围与 stateSortKey 发布命令。
     // primaryElementIndex 必须对应 initializer.ValidElementMask 的最低有效位；不重写几何字段。
@@ -82,7 +82,7 @@ public:
     void FinalizeVisibleCommands() noexcept;
     void Clear() noexcept;
     void SetSortMode(MeshPassSortMode mode) noexcept;
-    MeshPassSortMode GetSortMode() const noexcept { return _sortMode; }
+    MeshPassSortMode GetSortMode() const noexcept;
 
     // FinalizeVisibleCommands 之后至 Clear 之前，不得调整大小、预留容量、删除元素或替换存储。
     vector<MeshDrawCommand> Commands;

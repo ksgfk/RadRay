@@ -694,6 +694,10 @@ D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept {
     Unreachable();
 }
 
+HANDLE Win32Event::Get() const noexcept {
+    return _event;
+}
+
 }  // namespace radray::gpu::d3d12
 
 std::string_view format_as(D3D_FEATURE_LEVEL v) noexcept {

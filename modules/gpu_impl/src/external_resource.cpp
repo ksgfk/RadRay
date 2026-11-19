@@ -58,4 +58,13 @@ ExternalError LogExternalError(std::string_view operation, RenderBackend backend
     return error;
 }
 }  // namespace detail
+
+BorrowedExternalHandle OwnedExternalHandle::Borrow() const noexcept {
+    return {_value};
+}
+
+bool OwnedExternalHandle::IsValid() const noexcept {
+    return _value != 0 && _value != std::numeric_limits<uintptr_t>::max();
+}
+
 }  // namespace radray::gpu

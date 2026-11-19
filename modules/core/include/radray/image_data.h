@@ -58,7 +58,7 @@ struct PixelCompareResult {
     uint8_t ActualValue{0};
     uint8_t ExpectedValue{0};
 
-    bool IsMatch() const noexcept { return MismatchCount == 0; }
+    bool IsMatch() const noexcept;
 };
 
 class ImageData {

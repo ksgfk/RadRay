@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <limits>
 #include <string_view>
-#include <utility>
 #include <optional>
 #include <span>
 
@@ -38,13 +37,13 @@ using StructuredBufferReadOnlyView = BasicStructuredBufferView<const StructuredB
 class StructuredBufferVariable {
 public:
     StructuredBufferVariable() = default;
-    StructuredBufferVariable(string name, StructuredBufferId typeId) : _name(std::move(name)), _typeId(typeId) {}
+    StructuredBufferVariable(string name, StructuredBufferId typeId);
 
-    std::string_view GetName() const noexcept { return _name; }
-    StructuredBufferId GetTypeId() const noexcept { return _typeId; }
-    size_t GetOffset() const noexcept { return _offset; }
-    size_t GetArraySize() const noexcept { return _arraySize; }
-    StructuredBufferId GetGlobalId() const noexcept { return _globalId; }
+    std::string_view GetName() const noexcept;
+    StructuredBufferId GetTypeId() const noexcept;
+    size_t GetOffset() const noexcept;
+    size_t GetArraySize() const noexcept;
+    StructuredBufferId GetGlobalId() const noexcept;
 
 private:
     string _name;
@@ -59,12 +58,12 @@ private:
 class StructuredBufferType {
 public:
     StructuredBufferType() = default;
-    StructuredBufferType(std::string_view name, StructuredBufferId id) : _name(string{name}), _id(id) {}
+    StructuredBufferType(std::string_view name, StructuredBufferId id);
 
-    std::string_view GetName() const noexcept { return _name; }
-    StructuredBufferId GetId() const noexcept { return _id; }
-    size_t GetSizeInBytes() const noexcept { return _size; }
-    std::span<const StructuredBufferVariable> GetMembers() const noexcept { return _members; }
+    std::string_view GetName() const noexcept;
+    StructuredBufferId GetId() const noexcept;
+    size_t GetSizeInBytes() const noexcept;
+    std::span<const StructuredBufferVariable> GetMembers() const noexcept;
 
 private:
     string _name;
@@ -122,7 +121,7 @@ public:
     StructuredBufferView GetVar(std::string_view name) noexcept;
     StructuredBufferReadOnlyView GetVar(std::string_view name) const noexcept;
     void WriteData(size_t offset, std::span<const byte> data) noexcept;
-    std::span<const byte> GetData() const noexcept { return _buffer; }
+    std::span<const byte> GetData() const noexcept;
     std::span<const byte> GetGlobalSpan(size_t offset, size_t size) const noexcept;
     std::span<const byte> GetSpan(StructuredBufferId globalId) const noexcept;
     std::span<const byte> GetSpan(StructuredBufferId globalId, size_t arrayIndex) const noexcept;

@@ -5048,4 +5048,68 @@ void SamplerVulkan::DestroyImpl() noexcept {
     }
 }
 
+RenderObjectTags VMA::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+bool VulkanRenderPassCache::IsImageless() const noexcept {
+    return _mode == FramebufferModeVulkan::Imageless;
+}
+
+RenderBackend DeviceVulkan::GetBackend() noexcept {
+    return RenderBackend::Vulkan;
+}
+
+const RenderDeviceCapabilities& DeviceVulkan::GetCapabilities() const noexcept {
+    return _capabilities;
+}
+
+RenderObjectTags LegacyFenceVulkan::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+RenderObjectTags LegacySemaphoreVulkan::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+RenderObjectTags TimelineSemaphoreVulkan::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+RenderObjectTags SurfaceVulkan::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+bool SwapChainVulkan::OutstandingAcquire::IsValid() const noexcept {
+    return imageIndex != std::numeric_limits<uint32_t>::max() &&
+           waitToDraw != nullptr &&
+           readyToPresent != nullptr;
+}
+
+void SwapChainVulkan::OutstandingAcquire::Reset() noexcept {
+    imageIndex = std::numeric_limits<uint32_t>::max();
+    waitToDraw = nullptr;
+    readyToPresent = nullptr;
+}
+
+Device* BufferVulkan::GetDevice() const noexcept {
+    return _device;
+}
+
+RenderObjectTags BufferViewVulkan::GetTag() const noexcept {
+    return RenderObjectTag::UNKNOWN;
+}
+
+Device* ImageVulkan::GetDevice() const noexcept {
+    return _device;
+}
+
+TextureViewDescriptor ImageViewVulkan::GetDesc() const noexcept {
+    return _mdesc;
+}
+
+ShaderStages ShaderModuleVulkan::GetStages() const noexcept {
+    return _stages;
+}
+
 }  // namespace radray::gpu::vulkan

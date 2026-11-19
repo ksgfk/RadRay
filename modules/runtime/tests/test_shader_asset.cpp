@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <radray/file.h>
+#include <radray/hash.h>
 #include <radray/json.h>
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/shader_asset.h>

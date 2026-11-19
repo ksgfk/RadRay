@@ -44,7 +44,7 @@ struct ManualCoroutineRecord {
     bool ResumeOnCancel{true};
 
     /// A record type may wrap the synchronous resume in its owner's callback scope.
-    void ResumeContinuation(std::coroutine_handle<> continuation) noexcept { continuation.resume(); }
+    void ResumeContinuation(std::coroutine_handle<> continuation) noexcept;
 };
 
 template <class TRecord>
@@ -219,38 +219,23 @@ public:
     TaskScope& operator=(const TaskScope&) = delete;
     TaskScope& operator=(TaskScope&&) = delete;
 
-    ~TaskScope() noexcept {
-        RequestStop();
-        WaitUntilEmpty();
-    }
+    ~TaskScope() noexcept;
 
-    void Spawn(task<void> t) {
-        _scope.spawn(std::move(t));
-    }
+    void Spawn(task<void> t);
 
-    bool RequestStop() noexcept {
-        return _scope.request_stop();
-    }
+    bool RequestStop() noexcept;
 
-    task<void> Join() {
-        co_await _scope.on_empty();
-    }
+    task<void> Join();
 
-    void WaitUntilEmpty() noexcept {
-        (void)stdexec::sync_wait(_scope.on_empty());
-    }
+    void WaitUntilEmpty() noexcept;
 
-    stop_token GetStopToken() const noexcept {
-        return _scope.get_stop_token();
-    }
+    stop_token GetStopToken() const noexcept;
 
 private:
     exec::async_scope _scope;
 };
 
-inline task<stop_token> CurrentStopToken() {
-    co_return co_await stdexec::get_stop_token();
-}
+task<stop_token> CurrentStopToken();
 
 /// 从协程 promise 的 env 里取 stop token。
 ///
@@ -273,9 +258,7 @@ stop_token GetCoroutineStopToken(std::coroutine_handle<Promise> handle) noexcept
     }
 }
 
-inline task<void> StopCurrentTask() {
-    co_await stdexec::just_stopped();
-}
+task<void> StopCurrentTask();
 
 template <class T>
 task<std::optional<T>> AwaitWithStopToken(task<T> t, stop_token stop) {

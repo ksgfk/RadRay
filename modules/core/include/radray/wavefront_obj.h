@@ -45,13 +45,13 @@ public:
     explicit WavefrontObjReader(const string& text);
 
     bool HasError() const;
-    std::string_view Error() const { return _error; }
-    std::span<const Eigen::Vector3f> Positions() const { return _pos; }
-    std::span<const Eigen::Vector2f> UVs() const { return _uv; }
-    std::span<const Eigen::Vector3f> Normals() const { return _normal; }
-    std::span<const WavefrontObjFace> Faces() const { return _faces; }
-    std::span<const string> Mtllibs() const { return _mtllibs; }
-    std::span<const WavefrontObjObject> Objects() const { return _objects; }
+    std::string_view Error() const;
+    std::span<const Eigen::Vector3f> Positions() const;
+    std::span<const Eigen::Vector2f> UVs() const;
+    std::span<const Eigen::Vector3f> Normals() const;
+    std::span<const WavefrontObjFace> Faces() const;
+    std::span<const string> Mtllibs() const;
+    std::span<const WavefrontObjObject> Objects() const;
 
     void Read();
     TrianglePosition GetPosition(size_t faceIndex) const;

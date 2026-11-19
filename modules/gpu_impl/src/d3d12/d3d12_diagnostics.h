@@ -31,7 +31,7 @@ struct DiagnosticMessage {
     HRESULT Result{S_OK};
     DiagnosticFailure Failure{DiagnosticFailure::None};
 
-    bool IsCollectionFailure() const noexcept { return Failure != DiagnosticFailure::None; }
+    bool IsCollectionFailure() const noexcept;
 };
 
 class DiagnosticObserver {

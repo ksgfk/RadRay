@@ -3,7 +3,6 @@
 #include <optional>
 #include <span>
 #include <string_view>
-#include <utility>
 
 #include <radray/shader/diagnostic_result.h>
 #include <radray/shader/shader_compiler_contract.h>
@@ -26,17 +25,13 @@ class ShaderArtifactView {
 public:
     ShaderArtifactView() noexcept = default;
 
-    const WireMetadataEnvelope& Envelope() const noexcept { return _envelope; }
-    std::span<const ShaderArtifactEntryRecord> Entries() const noexcept { return _entries; }
-    std::span<const ShaderArtifactBindingRecord> Bindings() const noexcept { return _bindings; }
-    std::span<const ShaderArtifactTypeRecord> Types() const noexcept { return _types; }
-    std::span<const ShaderArtifactRootConstantRecord> RootConstants() const noexcept {
-        return _rootConstants;
-    }
-    std::span<const ShaderArtifactVertexInputRecord> VertexInputs() const noexcept {
-        return _vertexInputs;
-    }
-    std::span<const ShaderArtifactSamplerRecord> Samplers() const noexcept { return _samplers; }
+    const WireMetadataEnvelope& Envelope() const noexcept;
+    std::span<const ShaderArtifactEntryRecord> Entries() const noexcept;
+    std::span<const ShaderArtifactBindingRecord> Bindings() const noexcept;
+    std::span<const ShaderArtifactTypeRecord> Types() const noexcept;
+    std::span<const ShaderArtifactRootConstantRecord> RootConstants() const noexcept;
+    std::span<const ShaderArtifactVertexInputRecord> VertexInputs() const noexcept;
+    std::span<const ShaderArtifactSamplerRecord> Samplers() const noexcept;
     std::span<const byte> SerializedRootSignature() const noexcept;
     std::span<const byte> Bytecode() const noexcept;
 
@@ -61,11 +56,10 @@ private:
 
 class DxilShaderArtifactView final {
 public:
-    const ShaderArtifactView& Generic() const noexcept { return _view; }
+    const ShaderArtifactView& Generic() const noexcept;
 
 private:
-    explicit DxilShaderArtifactView(ShaderArtifactView view) noexcept
-        : _view(std::move(view)) {}
+    explicit DxilShaderArtifactView(ShaderArtifactView view) noexcept;
 
     ShaderArtifactView _view;
 
@@ -76,11 +70,10 @@ private:
 
 class SpirvShaderArtifactView final {
 public:
-    const ShaderArtifactView& Generic() const noexcept { return _view; }
+    const ShaderArtifactView& Generic() const noexcept;
 
 private:
-    explicit SpirvShaderArtifactView(ShaderArtifactView view) noexcept
-        : _view(std::move(view)) {}
+    explicit SpirvShaderArtifactView(ShaderArtifactView view) noexcept;
 
     ShaderArtifactView _view;
 

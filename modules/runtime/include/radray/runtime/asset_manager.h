@@ -232,8 +232,8 @@ class AssetLoadContext final {
 public:
     AssetLoadContext(const AssetLoadContext&) = delete;
     AssetLoadContext& operator=(const AssetLoadContext&) = delete;
-    const AssetMeta& GetMeta() const noexcept { return _meta; }
-    stop_token GetStopToken() const noexcept { return _manager._loadScope.GetStopToken(); }
+    const AssetMeta& GetMeta() const noexcept;
+    stop_token GetStopToken() const noexcept;
     template <typename T>
     AssetHandle<T> GetTargetHandle() const noexcept {
         return _manager.Matches(_target, typeid(T)) ? AssetHandle<T>{_target} : AssetHandle<T>{};
@@ -255,8 +255,7 @@ public:
 
 private:
     friend class AssetManager;
-    AssetLoadContext(AssetManager& manager, UntypedAssetHandle target, const AssetMeta& meta) noexcept
-        : _manager(manager), _target(target), _meta(meta) {}
+    AssetLoadContext(AssetManager& manager, UntypedAssetHandle target, const AssetMeta& meta) noexcept;
     AssetManager& _manager;
     UntypedAssetHandle _target;
     const AssetMeta& _meta;

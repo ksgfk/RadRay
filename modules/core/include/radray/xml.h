@@ -65,13 +65,13 @@ class XmlAttribute;
 class XmlNode {
 public:
     XmlNode() noexcept = default;
-    explicit XmlNode(pugi::xml_node_struct* node) noexcept : _node(node) {}
+    explicit XmlNode(pugi::xml_node_struct* node) noexcept;
 
-    bool IsValid() const noexcept { return _node != nullptr; }
-    explicit operator bool() const noexcept { return _node != nullptr; }
+    bool IsValid() const noexcept;
+    explicit operator bool() const noexcept;
 
-    bool operator==(const XmlNode& other) const noexcept { return _node == other._node; }
-    bool operator!=(const XmlNode& other) const noexcept { return _node != other._node; }
+    bool operator==(const XmlNode& other) const noexcept;
+    bool operator!=(const XmlNode& other) const noexcept;
 
     XmlNodeType NodeType() const noexcept;
     /// 节点名。文本/注释/CDATA/文档等无名字节点按 System.Xml 口径返回 "#text" 等。
@@ -120,8 +120,8 @@ protected:
 class XmlElement : public XmlNode {
 public:
     XmlElement() noexcept = default;
-    explicit XmlElement(pugi::xml_node_struct* node) noexcept : XmlNode(node) {}
-    explicit XmlElement(XmlNode node) noexcept : XmlNode(node) {}
+    explicit XmlElement(pugi::xml_node_struct* node) noexcept;
+    explicit XmlElement(XmlNode node) noexcept;
 
     using XmlNode::AppendChild;
 
@@ -150,13 +150,13 @@ public:
 class XmlAttribute {
 public:
     XmlAttribute() noexcept = default;
-    explicit XmlAttribute(pugi::xml_attribute_struct* attr) noexcept : _attr(attr) {}
+    explicit XmlAttribute(pugi::xml_attribute_struct* attr) noexcept;
 
-    bool IsValid() const noexcept { return _attr != nullptr; }
-    explicit operator bool() const noexcept { return _attr != nullptr; }
+    bool IsValid() const noexcept;
+    explicit operator bool() const noexcept;
 
-    bool operator==(const XmlAttribute& other) const noexcept { return _attr == other._attr; }
-    bool operator!=(const XmlAttribute& other) const noexcept { return _attr != other._attr; }
+    bool operator==(const XmlAttribute& other) const noexcept;
+    bool operator!=(const XmlAttribute& other) const noexcept;
 
     std::string_view Name() const noexcept;
     std::string_view Value() const noexcept;
@@ -187,7 +187,7 @@ public:
     XmlDocument(XmlDocument&& other) noexcept;
     XmlDocument& operator=(XmlDocument&& other) noexcept;
 
-    bool IsValid() const noexcept { return _document != nullptr; }
+    bool IsValid() const noexcept;
 
     /// 解析 XML 文本 / 读文件并解析。失败返回 false 并填充 outError (可空)。
     bool LoadXml(std::string_view xml, EnumFlags<XmlParseFlag> flags = {}, string* outError = nullptr);

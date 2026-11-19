@@ -32,7 +32,7 @@ public:
     // 排序前固定动态命令指针；提交只读冻结后的命令。
     void SortVisibleCommands();
     void SetSortMode(MeshPassSortMode mode) noexcept;
-    MeshPassSortMode GetSortMode() const noexcept { return DynamicContext.GetSortMode(); }
+    MeshPassSortMode GetSortMode() const noexcept;
     bool Submit(gpu::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs = {}) const noexcept;
     void Clear() noexcept;
 

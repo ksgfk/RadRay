@@ -464,4 +464,32 @@ bool WavefrontObjReader::ToTriangleMesh(std::u8string_view objName, TriangleMesh
     return false;
 }
 
+std::string_view WavefrontObjReader::Error() const {
+    return _error;
+}
+
+std::span<const Eigen::Vector3f> WavefrontObjReader::Positions() const {
+    return _pos;
+}
+
+std::span<const Eigen::Vector2f> WavefrontObjReader::UVs() const {
+    return _uv;
+}
+
+std::span<const Eigen::Vector3f> WavefrontObjReader::Normals() const {
+    return _normal;
+}
+
+std::span<const WavefrontObjFace> WavefrontObjReader::Faces() const {
+    return _faces;
+}
+
+std::span<const string> WavefrontObjReader::Mtllibs() const {
+    return _mtllibs;
+}
+
+std::span<const WavefrontObjObject> WavefrontObjReader::Objects() const {
+    return _objects;
+}
+
 }  // namespace radray

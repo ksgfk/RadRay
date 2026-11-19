@@ -183,4 +183,24 @@ bool BinaryReader::String(std::string_view& value) noexcept {
     return true;
 }
 
+size_t BinaryWriter::GetSize() const noexcept {
+    return _data.size();
+}
+
+bool BinaryWriter::IsEmpty() const noexcept {
+    return _data.empty();
+}
+
+std::span<const byte> BinaryWriter::GetData() const noexcept {
+    return _data;
+}
+
+size_t BinaryReader::Remaining() const noexcept {
+    return _data.size() - _offset;
+}
+
+bool BinaryReader::AtEnd() const noexcept {
+    return _offset == _data.size();
+}
+
 }  // namespace radray

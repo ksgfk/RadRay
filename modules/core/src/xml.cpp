@@ -414,4 +414,48 @@ XmlNode XmlDocument::CreateCDataSection(std::string_view text) {
     return XmlNode{node.internal_object()};
 }
 
+XmlNode::XmlNode(pugi::xml_node_struct* node) noexcept : _node(node) {}
+
+bool XmlNode::IsValid() const noexcept {
+    return _node != nullptr;
+}
+
+XmlNode::operator bool() const noexcept {
+    return IsValid();
+}
+
+bool XmlNode::operator==(const XmlNode& other) const noexcept {
+    return _node == other._node;
+}
+
+bool XmlNode::operator!=(const XmlNode& other) const noexcept {
+    return _node != other._node;
+}
+
+XmlElement::XmlElement(pugi::xml_node_struct* node) noexcept : XmlNode(node) {}
+
+XmlElement::XmlElement(XmlNode node) noexcept : XmlNode(node) {}
+
+XmlAttribute::XmlAttribute(pugi::xml_attribute_struct* attr) noexcept : _attr(attr) {}
+
+bool XmlAttribute::IsValid() const noexcept {
+    return _attr != nullptr;
+}
+
+XmlAttribute::operator bool() const noexcept {
+    return IsValid();
+}
+
+bool XmlAttribute::operator==(const XmlAttribute& other) const noexcept {
+    return _attr == other._attr;
+}
+
+bool XmlAttribute::operator!=(const XmlAttribute& other) const noexcept {
+    return _attr != other._attr;
+}
+
+bool XmlDocument::IsValid() const noexcept {
+    return _document != nullptr;
+}
+
 }  // namespace radray

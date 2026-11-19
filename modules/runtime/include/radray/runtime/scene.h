@@ -42,9 +42,9 @@ public:
     Nullable<const PrimitiveSceneInfo*> GetPrimitive(PrimitiveHandle handle) const noexcept;
     Nullable<const MeshBatch*> GetMeshBatch(MeshBatchHandle handle) const noexcept;
     Nullable<const MaterialRenderProxy*> GetMaterial(MaterialProxyHandle handle) const noexcept;
-    uint32_t GetPrimitiveCount() const noexcept { return _primitives.Count(); }
-    uint32_t GetMeshBatchCount() const noexcept { return _meshes.Count(); }
-    uint32_t GetMaterialCount() const noexcept { return _materials.Count(); }
+    uint32_t GetPrimitiveCount() const noexcept;
+    uint32_t GetMeshBatchCount() const noexcept;
+    uint32_t GetMaterialCount() const noexcept;
     bool IsBatchDirty(MeshBatchHandle handle) const noexcept;
     PrimitiveHandle GetOwningPrimitive(MeshBatchHandle handle) const noexcept;
 
@@ -64,11 +64,11 @@ public:
 
     void MarkBatchDirty(MeshBatchHandle batchHandle);
     void MarkMaterialDirty(MaterialProxyHandle materialHandle);
-    bool HasDirtyBatches() const noexcept { return _dirtyCount != 0; }
+    bool HasDirtyBatches() const noexcept;
     // 同步之前，队列中可能仍包含已删除的句柄。
-    std::span<const MeshBatchHandle> GetDirtyBatches() const noexcept { return _dirtyBatches; }
+    std::span<const MeshBatchHandle> GetDirtyBatches() const noexcept;
     Nullable<const CachedPassMeshDrawList*> GetPassCache(MeshPassId pass) const noexcept;
-    Nullable<const CachedPassMeshDrawList*> GetCachedDrawList(MeshPassId pass) const noexcept { return GetPassCache(pass); }
+    Nullable<const CachedPassMeshDrawList*> GetCachedDrawList(MeshPassId pass) const noexcept;
 
     // Pass ID 必须是唯一、紧凑的索引；登记变化会重建全部 Batch。
     // Processor 必须非空；登记违约终止程序，构建输入由调用方保证（helper 仅 Debug 校验）。

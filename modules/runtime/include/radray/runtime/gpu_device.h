@@ -28,8 +28,8 @@ public:
     [[nodiscard]] static Nullable<unique_ptr<DeviceContext>> Create(
         Environment& environment) noexcept;
 
-    gpu::Device& GetDevice() noexcept { return *_device; }
-    gpu::CommandQueue& GetQueue() noexcept { return *_directQueue; }
+    gpu::Device& GetDevice() noexcept;
+    gpu::CommandQueue& GetQueue() noexcept;
     bool SupportsIndirect() const noexcept;
     RDGDeviceConstraints GetRDGConstraints() const noexcept;
 

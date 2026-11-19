@@ -94,7 +94,7 @@ public:
 
     ~VMA() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -249,7 +249,7 @@ public:
     IntrusivePtr<NativeRenderPassVulkan> Acquire(const RenderPassExecutionKeyVulkan& key, std::string_view name = {});
     IntrusivePtr<NativeFramebufferVulkan> Acquire(const FramebufferKeyVulkan& key, VkRenderPass pass, std::span<const VkImageView> views, std::string_view name = {});
     uint64_t AllocateViewId();
-    bool IsImageless() const noexcept { return _mode == FramebufferModeVulkan::Imageless; }
+    bool IsImageless() const noexcept;
     void PinViews(std::span<const uint64_t> views);
     void UnpinViews(std::span<const uint64_t> views) noexcept;
     /// Called before native view destruction; rejects outstanding command references.
@@ -293,13 +293,13 @@ public:
 
     void Destroy() noexcept override;
 
-    RenderBackend GetBackend() noexcept override { return RenderBackend::Vulkan; }
+    RenderBackend GetBackend() noexcept override;
 
     Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
 
     DeviceDetail GetDetail() const noexcept override;
 
-    const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
+    const RenderDeviceCapabilities& GetCapabilities() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
@@ -618,7 +618,7 @@ public:
 
     ~LegacyFenceVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -641,7 +641,7 @@ public:
 
     ~LegacySemaphoreVulkan() noexcept;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -696,7 +696,7 @@ public:
 
     ~TimelineSemaphoreVulkan() noexcept;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -719,7 +719,7 @@ public:
 
     ~SurfaceVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -836,17 +836,9 @@ public:
         SwapChainSyncObjectVulkan* waitToDraw{nullptr};
         SwapChainSyncObjectVulkan* readyToPresent{nullptr};
 
-        bool IsValid() const noexcept {
-            return imageIndex != std::numeric_limits<uint32_t>::max() &&
-                   waitToDraw != nullptr &&
-                   readyToPresent != nullptr;
-        }
+        bool IsValid() const noexcept;
 
-        void Reset() noexcept {
-            imageIndex = std::numeric_limits<uint32_t>::max();
-            waitToDraw = nullptr;
-            readyToPresent = nullptr;
-        }
+        void Reset() noexcept;
     };
 
     DeviceVulkan* _device;
@@ -928,7 +920,7 @@ public:
 
     BufferDescriptor GetDesc() const noexcept override;
 
-    Device* GetDevice() const noexcept override { return _device; }
+    Device* GetDevice() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -956,7 +948,7 @@ public:
 
     ~BufferViewVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    RenderObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -987,7 +979,7 @@ public:
 
     TextureDescriptor GetDesc() const noexcept override;
 
-    Device* GetDevice() const noexcept override { return _device; }
+    Device* GetDevice() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1030,7 +1022,7 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    TextureViewDescriptor GetDesc() const noexcept override { return _mdesc; }
+    TextureViewDescriptor GetDesc() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1173,7 +1165,7 @@ public:
 
     void Destroy() noexcept override;
 
-    ShaderStages GetStages() const noexcept override { return _stages; }
+    ShaderStages GetStages() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;

@@ -28,7 +28,7 @@ public:
     Win32Event& operator=(Win32Event&& other) noexcept;
     Win32Event& operator=(const Win32Event& other) noexcept = delete;
 
-    HANDLE Get() const noexcept { return _event; }
+    HANDLE Get() const noexcept;
 
     void Destroy() noexcept;
 

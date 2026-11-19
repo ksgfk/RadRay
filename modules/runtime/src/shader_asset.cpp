@@ -271,4 +271,6 @@ task<std::optional<ShaderAsset>> ShaderAssetLoader::LoadAsync(AssetLoadContext& 
 
 Nullable<const ShaderAsset*> ShaderAssetLoader::GetFallback() const noexcept { return _fallback; }
 
+ShaderAsset::ShaderAsset(gpu::Device& device) noexcept : _device(&device) {}
+
 }  // namespace radray

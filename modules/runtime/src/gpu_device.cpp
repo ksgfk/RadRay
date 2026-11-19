@@ -104,4 +104,12 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
     return runtime;
 }
 
+gpu::Device& DeviceContext::GetDevice() noexcept {
+    return *_device;
+}
+
+gpu::CommandQueue& DeviceContext::GetQueue() noexcept {
+    return *_directQueue;
+}
+
 }  // namespace radray

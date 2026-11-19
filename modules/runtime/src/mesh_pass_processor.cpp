@@ -169,4 +169,12 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
     output.AddCommand(context, static_cast<size_t>(firstElement - batch.Elements.begin()), initializer, stateSortKey);
 }
 
+bool MeshPassDrawListContext::HasValidatedElements(const MeshBatch& batch) const noexcept {
+    return _validatedBatch.Get() == &batch;
+}
+
+MeshPassSortMode DynamicMeshPassDrawListContext::GetSortMode() const noexcept {
+    return _sortMode;
+}
+
 }  // namespace radray

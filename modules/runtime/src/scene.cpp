@@ -286,4 +286,28 @@ void Scene::Clear() noexcept {
     _initializedCache = false;
 }
 
+uint32_t Scene::GetPrimitiveCount() const noexcept {
+    return _primitives.Count();
+}
+
+uint32_t Scene::GetMeshBatchCount() const noexcept {
+    return _meshes.Count();
+}
+
+uint32_t Scene::GetMaterialCount() const noexcept {
+    return _materials.Count();
+}
+
+bool Scene::HasDirtyBatches() const noexcept {
+    return _dirtyCount != 0;
+}
+
+std::span<const MeshBatchHandle> Scene::GetDirtyBatches() const noexcept {
+    return _dirtyBatches;
+}
+
+Nullable<const CachedPassMeshDrawList*> Scene::GetCachedDrawList(MeshPassId pass) const noexcept {
+    return GetPassCache(pass);
+}
+
 }  // namespace radray

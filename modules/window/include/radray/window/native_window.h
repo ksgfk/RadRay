@@ -111,7 +111,7 @@ public:
     virtual Eigen::Vector2i GetPosition() const noexcept = 0;
     virtual float GetDpiScale() const noexcept = 0;
     virtual bool IsMinimized() const noexcept = 0;
-    virtual bool IsVisible() const noexcept { return true; }
+    virtual bool IsVisible() const noexcept;
     virtual bool IsFocused() const noexcept = 0;
 
     virtual void SetSize(int width, int height) noexcept = 0;
@@ -127,20 +127,20 @@ public:
     virtual Eigen::Vector2i ClientToScreen(Eigen::Vector2i pos) const noexcept = 0;
     virtual Eigen::Vector2i ScreenToClient(Eigen::Vector2i pos) const noexcept = 0;
 
-    virtual NativeDesktopCapabilities GetDesktopCapabilities() const noexcept { return {}; }
-    virtual bool SetCursor(NativeCursor) noexcept { return false; }
-    virtual std::optional<Eigen::Vector2i> GetDesktopMousePosition() const noexcept { return {}; }
-    virtual bool SetDesktopMousePosition(Eigen::Vector2i) noexcept { return false; }
-    virtual Nullable<NativeWindow*> GetHoveredWindow() const noexcept { return nullptr; }
-    virtual vector<NativeMonitor> GetMonitors() const { return {}; }
-    virtual std::optional<string> GetClipboardText() const { return {}; }
-    virtual bool SetClipboardText(std::string_view) { return false; }
-    virtual bool SetImePosition(Eigen::Vector2i, int, bool) noexcept { return false; }
-    sigslot::signal<float, float>& EventScroll() noexcept { return _eventScroll; }
-    sigslot::signal<>& EventCaptureLost() noexcept { return _eventCaptureLost; }
-    sigslot::signal<>& EventDisplayChanged() noexcept { return _eventDisplayChanged; }
+    virtual NativeDesktopCapabilities GetDesktopCapabilities() const noexcept;
+    virtual bool SetCursor(NativeCursor) noexcept;
+    virtual std::optional<Eigen::Vector2i> GetDesktopMousePosition() const noexcept;
+    virtual bool SetDesktopMousePosition(Eigen::Vector2i) noexcept;
+    virtual Nullable<NativeWindow*> GetHoveredWindow() const noexcept;
+    virtual vector<NativeMonitor> GetMonitors() const;
+    virtual std::optional<string> GetClipboardText() const;
+    virtual bool SetClipboardText(std::string_view);
+    virtual bool SetImePosition(Eigen::Vector2i, int, bool) noexcept;
+    sigslot::signal<float, float>& EventScroll() noexcept;
+    sigslot::signal<>& EventCaptureLost() noexcept;
+    sigslot::signal<>& EventDisplayChanged() noexcept;
     /// Fired before destruction or an API mutates HWND/NSWindow geometry, visibility, styles, owner, or alpha.
-    sigslot::signal<>& EventBeforeSurfaceChange() noexcept { return _eventBeforeSurfaceChange; }
+    sigslot::signal<>& EventBeforeSurfaceChange() noexcept;
 
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;
     virtual sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept = 0;

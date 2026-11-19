@@ -14,7 +14,7 @@ public:
     virtual ~FramePipeline() noexcept;
 
     // 同步更新缓存期间持续借用登记项与处理器。
-    virtual std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept { return {}; }
+    virtual std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept;
 
     // 阶段串行执行，不得重入调度器；输入借用保持到 Submit 返回。
     // 帧错误不可恢复；正常返回表示该阶段全部完成。

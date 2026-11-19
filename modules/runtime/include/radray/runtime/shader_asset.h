@@ -86,7 +86,7 @@ public:
     std::optional<shader::ShaderResolvedMember> FindBufferMember(std::string_view block, std::string_view path) const;
 
 private:
-    explicit ShaderAsset(gpu::Device& device) noexcept : _device(&device) {}
+    explicit ShaderAsset(gpu::Device& device) noexcept;
     gpu::Device* _device;
     struct StageObject {
         uint32_t VariantIndex;

@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <iterator>
+#include <utility>
 
 #include <radray/logger.h>
 
@@ -345,5 +346,47 @@ DiagnosticResult<SpirvShaderArtifactView> DecodeSpirvShaderArtifact(
     }
     return {SpirvShaderArtifactView{std::move(*view.Value)}, std::move(view.Diagnostics)};
 }
+
+const WireMetadataEnvelope& ShaderArtifactView::Envelope() const noexcept {
+    return _envelope;
+}
+
+std::span<const ShaderArtifactEntryRecord> ShaderArtifactView::Entries() const noexcept {
+    return _entries;
+}
+
+std::span<const ShaderArtifactBindingRecord> ShaderArtifactView::Bindings() const noexcept {
+    return _bindings;
+}
+
+std::span<const ShaderArtifactTypeRecord> ShaderArtifactView::Types() const noexcept {
+    return _types;
+}
+
+std::span<const ShaderArtifactRootConstantRecord> ShaderArtifactView::RootConstants() const noexcept {
+    return _rootConstants;
+}
+
+std::span<const ShaderArtifactVertexInputRecord> ShaderArtifactView::VertexInputs() const noexcept {
+    return _vertexInputs;
+}
+
+std::span<const ShaderArtifactSamplerRecord> ShaderArtifactView::Samplers() const noexcept {
+    return _samplers;
+}
+
+const ShaderArtifactView& DxilShaderArtifactView::Generic() const noexcept {
+    return _view;
+}
+
+DxilShaderArtifactView::DxilShaderArtifactView(ShaderArtifactView view) noexcept
+    : _view(std::move(view)) {}
+
+const ShaderArtifactView& SpirvShaderArtifactView::Generic() const noexcept {
+    return _view;
+}
+
+SpirvShaderArtifactView::SpirvShaderArtifactView(ShaderArtifactView view) noexcept
+    : _view(std::move(view)) {}
 
 }  // namespace radray::shader

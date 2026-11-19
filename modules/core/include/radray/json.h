@@ -35,9 +35,9 @@ struct JsonDeserializer;
 class JsonValue {
 public:
     JsonValue() noexcept = default;
-    explicit JsonValue(yyjson_val* val) noexcept : _val(val) {}
+    explicit JsonValue(yyjson_val* val) noexcept;
 
-    bool IsValid() const noexcept { return _val != nullptr; }
+    bool IsValid() const noexcept;
     bool IsObject() const noexcept;
     bool IsArray() const noexcept;
     bool IsString() const noexcept;
@@ -88,11 +88,11 @@ public:
     /// 读文件并解析。失败返回 nullopt。
     static std::optional<JsonDocument> ParseFile(const std::filesystem::path& path) noexcept;
 
-    bool IsValid() const noexcept { return _doc != nullptr; }
+    bool IsValid() const noexcept;
     JsonValue Root() const noexcept;
 
 private:
-    explicit JsonDocument(yyjson_doc* doc) noexcept : _doc(doc) {}
+    explicit JsonDocument(yyjson_doc* doc) noexcept;
     yyjson_doc* _doc{nullptr};
 };
 
@@ -103,9 +103,9 @@ private:
 class JsonRef {
 public:
     JsonRef() noexcept = default;
-    JsonRef(yyjson_mut_doc* doc, yyjson_mut_val* val) noexcept : _doc(doc), _val(val) {}
+    JsonRef(yyjson_mut_doc* doc, yyjson_mut_val* val) noexcept;
 
-    bool IsValid() const noexcept { return _doc != nullptr && _val != nullptr; }
+    bool IsValid() const noexcept;
 
     // object 成员写入
     void AddString(std::string_view key, std::string_view value) noexcept;
@@ -140,7 +140,7 @@ public:
     JsonWriter(JsonWriter&& other) noexcept;
     JsonWriter& operator=(JsonWriter&& other) noexcept;
 
-    bool IsValid() const noexcept { return _doc != nullptr; }
+    bool IsValid() const noexcept;
 
     /// 设根为 object 并返回其句柄 (只应调用一次)。
     JsonRef RootObject() noexcept;
@@ -241,7 +241,7 @@ class JsonObjectWriter {
 public:
     JsonObjectWriter() noexcept = default;
 
-    bool IsValid() const noexcept { return _doc != nullptr && _object != nullptr; }
+    bool IsValid() const noexcept;
 
     /// 写入字段。name 会复制到 JsonWriter，临时或动态字符串均可安全使用。
     template <json_serializable T>
@@ -269,8 +269,7 @@ public:
 private:
     friend class JsonWriteContext;
 
-    JsonObjectWriter(yyjson_mut_doc* doc, yyjson_mut_val* object) noexcept
-        : _doc(doc), _object(object) {}
+    JsonObjectWriter(yyjson_mut_doc* doc, yyjson_mut_val* object) noexcept;
 
     yyjson_mut_doc* _doc{nullptr};
     yyjson_mut_val* _object{nullptr};
@@ -280,7 +279,7 @@ class JsonArrayWriter {
 public:
     JsonArrayWriter() noexcept = default;
 
-    bool IsValid() const noexcept { return _doc != nullptr && _array != nullptr; }
+    bool IsValid() const noexcept;
 
     template <json_serializable T>
     bool Element(const T& value) noexcept {
@@ -295,8 +294,7 @@ public:
 private:
     friend class JsonWriteContext;
 
-    JsonArrayWriter(yyjson_mut_doc* doc, yyjson_mut_val* array) noexcept
-        : _doc(doc), _array(array) {}
+    JsonArrayWriter(yyjson_mut_doc* doc, yyjson_mut_val* array) noexcept;
 
     yyjson_mut_doc* _doc{nullptr};
     yyjson_mut_val* _array{nullptr};
@@ -332,16 +330,12 @@ bool SerializeJsonObject(
 
 template <>
 struct JsonSerializer<std::nullptr_t> {
-    static bool Write(JsonWriteContext& context, std::nullptr_t) noexcept {
-        return context.Null();
-    }
+    static bool Write(JsonWriteContext& context, std::nullptr_t) noexcept;
 };
 
 template <>
 struct JsonSerializer<bool> {
-    static bool Write(JsonWriteContext& context, bool value) noexcept {
-        return context.Bool(value);
-    }
+    static bool Write(JsonWriteContext& context, bool value) noexcept;
 };
 
 template <std::signed_integral T>
@@ -370,22 +364,17 @@ struct JsonSerializer<T> {
 
 template <>
 struct JsonSerializer<Uri> {
-    static bool Write(JsonWriteContext& context, const Uri& uri) noexcept { return context.String(uri.AsString()); }
+    static bool Write(JsonWriteContext& context, const Uri& uri) noexcept;
 };
 
 template <>
 struct JsonDeserializer<Uri> {
-    static bool Read(const JsonValue& value, Uri& uri) noexcept {
-        std::string_view text;
-        return value.TryGetString(text) && Uri::TryParse(text, UriKind::RelativeOrAbsolute, uri);
-    }
+    static bool Read(const JsonValue& value, Uri& uri) noexcept;
 };
 
 template <>
 struct JsonSerializer<std::string_view> {
-    static bool Write(JsonWriteContext& context, std::string_view value) noexcept {
-        return context.String(value);
-    }
+    static bool Write(JsonWriteContext& context, std::string_view value) noexcept;
 };
 
 template <class Traits, class Allocator>
@@ -564,12 +553,10 @@ bool DeserializeJsonValue(const JsonValue& value, T& output) noexcept {
 /// Object 读取辅助器。Member 要求字段存在；OptionalMember 允许字段缺失或为 null。
 class JsonObjectReader {
 public:
-    explicit JsonObjectReader(JsonValue value) noexcept : _object(value) {}
+    explicit JsonObjectReader(JsonValue value) noexcept;
 
-    bool IsValid() const noexcept { return _object.IsObject(); }
-    bool Has(std::string_view name) const noexcept {
-        return IsValid() && _object.Has(name);
-    }
+    bool IsValid() const noexcept;
+    bool Has(std::string_view name) const noexcept;
 
     template <json_deserializable T>
     bool Member(std::string_view name, T& output) const noexcept {
@@ -611,10 +598,10 @@ private:
 
 class JsonArrayReader {
 public:
-    explicit JsonArrayReader(JsonValue value) noexcept : _array(value) {}
+    explicit JsonArrayReader(JsonValue value) noexcept;
 
-    bool IsValid() const noexcept { return _array.IsArray(); }
-    size_t Size() const noexcept { return IsValid() ? _array.Size() : 0; }
+    bool IsValid() const noexcept;
+    size_t Size() const noexcept;
 
     template <json_deserializable T>
     bool Element(size_t index, T& output) const noexcept {
@@ -655,25 +642,12 @@ bool DeserializeJsonObject(
 
 template <>
 struct JsonDeserializer<std::nullptr_t> {
-    static bool Read(const JsonValue& value, std::nullptr_t& output) noexcept {
-        if (!value.IsNull()) {
-            return false;
-        }
-        output = nullptr;
-        return true;
-    }
+    static bool Read(const JsonValue& value, std::nullptr_t& output) noexcept;
 };
 
 template <>
 struct JsonDeserializer<bool> {
-    static bool Read(const JsonValue& value, bool& output) noexcept {
-        bool decoded = false;
-        if (!value.TryGetBool(decoded)) {
-            return false;
-        }
-        output = decoded;
-        return true;
-    }
+    static bool Read(const JsonValue& value, bool& output) noexcept;
 };
 
 template <std::signed_integral T>

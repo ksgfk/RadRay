@@ -118,11 +118,8 @@ public:
     // Call once before transferring ownership to FrameScheduler.
     bool Initialize();
     // The processors are configured for this sample's fixed Scene; the borrow ends at ClearInput.
-    void SetInput(const Scene& scene) noexcept {
-        if (&scene != &_scene) RADRAY_ABORT("MeshDrawingFramePipeline: unexpected source scene");
-        _input = &scene;
-    }
-    void ClearInput() noexcept { _input = nullptr; }
+    void SetInput(const Scene& scene) noexcept;
+    void ClearInput() noexcept;
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override;
     void Wait(FrameSlot& slot) noexcept override;
     // Call after scheduler.WaitIdle(); the pipeline remains owned by the scheduler.

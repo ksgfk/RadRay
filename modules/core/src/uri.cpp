@@ -255,4 +255,73 @@ std::optional<std::filesystem::path> Uri::ToFilePath() const {
     native.make_preferred();
     return native;
 }
+
+bool Uri::IsAbsoluteUri() const noexcept {
+    return !Scheme().empty();
+}
+
+bool Uri::IsFile() const noexcept {
+    return Scheme() == "file";
+}
+
+std::string_view Uri::Scheme() const noexcept {
+    return View(_scheme);
+}
+
+std::string_view Uri::Authority() const noexcept {
+    return View(_authority);
+}
+
+std::string_view Uri::UserInfo() const noexcept {
+    return View(_userInfo);
+}
+
+std::string_view Uri::Host() const noexcept {
+    return View(_host);
+}
+
+std::optional<uint16_t> Uri::Port() const noexcept {
+    return _text.empty() ? std::nullopt : _port;
+}
+
+std::string_view Uri::AbsolutePath() const noexcept {
+    return View(_path);
+}
+
+std::string_view Uri::Query() const noexcept {
+    return View(_query);
+}
+
+std::string_view Uri::Fragment() const noexcept {
+    return View(_fragment);
+}
+
+std::string_view Uri::AsString() const noexcept {
+    return _text;
+}
+
+const string& Uri::ToString() const noexcept {
+    return _text;
+}
+
+bool Uri::operator==(const Uri& other) const noexcept {
+    return _text == other._text;
+}
+
+std::strong_ordering Uri::operator<=>(const Uri& other) const noexcept {
+    return _text <=> other._text;
+}
+
+std::string_view Uri::View(Range range) const noexcept {
+    return _text.empty() ? std::string_view{} : AsString().substr(range.Offset, range.Length);
+}
+
+std::string_view format_as(const Uri& value) noexcept {
+    return value.AsString();
+}
+
 }  // namespace radray
+
+size_t std::hash<radray::Uri>::operator()(const radray::Uri& uri) const noexcept {
+    return std::hash<std::string_view>{}(uri.AsString());
+}

@@ -89,4 +89,60 @@ std::string_view format_as(NativeWindowType v) noexcept {
     return EnumNameOr(v);
 }
 
+bool NativeWindow::IsVisible() const noexcept {
+    return true;
+}
+
+NativeDesktopCapabilities NativeWindow::GetDesktopCapabilities() const noexcept {
+    return {};
+}
+
+bool NativeWindow::SetCursor(NativeCursor) noexcept {
+    return false;
+}
+
+std::optional<Eigen::Vector2i> NativeWindow::GetDesktopMousePosition() const noexcept {
+    return {};
+}
+
+bool NativeWindow::SetDesktopMousePosition(Eigen::Vector2i) noexcept {
+    return false;
+}
+
+Nullable<NativeWindow*> NativeWindow::GetHoveredWindow() const noexcept {
+    return nullptr;
+}
+
+vector<NativeMonitor> NativeWindow::GetMonitors() const {
+    return {};
+}
+
+std::optional<string> NativeWindow::GetClipboardText() const {
+    return {};
+}
+
+bool NativeWindow::SetClipboardText(std::string_view) {
+    return false;
+}
+
+bool NativeWindow::SetImePosition(Eigen::Vector2i, int, bool) noexcept {
+    return false;
+}
+
+sigslot::signal<float, float>& NativeWindow::EventScroll() noexcept {
+    return _eventScroll;
+}
+
+sigslot::signal<>& NativeWindow::EventCaptureLost() noexcept {
+    return _eventCaptureLost;
+}
+
+sigslot::signal<>& NativeWindow::EventDisplayChanged() noexcept {
+    return _eventDisplayChanged;
+}
+
+sigslot::signal<>& NativeWindow::EventBeforeSurfaceChange() noexcept {
+    return _eventBeforeSurfaceChange;
+}
+
 }  // namespace radray

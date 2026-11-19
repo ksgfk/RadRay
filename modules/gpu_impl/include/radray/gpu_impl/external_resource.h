@@ -50,8 +50,8 @@ public:
     OwnedExternalHandle& operator=(const OwnedExternalHandle&) = delete;
     OwnedExternalHandle(OwnedExternalHandle&& other) noexcept;
     OwnedExternalHandle& operator=(OwnedExternalHandle&& other) noexcept;
-    BorrowedExternalHandle Borrow() const noexcept { return {_value}; }
-    bool IsValid() const noexcept { return _value != 0 && _value != std::numeric_limits<uintptr_t>::max(); }
+    BorrowedExternalHandle Borrow() const noexcept;
+    bool IsValid() const noexcept;
     void Reset() noexcept;
     ExternalResult<OwnedExternalHandle> Duplicate() const noexcept;
 

@@ -44,4 +44,28 @@ Hash128 HashData128(const void* data, size_t size) noexcept {
     return Hash128::FromWords(value.low64, value.high64);
 }
 
+size_t StringHash::operator()(const char* str) const noexcept {
+    return hash_type{}(str);
+}
+
+size_t StringHash::operator()(std::string_view str) const noexcept {
+    return hash_type{}(str);
+}
+
+bool StringEqual::operator()(std::string_view lhs, std::string_view rhs) const noexcept {
+    return lhs == rhs;
+}
+
+bool StringEqual::operator()(const string& lhs, std::string_view rhs) const noexcept {
+    return std::string_view{lhs} == rhs;
+}
+
+bool StringEqual::operator()(std::string_view lhs, const string& rhs) const noexcept {
+    return lhs == std::string_view{rhs};
+}
+
+bool StringEqual::operator()(const string& lhs, const string& rhs) const noexcept {
+    return lhs == rhs;
+}
+
 }  // namespace radray

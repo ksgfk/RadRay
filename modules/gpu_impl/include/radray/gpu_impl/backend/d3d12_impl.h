@@ -268,8 +268,8 @@ public:
 
     void Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept;
 
-    ID3D12DescriptorHeap* GetNative() const noexcept { return _heap->Get(); }
-    DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
+    ID3D12DescriptorHeap* GetNative() const noexcept;
+    DescriptorHeap* GetHeap() const noexcept;
 
 private:
     DeviceD3D12* _device;
@@ -297,7 +297,7 @@ public:
     vector<DXGIAdapterInfo> GetAdapters() const noexcept override;
 
     std::optional<uint32_t> SelectHighPerformanceAdapter() const noexcept override;
-    bool IsValidationEnabled() const noexcept override { return _validationEnabled; }
+    bool IsValidationEnabled() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -324,13 +324,13 @@ public:
 
     void Destroy() noexcept override;
 
-    RenderBackend GetBackend() noexcept override { return RenderBackend::D3D12; }
+    RenderBackend GetBackend() noexcept override;
 
     Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
 
     DeviceDetail GetDetail() const noexcept override;
 
-    const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
+    const RenderDeviceCapabilities& GetCapabilities() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     TextureSupport QueryTextureSupportWithNativeStatus(const TextureSupportQuery& query, HRESULT& status) const noexcept;
@@ -698,7 +698,7 @@ public:
 
     BufferDescriptor GetDesc() const noexcept override;
 
-    Device* GetDevice() const noexcept override { return _device; }
+    Device* GetDevice() const noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -760,7 +760,7 @@ public:
 
     TextureDescriptor GetDesc() const noexcept override;
 
-    Device* GetDevice() const noexcept override { return _device; }
+    Device* GetDevice() const noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -791,7 +791,7 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    TextureViewDescriptor GetDesc() const noexcept override { return _desc; }
+    TextureViewDescriptor GetDesc() const noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -818,7 +818,7 @@ public:
 
     void Destroy() noexcept override;
 
-    ShaderStages GetStages() const noexcept override { return _stages; }
+    ShaderStages GetStages() const noexcept override;
 
     D3D12_SHADER_BYTECODE ToByteCode() const noexcept;
 
@@ -837,7 +837,7 @@ struct ShaderParameterSetLayoutEntryD3D12 {
     uint32_t TableIndex{0};
     uint32_t TableOffset{0};
     uint32_t RootIndex{0};
-    bool IsRootDescriptor() const noexcept { return Placement == D3D12BufferPlacement::RootDescriptor; }
+    bool IsRootDescriptor() const noexcept;
 };
 struct DescriptorTableBindingD3D12 {
     D3D12_DESCRIPTOR_HEAP_TYPE HeapType{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};

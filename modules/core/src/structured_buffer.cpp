@@ -1,5 +1,7 @@
 #include <radray/structured_buffer.h>
 
+#include <utility>
+
 namespace radray {
 namespace {
 
@@ -452,5 +454,49 @@ std::span<const byte> StructuredBufferStorage::GetSpan(StructuredBufferId global
 
 template class BasicStructuredBufferView<StructuredBufferStorage>;
 template class BasicStructuredBufferView<const StructuredBufferStorage>;
+
+StructuredBufferVariable::StructuredBufferVariable(string name, StructuredBufferId typeId) : _name(std::move(name)), _typeId(typeId) {}
+
+std::string_view StructuredBufferVariable::GetName() const noexcept {
+    return _name;
+}
+
+StructuredBufferId StructuredBufferVariable::GetTypeId() const noexcept {
+    return _typeId;
+}
+
+size_t StructuredBufferVariable::GetOffset() const noexcept {
+    return _offset;
+}
+
+size_t StructuredBufferVariable::GetArraySize() const noexcept {
+    return _arraySize;
+}
+
+StructuredBufferId StructuredBufferVariable::GetGlobalId() const noexcept {
+    return _globalId;
+}
+
+StructuredBufferType::StructuredBufferType(std::string_view name, StructuredBufferId id) : _name(string{name}), _id(id) {}
+
+std::string_view StructuredBufferType::GetName() const noexcept {
+    return _name;
+}
+
+StructuredBufferId StructuredBufferType::GetId() const noexcept {
+    return _id;
+}
+
+size_t StructuredBufferType::GetSizeInBytes() const noexcept {
+    return _size;
+}
+
+std::span<const StructuredBufferVariable> StructuredBufferType::GetMembers() const noexcept {
+    return _members;
+}
+
+std::span<const byte> StructuredBufferStorage::GetData() const noexcept {
+    return _buffer;
+}
 
 }  // namespace radray

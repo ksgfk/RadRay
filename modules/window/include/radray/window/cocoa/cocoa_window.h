@@ -37,7 +37,7 @@ public:
 
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
-    NativeWindowType GetType() const noexcept override { return NativeWindowType::CocoaNSWindow; }
+    NativeWindowType GetType() const noexcept override;
 
     void Show() noexcept override;
     void Show(NativeWindowShowMode mode) noexcept override;

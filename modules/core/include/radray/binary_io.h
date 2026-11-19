@@ -28,9 +28,9 @@ public:
     void SizedBytes(std::span<const byte> value);
     void String(std::string_view value);
 
-    size_t GetSize() const noexcept { return _data.size(); }
-    bool IsEmpty() const noexcept { return _data.empty(); }
-    std::span<const byte> GetData() const noexcept { return _data; }
+    size_t GetSize() const noexcept;
+    bool IsEmpty() const noexcept;
+    std::span<const byte> GetData() const noexcept;
     vector<byte> TakeData() && noexcept;
 
 private:
@@ -52,8 +52,8 @@ public:
     bool SizedBytes(std::span<const byte>& value) noexcept;
     bool String(std::string_view& value) noexcept;
 
-    size_t Remaining() const noexcept { return _data.size() - _offset; }
-    bool AtEnd() const noexcept { return _offset == _data.size(); }
+    size_t Remaining() const noexcept;
+    bool AtEnd() const noexcept;
 
 private:
     std::span<const byte> _data;

@@ -630,4 +630,8 @@ bool IsDiagnosticHealthy(const shared_ptr<DiagnosticSession>& session) noexcept 
     return std::ranges::all_of(session->Dxgi, [](const auto& channel) { return channel->Healthy.load(); });
 }
 
+bool DiagnosticMessage::IsCollectionFailure() const noexcept {
+    return Failure != DiagnosticFailure::None;
+}
+
 }  // namespace radray::gpu::d3d12::detail

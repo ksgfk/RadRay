@@ -499,4 +499,8 @@ std::string_view format_as(ImageFormat val) noexcept {
     return EnumNameOr(val);
 }
 
+bool PixelCompareResult::IsMatch() const noexcept {
+    return MismatchCount == 0;
+}
+
 }  // namespace radray
