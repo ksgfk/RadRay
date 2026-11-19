@@ -14,6 +14,7 @@
 #include <radray/viewport.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>
+#include <radray/gpu/external_resource.h>
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/gpu_device.h>
 
@@ -36,11 +37,23 @@ public:
     gpu::BufferDescriptor Desc;
 };
 
-class FakePipeline final : public gpu::GraphicsPipelineState {
+class FakePipelineLayout final : public gpu::PipelineLayout {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
+    gpu::PipelineLayoutDescriptor GetDesc() const noexcept override { return {}; }
+};
+
+class FakePipeline final : public gpu::GraphicsPipelineState {
+public:
+    explicit FakePipeline(Nullable<gpu::PipelineLayout*> layout = nullptr) noexcept : Layout(layout) {}
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    Nullable<gpu::PipelineLayout*> GetLayout() const noexcept override { return Layout; }
+
+    Nullable<gpu::PipelineLayout*> Layout{nullptr};
 };
 
 class FakeMappedBuffer final : public FakeBuffer {
@@ -114,6 +127,12 @@ struct RecordedParameterBind {
     vector<gpu::ShaderParameterDynamicOffset> DynamicOffsets;
 };
 
+struct RecordedIndirectDraw {
+    gpu::Buffer* Buffer{nullptr};
+    uint64_t Offset{0};
+    uint32_t Count{0};
+};
+
 class RecordingEncoder final : public gpu::GraphicsCommandEncoder {
 public:
     bool IsValid() const noexcept override { return Valid; }
@@ -144,18 +163,29 @@ public:
     bool SetPushConstants(uint32_t, uint32_t, std::span<const byte> bytes) noexcept override {
         Order.emplace_back("push");
         Pushes.emplace_back(bytes.begin(), bytes.end());
+        if (FailPushConstantsOnCall != 0 && Pushes.size() == FailPushConstantsOnCall) return false;
         return !FailPushConstants;
     }
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override {
         Order.emplace_back("draw");
         Draws.push_back({indexCount, instanceCount, firstIndex, vertexOffset, firstInstance});
     }
-    void Draw(uint32_t, uint32_t, uint32_t, uint32_t) noexcept override {}
-    void DrawIndirect(gpu::Buffer*, uint64_t, uint32_t) noexcept override {}
-    void DrawIndexedIndirect(gpu::Buffer*, uint64_t, uint32_t) noexcept override {}
+    void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override {
+        Order.emplace_back("draw_non_indexed");
+        NonIndexedDraws.push_back({vertexCount, instanceCount, firstVertex, firstInstance});
+    }
+    void DrawIndirect(gpu::Buffer* buffer, uint64_t offset, uint32_t count) noexcept override {
+        Order.emplace_back("draw_indirect");
+        IndirectDraws.push_back({buffer, offset, count});
+    }
+    void DrawIndexedIndirect(gpu::Buffer* buffer, uint64_t offset, uint32_t count) noexcept override {
+        Order.emplace_back("draw_indexed_indirect");
+        IndexedIndirectDraws.push_back({buffer, offset, count});
+    }
 
     bool Valid{true};
     bool FailPushConstants{false};
+    uint32_t FailPushConstantsOnCall{0};
     vector<std::string_view> Order;
     vector<gpu::GraphicsPipelineState*> Pipelines;
     vector<vector<gpu::VertexBufferBinding>> VertexCalls;
@@ -164,6 +194,9 @@ public:
     vector<RecordedParameterBind> ParameterBinds;
     vector<vector<byte>> Pushes;
     vector<gpu::DrawIndexedIndirectArguments> Draws;
+    vector<gpu::DrawIndirectArguments> NonIndexedDraws;
+    vector<RecordedIndirectDraw> IndirectDraws;
+    vector<RecordedIndirectDraw> IndexedIndirectDraws;
 };
 
 class FakeCommandBuffer : public gpu::CommandBuffer {
@@ -182,6 +215,7 @@ public:
     void EndComputePass(unique_ptr<gpu::ComputeCommandEncoder>) noexcept override {}
     void CopyBufferToBuffer(gpu::Buffer*, uint64_t, gpu::Buffer*, uint64_t, uint64_t) noexcept override {}
     void CopyBufferToTexture(gpu::Texture*, gpu::SubresourceRange, gpu::Buffer*, uint64_t) noexcept override {}
+    bool CopyTextureToBufferRegion(const gpu::TextureToBufferCopyDescriptor&) noexcept override { return false; }
     bool CopyBufferToTextureRegion(const gpu::BufferToTextureCopyDescriptor&) noexcept override { return false; }
     void CopyTextureToBuffer(gpu::Buffer*, uint64_t, gpu::Texture*, gpu::SubresourceRange) noexcept override {}
     void CopyTextureToTexture(const gpu::TextureCopyDescriptor&) noexcept override {}
@@ -209,7 +243,10 @@ class FakeQueue final : public gpu::CommandQueue {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    void Submit(const gpu::CommandQueueSubmitDescriptor&) noexcept override {}
+    bool Submit(const gpu::CommandQueueSubmitDescriptor&) noexcept override { return OnSubmit ? OnSubmit() : true; }
+    uint32_t GetTimestampValidBits() const noexcept override { return TimestampBits; }
+    uint32_t TimestampBits{};
+    std::function<bool()> OnSubmit;
     void Wait() noexcept override {}
     gpu::QueueType GetQueueType() const noexcept override { return gpu::QueueType::Direct; }
     gpu::TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override { return {}; }
@@ -220,10 +257,12 @@ class FakeDevice : public gpu::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    gpu::RenderBackend GetBackend() noexcept override { return gpu::RenderBackend::D3D12; }
-    Nullable<gpu::ExternalResourceExtension*> GetExternalResourceExtension() noexcept override { return nullptr; }
+    bool IsDeviceLost() const noexcept override { return Lost; }
+    bool Lost{false};
+    gpu::GpuBackend GetBackend() noexcept override { return gpu::GpuBackend::D3D12; }
+    Nullable<unique_ptr<gpu::ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override { return nullptr; }
     gpu::DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
-    const gpu::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
+    const gpu::GpuDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
     gpu::TextureSupport QueryTextureSupport(const gpu::TextureSupportQuery&) const noexcept override {
         if (!EnableTextures) return {};
         return {.MaxResourceSize = std::numeric_limits<uint64_t>::max(), .MaxWidth = 16384, .MaxHeight = 16384, .MaxDepth = 1, .MaxArrayLayers = 2048, .MaxMipLevels = 15, .SampleCounts = gpu::SampleCount::X1, .Supported = true};
@@ -264,7 +303,7 @@ public:
     Nullable<gpu::Sampler*> GetOrCreateSampler(const gpu::SamplerDescriptor&) noexcept override { return nullptr; }
 
     FakeQueue Queue;
-    gpu::RenderDeviceCapabilities Capabilities{};
+    gpu::GpuDeviceCapabilities Capabilities{};
     std::function<void()> OnAllocatorReset;
     bool FailCommandBuffers{false};
     int32_t BuffersUntilFailure{-1};
@@ -284,8 +323,9 @@ public:
     void Prepare(FrameSlot& slot) noexcept override {
         if (OnPrepare) OnPrepare(slot);
     }
-    void Submit(FrameSlot& slot) noexcept override {
+    bool Submit(FrameSlot& slot) noexcept override {
         if (OnSubmit) OnSubmit(slot);
+        return SubmitResult;
     }
     void Record(FrameSlot& slot) noexcept override {
         if (OnRecord) OnRecord(slot);
@@ -293,8 +333,13 @@ public:
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
     }
+    void OnSlotCompleted(FrameSlot& slot) noexcept override {
+        if (OnCompleted) OnCompleted(slot);
+    }
+    std::function<void(FrameSlot&)> OnCompleted;
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }
 
+    bool SubmitResult{true};
     std::function<void(FrameSlot&)> OnExtract;
     std::function<void(FrameSlot&)> OnPrepare, OnSubmit;
     std::function<void(FrameSlot&)> OnRecord;

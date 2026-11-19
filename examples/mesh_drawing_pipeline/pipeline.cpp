@@ -356,18 +356,19 @@ void MeshDrawingFramePipeline::ExtractMeshPass(MeshPassId pass, FrameSlot& slot,
     RADRAY_INFO_LOG("步骤 6：Frame={} Slot={} MeshPass={}，{} 条单实例 Draw", slot.GetFrameId(), slot.GetIndex(), pass.Value, drawList.VisibleCommands.size());
 }
 
-void MeshDrawingFramePipeline::SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& command) noexcept {
+bool MeshDrawingFramePipeline::SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& command) noexcept {
     auto& resources = *_frames[slot.GetIndex()];
     if (resources.CompletionValue >= std::numeric_limits<uint64_t>::max() - 1) RADRAY_ABORT("MeshDrawingFramePipeline: fence values exhausted");
     array submitted{&command};
     array fences{resources.CompletionFence.Get()};
     array values{resources.CompletionValue + 1};
-    slot.GetQueue().Submit({.CmdBuffers = submitted, .SignalFences = fences, .SignalValues = values});
+    if (!slot.GetQueue().Submit({.CmdBuffers = submitted, .SignalFences = fences, .SignalValues = values})) return false;
     resources.CompletionValue = values[0];
     _geometrySubmitted = true;
     _gpu.PendingVertexBytes.clear();
     _gpu.PendingIndexBytes.clear();
     RADRAY_INFO_LOG("步骤 8：提交 Frame={} Slot={} Fence={}，复用该槽时才等待", slot.GetFrameId(), slot.GetIndex(), resources.CompletionValue);
+    return true;
 }
 
 void MeshDrawingFramePipeline::Wait(FrameSlot& slot) noexcept {

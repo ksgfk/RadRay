@@ -56,7 +56,15 @@ public:
     friend bool operator==(const MaterialShaderProgram&, const MaterialShaderProgram&) = default;
 };
 
-using MaterialParameterValue = std::variant<float, array<float, 4>, Nullable<gpu::TextureView*>, Nullable<gpu::Sampler*>>;
+// array<float, 16> 在 CPU 侧统一按列主序（Column-Major，m[column * 4 + row]，与 Eigen::Matrix4f::data() 一致）存储；
+// 写入常量块时按着色器反射的 RowMajor 自动适配行列主序。
+using MaterialParameterValue = std::variant<
+    float, int32_t, uint32_t,
+    array<float, 2>, array<float, 3>, array<float, 4>,
+    array<int32_t, 4>, array<uint32_t, 4>,
+    array<float, 16>,
+    Nullable<gpu::TextureView*>,
+    Nullable<gpu::Sampler*>>;
 
 struct MaterialParameter {
     string Name;

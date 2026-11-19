@@ -1,5 +1,8 @@
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/shader/shader_reflector.h>
+#include <radray/shader/client.h>
+
+#include "compiler_test_utils.h"
 
 #include <algorithm>
 #include <cstring>
@@ -271,6 +274,239 @@ TEST(ShaderReflector, TargetOnlyPushConstantRequiresExplicitPolicy) {
     EXPECT_TRUE(allowed.Value->SharedLayout.PushConstants[0].Push.Vulkan);
     EXPECT_TRUE(allowed.Value->Variants[0].DXIL->ActivePushConstants.empty());
     EXPECT_EQ(allowed.Value->Variants[0].SPIRV->ActivePushConstants.size(), 1u);
+}
+
+struct CompiledDualVariant {
+    vector<byte> DxBytes;
+    vector<byte> VkBytes;
+    std::optional<DxilShaderArtifactView> DXIL;
+    std::optional<SpirvShaderArtifactView> SPIRV;
+
+    ShaderVariantArtifacts View(string name, bool includeDxil = true, bool includeSpirv = true) const {
+        return {std::move(name),
+                includeDxil && DXIL ? &*DXIL : Nullable<const DxilShaderArtifactView*>{nullptr},
+                includeSpirv && SPIRV ? &*SPIRV : Nullable<const SpirvShaderArtifactView*>{nullptr}};
+    }
+};
+
+std::optional<CompiledDualVariant> CompileDual(const Client& client, std::string_view sourceName, std::string_view source, vector<Define> defines = {}) {
+    auto compiled = test::DiscoverAndCompile(client, {.SourceName = sourceName, .Source = test::ToBytes(source), .Targets = ShaderTargetMask::All, .Defines = std::move(defines)});
+    EXPECT_TRUE(compiled.Succeeded()) << compiled.Diagnostics;
+    if (!compiled.Succeeded()) return std::nullopt;
+    CompiledDualVariant out;
+    for (const auto& lane : *compiled.Value) {
+        WireMetadataEnvelope envelope{};
+        if (lane.Metadata.size() >= sizeof(envelope)) DecodeShaderMetadataEnvelope(std::span<const byte>{lane.Metadata}.first(152), envelope);
+        const ShaderArtifactDecodeOptions opts{lane.Target, envelope.GpuArtifact, kShaderToolchainIdentity};
+        if (lane.Target == ShaderTarget::DXIL) {
+            out.DxBytes = lane.Metadata;
+            auto decoded = DecodeDxilShaderArtifact(out.DxBytes, opts);
+            EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+            if (!decoded.Succeeded()) return std::nullopt;
+            out.DXIL = std::move(*decoded.Value);
+        } else {
+            out.VkBytes = lane.Metadata;
+            auto decoded = DecodeSpirvShaderArtifact(out.VkBytes, opts);
+            EXPECT_TRUE(decoded.Succeeded()) << decoded.Diagnostics;
+            if (!decoded.Succeeded()) return std::nullopt;
+            out.SPIRV = std::move(*decoded.Value);
+        }
+    }
+    return out;
+}
+
+TEST(ShaderReflector, PromotesDxilCBufferToRootConstantsWithExactRootTypeSizeAndFixedArrays) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    constexpr std::string_view kTwoDwordsSource = R"hlsl(
+#include <core/platform.hlsli>
+struct TwoDwords {
+    uint First;
+    uint Second;
+};
+VK_PUSH_CONSTANT ConstantBuffer<TwoDwords> DrawPush : register(b0, space2);
+VK_BINDING(0, 0) RWStructuredBuffer<uint> OutBuf : register(u0, space0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain() {
+    OutBuf[0] = DrawPush.First + DrawPush.Second;
+}
+)hlsl";
+    auto two = CompileDual(client, "reflector/promote_two_dwords.hlsl", kTwoDwordsSource);
+    ASSERT_TRUE(two);
+    ShaderReflectionPolicy twoPolicy;
+    twoPolicy.PushConstants.push_back({.Name = "DrawPush", .PushId = 7, .PromoteDxilCBufferToRootConstants = true});
+    const auto twoResult = ReflectShaderVariant(two->View("TwoDwords"), twoPolicy);
+    ASSERT_TRUE(twoResult.Succeeded()) << twoResult.Diagnostics;
+    ASSERT_EQ(twoResult.Value->SharedLayout.PushConstants.size(), 1u);
+    const auto& twoPush = twoResult.Value->SharedLayout.PushConstants[0];
+    EXPECT_EQ(twoPush.Name, "DrawPush");
+    EXPECT_EQ(twoPush.Push.PushId, 7u);
+    EXPECT_EQ(twoPush.Push.Size, 8u);
+    ASSERT_TRUE(twoPush.Push.D3D12);
+    EXPECT_EQ(twoPush.Push.D3D12->Register, 0u);
+    EXPECT_EQ(twoPush.Push.D3D12->Space, 2u);
+    EXPECT_TRUE(twoPush.Push.Vulkan);
+    ASSERT_TRUE(twoPush.TypeIndex);
+    for (const auto& group : twoResult.Value->SharedLayout.Groups) {
+        for (const auto& binding : group.Bindings) EXPECT_NE(binding.Name, "DrawPush");
+    }
+    ASSERT_EQ(twoResult.Value->Variants.size(), 1u);
+    EXPECT_EQ(twoResult.Value->Variants[0].DXIL->ActivePushConstants, (vector<uint32_t>{7u}));
+    EXPECT_EQ(twoResult.Value->Variants[0].SPIRV->ActivePushConstants, (vector<uint32_t>{7u}));
+    EXPECT_EQ(twoResult.Value->Variants[0].DXIL->ActiveBindings.size(), 1u);
+
+    constexpr std::string_view kArraySource = R"hlsl(
+#include <core/platform.hlsli>
+struct PushArray {
+    uint4 Raw[2];
+};
+VK_PUSH_CONSTANT ConstantBuffer<PushArray> ArrayPush : register(b1, space3);
+VK_BINDING(0, 0) RWStructuredBuffer<uint4> OutBuf : register(u0, space0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain() {
+    OutBuf[0] = ArrayPush.Raw[0] + ArrayPush.Raw[1];
+}
+)hlsl";
+    auto arr = CompileDual(client, "reflector/promote_array.hlsl", kArraySource);
+    ASSERT_TRUE(arr);
+    ShaderReflectionPolicy arrPolicy;
+    arrPolicy.PushConstants.push_back({.Name = "ArrayPush", .PushId = 9, .PromoteDxilCBufferToRootConstants = true});
+    const auto arrResult = ReflectShaderVariant(arr->View("Array"), arrPolicy);
+    ASSERT_TRUE(arrResult.Succeeded()) << arrResult.Diagnostics;
+    ASSERT_EQ(arrResult.Value->SharedLayout.PushConstants.size(), 1u);
+    const auto& arrPush = arrResult.Value->SharedLayout.PushConstants[0];
+    EXPECT_EQ(arrPush.Name, "ArrayPush");
+    EXPECT_EQ(arrPush.Push.PushId, 9u);
+    EXPECT_EQ(arrPush.Push.Size, 32u);
+    ASSERT_TRUE(arrPush.Push.D3D12);
+    EXPECT_EQ(arrPush.Push.D3D12->Register, 1u);
+    EXPECT_EQ(arrPush.Push.D3D12->Space, 3u);
+    EXPECT_TRUE(arrPush.Push.Vulkan);
+    EXPECT_EQ(arrResult.Value->Variants[0].DXIL->ActivePushConstants, (vector<uint32_t>{9u}));
+    EXPECT_EQ(arrResult.Value->Variants[0].SPIRV->ActivePushConstants, (vector<uint32_t>{9u}));
+    EXPECT_EQ(arrResult.Value->Variants[0].DXIL->ActiveBindings.size(), 1u);
+}
+
+TEST(ShaderReflector, AllowDxilOnlyCoversDxilOnlySpirvOnlyAndDualLaneAndRejectsDuplicates) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    constexpr std::string_view kSource = R"hlsl(
+#include <core/platform.hlsli>
+#if !defined(__spirv__)
+struct HelperPush {
+    uint BaseInstance;
+    uint DrawId;
+};
+ConstantBuffer<HelperPush> DxHelper : register(b2, space0);
+#endif
+VK_BINDING(0, 0) RWStructuredBuffer<uint> OutBuf : register(u0, space0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain() {
+#if !defined(__spirv__)
+    OutBuf[0] = DxHelper.BaseInstance + DxHelper.DrawId;
+#else
+    OutBuf[0] = 1u;
+#endif
+}
+)hlsl";
+    auto compiled = CompileDual(client, "reflector/dxil_only_push.hlsl", kSource);
+    ASSERT_TRUE(compiled);
+    ShaderReflectionPolicy policy;
+    policy.AllowTargetOnlyBindings = false;
+    policy.PushConstants.push_back({.Name = "DxHelper", .PushId = 3, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+
+    const auto dxOnly = ReflectShaderVariant(compiled->View("Main", true, false), policy);
+    ASSERT_TRUE(dxOnly.Succeeded()) << dxOnly.Diagnostics;
+    ASSERT_EQ(dxOnly.Value->SharedLayout.PushConstants.size(), 1u);
+    EXPECT_EQ(dxOnly.Value->SharedLayout.PushConstants[0].Push.PushId, 3u);
+    EXPECT_TRUE(dxOnly.Value->SharedLayout.PushConstants[0].Push.D3D12);
+    EXPECT_FALSE(dxOnly.Value->SharedLayout.PushConstants[0].Push.Vulkan);
+
+    const auto vkOnly = ReflectShaderVariant(compiled->View("Main", false, true), policy);
+    ASSERT_TRUE(vkOnly.Succeeded()) << vkOnly.Diagnostics;
+    EXPECT_TRUE(vkOnly.Value->SharedLayout.PushConstants.empty());
+
+    const auto dual = ReflectShaderVariant(compiled->View("Main", true, true), policy);
+    ASSERT_TRUE(dual.Succeeded()) << dual.Diagnostics;
+    ASSERT_EQ(dual.Value->SharedLayout.PushConstants.size(), 1u);
+    EXPECT_TRUE(dual.Value->SharedLayout.PushConstants[0].Push.D3D12);
+    EXPECT_FALSE(dual.Value->SharedLayout.PushConstants[0].Push.Vulkan);
+    EXPECT_EQ(dual.Value->Variants[0].DXIL->ActivePushConstants, (vector<uint32_t>{3u}));
+    EXPECT_TRUE(dual.Value->Variants[0].SPIRV->ActivePushConstants.empty());
+
+    auto dupName = policy;
+    dupName.PushConstants.push_back({.Name = "DxHelper", .PushId = 4, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+    EXPECT_FALSE(ReflectShaderVariant(compiled->View("Main", false, true), dupName).Succeeded());
+
+    auto dupId = policy;
+    dupId.PushConstants.push_back({.Name = "OtherDxHelper", .PushId = 3, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+    EXPECT_FALSE(ReflectShaderVariant(compiled->View("Main", false, true), dupId).Succeeded());
+
+    auto unknownOnDxil = policy;
+    unknownOnDxil.PushConstants.push_back({.Name = "MissingDxHelper", .PushId = 8, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+    EXPECT_FALSE(ReflectShaderVariant(compiled->View("Main", true, true), unknownOnDxil).Succeeded());
+    EXPECT_FALSE(ReflectShaderVariant(compiled->View("Main", true, false), unknownOnDxil).Succeeded());
+}
+
+TEST(ShaderReflector, AllowDxilOnlyMergesVulkanMappingAcrossVariantsAndDropsItWhenAbsent) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    constexpr std::string_view kSource = R"hlsl(
+#include <core/platform.hlsli>
+struct CommonData {
+    uint Value;
+};
+#if !defined(__spirv__) || defined(USE_VK_PUSH)
+VK_PUSH_CONSTANT ConstantBuffer<CommonData> CommonPush : register(b0, space1);
+#endif
+VK_BINDING(0, 0) RWStructuredBuffer<uint> OutBuf : register(u0, space0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain() {
+#if !defined(__spirv__) || defined(USE_VK_PUSH)
+    OutBuf[0] = CommonPush.Value;
+#else
+    OutBuf[0] = 0u;
+#endif
+}
+)hlsl";
+    auto variantA = CompileDual(client, "reflector/common_push.hlsl", kSource);
+    auto variantB = CompileDual(client, "reflector/common_push.hlsl", kSource, {{"USE_VK_PUSH", "1"}});
+    ASSERT_TRUE(variantA && variantB);
+
+    ShaderReflectionPolicy policy;
+    policy.AllowTargetOnlyBindings = false;
+    policy.PushConstants.push_back({.Name = "CommonPush", .PushId = 5, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+
+    const array both{variantA->View("A"), variantB->View("B")};
+    const auto merged = ReflectShaderFamily(both, policy);
+    ASSERT_TRUE(merged.Succeeded()) << merged.Diagnostics;
+    ASSERT_EQ(merged.Value->SharedLayout.PushConstants.size(), 1u);
+    const auto& sharedPush = merged.Value->SharedLayout.PushConstants[0];
+    EXPECT_EQ(sharedPush.Name, "CommonPush");
+    EXPECT_EQ(sharedPush.Push.PushId, 5u);
+    EXPECT_TRUE(sharedPush.Push.D3D12.has_value());
+    EXPECT_TRUE(sharedPush.Push.Vulkan.has_value());
+    ASSERT_EQ(merged.Value->Variants.size(), 2u);
+    EXPECT_EQ(merged.Value->Variants[0].Name, "A");
+    EXPECT_EQ(merged.Value->Variants[0].DXIL->ActivePushConstants, (vector<uint32_t>{5u}));
+    EXPECT_TRUE(merged.Value->Variants[0].SPIRV->ActivePushConstants.empty());
+    EXPECT_EQ(merged.Value->Variants[1].Name, "B");
+    EXPECT_EQ(merged.Value->Variants[1].DXIL->ActivePushConstants, (vector<uint32_t>{5u}));
+    EXPECT_EQ(merged.Value->Variants[1].SPIRV->ActivePushConstants, (vector<uint32_t>{5u}));
+
+    const auto onlyA = ReflectShaderVariant(variantA->View("A"), policy);
+    ASSERT_TRUE(onlyA.Succeeded()) << onlyA.Diagnostics;
+    ASSERT_EQ(onlyA.Value->SharedLayout.PushConstants.size(), 1u);
+    EXPECT_TRUE(onlyA.Value->SharedLayout.PushConstants[0].Push.D3D12.has_value());
+    EXPECT_FALSE(onlyA.Value->SharedLayout.PushConstants[0].Push.Vulkan.has_value());
 }
 }  // namespace
 }  // namespace radray::shader

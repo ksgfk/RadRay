@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 
 namespace radray::gpu {
-TEST(GpuContract, DescriptorsResolveRangesWithoutImplementation) {
+TEST(GpuContract, DescriptorsResolveRanges) {
     TextureDescriptor texture{};
     texture.Dim = TextureDimension::Dim2DArray;
     texture.Format = TextureFormat::RGBA8_UNORM;

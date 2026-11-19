@@ -45,6 +45,7 @@ public:
     // 只能在包含这些页的命令正常提交后调用。
     void CommitSubmittedStates() noexcept;
     uint64_t GetCapacity() const noexcept;
+    gpu::Device& GetDevice() const noexcept;
 
 private:
     struct Page {

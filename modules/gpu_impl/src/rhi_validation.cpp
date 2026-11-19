@@ -1,10 +1,11 @@
 #include "rhi_validation.h"
+#include <radray/utility.h>
 #include <radray/gpu_impl/validation.h>
 
 #include <radray/logger.h>
 
 #include <limits>
-#include <radray/gpu_impl/external_resource.h>
+#include <radray/gpu/external_resource.h>
 
 #include <algorithm>
 #include <bit>
@@ -29,9 +30,9 @@ struct ObjectRecord;
 struct ValidationContext {
     shared_ptr<Device> NativeDevice;
     Nullable<Device*> Owner{nullptr};
-    RhiValidationOptions Options;
+    GpuValidationOptions Options;
     mutable std::mutex Mutex;
-    unordered_map<const RenderBase*, ObjectRecord*> Objects;
+    unordered_map<const GpuObject*, ObjectRecord*> Objects;
     size_t LiveOwned{0};
 
     bool Reject(std::string_view operation, std::string_view reason) const noexcept {
@@ -48,7 +49,7 @@ struct ValidationContext {
         RADRAY_ABORT("RHI validation: {}: {}", operation, reason);
     }
 
-    Nullable<ObjectRecord*> Find(const RenderBase* object) const noexcept {
+    Nullable<ObjectRecord*> Find(const GpuObject* object) const noexcept {
         std::lock_guard lock{Mutex};
         const auto found = Objects.find(object);
         return found == Objects.end() ? Nullable<ObjectRecord*>{nullptr} : found->second;
@@ -125,8 +126,8 @@ bool ValidateLayoutLimitsVulkan(const ValidationContext& context, const vulkan::
 
 struct ObjectRecord {
     shared_ptr<ValidationContext> Context;
-    RenderBase* Native;
-    RenderBase* Public;
+    GpuObject* Native;
+    GpuObject* Public;
     bool Owned;
     bool Live{true};
     bool Open{false};
@@ -134,7 +135,7 @@ struct ObjectRecord {
     vector<ObjectRecord*> Dependencies;
     string Name;
 
-    ObjectRecord(shared_ptr<ValidationContext> context, RenderBase* native, RenderBase* object, bool owned)
+    ObjectRecord(shared_ptr<ValidationContext> context, GpuObject* native, GpuObject* object, bool owned)
         : Context(std::move(context)), Native(native), Public(object), Owned(owned) {
         std::lock_guard lock{Context->Mutex};
         Context->Objects.emplace(Public, this);
@@ -473,18 +474,18 @@ public:
             } else if (kind == BindingKind::CBuffer) {
                 const auto alignment = std::max(uint64_t{1}, limits.CBufferOffsetAlignment);
                 if (range.Offset % alignment || (limits.MaxUniformBufferRange && size > limits.MaxUniformBufferRange)) return Context->Reject(operation, "constant buffer range or alignment is invalid");
-            } else if (Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
+            } else if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
                 if (range.Offset % std::max(uint64_t{1}, limits.StorageBufferOffsetAlignment) || (limits.MaxStorageBufferRange && size > limits.MaxStorageBufferRange))
                     return Context->Reject(operation, "storage buffer range or alignment is invalid");
             }
-            if (texel && (!ValidEnum(format) || format == TextureFormat::UNKNOWN || IsDepthStencilFormat(format) || range.Offset % GetTextureFormatBytesPerPixel(format) || size % GetTextureFormatBytesPerPixel(format)))
+            if (texel && (!ValidEnum(format) || format == TextureFormat::UNKNOWN || IsDepthStencilFormat(format) || IsBlockCompressedFormat(format) || range.Offset % GetTextureFormatBytesPerPixel(format) || size % GetTextureFormatBytesPerPixel(format)))
                 return Context->Reject(operation, "texel buffer format or range is invalid");
             if ((kind == BindingKind::StructuredBuffer || kind == BindingKind::RWStructuredBuffer) && (!stride || size % stride || range.Offset % stride))
                 return Context->Reject(operation, "structured buffer stride or range is invalid");
             if ((kind == BindingKind::RawBuffer || kind == BindingKind::RWRawBuffer) && (stride || range.Offset % 4 || size % 4))
                 return Context->Reject(operation, "raw buffers require zero stride and a four-byte aligned range");
 #ifdef RADRAY_ENABLE_D3D12
-            if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) {
+            if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) {
                 if (stride > D3D12_REQ_MULTI_ELEMENT_STRUCTURE_SIZE_IN_BYTES)
                     return Context->Reject(operation, "structured buffer stride exceeds the D3D12 limit");
                 if (texel) {
@@ -573,6 +574,12 @@ public:
     }
 };
 
+class PipelineCacheValidation final : public ValidatedObject<PipelineCache> {
+public:
+    using ValidatedObject::ValidatedObject;
+    vector<byte> GetData() const noexcept override { return Ready("GetData") ? Real()->GetData() : vector<byte>{}; }
+};
+
 class GraphicsPipelineValidation final : public ValidatedObject<GraphicsPipelineState> {
 public:
     GraphicsPipelineValidation(shared_ptr<ValidationContext> context, unique_ptr<GraphicsPipelineState> native, PipelineLayoutValidation* layout, const GraphicsPipelineStateDescriptor& desc)
@@ -593,6 +600,7 @@ public:
     PrimitiveState Primitive;
     bool WritesDepth{false}, WritesStencil{false};
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
+    Nullable<PipelineLayout*> GetLayout() const noexcept override { return Ready("GetLayout") ? Layout : nullptr; }
 };
 
 class ComputePipelineValidation final : public ValidatedObject<ComputePipelineState> {
@@ -601,6 +609,7 @@ public:
         : ValidatedObject(std::move(context), std::move(native)), Layout(layout) { AddDependency(layout); }
     PipelineLayoutValidation* Layout;
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
+    Nullable<PipelineLayout*> GetLayout() const noexcept override { return Ready("GetLayout") ? Layout : nullptr; }
 };
 
 class CommandBufferValidation;
@@ -646,6 +655,8 @@ public:
     void ResetLogical() noexcept {
         for (auto* reference : EpochReferences) RemoveDependency(reference);
         EpochReferences.clear();
+        Active = nullptr;
+        Open = false;
         State = RecordingState::Initial;
         DebugDepth = 0;
     }
@@ -664,24 +675,33 @@ public:
             Context->Reject("Begin", "command must be new or reset by its allocator");
             return;
         }
-        const bool d3d12 = Context->NativeDevice->GetBackend() == RenderBackend::D3D12;
+        const bool d3d12 = Context->NativeDevice->GetBackend() == GpuBackend::D3D12;
         if (d3d12 && Allocator->RecordingCommand) {
             Context->Reject("Begin", "D3D12 allocator already has an open recording");
             return;
         }
+        if (Context->NativeDevice->IsDeviceLost()) return;
         Real()->Begin();
+        if (Context->NativeDevice->IsDeviceLost()) return;
         if (d3d12) Allocator->RecordingCommand = this;
         State = RecordingState::Recording;
         Open = true;
     }
     void End() noexcept override {
+        if (Context->NativeDevice->IsDeviceLost() && !Active) {
+            if (Allocator->RecordingCommand.Get() == this) Allocator->RecordingCommand = nullptr;
+            State = RecordingState::Executable;
+            Open = false;
+            DebugDepth = 0;
+            return;
+        }
         if (!Recording("End")) return;
         if (DebugDepth) {
             Context->Reject("End", "debug groups are unbalanced");
             return;
         }
         Real()->End();
-        if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) Allocator->RecordingCommand = nullptr;
+        if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) Allocator->RecordingCommand = nullptr;
         State = RecordingState::Executable;
         Open = false;
     }
@@ -707,6 +727,7 @@ public:
     void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept override;
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
     void CopyBufferToTexture(Texture* dst, SubresourceRange range, Buffer* src, uint64_t offset) noexcept override;
+    bool CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept override;
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
     void CopyTextureToBuffer(Buffer* dst, uint64_t offset, Texture* src, SubresourceRange range) noexcept override;
     void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept override;
@@ -714,6 +735,7 @@ public:
     void ResetQueryPool(QueryPool* pool, uint32_t first, uint32_t count) noexcept override;
     void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override;
     void ResolveQueryData(const QueryResolveDescriptor& desc) noexcept override;
+    bool ValidateTransferQueue(const TextureDescriptor& texture, const TextureRegion2D& image, uint64_t bufferOffset, std::string_view operation) const noexcept;
     bool ValidateTextureBufferCopy(Texture* texture, SubresourceRange range, Buffer* buffer, uint64_t offset, bool toTexture, std::string_view operation) const noexcept;
     bool ValidateQueryQueue(std::string_view operation, std::optional<QueryPipelineStage> stage = std::nullopt) const noexcept;
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
@@ -722,11 +744,12 @@ public:
 void CommandAllocatorValidation::Reset() noexcept {
     if (!Ready("Reset")) return;
     for (auto* child : Children)
-        if (child->State == CommandBufferValidation::RecordingState::Recording) {
+        if (child->Active || (child->State == CommandBufferValidation::RecordingState::Recording && !Context->NativeDevice->IsDeviceLost())) {
             Context->Reject("Reset", "allocator has an open recording");
             return;
         }
     Real()->Reset();
+    RecordingCommand = nullptr;
     for (auto* child : Children) child->ResetLogical();
 }
 
@@ -828,7 +851,7 @@ public:
         for (const auto& group : Layout.Get()->Groups) {
             auto* layout = static_cast<BindingGroupLayoutValidation*>(group.Layout);
             if (layout->Bindings.empty() ||
-                (this->Context->NativeDevice->GetBackend() == RenderBackend::D3D12 &&
+                (this->Context->NativeDevice->GetBackend() == GpuBackend::D3D12 &&
                  std::none_of(layout->Bindings.begin(), layout->Bindings.end(), [](const auto& b) { return !b.Immutable; }))) continue;
             const auto found = BoundSets.find(group.GroupSlot);
             if (found == BoundSets.end() || !this->Context->Find(found->second) || !found->second->Ready(operation))
@@ -861,7 +884,7 @@ public:
     std::optional<IndexBufferView> IndexBuffer;
     void SetViewport(Viewport viewport) noexcept override {
         if (!Active("SetViewport")) return;
-        if (!std::isfinite(viewport.X) || !std::isfinite(viewport.Y) || !std::isfinite(viewport.Width) || !std::isfinite(viewport.Height) || !std::isfinite(viewport.MinDepth) || !std::isfinite(viewport.MaxDepth) || viewport.Width <= 0 || viewport.Height == 0 || (viewport.Height < 0 && Context->NativeDevice->GetBackend() != RenderBackend::Vulkan) || viewport.MinDepth < 0 || viewport.MaxDepth > 1 || viewport.MinDepth > viewport.MaxDepth) {
+        if (!std::isfinite(viewport.X) || !std::isfinite(viewport.Y) || !std::isfinite(viewport.Width) || !std::isfinite(viewport.Height) || !std::isfinite(viewport.MinDepth) || !std::isfinite(viewport.MaxDepth) || viewport.Width <= 0 || viewport.Height == 0 || (viewport.Height < 0 && Context->NativeDevice->GetBackend() != GpuBackend::Vulkan) || viewport.MinDepth < 0 || viewport.MaxDepth > 1 || viewport.MinDepth > viewport.MaxDepth) {
             Context->Reject("SetViewport", "viewport bounds or depth range is invalid");
             return;
         }
@@ -1177,7 +1200,7 @@ void CommandBufferValidation::ResourceBarrier(std::span<const ResourceBarrierDes
             return;
         }
 #ifdef RADRAY_ENABLE_VULKAN
-        if (Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
+        if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
             const auto flags = static_cast<vulkan::CommandBufferVulkan*>(Real())->_cmdPool->_queue->_queueFlags;
             const bool supported = std::visit([&](const auto& value) {
                 using V = std::decay_t<decltype(value)>;
@@ -1204,7 +1227,7 @@ void CommandBufferValidation::ResourceBarrier(std::span<const ResourceBarrierDes
         }
 #endif
 #ifdef RADRAY_ENABLE_D3D12
-        if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) {
+        if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) {
             const auto type = static_cast<d3d12::CmdListD3D12*>(Real())->_type;
             const bool supported = std::visit([&](const auto& value) {
                 using V = std::decay_t<decltype(value)>;
@@ -1255,6 +1278,29 @@ void CommandBufferValidation::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset
     Real()->CopyBufferToBuffer(destination.Get(), dstOffset, source.Get(), srcOffset, size);
 }
 
+bool CommandBufferValidation::ValidateTransferQueue(const TextureDescriptor& texture, const TextureRegion2D& image, uint64_t bufferOffset, std::string_view operation) const noexcept {
+#ifdef RADRAY_ENABLE_VULKAN
+    if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
+        const auto* queue = static_cast<vulkan::CommandBufferVulkan*>(Real())->_cmdPool->_queue;
+        if (!vulkan::IsBufferImageTransferSupported(texture, image, bufferOffset, queue->_queueFlags, queue->_minImageTransferGranularity))
+            return Context->Reject(operation, "buffer offset or image region violates queue family transfer limits");
+    }
+#endif
+    return true;
+}
+
+bool CommandBufferValidation::CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept {
+    if (!Recording("CopyTextureToBufferRegion")) return false;
+    const auto source = Lookup(*Context, desc.Source, "CopyTextureToBufferRegion");
+    const auto destination = Lookup(*Context, desc.Destination, "CopyTextureToBufferRegion");
+    if (!source || !destination) return false;
+    const auto texture = desc.Source->GetDesc();
+    const auto [valid, reason] = ValidateTextureReadbackRegion(texture, desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetDetail());
+    if (!valid) return Context->Reject("CopyTextureToBufferRegion", reason);
+    if (!ValidateTransferQueue(texture, desc.Region.Source, desc.Region.DestinationOffset, "CopyTextureToBufferRegion")) return false;
+    return Real()->CopyTextureToBufferRegion({source.Get(), destination.Get(), desc.Region});
+}
+
 bool CommandBufferValidation::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
     if (!Recording("CopyBufferToTextureRegion")) return false;
     const auto source = Lookup(*Context, desc.Source, "CopyBufferToTextureRegion");
@@ -1262,6 +1308,7 @@ bool CommandBufferValidation::CopyBufferToTextureRegion(const BufferToTextureCop
     if (!source || !destination) return false;
     const auto [valid, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetDetail());
     if (!valid) return Context->Reject("CopyBufferToTextureRegion", reason);
+    if (!ValidateTransferQueue(desc.Destination->GetDesc(), desc.Region.Destination, desc.Region.SourceOffset, "CopyBufferToTextureRegion")) return false;
     return Real()->CopyBufferToTextureRegion({source.Get(), destination.Get(), desc.Region});
 }
 
@@ -1272,7 +1319,7 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
     if (range.ArrayLayerCount == SubresourceRange::All || range.MipLevelCount == SubresourceRange::All || !NormalizeSubresourceRange(t, range) || !t.Usage.HasFlag(toTexture ? TextureUse::CopyDestination : TextureUse::CopySource) || !b.Usage.HasFlag(toTexture ? BufferUse::CopySource : BufferUse::CopyDestination) || t.SampleCount != 1) return Context->Reject(operation, "texture-buffer copy usage or explicit subresources are invalid");
     range = ResolveSubresourceRange(t, range);
 #ifdef RADRAY_ENABLE_D3D12
-    if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) {
+    if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) {
         if (!std::has_single_bit(range.Aspects.value())) return Context->Reject(operation, "D3D12 buffer-texture copies require exactly one aspect");
         if (offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) return Context->Reject(operation, "texture-buffer copy offset is not aligned");
         const auto* nativeTexture = static_cast<d3d12::TextureD3D12*>(Lookup(*Context, texture, operation).Get());
@@ -1296,11 +1343,11 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
     const auto detail = Context->NativeDevice->GetDetail();
     auto placement = std::max<uint64_t>(1, detail.TextureDataPlacementAlignment);
     auto pitch = std::max<uint64_t>(1, detail.TextureDataPitchAlignment);
-    auto bpp = GetTextureFormatBytesPerPixel(t.Format);
+    auto block = GetTextureFormatBlockInfo(t.Format);
 #ifdef RADRAY_ENABLE_VULKAN
-    if (Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
-        bpp = vulkan::GetTextureCopyBytesPerPixelVulkan(t.Format, range.Aspects);
-        if (!bpp) return Context->Reject(operation, "Vulkan buffer-image copies require exactly one aspect");
+    if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
+        block = vulkan::GetTextureCopyBlockInfoVulkan(t.Format, range.Aspects);
+        if (!block.BytesPerBlock) return Context->Reject(operation, "Vulkan buffer-image copies require exactly one aspect");
         if (IsDepthStencilFormat(t.Format)) {
             const auto flags = static_cast<vulkan::CommandBufferVulkan*>(Real())->_cmdPool->_queue->_queueFlags;
             if (!(flags & VK_QUEUE_GRAPHICS_BIT)) return Context->Reject(operation, "Vulkan 1.2 depth/stencil copies require a graphics queue");
@@ -1309,15 +1356,18 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
         }
     }
 #endif
-    if (offset % placement) return Context->Reject(operation, "texture-buffer copy offset is not aligned");
+    if (offset % placement || offset % block.BytesPerBlock) return Context->Reject(operation, "texture-buffer copy offset is not aligned");
     uint64_t end = offset;
     for (uint32_t mip = range.BaseMipLevel; mip < range.BaseMipLevel + range.MipLevelCount; ++mip) {
-        const uint64_t rowBytes = uint64_t(std::max(1u, t.Width >> mip)) * bpp;
+        const uint64_t rowBytes = uint64_t(block.Columns(std::max(1u, t.Width >> mip))) * block.BytesPerBlock;
         const uint64_t rowPitch = (rowBytes + pitch - 1) / pitch * pitch;
-        const uint64_t rows = std::max(1u, t.Height >> mip);
+        const uint64_t rows = block.Rows(std::max(1u, t.Height >> mip));
         const uint64_t depth = Is3D(t) ? std::max(1u, t.DepthOrArraySize >> mip) : 1;
-        if (!rowBytes || rowPitch % bpp) return Context->Reject(operation, "row pitch cannot be represented in texels");
+        if (!rowBytes || rowPitch % block.BytesPerBlock) return Context->Reject(operation, "row pitch cannot be represented in format blocks");
         for (uint32_t layer = 0; layer < range.ArrayLayerCount; ++layer) {
+            const TextureRegion2D whole{mip, range.BaseArrayLayer + layer, 0, 0, std::max(1u, t.Width >> mip),
+                                        std::max(1u, t.Height >> mip), 0, static_cast<uint32_t>(depth)};
+            if (!ValidateTransferQueue(t, whole, end, operation)) return false;
             const uint64_t required = rowPitch * rows * depth;
             if (!RangeFits(b.Size, end, required)) return Context->Reject(operation, "texture-buffer copy exceeds buffer range");
             end += required;
@@ -1343,31 +1393,39 @@ void CommandBufferValidation::CopyTextureToTexture(const TextureCopyDescriptor& 
     if (!Recording("CopyTextureToTexture")) return;
     const auto src = Lookup(*Context, desc.Source, "CopyTextureToTexture"), dst = Lookup(*Context, desc.Destination, "CopyTextureToTexture");
     if (!src || !dst) return;
-    if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12 && desc.Source == desc.Destination && desc.SourceMipLevel == desc.DestinationMipLevel && desc.SourceArrayLayer == desc.DestinationArrayLayer) {
+    if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12 && desc.Source == desc.Destination && desc.SourceMipLevel == desc.DestinationMipLevel && desc.SourceArrayLayer == desc.DestinationArrayLayer) {
         Context->Reject("CopyTextureToTexture", "D3D12 copies require different source and destination subresources");
         return;
     }
     const auto s = desc.Source->GetDesc(), d = desc.Destination->GetDesc();
-    if (s.Format != d.Format || IsDepthStencilFormat(s.Format) || s.SampleCount != d.SampleCount || NativeDimension(s.Dim) != NativeDimension(d.Dim) || !s.Usage.HasFlag(TextureUse::CopySource) || !d.Usage.HasFlag(TextureUse::CopyDestination) || desc.SourceMipLevel >= s.MipLevels || desc.DestinationMipLevel >= d.MipLevels) {
+    const bool depthCopy = IsDepthStencilFormat(s.Format);
+    if (s.Format != d.Format || (depthCopy && s.Format != TextureFormat::D16_UNORM && s.Format != TextureFormat::D32_FLOAT) || s.SampleCount != d.SampleCount || NativeDimension(s.Dim) != NativeDimension(d.Dim) || !s.Usage.HasFlag(TextureUse::CopySource) || !d.Usage.HasFlag(TextureUse::CopyDestination) || desc.SourceMipLevel >= s.MipLevels || desc.DestinationMipLevel >= d.MipLevels) {
         Context->Reject("CopyTextureToTexture", "copy format, dimension, samples, usage, or mip is invalid");
         return;
     }
     const uint32_t sw = std::max(1u, s.Width >> desc.SourceMipLevel), sh = std::max(1u, s.Height >> desc.SourceMipLevel), sd = Is3D(s) ? std::max(1u, s.DepthOrArraySize >> desc.SourceMipLevel) : 1;
     const uint32_t dw = std::max(1u, d.Width >> desc.DestinationMipLevel), dh = std::max(1u, d.Height >> desc.DestinationMipLevel), dd = Is3D(d) ? std::max(1u, d.DepthOrArraySize >> desc.DestinationMipLevel) : 1;
-    if (!RangeFits(sw, desc.SourceX, desc.Width) || !RangeFits(sh, desc.SourceY, desc.Height) || !RangeFits(sd, desc.SourceZ, desc.Depth) || !RangeFits(dw, desc.DestinationX, desc.Width) || !RangeFits(dh, desc.DestinationY, desc.Height) || !RangeFits(dd, desc.DestinationZ, desc.Depth) || !RangeFits(ArrayLayers(s), desc.SourceArrayLayer, desc.ArrayLayerCount) || !RangeFits(ArrayLayers(d), desc.DestinationArrayLayer, desc.ArrayLayerCount) || (s.SampleCount > 1 && (desc.SourceX || desc.SourceY || desc.SourceZ || desc.DestinationX || desc.DestinationY || desc.DestinationZ || desc.Width != sw || desc.Height != sh || desc.Depth != sd || sw != dw || sh != dh || sd != dd))) {
+    if (!RangeFits(sw, desc.SourceX, desc.Width) || !RangeFits(sh, desc.SourceY, desc.Height) || !RangeFits(sd, desc.SourceZ, desc.Depth) || !RangeFits(dw, desc.DestinationX, desc.Width) || !RangeFits(dh, desc.DestinationY, desc.Height) || !RangeFits(dd, desc.DestinationZ, desc.Depth) || !RangeFits(ArrayLayers(s), desc.SourceArrayLayer, desc.ArrayLayerCount) || !RangeFits(ArrayLayers(d), desc.DestinationArrayLayer, desc.ArrayLayerCount) || ((depthCopy || s.SampleCount > 1) && (desc.SourceX || desc.SourceY || desc.SourceZ || desc.DestinationX || desc.DestinationY || desc.DestinationZ || desc.Width != sw || desc.Height != sh || desc.Depth != sd || sw != dw || sh != dh || sd != dd))) {
         Context->Reject("CopyTextureToTexture", "copy region or layer range is invalid");
         return;
     }
     auto converted = desc;
     converted.Source = src.Get();
     converted.Destination = dst.Get();
+#ifdef RADRAY_ENABLE_VULKAN
+    if (depthCopy && s.SampleCount > 1 && Context->NativeDevice->GetBackend() == GpuBackend::Vulkan &&
+        !(static_cast<vulkan::CommandBufferVulkan*>(Real())->_cmdPool->_queue->_queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+        Context->Reject("CopyTextureToTexture", "multisampled depth copy requires a graphics queue");
+        return;
+    }
+#endif
     Real()->CopyTextureToTexture(converted);
 }
 
 void CommandBufferValidation::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
     if (!Recording("ResolveTexture")) return;
 #ifdef RADRAY_ENABLE_D3D12
-    if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12 && Allocator->Queue->GetQueueType() != QueueType::Direct) {
+    if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12 && Allocator->Queue->GetQueueType() != QueueType::Direct) {
         Context->Reject("ResolveTexture", "D3D12 texture resolve requires a direct command list");
         return;
     }
@@ -1384,7 +1442,7 @@ void CommandBufferValidation::ResolveTexture(const TextureResolveDescriptor& des
         return;
     }
 #ifdef RADRAY_ENABLE_D3D12
-    if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12) {
+    if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) {
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support{};
         support.Format = d3d12::MapType(s.Format);
         const auto device = static_cast<d3d12::DeviceD3D12*>(Context->NativeDevice.get());
@@ -1401,10 +1459,10 @@ void CommandBufferValidation::ResolveTexture(const TextureResolveDescriptor& des
 }
 
 bool CommandBufferValidation::ValidateQueryQueue(std::string_view operation, std::optional<QueryPipelineStage> stage) const noexcept {
-    if (Context->NativeDevice->GetBackend() == RenderBackend::D3D12 && Allocator->Queue->GetQueueType() == QueueType::Copy)
+    if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12 && Allocator->Queue->GetQueueType() == QueueType::Copy)
         return Context->Reject(operation, "D3D12 regular timestamp heaps require a direct or compute command list");
 #ifdef RADRAY_ENABLE_VULKAN
-    if (Context->NativeDevice->GetBackend() == RenderBackend::Vulkan) {
+    if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
         const auto* queue = static_cast<vulkan::CommandBufferVulkan*>(Real())->_cmdPool->_queue;
         if (stage) {
             if (!queue->_timestampValidBits || !vulkan::ArePipelineStagesSupportedVulkan(vulkan::MapType(*stage), queue->_queueFlags))
@@ -1473,6 +1531,9 @@ public:
         if (!Ready("GetQueueType")) Context->Fatal("GetQueueType", "cannot query a destroyed queue");
         return Real()->GetQueueType();
     }
+    uint32_t GetTimestampValidBits() const noexcept override {
+        return Ready("GetTimestampValidBits") ? Real()->GetTimestampValidBits() : 0;
+    }
     TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override {
         if (!Ready("GetTimestampClockCalibration")) return {.Status = TimestampClockCalibrationStatus::InvalidQueue};
         return Real()->GetTimestampClockCalibration();
@@ -1480,58 +1541,58 @@ public:
     void Wait() noexcept override {
         if (Ready("Wait")) Real()->Wait();
     }
-    void Submit(const CommandQueueSubmitDescriptor& desc) noexcept override {
-        if (!Ready("Submit")) return;
+    bool Submit(const CommandQueueSubmitDescriptor& desc) noexcept override {
+        if (!Ready("Submit") || Context->NativeDevice->IsDeviceLost()) return false;
         if (desc.WaitFences.size() != desc.WaitValues.size() || desc.SignalFences.size() != desc.SignalValues.size()) {
             Context->Reject("Submit", "fence and value arrays must have matching sizes");
-            return;
+            return false;
         }
         vector<CommandBuffer*> commands;
         for (auto* input : desc.CmdBuffers) {
             const auto wrapper = WrapperOf<CommandBufferValidation>(*Context, input, "Submit");
-            if (!wrapper) return;
+            if (!wrapper) return false;
             if (wrapper.Get()->State != CommandBufferValidation::RecordingState::Executable || wrapper.Get()->Allocator->Queue != this) {
                 Context->Reject("Submit", "commands must be closed, current recordings from this queue");
-                return;
+                return false;
             }
             if (std::find(commands.begin(), commands.end(), wrapper.Get()->Real()) != commands.end()) {
                 Context->Reject("Submit", "a command buffer occurs twice in the same submission");
-                return;
+                return false;
             }
             commands.push_back(wrapper.Get()->Real());
         }
         vector<Fence*> waits, signals;
         for (auto* input : desc.WaitFences) {
             const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return;
+            if (!native) return false;
             waits.push_back(native.Get());
         }
         for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
             auto* input = desc.SignalFences[i];
             const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return;
+            if (!native) return false;
             if (desc.SignalValues[i] == std::numeric_limits<uint64_t>::max() || desc.SignalValues[i] <= input->GetLastSignaledValue() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
                 Context->Reject("Submit", "fence signal values must increase and signal each fence once");
-                return;
+                return false;
             }
             signals.push_back(native.Get());
         }
         vector<SwapChainSyncObject*> waitSync, presentSync;
         for (auto* input : desc.WaitToExecute) {
             const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return;
+            if (!native) return false;
             if (std::find(waitSync.begin(), waitSync.end(), native.Get()) != waitSync.end()) {
                 Context->Reject("Submit", "a swapchain wait sync occurs twice");
-                return;
+                return false;
             }
             waitSync.push_back(native.Get());
         }
         for (auto* input : desc.ReadyToPresent) {
             const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return;
+            if (!native) return false;
             if (std::find(presentSync.begin(), presentSync.end(), native.Get()) != presentSync.end()) {
                 Context->Reject("Submit", "a swapchain present sync occurs twice");
-                return;
+                return false;
             }
             presentSync.push_back(native.Get());
         }
@@ -1541,8 +1602,9 @@ public:
         converted.SignalFences = signals;
         converted.WaitToExecute = waitSync;
         converted.ReadyToPresent = presentSync;
-        Real()->Submit(converted);
+        if (!Real()->Submit(converted)) return false;
         for (auto* command : desc.CmdBuffers) static_cast<CommandBufferValidation*>(command)->State = CommandBufferValidation::RecordingState::Submitted;
+        return true;
     }
 };
 
@@ -1644,7 +1706,16 @@ public:
 
 class ExternalResourceValidation final : public ExternalResourceExtension {
 public:
-    ExternalResourceValidation(shared_ptr<ValidationContext> context, ExternalResourceExtension* native) : Context(std::move(context)), Native(native) {}
+    ExternalResourceValidation(shared_ptr<ValidationContext> context, unique_ptr<ExternalResourceExtension> native)
+        : Context(std::move(context)), Native(std::move(native)) {
+        std::lock_guard lock{Context->Mutex};
+        ++Context->LiveOwned;
+    }
+    ~ExternalResourceValidation() noexcept override {
+        Native.reset();
+        std::lock_guard lock{Context->Mutex};
+        --Context->LiveOwned;
+    }
     ExternalResult<ExternalDeviceIdentity> GetDeviceIdentity() const noexcept override { return Native->GetDeviceIdentity(); }
     ExternalSupport QueryBufferSupport(const BufferDescriptor& d, const ExternalResourceDescriptor& e) const noexcept override { return Native->QueryBufferSupport(d, e); }
     ExternalSupport QueryTextureSupport(const TextureDescriptor& d, const ExternalTextureDescriptor& e) const noexcept override { return Native->QueryTextureSupport(d, e); }
@@ -1691,7 +1762,7 @@ public:
 
 private:
     shared_ptr<ValidationContext> Context;
-    ExternalResourceExtension* Native;
+    unique_ptr<ExternalResourceExtension> Native;
 };
 
 class DeviceValidation final : public Device {
@@ -1717,24 +1788,22 @@ public:
         _context->NativeDevice->Destroy();
     }
     bool Ready(std::string_view operation) const noexcept { return IsValid() || _context->Reject(operation, "device is destroyed"); }
-    RenderBackend GetBackend() noexcept override {
+    bool IsDeviceLost() const noexcept override { return _context->NativeDevice->IsDeviceLost(); }
+    GpuBackend GetBackend() noexcept override {
         if (!Ready("GetBackend")) _context->Fatal("GetBackend", "cannot query a destroyed device");
         return _context->NativeDevice->GetBackend();
     }
-    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override {
-        std::lock_guard lock{_cacheMutex};
-        if (!_externalExtension) {
-            const auto native = _context->NativeDevice->GetExternalResourceExtension();
-            if (!native) return nullptr;
-            _externalExtension = make_unique<ExternalResourceValidation>(_context, native.Get());
-        }
-        return _externalExtension.get();
+    Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override {
+        if (!Ready("CreateExternalResourceExtension")) return nullptr;
+        auto native = _context->NativeDevice->CreateExternalResourceExtension();
+        if (!native) return nullptr;
+        return make_unique<ExternalResourceValidation>(_context, native.Release());
     }
     DeviceDetail GetDetail() const noexcept override {
         if (!Ready("GetDetail")) _context->Fatal("GetDetail", "cannot query a destroyed device");
         return _context->NativeDevice->GetDetail();
     }
-    const RenderDeviceCapabilities& GetCapabilities() const noexcept override {
+    const GpuDeviceCapabilities& GetCapabilities() const noexcept override {
         if (!Ready("GetCapabilities")) _context->Fatal("GetCapabilities", "cannot query a destroyed device");
         return _context->NativeDevice->GetCapabilities();
     }
@@ -1806,7 +1875,7 @@ public:
             _context->Reject("CreateSwapChain", "invalid swapchain dimensions, format, mode, surface, or queue");
             return nullptr;
         }
-        if (GetBackend() == RenderBackend::D3D12 && (desc.BackBufferCount < 2 || desc.BackBufferCount > 16 || (desc.Format != TextureFormat::RGBA8_UNORM && desc.Format != TextureFormat::RGBA8_UNORM_SRGB && desc.Format != TextureFormat::BGRA8_UNORM && desc.Format != TextureFormat::BGRA8_UNORM_SRGB && desc.Format != TextureFormat::RGB10A2_UNORM && desc.Format != TextureFormat::RGBA16_FLOAT))) {
+        if (GetBackend() == GpuBackend::D3D12 && (desc.BackBufferCount < 2 || desc.BackBufferCount > 16 || (desc.Format != TextureFormat::RGBA8_UNORM && desc.Format != TextureFormat::RGBA8_UNORM_SRGB && desc.Format != TextureFormat::BGRA8_UNORM && desc.Format != TextureFormat::BGRA8_UNORM_SRGB && desc.Format != TextureFormat::RGB10A2_UNORM && desc.Format != TextureFormat::RGBA16_FLOAT))) {
             _context->Reject("CreateSwapChain", "unsupported D3D12 flip-model buffer count or format");
             return nullptr;
         }
@@ -1826,7 +1895,7 @@ public:
             _context->Reject("CreateBuffer", "MapRead requires readback memory and MapWrite requires upload memory");
             return nullptr;
         }
-        if (GetBackend() == RenderBackend::D3D12 && !desc.Usage.HasFlag(BufferUse::UnorderedAccess) &&
+        if (GetBackend() == GpuBackend::D3D12 && !desc.Usage.HasFlag(BufferUse::UnorderedAccess) &&
             ((desc.Memory == MemoryType::Upload && desc.Usage.HasFlag(BufferUse::CopyDestination)) ||
              (desc.Memory == MemoryType::ReadBack && (desc.Usage & ~(BufferUse::MapRead | BufferUse::CopyDestination))))) {
             _context->Reject("CreateBuffer", "D3D12 upload/readback heap usage is incompatible with its fixed resource state");
@@ -1871,11 +1940,11 @@ public:
             _context->Reject("CreateTextureView", "view dimension does not match its layer range");
             return nullptr;
         }
-        if (GetBackend() == RenderBackend::D3D12 && normalized->BaseArrayLayer && (nonArrayView || desc.Dim == TextureDimension::Cube)) {
+        if (GetBackend() == GpuBackend::D3D12 && normalized->BaseArrayLayer && (nonArrayView || desc.Dim == TextureDimension::Cube)) {
             _context->Reject("CreateTextureView", "D3D12 non-array views cannot select a nonzero base array layer");
             return nullptr;
         }
-        if (GetBackend() == RenderBackend::Vulkan && cubeView && target.Dim != TextureDimension::Cube && target.Dim != TextureDimension::CubeArray) {
+        if (GetBackend() == GpuBackend::Vulkan && cubeView && target.Dim != TextureDimension::Cube && target.Dim != TextureDimension::CubeArray) {
             _context->Reject("CreateTextureView", "Vulkan cube views require a cube-compatible texture dimension");
             return nullptr;
         }
@@ -1898,11 +1967,11 @@ public:
         converted.Range = *normalized;
         std::pair<bool, string> support{false, "texture view backend is unavailable"};
 #if defined(RADRAY_ENABLE_D3D12)
-        if (GetBackend() == RenderBackend::D3D12)
+        if (GetBackend() == GpuBackend::D3D12)
             support = static_cast<d3d12::DeviceD3D12*>(_context->NativeDevice.get())->ValidateTextureView(converted);
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-        if (GetBackend() == RenderBackend::Vulkan)
+        if (GetBackend() == GpuBackend::Vulkan)
             support = static_cast<vulkan::DeviceVulkan*>(_context->NativeDevice.get())->ValidateTextureView(converted);
 #endif
         if (!support.first) {
@@ -1915,7 +1984,7 @@ public:
     }
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override {
         if (!Ready("CreateShader")) return nullptr;
-        const auto expected = GetBackend() == RenderBackend::D3D12 ? ShaderBlobCategory::DXIL : ShaderBlobCategory::SPIRV;
+        const auto expected = GetBackend() == GpuBackend::D3D12 ? ShaderBlobCategory::DXIL : ShaderBlobCategory::SPIRV;
         if (desc.Source.empty() || desc.Category != expected || !IsValidShaderStages(desc.Stages) || (expected == ShaderBlobCategory::SPIRV && desc.Source.size() % 4)) {
             _context->Reject("CreateShader", "shader source, target, stages, or SPIR-V size is invalid");
             return nullptr;
@@ -1926,7 +1995,7 @@ public:
     }
     Nullable<unique_ptr<BindingGroupLayout>> CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept override {
         if (!Ready("CreateBindingGroupLayout")) return nullptr;
-        const bool dx = GetBackend() == RenderBackend::D3D12;
+        const bool dx = GetBackend() == GpuBackend::D3D12;
         unordered_set<uint32_t> ids;
         std::optional<uint32_t> vkSet;
         for (const auto& binding : desc.Bindings) {
@@ -1967,7 +2036,7 @@ public:
         vector<PipelineLayoutGroupDescriptor> converted;
         vector<BindingGroupLayoutValidation*> dependencies;
         unordered_set<uint32_t> slots, pushIds;
-        const bool dx = GetBackend() == RenderBackend::D3D12;
+        const bool dx = GetBackend() == GpuBackend::D3D12;
         for (const auto& group : desc.Groups) {
             const auto layout = WrapperOf<BindingGroupLayoutValidation>(*_context, group.Layout, "CreatePipelineLayout");
             if (!layout) return nullptr;
@@ -2008,6 +2077,13 @@ public:
         if (!native) return nullptr;
         return make_unique<ShaderParameterSetValidation>(_context, native.Release(), layout.Get());
     }
+    Nullable<unique_ptr<PipelineCache>> CreatePipelineCache(std::span<const byte> initialData) noexcept override {
+        if (!Ready("CreatePipelineCache")) return nullptr;
+        auto cache = _context->NativeDevice->CreatePipelineCache(initialData);
+        if (!cache) return nullptr;
+        return make_unique<PipelineCacheValidation>(_context, cache.Release());
+    }
+
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override {
         if (!Ready("CreateGraphicsPipelineState")) return nullptr;
         const auto layout = WrapperOf<PipelineLayoutValidation>(*_context, desc.PipelineLayout, "CreateGraphicsPipelineState");
@@ -2030,7 +2106,7 @@ public:
             _context->Reject("CreateGraphicsPipelineState", "invalid strip index format");
             return nullptr;
         }
-        if (GetBackend() == RenderBackend::D3D12 && desc.Primitive.Poly == PolygonMode::Point) {
+        if (GetBackend() == GpuBackend::D3D12 && desc.Primitive.Poly == PolygonMode::Point) {
             _context->Reject("CreateGraphicsPipelineState", "D3D12 does not support point polygon mode");
             return nullptr;
         }
@@ -2059,6 +2135,10 @@ public:
         }
         auto converted = desc;
         converted.PipelineLayout = layout.Get()->Real();
+        if (desc.Cache) {
+            converted.Cache = Lookup(*_context, desc.Cache.Get(), "CreateGraphicsPipelineState");
+            if (!converted.Cache) return nullptr;
+        }
         const auto shaderEntry = [&](std::optional<ShaderEntry>& entry, ShaderStage stage) {
             if (!entry) return true;
             const auto native = Lookup(*_context, entry->Target, "CreateGraphicsPipelineState");
@@ -2106,6 +2186,10 @@ public:
         auto converted = desc;
         converted.PipelineLayout = layout.Get()->Real();
         converted.CS.Target = shader.Get();
+        if (desc.Cache) {
+            converted.Cache = Lookup(*_context, desc.Cache.Get(), "CreateComputePipelineState");
+            if (!converted.Cache) return nullptr;
+        }
         auto result = _context->NativeDevice->CreateComputePipelineState(converted);
         if (!result) return nullptr;
         return make_unique<ComputePipelineValidation>(_context, result.Release(), layout.Get());
@@ -2146,7 +2230,6 @@ public:
     }
 
 private:
-    unique_ptr<ExternalResourceExtension> _externalExtension;
     shared_ptr<ValidationContext> _context;
     std::mutex _cacheMutex;
     unordered_map<CommandQueue*, unique_ptr<QueueValidation>> _queues;
@@ -2155,7 +2238,7 @@ private:
 
 }  // namespace
 
-Nullable<shared_ptr<Device>> CreateValidationDevice(shared_ptr<Device> device, const RhiValidationOptions& options) {
+Nullable<shared_ptr<Device>> CreateValidationDevice(shared_ptr<Device> device, const GpuValidationOptions& options) {
     auto context = make_shared<ValidationContext>();
     context->NativeDevice = std::move(device);
     context->Options = options;

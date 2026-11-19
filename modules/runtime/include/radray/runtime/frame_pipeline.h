@@ -23,9 +23,11 @@ public:
     // 仅录制已准备的数据；返回前关闭 encoder 并 End command buffer。
     virtual void Record(FrameSlot& slot) noexcept = 0;
     // 正常提交后才发布状态；保存本槽完成信息供 Wait 使用。
-    virtual void Submit(FrameSlot& slot) noexcept = 0;
+    virtual bool Submit(FrameSlot& slot) noexcept = 0;
     // 等待实际提交完成；返回后仍须重置命令存储才能释放帧内对象。
     virtual void Wait(FrameSlot& slot) noexcept = 0;
+    // 调度器在 Wait 返回后、命令与帧对象回收前发布本槽的完成结果。
+    virtual void OnSlotCompleted(FrameSlot& slot) noexcept;
 };
 
 }  // namespace radray

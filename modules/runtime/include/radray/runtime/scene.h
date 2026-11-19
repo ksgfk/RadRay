@@ -94,6 +94,12 @@ private:
     void UnlinkMaterial(MeshBatchHandle batchHandle) noexcept;
     void LinkMaterial(MeshBatchHandle batchHandle);
     bool ValidateBatch(const MeshBatch& batch) const noexcept;
+    bool GatherVisibleBatch(MeshPassSortMode sortMode,
+                            std::span<const PassBatchCacheSlot> batchSlots,
+                            std::span<const MeshDrawCommand> commands,
+                            const VisibleMeshBatch& visible,
+                            vector<VisibleMeshDrawCommand>& output,
+                            size_t initialSize) const;
 
     SparseSet<PrimitiveSceneInfo> _primitives;
     SparseSet<MeshBatch> _meshes;

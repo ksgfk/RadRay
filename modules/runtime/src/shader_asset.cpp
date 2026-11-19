@@ -8,15 +8,15 @@
 namespace radray {
 namespace {
 template <typename T>
-bool AssetActive(const T& value, gpu::RenderBackend backend) noexcept {
-    return backend == gpu::RenderBackend::D3D12 ? value.D3D12.has_value() : value.Vulkan.has_value();
+bool AssetActive(const T& value, gpu::GpuBackend backend) noexcept {
+    return backend == gpu::GpuBackend::D3D12 ? value.D3D12.has_value() : value.Vulkan.has_value();
 }
 }  // namespace
 
 std::optional<ShaderAsset> ShaderAsset::Create(gpu::Device& device, const ShaderAssetDesc& desc) {
     string diagnostic;
     const auto backend = device.GetBackend();
-    if ((backend != gpu::RenderBackend::D3D12 && backend != gpu::RenderBackend::Vulkan) ||
+    if ((backend != gpu::GpuBackend::D3D12 && backend != gpu::GpuBackend::Vulkan) ||
         desc.Family.Variants.empty() || !shader::ValidateShaderFamilyLayoutDesc(desc.Family, &diagnostic)) {
         RADRAY_ERR_LOG("Invalid shader asset family: {}", diagnostic);
         return std::nullopt;
@@ -57,7 +57,7 @@ std::optional<ShaderAsset> ShaderAsset::Create(gpu::Device& device, const Shader
     result._backend = backend;
     for (const auto& entry : desc.Stages) {
         if (entry.Backend != backend) continue;
-        auto shader = device.CreateShader({entry.Bytecode, backend == gpu::RenderBackend::D3D12 ? gpu::ShaderBlobCategory::DXIL : gpu::ShaderBlobCategory::SPIRV, entry.Stage});
+        auto shader = device.CreateShader({entry.Bytecode, backend == gpu::GpuBackend::D3D12 ? gpu::ShaderBlobCategory::DXIL : gpu::ShaderBlobCategory::SPIRV, entry.Stage});
         if (!shader) {
             RADRAY_ERR_LOG("Cannot create shader entry {}", entry.Entry);
             return std::nullopt;
@@ -83,8 +83,8 @@ shader::DiagnosticResult<ShaderAsset> ShaderAsset::Compile(
     if (!shader::IsLogicalSourceName(sourceName)) return failure("invalid compiler source name");
     if (!client.IsAvailable()) return failure("shader compiler unavailable");
     const auto backend = device.GetBackend();
-    if (backend != gpu::RenderBackend::D3D12 && backend != gpu::RenderBackend::Vulkan) return failure("unsupported backend");
-    const bool dxil = backend == gpu::RenderBackend::D3D12;
+    if (backend != gpu::GpuBackend::D3D12 && backend != gpu::GpuBackend::Vulkan) return failure("unsupported backend");
+    const bool dxil = backend == gpu::GpuBackend::D3D12;
     const auto target = dxil ? shader::ShaderTarget::DXIL : shader::ShaderTarget::SPIRV;
     shader::SourceContractRequest source{
         sourceName, {desc.Source.begin(), desc.Source.end()}, desc.Defines,
@@ -176,7 +176,7 @@ std::optional<ShaderAsset> ShaderAsset::Load(gpu::Device& device, const std::fil
             (stage != "vertex" && stage != "pixel" && stage != "compute")) return std::nullopt;
         ShaderStageBytecode code;
         code.VariantIndex = static_cast<uint32_t>(found - desc.Family.Variants.begin());
-        code.Backend = target == "dxil" ? gpu::RenderBackend::D3D12 : gpu::RenderBackend::Vulkan;
+        code.Backend = target == "dxil" ? gpu::GpuBackend::D3D12 : gpu::GpuBackend::Vulkan;
         code.Stage = stage == "vertex" ? gpu::ShaderStage::Vertex : stage == "pixel" ? gpu::ShaderStage::Pixel
                                                                                         : gpu::ShaderStage::Compute;
         code.Entry = std::move(entry);
@@ -228,7 +228,7 @@ AssetReloadDecision ShaderAsset::ClassifyReload(const ShaderAsset& candidate) co
 
 const shader::ShaderPipelineLayoutDesc& ShaderAsset::GetLayoutDesc() const noexcept { return _family.SharedLayout; }
 const shader::ShaderFamilyLayoutDesc& ShaderAsset::GetFamilyDesc() const noexcept { return _family; }
-gpu::RenderBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
+gpu::GpuBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
 Nullable<const shader::ShaderVariantTargetInterfaceDesc*> ShaderAsset::GetVariantInterface(uint32_t variant) const noexcept {
     return variant < _family.Variants.size() ? shader::GetShaderTargetInterface(_family.Variants[variant], _backend) : nullptr;
 }

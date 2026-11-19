@@ -7,7 +7,7 @@
 namespace radray {
 
 Environment::Environment(
-    gpu::RenderBackend backend,
+    gpu::GpuBackend backend,
     bool validation,
     unique_ptr<gpu::DXGIFactory> factory,
     Nullable<gpu::InstanceVulkan*> instance) noexcept
@@ -27,7 +27,7 @@ bool Environment::IsOwnerThread() const noexcept {
 }
 
 Nullable<unique_ptr<Environment>> Environment::Create(
-    gpu::RenderBackend backend, bool validation,
+    gpu::GpuBackend backend, bool validation,
     std::string_view appName) noexcept {
     Nullable<gpu::InstanceVulkan*> instance = nullptr;
     auto cleanup = MakeScopeGuard([&]() noexcept {
@@ -38,7 +38,7 @@ Nullable<unique_ptr<Environment>> Environment::Create(
     unique_ptr<gpu::DXGIFactory> factory;
     switch (backend) {
 #if defined(RADRAY_ENABLE_D3D12)
-        case gpu::RenderBackend::D3D12: {
+        case gpu::GpuBackend::D3D12: {
             RADRAY_INFO_LOG("Environment: creating DXGI factory");
             gpu::DXGIFactoryDescriptor desc{};
             desc.IsEnableDebugLayer = validation;
@@ -60,7 +60,7 @@ Nullable<unique_ptr<Environment>> Environment::Create(
         }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-        case gpu::RenderBackend::Vulkan: {
+        case gpu::GpuBackend::Vulkan: {
             RADRAY_INFO_LOG("Environment: creating Vulkan environment");
             gpu::VulkanInstanceDescriptor desc{};
             desc.AppName = appName;
@@ -91,7 +91,7 @@ Nullable<unique_ptr<Environment>> Environment::Create(
     return environment;
 }
 
-gpu::RenderBackend Environment::GetBackend() const noexcept {
+gpu::GpuBackend Environment::GetBackend() const noexcept {
     return _backend;
 }
 

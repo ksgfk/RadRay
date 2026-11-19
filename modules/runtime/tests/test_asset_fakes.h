@@ -63,8 +63,8 @@ public:
         if (FailShaderAt == ShaderCreates) return nullptr;
         return make_unique<AssetTestShader>(desc.Stages, ShaderDestroys);
     }
-    gpu::RenderBackend Backend{gpu::RenderBackend::D3D12};
-    gpu::RenderBackend GetBackend() noexcept override { return Backend; }
+    gpu::GpuBackend Backend{gpu::GpuBackend::D3D12};
+    gpu::GpuBackend GetBackend() noexcept override { return Backend; }
     Nullable<unique_ptr<gpu::BindingGroupLayout>> CreateBindingGroupLayout(const gpu::BindingGroupLayoutDescriptor& desc) noexcept override {
         ++GroupCreates;
         if (FailGroup) return nullptr;
@@ -92,14 +92,14 @@ inline shader::ShaderPipelineLayoutDesc MaterialLayout() {
 
 
 
-inline ShaderAssetDesc MakeShaderDesc(shader::ShaderPipelineLayoutDesc layout = {}, gpu::RenderBackend backend = gpu::RenderBackend::D3D12) {
+inline ShaderAssetDesc MakeShaderDesc(shader::ShaderPipelineLayoutDesc layout = {}, gpu::GpuBackend backend = gpu::GpuBackend::D3D12) {
     ShaderAssetDesc desc;
     desc.Family.SharedLayout = std::move(layout);
     shader::ShaderVariantInterfaceDesc program;
     program.Name = "Default";
     shader::ShaderVariantTargetInterfaceDesc interface;
     interface.Stages = gpu::ShaderStage::Vertex | gpu::ShaderStage::Pixel;
-    if (backend == gpu::RenderBackend::D3D12)
+    if (backend == gpu::GpuBackend::D3D12)
         program.DXIL = interface;
     else
         program.SPIRV = interface;

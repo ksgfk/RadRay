@@ -33,9 +33,12 @@ public:
     VertexBufferSubAllocation& operator=(const VertexBufferSubAllocation&) = delete;
 
     explicit operator bool() const noexcept;
+    // 池内稀疏槽号；空句柄返回 0。存活句柄的槽号可达或超过 GetPageCount()。
+    uint32_t GetPageIndex() const noexcept;
+    // 引用随所属页撤销提交而失效；单独保留 GetGpuBuffer() 不延长其寿命。
     const VertexInput& GetVertexInput() const noexcept;
     gpu::Buffer* GetBuffer() const noexcept;
-    // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
+    // 仅延长底层缓冲寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
     IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetVertexStride() const noexcept;
     uint32_t GetFirstVertex() const noexcept;
@@ -62,8 +65,10 @@ public:
     IndexBufferSubAllocation& operator=(const IndexBufferSubAllocation&) = delete;
 
     explicit operator bool() const noexcept;
+    // 池内稀疏槽号；空句柄返回 0。存活句柄的槽号可达或超过 GetPageCount()。
+    uint32_t GetPageIndex() const noexcept;
     gpu::Buffer* GetBuffer() const noexcept;
-    // 仅延长整页寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
+    // 仅延长底层缓冲寿命；子分配区间仍须保留到 GPU 工作及命令引用结束。
     IntrusivePtr<GpuBuffer> GetGpuBuffer() const noexcept;
     uint32_t GetIndexStride() const noexcept;
     uint32_t GetFirstIndex() const noexcept;
@@ -99,7 +104,7 @@ struct IndexBufferPoolDescriptor {
     std::string_view DebugNamePrefix{"IndexBufferPool"};
 };
 
-// 池借用设备，保留全部页面直到自身销毁；所有调用必须串行。
+// 池借用设备，所有调用必须串行。
 class VertexBufferPool final {
 public:
     static Nullable<unique_ptr<VertexBufferPool>> Create(gpu::Device& device, const VertexBufferPoolDescriptor& desc);
@@ -108,9 +113,14 @@ public:
     VertexBufferPool& operator=(const VertexBufferPool&) = delete;
 
     std::optional<VertexBufferSubAllocation> Allocate(uint32_t vertexCount);
+    // 当前已提交页数，不含稀疏空槽。
     uint32_t GetPageCount() const noexcept;
+    uint64_t GetCapacityBytes() const noexcept;
     uint64_t GetFreeBytes() const noexcept;
-    // 以 Common → Common 边界导入全部页面，包括保留的空页面。
+    uint64_t GetAllocatedBytes() const noexcept;
+    // 撤销所有整页空闲的提交，返回页数；外部页面强引用仍然有效。
+    uint32_t TrimEmptyPages() noexcept;
+    // 导入全部已提交缓冲（含空页）。影响本 Pass 读取的建页、重提交和 Trim 须先于此调用。
     void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state = gpu::BufferState::Vertex) const;
 
 private:
@@ -128,8 +138,14 @@ public:
     IndexBufferPool& operator=(const IndexBufferPool&) = delete;
 
     std::optional<IndexBufferSubAllocation> Allocate(uint32_t indexCount);
+    // 当前已提交页数，不含稀疏空槽。
     uint32_t GetPageCount() const noexcept;
+    uint64_t GetCapacityBytes() const noexcept;
     uint64_t GetFreeBytes() const noexcept;
+    uint64_t GetAllocatedBytes() const noexcept;
+    // 撤销所有整页空闲的提交，返回页数；外部页面强引用仍然有效。
+    uint32_t TrimEmptyPages() noexcept;
+    // 导入全部已提交缓冲（含空页）。影响本 Pass 读取的建页、重提交和 Trim 须先于此调用。
     void AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state = gpu::BufferState::Index) const;
 
 private:

@@ -1,7 +1,7 @@
 #include <radray/runtime/frame_slot.h>
 
-#include <algorithm>
 #include <limits>
+#include <utility>
 
 #include <radray/logger.h>
 #include <radray/profiler.h>
@@ -17,7 +17,10 @@ void MeshPassFrameDrawList::SetSortMode(MeshPassSortMode mode) noexcept {
 }
 
 MeshPassFrameDrawList::MeshPassFrameDrawList(MeshPassFrameDrawList&& other) noexcept
-    : VisibleCommands(std::move(other.VisibleCommands)), DynamicContext(std::move(other.DynamicContext)), _scratchCommands(std::move(other._scratchCommands)) {
+    : VisibleCommands(std::move(other.VisibleCommands)),
+      DynamicContext(std::move(other.DynamicContext)),
+      IndirectDraws(std::move(other.IndirectDraws)),
+      _scratchCommands(std::move(other._scratchCommands)) {
     DynamicContext.BindVisibleCommands(VisibleCommands);
 }
 
@@ -25,6 +28,7 @@ MeshPassFrameDrawList& MeshPassFrameDrawList::operator=(MeshPassFrameDrawList&& 
     if (this != &other) {
         VisibleCommands = std::move(other.VisibleCommands);
         DynamicContext = std::move(other.DynamicContext);
+        IndirectDraws = std::move(other.IndirectDraws);
         _scratchCommands = std::move(other._scratchCommands);
         DynamicContext.BindVisibleCommands(VisibleCommands);
     }
@@ -47,9 +51,21 @@ void MeshPassFrameDrawList::SortVisibleCommands() {
         }
         return;
     }
-    _scratchCommands.resize(VisibleCommands.size());
     uint64_t differing = 0;
-    for (const auto& command : VisibleCommands) differing |= command.SortKey ^ VisibleCommands.front().SortKey;
+    bool sorted = true;
+    for (size_t i = 1; i < VisibleCommands.size(); ++i) {
+        differing |= VisibleCommands[i].SortKey ^ VisibleCommands[0].SortKey;
+        sorted &= VisibleCommands[i - 1].SortKey <= VisibleCommands[i].SortKey;
+    }
+    if (sorted) return;
+    uint32_t activePasses = 0;
+    for (uint32_t shift = 0; shift < 64; shift += 8) {
+        if (((differing >> shift) & 255) != 0) ++activePasses;
+    }
+    if ((activePasses & 1u) != 0 && _scratchCommands.capacity() < VisibleCommands.capacity()) {
+        _scratchCommands.reserve(VisibleCommands.capacity());
+    }
+    _scratchCommands.resize(VisibleCommands.size());
     auto source = VisibleCommands.data();
     auto destination = _scratchCommands.data();
     for (uint32_t shift = 0; shift < 64; shift += 8) {
@@ -65,7 +81,7 @@ void MeshPassFrameDrawList::SortVisibleCommands() {
         for (size_t i = 0; i < VisibleCommands.size(); ++i) destination[offsets[(source[i].SortKey >> shift) & 255]++] = source[i];
         std::swap(source, destination);
     }
-    if (source != VisibleCommands.data()) std::copy_n(source, VisibleCommands.size(), VisibleCommands.data());
+    if (source != VisibleCommands.data()) VisibleCommands.swap(_scratchCommands);
 }
 
 bool MeshPassFrameDrawList::Submit(gpu::GraphicsCommandEncoder& encoder, const MeshPassSubmitArgs& submitArgs) const noexcept {
@@ -75,6 +91,7 @@ bool MeshPassFrameDrawList::Submit(gpu::GraphicsCommandEncoder& encoder, const M
 void MeshPassFrameDrawList::Clear() noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.DrawList.Clear");
     VisibleCommands.clear();
+    IndirectDraws.Clear();
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.DrawList.ClearDynamic");
         DynamicContext.Clear();
@@ -91,7 +108,7 @@ Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_
 }
 
 FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<gpu::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream)
-    : _device(device), _allocator(std::move(allocator)),
+    : _device(device), _allocator(std::move(allocator)), _parameterSets(device.GetDevice()),
       _memoryUpstream(memoryUpstream ? *memoryUpstream : _memoryHeap),
       _scratchPool(std::pmr::pool_options{.max_blocks_per_chunk = 4096, .largest_required_pool_block = 64 * 1024}, &_memoryUpstream), _index(index) {}
 
@@ -147,9 +164,18 @@ Nullable<gpu::CommandBuffer*> FrameSlot::AcquireCommandBuffer() {
     return _commands[_nextCommandIndex++].get();
 }
 
+Nullable<gpu::ShaderParameterSet*> FrameSlot::AcquireParameterSet(const shared_ptr<gpu::BindingGroupLayout>& layout, std::span<const TransientParameterBinding> bindings) {
+    return _parameterSets.AcquireParameterSet(layout, bindings);
+}
+
+Nullable<gpu::ShaderParameterSet*> FrameSlot::AcquireUninitializedParameterSet(const shared_ptr<gpu::BindingGroupLayout>& layout) {
+    return _parameterSets.AcquireUninitializedParameterSet(layout);
+}
+
 void FrameSlot::ResetCommandStorage() noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameSlot.ResetCommandStorage");
     _allocator->Reset();
+    _parameterSets.BeginFrame();
     _nextCommandIndex = 0;
 }
 

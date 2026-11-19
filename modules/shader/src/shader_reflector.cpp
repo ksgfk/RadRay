@@ -1,5 +1,6 @@
 #include <radray/shader/shader_reflector.h>
 
+#include "record_validation.h"
 #include <radray/shader/shader_compiler_contract.h>
 
 #include <algorithm>
@@ -176,16 +177,65 @@ struct Lane {
     vector<string> ActivePushes;
 };
 
-bool ReadLane(const shader::ShaderArtifactView& artifact, bool dxil, TypeInterner& interner, Lane& lane, string& error) {
+bool ShouldPromoteDxilCBuffer(const ShaderReflectionPolicy& policy, std::string_view name) noexcept {
+    return std::any_of(policy.PushConstants.begin(), policy.PushConstants.end(), [&](const auto& rule) {
+        return rule.PromoteDxilCBufferToRootConstants && rule.Name == name;
+    });
+}
+
+bool IsAllowedDxilOnlyPush(const ShaderReflectionPolicy& policy, std::string_view name) noexcept {
+    return std::any_of(policy.PushConstants.begin(), policy.PushConstants.end(), [&](const auto& rule) {
+        return rule.AllowDxilOnly && rule.Name == name;
+    });
+}
+
+bool SamePushNames(const map<string, ShaderPushConstantDesc>& dxil,
+                   const map<string, ShaderPushConstantDesc>& spirv,
+                   const ShaderReflectionPolicy& policy) noexcept {
+    for (const auto& [name, _] : spirv) {
+        if (!dxil.contains(name)) return false;
+    }
+    for (const auto& [name, _] : dxil) {
+        if (!spirv.contains(name) && !IsAllowedDxilOnlyPush(policy, name)) return false;
+    }
+    return true;
+}
+
+bool ReadLane(const shader::ShaderArtifactView& artifact, bool dxil, const ShaderReflectionPolicy& policy, TypeInterner& interner, Lane& lane, string& error) {
     const auto remap = interner.Import(artifact);
     lane.Interface.Stages = gpu::ShaderStages{uint32_t{artifact.Envelope().StageMask}};
     for (const auto& wire : artifact.VertexInputs()) lane.Interface.VertexInputs.push_back({string{*artifact.GetName(wire.Semantic)}, wire.SemanticIndex, wire.Location,
                                                                                             static_cast<shader::ShaderVertexComponentType>(wire.ComponentType), wire.ComponentCount});
     std::sort(lane.Interface.VertexInputs.begin(), lane.Interface.VertexInputs.end(), [](const auto& a, const auto& b) { return a.Location < b.Location; });
     for (const auto& wire : artifact.Bindings()) {
+        const auto kind = *DecodeBindingKind(wire.Type);
+        const string name{*artifact.GetName(wire.Name)};
+        if (dxil && kind == gpu::BindingKind::CBuffer && ShouldPromoteDxilCBuffer(policy, name)) {
+            if (wire.Count != 1 || !detail::IsRoot(artifact.Types(), wire.TypeIndex)) {
+                error = radray::format("DXIL cbuffer '{}' cannot be promoted to root constants", name);
+                return false;
+            }
+            const uint32_t actualSize = artifact.Types()[wire.TypeIndex].Size;
+            if (actualSize == 0 || (actualSize % 4) != 0 || actualSize > 64 * 4) {
+                error = radray::format("DXIL cbuffer '{}' root constant size {} is invalid", name, actualSize);
+                return false;
+            }
+            ShaderPushConstantDesc entry;
+            entry.Name = name;
+            entry.Push.Size = actualSize;
+            entry.Push.Stages = gpu::ShaderStages{wire.StageMask};
+            entry.Push.D3D12 = gpu::PushConstantDescriptor::D3D12Location{wire.Binding, wire.Group};
+            entry.TypeIndex = remap[wire.TypeIndex];
+            if (wire.StageMask != 0) lane.ActivePushes.push_back(entry.Name);
+            if (!lane.Pushes.emplace(entry.Name, std::move(entry)).second) {
+                error = radray::format("duplicate push constant '{}'", name);
+                return false;
+            }
+            continue;
+        }
         ShaderBindingDesc entry;
-        entry.Name = *artifact.GetName(wire.Name);
-        entry.Binding.Kind = *DecodeBindingKind(wire.Type);
+        entry.Name = name;
+        entry.Binding.Kind = kind;
         entry.Binding.Count = wire.Count;
         entry.Binding.Stages = gpu::ShaderStages{wire.StageMask};
         entry.BufferByteSize = wire.BufferByteSize;
@@ -280,21 +330,23 @@ shader::DiagnosticResult<ShaderFamilyLayoutDesc> ReflectShaderFamily(std::span<c
     map<string, ShaderBindingDesc> bindings;
     map<string, ShaderPushConstantDesc> pushes;
     vector<PendingVariant> pending;
+    bool hasAnyDxil = false;
     string error;
     for (const auto* input : ordered) {
         if (input->Name.empty() || (!input->DXIL && !input->SPIRV) || (!pending.empty() && pending.back().Name == input->Name))
             return {std::nullopt, "variant needs a unique name and at least one artifact"};
         PendingVariant variant{input->Name, std::nullopt, std::nullopt};
         if (input->DXIL) {
+            hasAnyDxil = true;
             variant.DXIL.emplace();
-            if (!ReadLane(input->DXIL.Get()->Generic(), true, interner, *variant.DXIL, error)) return {std::nullopt, error};
+            if (!ReadLane(input->DXIL.Get()->Generic(), true, policy, interner, *variant.DXIL, error)) return {std::nullopt, error};
         }
         if (input->SPIRV) {
             variant.SPIRV.emplace();
-            if (!ReadLane(input->SPIRV.Get()->Generic(), false, interner, *variant.SPIRV, error)) return {std::nullopt, error};
+            if (!ReadLane(input->SPIRV.Get()->Generic(), false, policy, interner, *variant.SPIRV, error)) return {std::nullopt, error};
         }
         if (variant.DXIL && variant.SPIRV && !policy.AllowTargetOnlyBindings &&
-            (!SameNames(variant.DXIL->Bindings, variant.SPIRV->Bindings) || !SameNames(variant.DXIL->Pushes, variant.SPIRV->Pushes)))
+            (!SameNames(variant.DXIL->Bindings, variant.SPIRV->Bindings) || !SamePushNames(variant.DXIL->Pushes, variant.SPIRV->Pushes, policy)))
             return {std::nullopt, radray::format("variant '{}' has target-only resources", input->Name)};
         if (variant.DXIL)
             for (const auto& name : variant.DXIL->StaticSamplers) {
@@ -367,9 +419,12 @@ shader::DiagnosticResult<ShaderFamilyLayoutDesc> ReflectShaderFamily(std::span<c
     }
     map<string, uint32_t> pushLocations;
     unordered_set<uint32_t> pushIds;
-    for (const auto& rule : policy.PushConstants)
-        if (!pushes.contains(rule.Name) || !pushLocations.emplace(rule.Name, rule.PushId).second || !pushIds.insert(rule.PushId).second)
+    for (const auto& rule : policy.PushConstants) {
+        if (!pushLocations.emplace(rule.Name, rule.PushId).second || !pushIds.insert(rule.PushId).second)
             return {std::nullopt, "push override has unknown/duplicate name or ID"};
+        if (!pushes.contains(rule.Name) && !(rule.AllowDxilOnly && !hasAnyDxil))
+            return {std::nullopt, "push override has unknown/duplicate name or ID"};
+    }
     for (auto& [name, entry] : pushes) {
         auto found = pushLocations.find(name);
         uint32_t id = 0;

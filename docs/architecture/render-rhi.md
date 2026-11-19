@@ -1,23 +1,24 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文说明显式 RHI layout 契约、所有权与两个后端映射。Shader 编写方式见 [authoring 指南](../guide/shader-authoring.md)
-> - 锚点: `modules/gpu/include/radray/gpu/types.h`, `modules/gpu_impl/include/radray/gpu_impl/external_resource.h`, `modules/gpu_impl/include/radray/gpu_impl/backend/vulkan_impl.h`, `modules/gpu_impl/include/radray/gpu_impl/sampler_cache.h`, `modules/gpu_impl/src/factory.cpp`, `modules/gpu_impl/src/rhi_validation.cpp`, `modules/gpu_impl/src/sampler_cache.cpp`, `modules/gpu_impl/src/d3d12/d3d12_impl.cpp`, `modules/gpu_impl/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/gpu/include/radray/gpu/types.h`, `modules/gpu/include/radray/gpu/external_resource.h`, `modules/gpu_impl/include/radray/gpu_impl/backend/vulkan_impl.h`, `modules/gpu_impl/include/radray/gpu_impl/sampler_cache.h`, `modules/gpu_impl/src/factory.cpp`, `modules/gpu_impl/src/rhi_validation.cpp`, `modules/gpu_impl/src/sampler_cache.cpp`, `modules/gpu_impl/src/d3d12/d3d12_impl.cpp`, `modules/gpu_impl/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
-`radraygpu` / `RadRay::gpu` 是依赖 core 的纯头文件契约库，命名空间为 `radray::gpu`。
+`radraygpu` / `RadRay::gpu` 是依赖 core 的静态契约库，命名空间为 `radray::gpu`。
 公共头 `<radray/gpu/types.h>` 统一提供枚举、flags、格式化、类型查询、描述符、值操作和抽象对象接口，
 不包含原生 SDK 头。
 
 `radraygpu_impl` / `RadRay::gpu_impl` 提供工厂、描述符校验、CPU 校验包装、sampler cache、外部资源扩展与
 D3D12 / Vulkan 实现。`factory.h/.cpp` 提供 `CreateDevice`、`CreateDXGIFactory`、
 `CreateDXGIDiagnosticContext`、`InitVulkanEnv`、`ShutdownVulkanEnv`；接口类没有静态工厂。
-`validation.h/.cpp` 提供完整描述符与设备能力校验。外部资源扩展及 OS 句柄所有权位于 gpu_impl；
-gpu 的 Device 只前置声明扩展并提供查询。两个模块都不知道资产、场景和帧节奏。
+`validation.h/.cpp` 提供完整描述符与设备能力校验。外部资源契约与 OS 句柄 RAII 的声明位于 `RadRay::gpu` 的独立公共头 `<radray/gpu/external_resource.h>`。
+句柄的关闭与复制由 gpu 的实现文件处理，公共接口无需包含 Win32 头。
+两个模块都不知道资产、场景和帧节奏。
 
 ## 可选 RHI 校验
 
-`CreateDevice(desc, RhiValidationOptions)` 在创建真实后端后按固定配置决定是否包装。
-`RhiValidationOptions::IsEnabled` 在 Debug（定义 `RADRAY_IS_DEBUG` 且未定义 `NDEBUG`）中默认开启，
+`CreateDevice(desc, GpuValidationOptions)` 在创建真实后端后按固定配置决定是否包装。
+`GpuValidationOptions::IsEnabled` 在 Debug（定义 `RADRAY_IS_DEBUG` 且未定义 `NDEBUG`）中默认开启，
 Release、RelWithDebInfo、MinSizeRel 默认关闭；
 调用方可以显式覆盖。`LogCallback` / `LogUserData` 接收 RHI 误用诊断；未提供回调时写项目错误日志。
 接收者须存活至 device 和对象销毁；回调不重入 RHI。原生诊断回调仍可能由驱动线程调用，接收者负责线程安全。
@@ -89,7 +90,7 @@ Vulkan 的 viewport 可以用负高度表达 Y 翻转；D3D12 要求正高度。
 在 `CreateQueryPool` 调用期间有效；两个后端均即时设置原生对象名称，不保存该 view。
 D3D12 与 Vulkan 查询池仅平铺保存查询类型与数量，不保存创建描述符。
 
-Vulkan 的 `TimestampQueries` 表示至少一个已创建 queue family 支持 timestamp；不代表所有队列均支持。
+Vulkan 的 `TimestampQueries` 表示至少一个已创建 queue family 支持 timestamp。`CommandQueue::GetTimestampValidBits()` 返回实际队列的有效计数位宽，零表示无法写时间戳。D3D12 的 Direct 和 Compute 队列返回 64。
 校验层按 command buffer 实际 family 检查 `timestampValidBits` 和 timestamp stage。
 `ResetQueryPool` / `ResolveQueryData` 要求 graphics 或 compute family，专用 transfer family 被拒绝。
 
@@ -120,20 +121,18 @@ D3D12 的无效队列、API 失败和无效频率/区间分别
 结果的 tick 与频率可用于转换，失败不以 CPU 时间或零值伪造 GPU 样本。已有 query 的 GPU
 write/resolve/availability 语义不变。
 
+## 颜色写掩码
+
+D3D12 与 Vulkan 均支持 RGBA 四个通道的全部 16 种写入组合。`ColorTargetState::WriteMask={}` 保留颜色附件的原值，深度测试与写入继续使用管线的深度状态。创建管线时会拒绝四个通道以外的位。
+
 ## D3D12 执行失败
 
-D3D12 的 `ColorTargetState::WriteMask={}` 是合法零写掩码：颜色附件仍存在，draw 不写颜色，
-depth test/write 按原 depth state 执行。它不等同于没有颜色附件；未知掩码位仍拒绝。
-
-D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，
-HRESULT 检查成功时直接返回，仅失败时查询 `GetDeviceRemovedReason()`，诊断同时保留调用 HRESULT
-和设备移除原因。Submit 入口与 ExecuteCommandLists 返回后独立检查设备状态，因为设备移除后部分
-队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
+D3D12 在命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 上检查 HRESULT。检出设备移除时，`Device::IsDeviceLost()` 锁存终态并输出 HRESULT、移除原因和可用的 DRED 信息。Submit 入口与 ExecuteCommandLists 返回后也检查设备状态，部分队列调用在设备移除后仍可能返回成功。丢失后创建接口返回空，队列 Submit 返回 false，Present 返回 Error。健康设备的内部提交错误仍会终止进程。
 
 ### D3D12 / DXGI 诊断通道
 
 诊断实现位于内部 `modules/gpu_impl/src/d3d12/d3d12_diagnostics.h/.cpp`，没有全局注册表、
-函数内静态实例、全局锁或全局订阅者列表。`RenderLogCallback` 签名不变。
+函数内静态实例、全局锁或全局订阅者列表。`GpuLogCallback` 签名不变。
 调用方通过 `CreateDXGIDiagnosticContext()` 创建上下文，并传入
 `DXGIFactoryDescriptor::DiagnosticContext`；启用 debug layer 时缺少上下文会创建失败。
 同进程所有同时存活的验证 Factory **必须显式共享同一个上下文**，包括被 Device 保留的原生 Factory。
@@ -218,11 +217,11 @@ APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留�
 #### Fence 等待与不可呈现窗口
 
 Fence 查询把 `std::numeric_limits<uint64_t>::max()` 视为设备移除，禁止上层将其比较为成功完成。
-`Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
+`Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询。超时和设备丢失均返回 false，调用者可查询 `Device::IsDeviceLost()` 区分原因。丢失后的 `GetCompletedValue()` 返回上一次观测到的真实完成值。即使目标值此前已达到，只要调用前已锁存丢失或本次查询检出丢失，`WaitFor` 也返回 false。
 即使 timeoutMs 为 `std::numeric_limits<uint64_t>::max()`，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。
 D3D12 检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除和较早超时的事件
 注册也能唤醒事件。Vulkan 使用有限 vkWaitSemaphores。兼容 Wait() / Wait(value) 的期限为
-30 秒；超时明确终止，不在 GPU 仍可能使用资源时继续销毁。上层可用 WaitFor/poll 做可取消关闭。
+30 秒。健康设备等待超时会终止进程，丢失的设备直接结束等待。Vulkan 首次检出丢失时完成一次设备级 idle，同步完成后即可回收在途槽持有的原生对象。
 这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
 D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
 对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
@@ -236,14 +235,15 @@ DXGI_ERROR_WAS_STILL_DRAWING 返回 RetryLater，保留未排入呈现的 readin
 ## 区域纹理上传
 
 `CommandBuffer::CopyBufferToTextureRegion` 接受 `BufferToTextureCopyDescriptor`，其中
-`BufferTextureCopyRegion` 通过 SourceOffset、RowPitch 表达源 buffer 的字节偏移和行距，
-Destination 使用 `TextureRegion2D` 表达目标 mip、array layer 及以 texel 为单位的 X/Y、宽高。
-`TextureRegion2D` 只描述目标区域，也由 runtime 的 RDG 上传声明复用。
-`ValidateBufferTextureCopyRegion` 验证单采样、非压缩 color 2D/2DArray、copy usage、子资源与区域边界、
-设备 pitch/placement 对齐及源 buffer 范围。源内容从指定 offset 开始，只上传区域的行；
-目标区域外的 texel 保持原值。D3D12 映射到 placed footprint + CopyTextureRegion，Vulkan
-映射到 VkBufferImageCopy + vkCmdCopyBufferToImage。不支持的 command buffer 实现返回 false。
+`BufferTextureCopyRegion` 的 SourceOffset 和 RowPitch 以字节计，RowsPerImage 是相邻深度切片的块行间距，零表示紧密切片。
+Destination 使用 `TextureRegion2D` 指定 mip、数组层或 Cube 面和 texel 单位的 XYZ 范围。3D 纹理使用第零数组层及所选 mip 内的 Z、Depth。
+`GetTextureFormatBlockInfo` 给出块宽、块高及每块字节数。BC1 至 BC7 使用 4×4 块，起点须块对齐，末端抵达 mip 边缘时允许部分块。
+`ValidateBufferTextureCopyRegion` 校验单采样、copy usage、范围、块边界和设备对齐。源缓冲只需覆盖最后一个有效块。
+`CopyTextureToBufferRegion` 以相同单位描述颜色纹理读回，源区域、目标字节偏移、行距及切片间距由 `TextureBufferCopyRegion` 指定。`ValidateTextureReadbackRegion` 校验目标容量到最后一个有效块。Vulkan 按实际队列族校验双向传输粒度，压缩格式按块换算。纯传输队列的缓冲偏移须按 4 字节对齐。
+D3D12 的 placed footprint 必须整体位于源缓冲内。有片间填充且缓冲止于最后一片有效数据时，后端单独录制最后一片，必要时用源框跳过一行以满足放置对齐。
+Vulkan 将字节行距和块行间距转换为 `VkBufferImageCopy` 的 texel 单位。
 
+`D16_UNORM` 和 `D32_FLOAT` 支持纹理间整子资源复制，源与目标 mip 的尺寸和采样数须一致。Vulkan 上多采样深度复制要求图形队列。
 `CopyTextureToTexture` 校验原生图像维度，而非采样 view 的逻辑类型；等格式、等采样数的
 2D / 2D array / cube layer 可以互相复制，mip、layer、区域、copy usage 仍逐项检查。
 D3D12 每次复制的源、目标必须属于不同 subresource，即使同一 subresource 内的区域互不重叠也拒绝。
@@ -282,9 +282,9 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 
 **两段式析构**：对象具有幂等的 `Destroy()`，析构函数兜底释放。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
 
-`RenderBase` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `types.h` 中直接返回类型标签外，
+`GpuObject` 是全部对象的根，禁拷贝禁移动。除 `GetTag()` 在 `types.h` 中直接返回类型标签外，
 所有实例操作都是纯虚接口；保留构造、虚析构、静态工厂和无状态辅助函数。
-`RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
+`GpuObjectTag` 是位标志形式的类型标签，子类位或合成父类位
 （`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），用于日志和 RHI 校验注册表的对象类型检查。
 
 ## 命令录制存储
@@ -414,7 +414,7 @@ PipelineLayoutDescriptor（GroupSlot + 组布局、push blocks）→ PipelineLay
 
 `Device::CreateBindingGroupLayout` 与 `CreatePipelineLayout` 返回可空独占 owner。
 创建描述里的 spans 只借用至返回；布局复制自身需要的不可变描述与后端映射。`GetDesc()` 返回的 spans
-借用至布局销毁。完整布局和参数集借用组布局，PSO 借用完整布局，device 必须覆盖所有这些对象的寿命。
+借用至布局销毁。完整布局和参数集借用组布局，PSO 借用完整布局（可通过 `PipelineState::GetLayout()` 查询，无效时返回空），device 必须覆盖所有这些对象的寿命。
 
 | 数字命名空间 | 作用域 | 使用方式 |
 |---|---|---|
@@ -462,8 +462,8 @@ Shader 是否使用全部槽位不影响布局。调用方负责字节码与显�
 独立所有权指各 owner 持有并释放自身引用，不保证原生指针不同。销毁一个 owner 不影响另一个。
 根签名超过 64 DWORD 或原生创建失败返回空值。
 
-参数集每个 table 分配连续 CPU mirror 与 shader-visible 区间，组内 offset 不随完整布局变化。
-Set 更新 mirror 和 dirty ranges；FlushWrites 只发布 dirty 部分，并避免跨未初始化空洞批量复制。
+参数集的每个 table 拥有连续 CPU mirror，组内 offset 由绑定组布局决定。
+Set 更新 mirror 和 dirty ranges。FlushWrites 发布资源表的脏区间，并按完整采样器 ID 序列查找共享采样器表。
 root buffer 保存 GPU 基地址，绑定时加偏移。绑定根据当前 PSO 的完整布局映射下发，不重排参数集 descriptor 存储。
 
 RawBuffer / RWRawBuffer 的 StructureByteStride 必须为 0，range 按 4 字节对齐。D3D12 structured buffer
@@ -523,15 +523,20 @@ mimalloc，不依赖 CRT 全局分配覆盖；GPU 显存仍由 D3D12 管理。
 
 D3D12 分两套：`CpuDescriptorAllocator` 是分页堆，每页用 `D3D12MA::VirtualBlock` 做子分配；
 `GpuDescriptorAllocator` 是单个 shader-visible 堆 + `FirstFitAllocator`。Device 持 4 个 CPU
-分配器（CBV_SRV_UAV / RTV / DSV / Sampler）和 2 个 GPU 堆（resource 65536、sampler 2048）。
-Sampler 堆使用 D3D12 允许的完整 shader-visible 容量，容纳多视图、多 flight 同时持有的 parameter sets。
+分配器（CBV_SRV_UAV / RTV / DSV / Sampler）和 2 个 GPU 堆（resource 1,000,000、sampler 2,048）。
 `CmdListD3D12::Begin` 时把两个 GPU 堆 `SetDescriptorHeaps`（copy 队列除外）。
 `DescriptorHeapViewRAII` 负责归还。
 
-参数集创建时为每个 table 分配等长 CPU mirror 与 GPU 区间；不同 table 区间不保证相邻。
-分配失败通过已有 RAII 释放已成功的区间。GPU 区间随 set 持有；每次绑定不生成 descriptor 快照。
+参数集创建时为资源表分配等长的 GPU 区间。采样器表在 FlushWrites 时共享 GPU 区间，键包含每个槽的采样器实例 ID，空槽为零。
+重刷、解绑或销毁参数集时释放该表的引用，最后一个引用释放 GPU 区间。唯一表占满堆时 FlushWrites 返回 false，腾出空间后可以重试。
 Vulkan 的 `DescriptorSetAllocatorVulkan` 继续按 `{layout, poolSizes}` 在 descriptor pool 页上分配与复用。
 描述符分配器、sampler cache、render-pass/framebuffer 机制与布局所有权独立。
+
+## 原生管线缓存
+
+`Device::CreatePipelineCache` 接受同一后端的 `PipelineCache::GetData()` 字节。图形与计算管线描述符的 `Cache` 在创建期间借用，可在 PSO 创建完成后销毁。
+D3D12 使用 pipeline library，以根签名、着色器和原生状态内容命名 PSO。序列化头记录适配器、驱动和数据校验值，library 持有期间保留输入字节副本。缺少 library 支持时仍能创建管线，导出为空。
+Vulkan 复用 VkPipelineCache，导入前检查设备、厂商与 pipelineCacheUUID。两端遇到不匹配的缓存均从空缓存开始。
 
 ## 原生布局直接所有权与显式共享
 
@@ -669,7 +674,7 @@ RDG 上传按 execution group 记录 zone，逐节点 CPU 诊断仍保留，见 
 
 ## 设备能力与纹理支持
 
-`Device::GetCapabilities()` 返回创建后不可变的 `RenderDeviceCapabilities`，包括原
+`Device::GetCapabilities()` 返回创建后不可变的 `GpuDeviceCapabilities`，包括原
 `DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
 `DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
 
@@ -736,12 +741,10 @@ view 维度与层范围也在 RHI 校验层按后端检查：Vulkan 的 1D/2D �
 
 ## Windows 同 GPU 原生资源互操作
 
-公共入口是 `external_resource.h` 的 `Device::GetExternalResourceExtension()`，返回由 device 持有的借用接口。
-该入口为纯虚函数，每个 Device 实现必须显式提供扩展或返回空。
-`D3D12DeviceDescriptor::EnableExternalResource` 与 `VulkanDeviceDescriptor::EnableExternalResource`
-默认 false；需要互操作时，调用方必须在创建设备前显式设为 true。关闭时不构造扩展对象，入口返回空，
-RHI validation 包装也保持为空；查询入口不会延迟启用功能。配置在设备创建后不可更改。
-Windows 后端在开启时提供该扩展，其他平台返回空；扩展存在不代表某个资源/方向可用。
+包含 `<radray/gpu/external_resource.h>` 后，通过 `Device::CreateExternalResourceExtension()` 按需创建扩展。
+每次成功调用都返回独立的 `unique_ptr`，调用方须在设备销毁前释放它。校验层将扩展计入设备的存活子对象。
+通过扩展创建或导入的资源可以比扩展活得更久。Windows D3D12 和 Vulkan 提供扩展，其他平台返回空。
+具体资源与方向的支持由扩展的能力查询给出。
 `GetDeviceIdentity()` 返回 `ExternalResult<ExternalDeviceIdentity>`：成功值仅包含 LUID / NodeMask，
 设备没有有效 LUID 或不符合单 node 限制时返回说明原因的 `ExternalError`，不使用 `Valid` 标记。
 身份查询不记录 error；能力查询传递其失败原因，实际创建或导入仍在自身失败边界记录一次 error。
@@ -799,9 +802,9 @@ D3D12 用 DEFAULT/SHARED 的 CreateCommittedResource，初态 COMMON、UNKNOWN l
 Cube/CubeArray 映射为 2D array；按 usage 设置 RTV/UAV/DS flags。默认 typed，开启重解释时使用 FormatToTypeless，
 没有独立 typeless 表示时保留原生格式。导入核对原生资源描述及 heap；DENY_SHADER_RESOURCE 仅与 sampled 请求冲突。
 Fence 使用 SHARED，通过 CreateSharedHandle 导出、OpenSharedHandle 导入。
-Vulkan 保持 1.2 基线，仅在 `EnableExternalResource` 开启时按驱动提供情况请求
-`VK_KHR_external_memory_win32` / `VK_KHR_external_semaphore_win32`；关闭时均不请求。
-开启后仍只要求当前方向的
+Windows Vulkan 保持 1.2 基线，创建设备时按驱动支持情况分别启用
+`VK_KHR_external_memory_win32` 和 `VK_KHR_external_semaphore_win32`，并检查对应入口。
+查询资源能力时只要求当前方向的
 EXPORTABLE 或 IMPORTABLE。Buffer/Image 声明所选的 D3D12_RESOURCE 或 OPAQUE_WIN32，导出使用
 VMA 3.4 dedicated 创建接口和 `VkExportMemoryAllocateInfo`，D3D12Resource 导入沿用 dedicated 创建接口及
 `VkImportMemoryWin32HandleInfoKHR`，offset 固定为 0。
@@ -937,7 +940,7 @@ semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重�
 
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
 D3D12 消费 outstanding frame，返回既有 result 的 Success，之后必须 Recreate 或关闭；
-`DiscardAcquiredFrame` 是纯虚接口，Vulkan 当前不支持该操作，调用立即 ABORT。析构不是 token 取消。
+Vulkan 在设备丢失后通过 `DiscardAcquiredFrame` 注销已获取的 token 并返回 Error。健康 Vulkan 设备调用此接口会立即 ABORT。
 D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
 不能把它统计成实际可见呈现。Vulkan Present 的 RequireRecreate / Error 同样消费帧，不保留重试 token。
 

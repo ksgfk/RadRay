@@ -96,7 +96,7 @@ std::optional<uint64_t> FindOffset(...);          // 值类，可能没有（示
 auto device = gpu::CreateDevice(descriptor, {.IsEnabled = true});
 ```
 
-gpu 头文件只包含契约与无后端的内联操作。window 继续使用接口类内的静态 `Create` 工厂。
+gpu 是静态库，普通值操作与查询在同名实现文件中定义，常量求值函数保留在头文件中。window 继续使用接口类内的静态 `Create` 工厂。
 
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 gpu_impl 后端实现类**，理由见
 [RHI 所有权](../architecture/render-rhi.md)。普通资源包装使用析构函数与成员声明顺序。

@@ -6,6 +6,7 @@
 #include <memory>
 #include <memory_resource>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -18,6 +19,7 @@
 #include <radray/runtime/mesh_draw_command.h>
 #include <radray/runtime/mesh_pass_processor.h>
 #include <radray/runtime/gpu_device.h>
+#include <radray/runtime/transient_parameter_pool.h>
 
 namespace radray {
 
@@ -29,7 +31,8 @@ public:
     MeshPassFrameDrawList(const MeshPassFrameDrawList&) = delete;
     MeshPassFrameDrawList& operator=(const MeshPassFrameDrawList&) = delete;
 
-    // 排序前固定动态命令指针；提交只读冻结后的命令。
+    // 排序前固定动态命令指针；奇数趟基数排序可能与内部暂存缓冲交换，
+    // 排序前持有的 VisibleCommands 底层指针/span 视图在排序后失效，须在排序后重新获取；提交只读冻结后的命令。
     void SortVisibleCommands();
     void SetSortMode(MeshPassSortMode mode) noexcept;
     MeshPassSortMode GetSortMode() const noexcept;
@@ -38,6 +41,7 @@ public:
 
     vector<VisibleMeshDrawCommand> VisibleCommands;
     DynamicMeshPassDrawListContext DynamicContext;
+    PreparedMeshPassIndirectDraws IndirectDraws;
 
 private:
     vector<VisibleMeshDrawCommand> _scratchCommands;
@@ -63,7 +67,7 @@ public:
     MeshPassFrameDrawList& GetPassDrawList(MeshPassId pass);
     const MeshPassFrameDrawList& GetPassDrawList(MeshPassId pass) const noexcept;
 
-    // 当前帧 BeginFrame 后至 Submit 返回前创建；参数原样转发。
+    // 当前帧 BeginFrame 后可登记；提交完成或 RunFrame 因设备丢失返回时关闭登记窗口。
     // 成功对象按构造完成的逆序，在等待、命令重置及 CPU 记录清空后统一析构。
     // 构造失败不登记该对象；已成功构造的嵌套对象仍由槽清理。
     // 资源 owner 应先于依赖它的 view/绑定登记，或放在同一个 RAII 对象中。
@@ -102,6 +106,8 @@ public:
     // 本槽下次重置时，借用失效，命令缓冲可被复用。
     // 调用方负责 Begin/End；共享分配器同一时刻只允许一份命令缓冲处于录制状态。
     Nullable<gpu::CommandBuffer*> AcquireCommandBuffer();
+    Nullable<gpu::ShaderParameterSet*> AcquireParameterSet(const shared_ptr<gpu::BindingGroupLayout>& layout, std::span<const TransientParameterBinding> bindings);
+    Nullable<gpu::ShaderParameterSet*> AcquireUninitializedParameterSet(const shared_ptr<gpu::BindingGroupLayout>& layout);
 
 private:
     friend class FrameScheduler;
@@ -131,6 +137,7 @@ private:
     DeviceContext& _device;
     uint64_t _frameId{0};
     unique_ptr<gpu::CommandAllocator> _allocator;
+    TransientParameterSetPool _parameterSets;
     vector<unique_ptr<gpu::CommandBuffer>> _commands;
     HeapMemoryResource _memoryHeap;
     std::pmr::memory_resource& _memoryUpstream;

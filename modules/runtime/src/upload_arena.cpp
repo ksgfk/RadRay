@@ -71,6 +71,8 @@ void UploadArena::CommitSubmittedStates() noexcept {
     }
 }
 
+gpu::Device& UploadArena::GetDevice() const noexcept { return _device; }
+
 uint64_t UploadArena::GetCapacity() const noexcept {
     uint64_t result = 0;
     for (const auto& page : _pages) result += page.Capacity;

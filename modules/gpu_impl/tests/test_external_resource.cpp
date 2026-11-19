@@ -1,24 +1,24 @@
 #include "gpu_test_fixture.h"
 
 #include <radray/logger.h>
-#include <radray/gpu_impl/external_resource.h>
+#include <radray/gpu/external_resource.h>
 
 namespace radray::gpu {
 namespace {
 
 // Opaque handles are only defined for Vulkan to Vulkan; every other route shares a D3D12 resource handle.
 struct Route {
-    RenderBackend Source, Destination;
+    GpuBackend Source, Destination;
     ExternalMemoryHandleType Handle{ExternalMemoryHandleType::D3D12Resource};
 };
 
-constexpr Route AllRoutes[]{{RenderBackend::D3D12, RenderBackend::D3D12},
-                            {RenderBackend::D3D12, RenderBackend::Vulkan},
-                            {RenderBackend::Vulkan, RenderBackend::D3D12},
-                            {RenderBackend::Vulkan, RenderBackend::Vulkan, ExternalMemoryHandleType::OpaqueWin32}};
+constexpr Route AllRoutes[]{{GpuBackend::D3D12, GpuBackend::D3D12},
+                            {GpuBackend::D3D12, GpuBackend::Vulkan},
+                            {GpuBackend::Vulkan, GpuBackend::D3D12},
+                            {GpuBackend::Vulkan, GpuBackend::Vulkan, ExternalMemoryHandleType::OpaqueWin32}};
 
 auto RouteName(const testing::TestParamInfo<Route>& info) {
-    const auto name = [](RenderBackend backend) { return backend == RenderBackend::D3D12 ? "D3D12" : "Vulkan"; };
+    const auto name = [](GpuBackend backend) { return backend == GpuBackend::D3D12 ? "D3D12" : "Vulkan"; };
     return std::string{radray::format("{}To{}", name(info.param.Source), name(info.param.Destination))};
 }
 
@@ -68,12 +68,12 @@ testing::AssertionResult QuerySucceeded(const ExternalSupport& support) {
 class ExternalResourceTest : public test::GpuTest, public testing::WithParamInterface<Route> {
 protected:
     void SetUp() override {
-        _source = OpenDevice(GetParam().Source, true).Get();
+        _source = OpenDevice(GetParam().Source).Get();
         if (!_source) return;
-        _destination = OpenDevice(GetParam().Destination, true).Get();
+        _destination = OpenDevice(GetParam().Destination).Get();
         if (!_destination) return;
-        _exporter = _source->GetExternalResourceExtension().Get();
-        _importer = _destination->GetExternalResourceExtension().Get();
+        _exporter = _source->CreateExternalResourceExtension().Release();
+        _importer = _destination->CreateExternalResourceExtension().Release();
         if (!_exporter || !_importer) GTEST_SKIP() << "external resource extension is unavailable";
         const auto sourceIdentity = _exporter->GetDeviceIdentity();
         const auto destinationIdentity = _importer->GetDeviceIdentity();
@@ -81,6 +81,12 @@ protected:
             if (const auto* error = std::get_if<ExternalError>(identity)) GTEST_SKIP() << error->Message;
         if (std::get<ExternalDeviceIdentity>(sourceIdentity) != std::get<ExternalDeviceIdentity>(destinationIdentity))
             GTEST_SKIP() << "devices are on different adapters";
+    }
+
+    void TearDown() override {
+        _importer.reset();
+        _exporter.reset();
+        GpuTest::TearDown();
     }
 
     // Skips when either side reports the route as unsupported.
@@ -93,8 +99,8 @@ protected:
 
     Device* _source{nullptr};
     Device* _destination{nullptr};
-    ExternalResourceExtension* _exporter{nullptr};
-    ExternalResourceExtension* _importer{nullptr};
+    unique_ptr<ExternalResourceExtension> _exporter;
+    unique_ptr<ExternalResourceExtension> _importer;
 };
 
 ResourceBarrierDescriptor BufferBarrier(Buffer& buffer, BufferStates before, BufferStates after,
@@ -176,6 +182,8 @@ TEST_P(ExternalResourceTest, BufferRoundTrip) {
     auto imported = Take(_importer->ImportBuffer(handle->Handle.Borrow(), handle->Info));
     ASSERT_TRUE(imported);
     handle.reset();
+    _exporter.reset();
+    _importer.reset();
 
     EXPECT_EQ(BufferTurn(*_destination, *imported, true, backward), forward);
     EXPECT_EQ(BufferTurn(*_source, *exported, true, {}), backward);
@@ -198,6 +206,24 @@ TEST_P(ExternalResourceTest, TextureRoundTrip) {
 
     EXPECT_EQ(TextureTurn(*_destination, *imported, true, backward), forward);
     EXPECT_EQ(TextureTurn(*_source, *exported, true, {}), backward);
+}
+
+TEST_P(ExternalResourceTest, FenceRoundTrip) {
+    const auto type = GetParam().Handle == ExternalMemoryHandleType::OpaqueWin32
+                          ? ExternalFenceHandleType::OpaqueWin32
+                          : ExternalFenceHandleType::D3D12Fence;
+    RequireSupport(_exporter->QueryFenceSupport(type), _importer->QueryFenceSupport(type));
+    if (IsSkipped() || HasFatalFailure()) return;
+
+    constexpr uint64_t initialValue = 7;
+    auto exported = Take(_exporter->CreateExportableFence({type, initialValue}));
+    ASSERT_TRUE(exported);
+    auto handle = TakeExport(_exporter->ExportFence(exported.get()));
+    ASSERT_TRUE(handle);
+    auto imported = Take(_importer->ImportFence(handle->Handle.Borrow(), handle->Info));
+    ASSERT_TRUE(imported);
+    handle.reset();
+    EXPECT_EQ(imported->GetCompletedValue(), initialValue);
 }
 
 INSTANTIATE_TEST_SUITE_P(Routes, ExternalResourceTest, testing::ValuesIn(AllRoutes), RouteName);

@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_rdg_upload/`, `tools/measure_rdg_upload_gpu.py`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_rdg_upload/`, `benchmarks/bench_transient_parameter_pool/`, `tools/measure_rdg_upload_gpu.py`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`, `modules/runtime/src/transient_parameter_pool.cpp`
 
 # 性能测量
 
@@ -13,10 +13,13 @@
 |---|---|
 | `bench_read_obj` | 内存 OBJ 文本解析，不含磁盘 IO |
 | `bench_sparse_set` | SparseSet 的扩容、访问、删除、复用与历史高水位压力；无需外部资产 |
-| `bench_rdg_upload` | runtime 的声明、编译、准备、录制及上传页复用；fake 只记录 GPU Copy 命令 |
+| `bench_rdg_upload` | runtime 的 RDG 声明、编译、准备、录制、上传页复用与 CPU 热路径（基数排序、MeshDrawCommand 展开/提交、百页几何池、RDG 密集单 Pass / 1,024 稀疏 CopyPass 与 Scene 万级可见收集）；fake 只记录计数 |
 | `bench_rdg_upload_gpu` | 真实 D3D12/Vulkan 上传与中间消费者；独立外围 timestamp 及 CPU Prepare/Record |
+| `bench_transient_parameter_pool` | `TransientParameterSetPool` 在 65,536 峰值后的稀疏帧按条目清桶与全表清零对照，持续 65,536 键高负载 `BeginFrame()` 耗时，以及参数集获取路径的配对测量 |
 
 ## RDG 上传
+
+启用 profiler 时，D3D12 分别记录每个设备的 shader-visible 资源堆和采样器堆的同时在用描述符峰值。Tracy 的 `RadRay.D3D12.ResourceHeap.PeakDescriptors` 与 `RadRay.D3D12.SamplerHeap.PeakDescriptors` 在刷新峰值时采样，单位为描述符槽位。
 
 `bench_rdg_upload` 随 runtime 与 benchmarks 开关启用，无需 shader 或真实 GPU。
 `RDGUpload/<负载>/<阶段>` 分别测 Build、Compile、Prepare、Record、Frame（Build 至状态发布）和 Recycle。
@@ -25,6 +28,10 @@ Recycle 单独测下一次 BeginFrame 的 fake 等待、命令重置、帧对象
 Prepare 包含布局、物化、分配、填充与 Flush，真实参数组更新成本应结合样例的 PrepareBindings Tracy 区间观察。
 `RDGUploadComponent/PrepareLayout|AllocateFill|Flush` 独立测 64 个 80 字节来源的组件调用；
 这些微基准不包含图调度和真实驱动绑定，不能相加代替完整 Prepare。
+`RDGHotpath/DensePass/{Build,Prepare,Frame}` 测单光栅 Pass 导入 100 页几何池 + 32 纹理并执行 200 次特征声明与视图解析；`RDGHotpath/SparseCopy1024/{Build,Compile,Frame}` 测 1,024 个稀疏 `AddCopyPass` 用户 Pass 各读一个高编号 `Buffer[4095]`（两者在 `--rdg_memory_probe` 模式下也注册 `Frame` 用例）。
+`RuntimeHotpath/*` 另覆盖 20,000 条可见命令 0/1/3/4 趟基数排序（非 0 趟每轮在 `PauseTiming`/`ResumeTiming` 外恢复同一乱序输入）、20,000 条单元素与 7 元素命令的 `CountMeshPassIndirectDraws` + `BuildMeshPassIndirectDraws` 与 `SubmitMeshDrawCommands`、100 页几何池 `GetFreeBytes` 查询与分配/释放循环，以及 10,000 Batch 下的 `Scene::GatherVisibleMeshDrawCommands` 与 `Scene::GatherVisiblePrimitives`。
+
+`RuntimeHotpath/IndirectBuild/{SinglePage,AlternatingPages}` 仅计时 20,000 条命令的 `BuildMeshPassIndirectDraws`。两组使用相同的管线和索引页，顶点页分别固定和逐条交替。预热时核对产生 1 或 20,000 个批次，并复用输出容量。
 
 负载覆盖 1 MiB Borrow/Snapshot、固定总量 64/1024/4096 块、0/10/100% 存活、固定生成、
 按可见命令数量决定大小的动态切片（声明上界为 16 个元素，实际 1/8 个）、不重叠与重叠写入、中间消费者及首次分配。
@@ -47,7 +54,7 @@ $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_rdg_upload.ex
 `logical_uploads` 是声明数，`physical_copies` / `copy_bytes` 是录制数与有效字节，
 `barrier_descriptors` 是 RHI 屏障描述数；这些不能代替原生 GPU 时间。
 `resource_creates`、`maps` 统计每轮资源创建/映射，`retained_upload_capacity` 是缓存页容量。
-`--rdg_memory_probe` 只注册 Frame 用例，通过 FrameScheduler 的自定义上游入口观测槽内全部 CPU PMR 存储，
+`--rdg_memory_probe` 只注册 `RDGUpload/*/Frame` 与 `RDGHotpath/*/Frame` 用例，通过 FrameScheduler 的自定义上游入口观测槽内全部 CPU PMR 存储，
 上游继续使用 HeapMemoryResource；普通计时模式使用默认上游，不经过 probe。
 采样模式的时间包含 probe 开销，不能与普通模式时间比较。
 `peak_storage_bytes` / `retained_storage_bytes` 为上游峰值 / 最终槽回收后的保留量，包含堆对齐取整、
@@ -62,6 +69,12 @@ $bench = './build/windows-x64-clangcl/Release/_build/Release/bench_rdg_upload.ex
 
 比较性能使用普通模式，固定 CPU affinity（尤其混合核心 CPU）、构建/校验/profiler 配置，并交替运行改前改后版本。
 复用时创建/映射为零不表示缓存内存已经释放；裁剪工作不包含外部 owner 已创建资源的成本。
+
+## 瞬态参数集获取
+
+`bench_transient_parameter_pool` 的 `ParameterAcquire/{Baseline,R3a,R3b}/{Repeat,Alternate,Insert}/{1,4,8}/{Sorted,Unsorted}` 在同一程序内使用三种基准实现。Baseline 复现 `af121f2` 的暂存与查表逻辑，R3a 借用有序输入并定位一次布局，R3b 额外在哈希前比较上次命中的键。三者共享设备、负载和计时循环。单绑定只有一种顺序，4 与 8 个绑定分别测正序和逆序。
+
+每轮计时 1,000 次获取。Repeat 连续命中同一键，Alternate 来回切换仅最后一个绑定值不同的两键。Insert 在计时前开启新帧，依次插入 1,000 个不同键。参数集与容器均已预热，检查计时期间的额外创建；Time 列除以 1,000 得到单次获取耗时。`TransientParameterPool/*` 则单独测生产池和全表清零对照的跨帧开销。
 
 ## 比较与证据口径
 
@@ -153,7 +166,7 @@ Plots 按调用输出，多个槽或 Pass 共用同名曲线，通过所属 zone
 - `Scene.VisibleBatches`、`DrawList.SortCommands`、`MeshDraw.SubmitCommands`
   分别表示本次 Gather 的输入 Batch 数、待排序命令数、提交列表长度；最后一项包含零实例而被跳过的项。
   命令数以 Batch/Pass 为单位；一条命令可按 ElementMask 发出多次 DrawIndexed，不能将列表长度当作 Draw 次数。
-  GatherPrimitives 按 Batch 调用 Gather，不能把单个 VisibleBatches 样本当成该 Primitive 入口的合计。
+  `GatherVisiblePrimitives` 与 `GatherVisibleMeshDrawCommands` 共用内层单 Batch 收集路径，每次 `GatherVisiblePrimitives` 调用仅输出一次 `RadRay.Scene.GatherVisibleHandles` 区间及该次遍历的合计 `Scene.VisibleBatches` 样本。
 - 当前没有 SnapshotCommands、SnapshotCapacityBefore/After 或 ClearSnapshots；缓存命令不再复制到帧槽。
 - `Scene.DirtyBatches` 是缓存同步本次取出的脏 Batch 数，包括随后因失效而跳过的项。
 - `RDG.DeclaredPasses/Textures/Buffers` 是声明数量，`AlivePasses`、`AliveMeshPasses` 和 `ExecutionGroups`

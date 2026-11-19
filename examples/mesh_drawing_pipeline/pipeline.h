@@ -129,7 +129,7 @@ private:
     void ExtractFrameData(FrameSlot& slot) noexcept override;
     void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override;
     void ExtractMeshPass(MeshPassId pass, FrameSlot& slot, MeshPassFrameDrawList& drawList) noexcept override;
-    void SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& commandBuffer) noexcept override;
+    bool SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& commandBuffer) noexcept override;
     struct InstanceGenerator;
     struct ConstantGenerator;
     struct PassData;

@@ -252,7 +252,7 @@ TEST_F(ShaderAssetFiles, CompileInMemoryWithDiskIncludesAndVariantIndices) {
     ShaderCompileDesc desc{.SourceUri = *uri, .Source = std::as_bytes(std::span{source}),
                            .IncludePaths = directories, .Variants = {{"Second", {}}, {"First", {}}}};
     shader::Client compiler;
-    for (const auto backend : {gpu::RenderBackend::D3D12, gpu::RenderBackend::Vulkan}) {
+    for (const auto backend : {gpu::GpuBackend::D3D12, gpu::GpuBackend::Vulkan}) {
         Device.Backend = backend;
         auto result = ShaderAsset::Compile(Device, compiler, desc);
         ASSERT_TRUE(result.Succeeded()) << result.Diagnostics;

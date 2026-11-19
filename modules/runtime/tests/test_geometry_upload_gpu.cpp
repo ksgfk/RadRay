@@ -199,6 +199,51 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferReleas
     EXPECT_EQ(actual, (vector<byte>{expected.begin(), expected.end()}));
 }
 
+TEST_P(GeometryUploadGpuTest, MultiPageAllocFreeAndReallocTracksExactFreeBytes) {
+    auto& device = GetDevice();
+    const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
+    const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
+    auto vertices = VertexBufferPool::Create(device, {.VertexStride = 12, .PageVertexCapacity = 8, .Layouts = layouts, .Attributes = attributes});
+    auto indices = IndexBufferPool::Create(device, {.IndexStride = 4, .PageIndexCapacity = 12});
+    ASSERT_TRUE(vertices && indices);
+
+    EXPECT_EQ(vertices->GetFreeBytes(), 0u);
+    EXPECT_EQ(indices->GetFreeBytes(), 0u);
+
+    auto v0 = vertices->Allocate(6);   // page 0 (cap 8): free 2
+    auto v1 = vertices->Allocate(5);   // page 1 (cap 8): free 3
+    auto v2 = vertices->Allocate(10);  // page 2 (cap 10): free 0
+    ASSERT_TRUE(v0 && v1 && v2);
+    EXPECT_EQ(vertices->GetPageCount(), 3u);
+    EXPECT_EQ(vertices->GetFreeBytes(), (2u + 3u + 0u) * 12u);
+
+    v0.reset();
+    EXPECT_EQ(vertices->GetFreeBytes(), (8u + 3u + 0u) * 12u);
+    auto v3 = vertices->Allocate(3);
+    ASSERT_TRUE(v3);
+    EXPECT_EQ(vertices->GetPageCount(), 3u);
+    EXPECT_EQ(vertices->GetFreeBytes(), (8u + 3u - 3u) * 12u);
+    v1.reset();
+    v2.reset();
+    v3.reset();
+    EXPECT_EQ(vertices->GetFreeBytes(), (8u + 8u + 10u) * 12u);
+
+    auto i0 = indices->Allocate(9);   // page 0 (cap 12): free 3
+    auto i1 = indices->Allocate(10);  // page 1 (cap 12): free 2
+    auto i2 = indices->Allocate(16);  // page 2 (cap 16): free 0
+    ASSERT_TRUE(i0 && i1 && i2);
+    EXPECT_EQ(indices->GetPageCount(), 3u);
+    EXPECT_EQ(indices->GetFreeBytes(), (3u + 2u + 0u) * 4u);
+    i1.reset();
+    auto i3 = indices->Allocate(4);
+    ASSERT_TRUE(i3);
+    EXPECT_EQ(indices->GetFreeBytes(), (3u + 12u - 4u) * 4u);
+    i0.reset();
+    i2.reset();
+    i3.reset();
+    EXPECT_EQ(indices->GetFreeBytes(), (12u + 12u + 16u) * 4u);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, GeometryUploadGpuTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
 }  // namespace

@@ -6,7 +6,7 @@
 
 namespace radray::gpu {
 
-Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc, const RhiValidationOptions& validation = {});
+Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc, const GpuValidationOptions& validation = {});
 Nullable<InstanceVulkan*> InitVulkanEnv(const VulkanInstanceDescriptor& desc);
 void ShutdownVulkanEnv() noexcept;
 Nullable<shared_ptr<DXGIDiagnosticContext>> CreateDXGIDiagnosticContext();

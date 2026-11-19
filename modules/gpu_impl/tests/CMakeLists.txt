@@ -5,6 +5,8 @@ add_executable(test_radray_gpu_impl
     test_compute_binding.cpp
     test_render_pass.cpp
     test_texture_view.cpp
+    test_texture_upload.cpp
+    test_sampler_table.cpp
     test_external_resource.cpp
     test_vulkan_device_features.cpp
     test_swapchain.cpp

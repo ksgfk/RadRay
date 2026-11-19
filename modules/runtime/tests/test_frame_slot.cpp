@@ -285,5 +285,193 @@ TEST(MeshPassFrameDrawListTest, RadixSortMatchesStableOrderAcrossAllKeyBytesAndR
     }
 }
 
+TEST(MeshPassFrameDrawListTest, SortAlreadySortedLargeListPreservesStableOrderAndFinalizesDynamicCommands) {
+    MeshPassFrameDrawList list;
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.emplace_back();
+    const MeshDrawCommand cached{};
+    for (uint32_t i = 0; i < 80; ++i) {
+        if (i % 4 == 0) {
+            MeshDrawCommand initializer;
+            list.DynamicContext.AddCommand({primitive, batch}, 0, initializer, i / 8);
+            list.VisibleCommands.back().FirstInstance = i;
+        } else {
+            list.VisibleCommands.push_back({.SortKey = uint64_t{i / 8} << 32, .CachedCommand = &cached, .FirstInstance = i});
+        }
+    }
+    list.SortVisibleCommands();
+    ASSERT_EQ(list.VisibleCommands.size(), 80u);
+    uint32_t dynamicIndex = 0;
+    for (uint32_t i = 0; i < 80; ++i) {
+        EXPECT_EQ(list.VisibleCommands[i].FirstInstance, i);
+        if (i % 4 == 0) {
+            EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &list.DynamicContext.Commands[dynamicIndex++]);
+        } else {
+            EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &cached);
+        }
+    }
+}
+
+TEST(MeshPassFrameDrawListTest, IndirectDrawsSurviveSlotGrowthListMovesAndClear) {
+    test::FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+
+    FakePipeline pipeline;
+    FakeBuffer indices{128, gpu::BufferUse::Index};
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
+
+    auto& list0 = slot.GetPassDrawList({0});
+    MeshDrawCommand initializer;
+    initializer.Pipeline = &pipeline;
+    initializer.IndexBuffer = {&indices, 0, 4};
+    initializer.IndexCount = 3;
+    list0.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
+    list0.SortVisibleCommands();
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(list0.VisibleCommands, list0.IndirectDraws));
+    ASSERT_EQ(list0.IndirectDraws.Batches.size(), 1u);
+    ASSERT_EQ(list0.IndirectDraws.IndexedArguments.size(), 1u);
+
+    // 触发 FrameSlot::_passDrawLists 扩容搬移。
+    (void)slot.GetPassDrawList({16});
+    auto& afterGrowth = slot.GetPassDrawList({0});
+    ASSERT_EQ(afterGrowth.IndirectDraws.Batches.size(), 1u);
+    ASSERT_EQ(afterGrowth.IndirectDraws.IndexedArguments.size(), 1u);
+    EXPECT_EQ(afterGrowth.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    // 移动构造与移动赋值均完整迁移 IndirectDraws。
+    MeshPassFrameDrawList moveConstructed{std::move(afterGrowth)};
+    ASSERT_EQ(moveConstructed.IndirectDraws.Batches.size(), 1u);
+    EXPECT_EQ(moveConstructed.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    MeshPassFrameDrawList moveAssigned;
+    moveAssigned = std::move(moveConstructed);
+    ASSERT_EQ(moveAssigned.IndirectDraws.Batches.size(), 1u);
+    EXPECT_EQ(moveAssigned.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    FakeBuffer indirectBuf{64, gpu::BufferUse::Indirect};
+    gpu::GpuDeviceCapabilities caps{};
+    caps.Features.IndirectDraw = true;
+    caps.Limits.MaxDrawIndirectCount = 4;
+    RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshPassIndirectDraws(encoder, moveAssigned.VisibleCommands, moveAssigned.IndirectDraws, {&indirectBuf, 0, 64}, {}, caps));
+    ASSERT_EQ(encoder.IndexedIndirectDraws.size(), 1u);
+    EXPECT_EQ(encoder.IndexedIndirectDraws[0].Count, 1u);
+
+    const auto batchCap = moveAssigned.IndirectDraws.Batches.capacity();
+    moveAssigned.Clear();
+    EXPECT_TRUE(moveAssigned.IndirectDraws.Batches.empty());
+    EXPECT_TRUE(moveAssigned.IndirectDraws.IndexedArguments.empty());
+    EXPECT_EQ(moveAssigned.IndirectDraws.Batches.capacity(), batchCap);
+    scheduler->WaitIdle();
+}
+
+TEST(MeshPassFrameDrawListTest, SortOddAndEvenActiveBytesPreservesStabilityAndDynamicPointers) {
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.emplace_back();
+    const MeshDrawCommand cached{};
+
+    for (const uint32_t activeBytes : {1u, 2u, 3u, 4u, 5u}) {
+        MeshPassFrameDrawList list;
+        list.DynamicContext.Commands.reserve(1);
+        constexpr uint32_t kCount = 256;
+        vector<std::pair<uint64_t, uint32_t>> expected;
+        expected.reserve(kCount);
+        vector<uint32_t> dynamicIndexByOrder(kCount, std::numeric_limits<uint32_t>::max());
+        uint32_t nextDynamic = 0;
+
+        for (uint32_t i = 0; i < kCount; ++i) {
+            uint64_t key = 0xA5A5A5A5A5A5A5A5ULL;
+            for (uint32_t b = 0; b < activeBytes; ++b) {
+                const uint32_t shift = b * 8u;
+                // 刻意产生重复键值以验证稳定性。
+                const uint64_t byteVal = ((i * (37u + b * 14u) + b * 11u) / 3u) & 0xFFu;
+                key = (key & ~(uint64_t{0xFFu} << shift)) | (byteVal << shift);
+            }
+            if (i % 3 == 0) {
+                MeshDrawCommand initializer;
+                list.DynamicContext.AddCommand({primitive, batch}, 0, initializer, 0);
+                list.VisibleCommands.back().SortKey = key;
+                list.VisibleCommands.back().FirstInstance = i;
+                dynamicIndexByOrder[i] = nextDynamic++;
+            } else {
+                list.VisibleCommands.push_back({.SortKey = key, .CachedCommand = &cached, .FirstInstance = i});
+            }
+            expected.emplace_back(key, i);
+        }
+
+        std::stable_sort(expected.begin(), expected.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        list.SortVisibleCommands();
+
+        ASSERT_EQ(list.VisibleCommands.size(), kCount) << "activeBytes=" << activeBytes;
+        for (uint32_t i = 0; i < kCount; ++i) {
+            EXPECT_EQ(list.VisibleCommands[i].SortKey, expected[i].first) << "activeBytes=" << activeBytes << " i=" << i;
+            EXPECT_EQ(list.VisibleCommands[i].FirstInstance, expected[i].second) << "activeBytes=" << activeBytes << " i=" << i;
+            const uint32_t origIdx = expected[i].second;
+            if (dynamicIndexByOrder[origIdx] != std::numeric_limits<uint32_t>::max()) {
+                EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &list.DynamicContext.Commands[dynamicIndexByOrder[origIdx]])
+                    << "activeBytes=" << activeBytes << " i=" << i;
+            } else {
+                EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &cached)
+                    << "activeBytes=" << activeBytes << " i=" << i;
+            }
+        }
+    }
+}
+
+TEST(MeshPassFrameDrawListTest, SortOddPassesSwapsBufferAndPreservesLargeReservationForNextFrame) {
+    MeshPassFrameDrawList list;
+    list.VisibleCommands.reserve(40000);
+    for (uint32_t i = 0; i < 10000; ++i) {
+        const uint64_t key = 0x1122334455667700ULL | ((uint64_t{i} * 73u + 19u) & 0xFFu);
+        list.VisibleCommands.push_back(Keyed(key, i));
+    }
+    const auto* bufferBeforeFrame0Sort = list.VisibleCommands.data();
+    list.SortVisibleCommands();
+    EXPECT_NE(list.VisibleCommands.data(), bufferBeforeFrame0Sort);
+    EXPECT_GE(list.VisibleCommands.capacity(), 40000u);
+    for (size_t i = 1; i < list.VisibleCommands.size(); ++i) {
+        EXPECT_LE(list.VisibleCommands[i - 1].SortKey, list.VisibleCommands[i].SortKey);
+    }
+
+    list.Clear();
+    const auto* bufferFrame1 = list.VisibleCommands.data();
+    for (uint32_t i = 0; i < 20000; ++i) {
+        const uint64_t b0 = (uint64_t{i} * 73u + 19u) & 0xFFu;
+        const uint64_t b2 = (uint64_t{i} * 131u + 7u) & 0xFFu;
+        const uint64_t b4 = (uint64_t{i} * 29u + 3u) & 0xFFu;
+        const uint64_t key = 0x1122330055007700ULL | b0 | (b2 << 16) | (b4 << 32);
+        list.VisibleCommands.push_back(Keyed(key, i));
+    }
+    EXPECT_EQ(list.VisibleCommands.data(), bufferFrame1);
+    list.SortVisibleCommands();
+    EXPECT_EQ(list.VisibleCommands.data(), bufferBeforeFrame0Sort);
+    EXPECT_GE(list.VisibleCommands.capacity(), 40000u);
+    for (size_t i = 1; i < list.VisibleCommands.size(); ++i) {
+        EXPECT_LE(list.VisibleCommands[i - 1].SortKey, list.VisibleCommands[i].SortKey);
+    }
+}
+
+TEST(MeshPassFrameDrawListTest, SortEvenPassesWithLargeReservationKeepsVisibleBufferInPlace) {
+    MeshPassFrameDrawList list;
+    list.VisibleCommands.reserve(40000);
+    for (uint32_t i = 0; i < 65; ++i) {
+        const uint64_t b0 = (64u - i) & 0xFFu;
+        const uint64_t b1 = ((i * 13u) & 0xFFu) << 8;
+        list.VisibleCommands.push_back(Keyed(0x1122334455660000ULL | b1 | b0, i));
+    }
+    const auto* bufferBeforeSort = list.VisibleCommands.data();
+    list.SortVisibleCommands();
+    EXPECT_EQ(list.VisibleCommands.data(), bufferBeforeSort);
+    EXPECT_GE(list.VisibleCommands.capacity(), 40000u);
+    for (size_t i = 1; i < list.VisibleCommands.size(); ++i) {
+        EXPECT_LE(list.VisibleCommands[i - 1].SortKey, list.VisibleCommands[i].SortKey);
+    }
+}
+
 }  // namespace
 }  // namespace radray

@@ -31,7 +31,7 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 箭头表示依赖方向，只列自有 target：
 
 ```text
-gpu       → core                              纯头文件
+gpu       → core                              静态库
 gpu_impl  → gpu
 shader    → gpu
 window    → core
@@ -66,7 +66,7 @@ gpu_impl 接收原始字节码与显式布局，不依赖 shader。发布边界�
 |---|---|
 | Runtime 后端环境 | `modules/runtime/include/radray/runtime/gpu_env.h` |
 | Runtime 设备与队列 | `modules/runtime/include/radray/runtime/gpu_device.h` |
-| Runtime 多槽帧循环与 RDG | `modules/runtime/include/radray/runtime/frame_scheduler.h`、`frame_pipeline.h`、`frame_slot.h`、`render_graph_pipeline.h`、`rdg.h` |
+| Runtime 多槽帧循环、RDG、GPU 计时与异步读回 | `modules/runtime/include/radray/runtime/frame_scheduler.h`、`frame_pipeline.h`、`frame_slot.h`、`render_graph_pipeline.h`、`rdg.h`、`readback_queue.h` |
 | Runtime 场景存储 | `modules/runtime/include/radray/runtime/scene.h` |
 | Runtime 材质资产、实例与渲染快照 | `modules/runtime/include/radray/runtime/material.h` |
 | Runtime 材质标签表 / 集合 | `modules/runtime/include/radray/runtime/material_tag.h` |

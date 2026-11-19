@@ -12,8 +12,6 @@
 
 namespace radray {
 class AssetManager;
-class ShaderAsset;
-class MaterialAsset;
 template <typename T>
 class AssetRef;
 

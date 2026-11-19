@@ -37,12 +37,12 @@ RDGBufferHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuBuffer& buffer) {
 RDGBufferHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuBuffer>& buffer) { return graph.ImportPersistentOwned(buffer); }
 
 Nullable<IntrusivePtr<GpuTexture>> GpuTexture::Create(gpu::Device& device, const GpuTextureDescriptor& desc) {
-    if ((desc.Dim != gpu::TextureDimension::Dim2D && desc.Dim != gpu::TextureDimension::Dim2DArray) ||
-        gpu::GetTextureFormatBytesPerPixel(desc.Format) == 0 || gpu::IsDepthStencilFormat(desc.Format)) {
-        RADRAY_ERR_LOG("GpuTexture: requires an uncompressed color 2D/2DArray format");
-        return nullptr;
+    auto resolved = desc;
+    if (!resolved.Usage) {
+        resolved.Usage = gpu::IsDepthStencilFormat(desc.Format) ? gpu::TextureUse::DepthStencilRead | gpu::TextureUse::DepthStencilWrite
+                                                               : gpu::TextureUse::CopyDestination | gpu::TextureUse::Resource;
     }
-    const gpu::TextureDescriptor native{.Dim = desc.Dim, .Width = desc.Width, .Height = desc.Height, .DepthOrArraySize = desc.ArrayLayers, .MipLevels = desc.MipLevels, .SampleCount = 1, .Format = desc.Format, .Memory = gpu::MemoryType::Device, .Usage = gpu::TextureUse::CopyDestination | gpu::TextureUse::Resource};
+    const gpu::TextureDescriptor native{.Dim = desc.Dim, .Width = desc.Width, .Height = desc.Height, .DepthOrArraySize = desc.ArrayLayers, .MipLevels = desc.MipLevels, .SampleCount = 1, .Format = desc.Format, .Memory = gpu::MemoryType::Device, .Usage = resolved.Usage};
     const auto [valid, diagnostic] = gpu::ValidateTextureDescriptor(native, device);
     if (!valid) {
         RADRAY_ERR_LOG("GpuTexture: {}", diagnostic);
@@ -53,12 +53,17 @@ Nullable<IntrusivePtr<GpuTexture>> GpuTexture::Create(gpu::Device& device, const
         RADRAY_ERR_LOG("GpuTexture: cannot create texture");
         return nullptr;
     }
-    auto view = device.CreateTextureView({.Target = texture.Get(), .Dim = desc.Dim, .Format = desc.Format, .Range = {0, desc.ArrayLayers, 0, desc.MipLevels, gpu::TextureAspect::Color}, .Usage = gpu::TextureViewUsage::Resource});
-    if (!view) {
-        RADRAY_ERR_LOG("GpuTexture: cannot create sampling view");
-        return nullptr;
+    unique_ptr<gpu::TextureView> view;
+    if (resolved.Usage.HasFlag(gpu::TextureUse::Resource)) {
+        auto range = gpu::ResolveSubresourceRange(native, gpu::SubresourceRange::AllSub());
+        if (gpu::IsDepthStencilFormat(desc.Format)) range.Aspects = gpu::TextureAspect::Depth;
+        view = device.CreateTextureView({texture.Get(), desc.Dim, desc.Format, range, gpu::TextureViewUsage::Resource}).Release();
+        if (!view) {
+            RADRAY_ERR_LOG("GpuTexture: cannot create sampling view");
+            return nullptr;
+        }
     }
-    return IntrusivePtr<GpuTexture>{new GpuTexture{desc, texture.Release(), view.Release()}};
+    return IntrusivePtr<GpuTexture>{new GpuTexture{resolved, texture.Release(), std::move(view)}};
 }
 
 GpuTexture::GpuTexture(const GpuTextureDescriptor& desc, unique_ptr<gpu::Texture> texture, unique_ptr<gpu::TextureView> view) noexcept
@@ -66,7 +71,26 @@ GpuTexture::GpuTexture(const GpuTextureDescriptor& desc, unique_ptr<gpu::Texture
 
 GpuTexture::~GpuTexture() noexcept = default;
 gpu::Texture* GpuTexture::GetTexture() const noexcept { return _texture.get(); }
-gpu::TextureView* GpuTexture::GetDefaultView() const noexcept { return _defaultView.get(); }
+Nullable<gpu::TextureView*> GpuTexture::GetDefaultView() const noexcept { return _defaultView.get(); }
+Nullable<gpu::TextureView*> GpuTexture::GetOrCreateView(gpu::Device& device, const GpuTextureViewKey& key) {
+    const auto desc = _texture->GetDesc();
+    auto canonical = key;
+    if (canonical.Dim == gpu::TextureDimension::UNKNOWN) canonical.Dim = desc.Dim;
+    if (canonical.Format == gpu::TextureFormat::UNKNOWN) canonical.Format = desc.Format;
+    if (canonical.Usage == gpu::TextureViewUsage::Resource && !canonical.Range.Aspects && gpu::IsDepthStencilFormat(desc.Format))
+        canonical.Range.Aspects = gpu::TextureAspect::Depth;
+    const auto range = gpu::NormalizeSubresourceRange(desc, canonical.Range);
+    if (!range) return nullptr;
+    canonical.Range = *range;
+    if (_defaultView && canonical.Usage == gpu::TextureViewUsage::Resource && canonical.Dim == desc.Dim && canonical.Format == desc.Format &&
+        _defaultView->GetDesc().Range == canonical.Range) return _defaultView.get();
+    for (const auto& [existing, view] : _viewCache) {
+        if (existing == canonical) return view.get();
+    }
+    auto view = device.CreateTextureView({_texture.get(), canonical.Dim, canonical.Format, canonical.Range, canonical.Usage});
+    if (!view) return nullptr;
+    return _viewCache.emplace_back(canonical, view.Release()).second.get();
+}
 const GpuTextureDescriptor& GpuTexture::GetDesc() const noexcept { return _desc; }
 
 gpu::TextureState GpuTexture::GetSubmittedState() const noexcept { return _submittedState; }

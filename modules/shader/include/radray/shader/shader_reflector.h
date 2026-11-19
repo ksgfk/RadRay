@@ -27,6 +27,8 @@ struct ShaderBindingOverride {
 struct ShaderPushConstantOverride {
     string Name;
     uint32_t PushId{0};
+    bool PromoteDxilCBufferToRootConstants{false};
+    bool AllowDxilOnly{false};
 };
 
 struct ShaderReflectionPolicy {

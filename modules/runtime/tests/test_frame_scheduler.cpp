@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <memory_resource>
 #include <utility>
@@ -71,6 +72,52 @@ protected:
 
 TEST_F(FrameSchedulerTest, CreateRejectsZeroSlots) {
     EXPECT_FALSE(Create(0));
+}
+
+TEST_F(FrameSchedulerTest, DeviceLossStopsSubmissionAndKeepsCurrentFrameUntilCleanup) {
+    for (int failStage = 0; failStage < 4; ++failStage) {
+        Gpu.Device->Lost = false;
+        auto scheduler = Create(1);
+        int calls = 0;
+        const auto stage = [&](FrameSlot&) { if (calls++ == failStage) Gpu.Device->Lost = true; };
+        Pipeline->OnExtract = Pipeline->OnPrepare = Pipeline->OnRecord = Pipeline->OnSubmit = stage;
+        Pipeline->SubmitResult = false;
+        auto& slot = scheduler->BeginFrame();
+        const auto id = slot.GetFrameId();
+        RegisterCleanup(slot, "released");
+        EXPECT_FALSE(scheduler->RunFrame());
+        EXPECT_EQ(calls, failStage + 1);
+        EXPECT_EQ(scheduler->GetCurrentSlot().Get(), &slot);
+        EXPECT_EQ(scheduler->BeginFrame().GetFrameId(), id);
+        EXPECT_FALSE(scheduler->RunFrame());
+        EXPECT_TRUE(Log.empty());
+        scheduler->WaitIdle();
+        EXPECT_EQ(Log, (vector<string>{"released"}));
+        Log.clear();
+    }
+}
+
+TEST_F(FrameSchedulerTest, LossDuringWaitSkipsCompletionAndReleasesSlotAfterWaitReturns) {
+    auto scheduler = Create(1);
+    RegisterCleanup(scheduler->BeginFrame(), "destroy");
+    ASSERT_TRUE(scheduler->RunFrame());
+    Pipeline->OnWait = [&](FrameSlot&) { Log.emplace_back("wait"); Gpu.Device->Lost = true; };
+    Pipeline->OnCompleted = [&](FrameSlot&) { Log.emplace_back("completed"); };
+    EXPECT_FALSE(scheduler->RunFrame());
+    EXPECT_EQ(Log, (vector<string>{"wait", "destroy"}));
+    scheduler->WaitIdle();
+}
+
+TEST_F(FrameSchedulerTest, SubmissionRejectedOnHealthyDeviceTerminates) {
+    auto scheduler = Create(1);
+    Pipeline->SubmitResult = false;
+    EXPECT_DEATH({
+        SetLogCallback([](LogLevel, std::string_view message, void*) {
+            std::fwrite(message.data(), 1, message.size(), stderr);
+            std::fflush(stderr);
+        }, nullptr);
+        scheduler->RunFrame();
+    }, "submission rejected on a healthy device");
 }
 
 TEST_F(FrameSchedulerTest, ObjectsKeepAlignmentAndDestroyInReverseCompletionOrder) {

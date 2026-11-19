@@ -16,9 +16,9 @@
 // Shared GPU test fixture. Rules for GPU tests are in docs/guide/testing.md.
 namespace radray::gpu::test {
 
-inline constexpr RenderBackend AllBackends[]{RenderBackend::D3D12, RenderBackend::Vulkan};
+inline constexpr GpuBackend AllBackends[]{GpuBackend::D3D12, GpuBackend::Vulkan};
 
-const char* BackendParamName(const testing::TestParamInfo<RenderBackend>& info);
+const char* BackendParamName(const testing::TestParamInfo<GpuBackend>& info);
 
 // Owns every device a test opens. Devices use native validation and RHI validation;
 // a test fails when native validation reports an error or RHI validation reports a
@@ -30,7 +30,7 @@ protected:
     // Returns null after skipping when the backend is not built or has no usable adapter,
     // and after failing when the backend is listed in RADRAY_TEST_REQUIRED_BACKENDS or
     // initialization fails on an available adapter.
-    Nullable<Device*> OpenDevice(RenderBackend backend, bool externalResource = false);
+    Nullable<Device*> OpenDevice(GpuBackend backend);
 
     uint32_t TakeRhiValidationErrors() noexcept { return _rhiErrors.exchange(0); }
 
@@ -39,8 +39,8 @@ private:
                             Unavailable,
                             Failed };
 
-    OpenStatus CreateD3D12Device(bool externalResource, string& reason);
-    OpenStatus CreateVulkanDevice(bool externalResource, string& reason);
+    OpenStatus CreateD3D12Device(string& reason);
+    OpenStatus CreateVulkanDevice(string& reason);
     OpenStatus AddDevice(Nullable<shared_ptr<Device>> device, string& reason);
 
     static void OnNativeMessage(LogLevel level, std::string_view message, void* userData);
@@ -55,7 +55,7 @@ private:
 };
 
 // One device of the backend named by the test parameter.
-class BackendTest : public GpuTest, public testing::WithParamInterface<RenderBackend> {
+class BackendTest : public GpuTest, public testing::WithParamInterface<GpuBackend> {
 protected:
     void SetUp() override;
 

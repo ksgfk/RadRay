@@ -13,6 +13,7 @@
 #include <radray/runtime/gpu_resource.h>
 
 #include "test_fakes.h"
+#include "../../gpu_impl/src/rhi_validation.h"
 
 using namespace radray;
 using namespace radray::test;
@@ -24,11 +25,15 @@ class ContainerProbe final : public std::pmr::memory_resource {
 public:
     explicit ContainerProbe(std::pmr::memory_resource& upstream) noexcept : _upstream(upstream) {}
     size_t LiveBytes{0};
+    size_t Allocations{0};
+    bool Fail{false};
 
 private:
     void* do_allocate(size_t bytes, size_t alignment) override {
+        if (Fail) std::function<void()>{}();
         auto* result = _upstream.allocate(bytes, alignment);
         LiveBytes += bytes;
+        ++Allocations;
         return result;
     }
     void do_deallocate(void* storage, size_t bytes, size_t alignment) override {
@@ -45,6 +50,7 @@ struct Probe {
         vector<RenderPassColorAttachment> Colors;
         std::optional<RenderPassDepthStencilAttachment> Depth;
         bool AllowUavWrites;
+        std::optional<Rect> Area;
     };
     vector<ResourceBarrierDescriptor> Barriers;
     vector<size_t> BarrierBatches;
@@ -56,6 +62,7 @@ struct Probe {
     vector<BufferDescriptor> BufferAllocations;
     vector<TextureDescriptor> TextureAllocations;
     vector<TextureViewDescriptor> Views;
+    unordered_map<Texture*, size_t> LiveViews;
     uint32_t Maps{0}, Flushes{0};
     uint32_t Copies{0};
     vector<TextureRegion2D> TextureCopies;
@@ -90,12 +97,18 @@ public:
 
 class ProbeView final : public TextureView {
 public:
-    explicit ProbeView(TextureViewDescriptor desc) noexcept : Desc(desc) {}
+    explicit ProbeView(TextureViewDescriptor desc, Probe* probe = nullptr) noexcept : Desc(desc), Owner(probe) {
+        if (Owner) ++Owner->LiveViews[Desc.Target];
+    }
+    ~ProbeView() noexcept override {
+        if (Owner) --Owner->LiveViews.at(Desc.Target);
+    }
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
     TextureViewDescriptor GetDesc() const noexcept override { return Desc; }
     TextureViewDescriptor Desc;
+    Probe* Owner;
 };
 
 class ProbeComputeEncoder final : public ComputeCommandEncoder {
@@ -128,7 +141,7 @@ public:
     }
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override {
         EXPECT_EQ(_probe.OpenEncoders, 0);
-        _probe.RasterScopes.push_back({{desc.Colors.begin(), desc.Colors.end()}, desc.DepthStencil, desc.AllowUavWrites});
+        _probe.RasterScopes.push_back({{desc.Colors.begin(), desc.Colors.end()}, desc.DepthStencil, desc.AllowUavWrites, desc.RenderArea});
         ++_probe.OpenEncoders;
         return make_unique<RecordingEncoder>();
     }
@@ -173,7 +186,7 @@ public:
     }
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override {
         _probe.Views.push_back(desc);
-        return make_unique<ProbeView>(desc);
+        return make_unique<ProbeView>(desc, &_probe);
     }
     bool FailAllocations{false};
 
@@ -338,6 +351,215 @@ TEST(RDG, CullsDeadMeshPassesAndKeepsFirstDeclarationOrder) {
     ASSERT_EQ(passes.size(), 2);
     EXPECT_EQ(passes[0], MeshPassId{3});
     EXPECT_EQ(passes[1], MeshPassId{1});
+}
+
+TEST(RDG, BlackboardIsPerGraphAndWholeResourceClearRejectsMipChains) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    RDGBuilder graph{slot}, other{slot};
+    auto& board = graph.GetBlackboard();
+    EXPECT_FALSE(board.Get<int>());
+    ASSERT_TRUE(board.Emplace<int>(7));
+    EXPECT_FALSE(board.Emplace<int>(8));
+    EXPECT_EQ(*board.Get<int>(), 7);
+    EXPECT_FALSE(other.GetBlackboard().Get<int>());
+    auto desc = ColorDescriptor();
+    desc.MipLevels = 2;
+    graph.AddClearColor(graph.CreateTexture(desc), {});
+    EXPECT_FALSE(graph.Compile());
+    desc.Format = TextureFormat::D24_UNORM_S8_UINT;
+    desc.Usage = TextureUse::DepthStencilWrite;
+    other.AddClearDepthStencil(other.CreateTexture(desc), {1, 0}, true, true);
+    EXPECT_FALSE(other.Compile());
+}
+
+TEST_F(RDGExecutionTest, SingleAspectClearPreservesTheOtherAspectAndItsWriter) {
+    Setup = [](RDGBuilder& graph) {
+        auto desc = ColorDescriptor();
+        desc.Format = TextureFormat::D24_UNORM_S8_UINT;
+        desc.Usage = TextureUse::DepthStencilWrite;
+        const auto depth = graph.CreateTexture(desc);
+        graph.AddClearDepthStencil(depth, {0.5f, 7});
+        graph.AddClearDepthStencil(depth, {0.25f, 0}, true, false);
+        graph.AddClearDepthStencil(depth, {1.f, 11}, false, true);
+        graph.MarkOutput(depth);
+    };
+    Run();
+    ASSERT_EQ(Trace.RasterScopes.size(), 3u);
+    const auto& depth = *Trace.RasterScopes[1].Depth;
+    EXPECT_EQ(depth.DepthLoad, LoadAction::Clear);
+    EXPECT_EQ(depth.StencilLoad, LoadAction::Load);
+    EXPECT_EQ(depth.StencilStore, StoreAction::Store);
+    const auto& stencil = *Trace.RasterScopes[2].Depth;
+    EXPECT_EQ(stencil.StencilLoad, LoadAction::Clear);
+    EXPECT_EQ(stencil.DepthLoad, LoadAction::Load);
+    EXPECT_EQ(stencil.DepthStore, StoreAction::Store);
+}
+
+TEST(RDG, RejectsAreasOutsideTheSelectedMipAndInvalidClearRanges) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    auto desc = ColorDescriptor();
+    desc.MipLevels = 2;
+    for (const auto area : {Rect{-1, 0, 1, 1}, Rect{0, -1, 1, 1}, Rect{0, 0, 0, 1}, Rect{0, 0, 1, 0},
+                            Rect{16, 0, 1, 1}, Rect{0, 8, 1, 1}, Rect{1, 1, UINT32_MAX, UINT32_MAX}}) {
+        RDGBuilder graph{slot};
+        graph.AddClearColor(graph.CreateTexture(desc), {}, {0, 1, 1, 1}, area);
+        EXPECT_FALSE(graph.Compile());
+    }
+    RDGBuilder color{slot}, depth{slot}, aspect{slot};
+    EXPECT_FALSE(color.AddClearColor(color.CreateTexture(desc), {}, {0, 1, 0, 2}).IsValid());
+    EXPECT_FALSE(color.Compile());
+    desc.Format = TextureFormat::D24_UNORM_S8_UINT;
+    desc.Usage = TextureUse::DepthStencilWrite;
+    EXPECT_FALSE(depth.AddClearDepthStencil(depth.CreateTexture(desc), {}, SubresourceRange{0, 1, 0, 2}).IsValid());
+    EXPECT_FALSE(depth.Compile());
+    aspect.AddClearDepthStencil(aspect.CreateTexture(desc), {}, {0, 1, 0, 1, TextureAspect::Depth});
+    EXPECT_FALSE(aspect.Compile());
+}
+
+TEST_F(RDGExecutionTest, MergeRequiresSameEffectiveAreaAndLayer) {
+    Device->EnableTextures = true;
+    Setup = [](RDGBuilder& graph) {
+        auto desc = ColorDescriptor();
+        desc.Dim = TextureDimension::Dim2DArray;
+        desc.DepthOrArraySize = 2;
+        const auto color = graph.CreateTexture(desc);
+        graph.AddClearColor(color, {}, {0, 2, 0, 1});
+        auto load = [&](SubresourceRange range, Rect area) {
+            graph.AddRasterPass("load", 0, +[](const int&, RDGRasterPassContext&) noexcept { return true; })
+                .SetRenderArea(area).WriteColor(0, color, LoadAction::Load, StoreAction::Store, {}, range);
+        };
+        load({0, SubresourceRange::All, 0, 1}, {0, 0, desc.Width, desc.Height});
+        load({0, 1, 0, 1}, {0, 0, 4, 4});
+        load({1, 1, 0, 1}, {0, 0, 4, 4});
+        load({1, 1, 0, 1}, {1, 0, 4, 4});
+        graph.MarkOutput(color);
+    };
+    Run();
+    EXPECT_EQ(Trace.RasterScopes.size(), 4u);
+}
+
+TEST(RDG, OrderBarriersBridgeCulledIntervalsAndDoNotKeepDeadPassesAlive) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    RDGBuilder graph{scheduler->BeginFrame()};
+    auto compute = [&](const char* name) { return graph.AddComputePass(name, 0, +[](const int&, RDGComputePassContext&) noexcept { return true; }); };
+    auto copy = [&](const char* name) { return graph.AddCopyPass(name, 0, +[](const int&, RDGCopyPassContext&) noexcept { return true; }); };
+    const auto start = compute("start").NeverCull().GetHandle();
+    graph.AddOrderBarrier(start);
+    compute("dead interval");
+    graph.AddOrderBarrier(copy("culled barrier").GetHandle());
+    graph.AddOrderBarrier(compute("middle").NeverCull().GetHandle());
+    const auto interior = compute("work").NeverCull().GetHandle();
+    const auto next = copy("copy").NeverCull().GetHandle();
+    graph.AddOrderDependency(interior, next);
+    graph.AddOrderDependency(interior, next);
+    graph.AddOrderBarrier(copy("end").NeverCull().GetHandle());
+    const auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled);
+    EXPECT_EQ(compiled->GetRecordedPassNames(), (vector<string>{"start", "middle", "work", "copy", "end"}));
+}
+
+TEST(RDG, RejectsInvalidOrderEdgesAndBarrierRegistrations) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    for (int scenario = 0; scenario < 6; ++scenario) {
+        RDGBuilder graph{slot};
+        const auto first = graph.AddCopyPass("first", 0, +[](const int&, RDGCopyPassContext&) noexcept { return true; }).GetHandle();
+        const auto last = graph.AddComputePass("last", 0, +[](const int&, RDGComputePassContext&) noexcept { return true; }).GetHandle();
+        switch (scenario) {
+            case 0: graph.AddOrderDependency(first, first); break;
+            case 1: graph.AddOrderDependency(last, first); break;
+            case 2: graph.AddOrderDependency(first, {}); break;
+            case 3: graph.AddOrderBarrier({}); break;
+            case 4: graph.AddOrderBarrier(first); break;
+            case 5: graph.AddOrderBarrier(last); graph.AddOrderBarrier(last); break;
+        }
+        EXPECT_FALSE(graph.Compile()) << scenario;
+    }
+}
+
+TEST_F(RDGExecutionTest, PartialClearsKeepPreviousMipsAndBindExactAttachmentRange) {
+    Device->EnableTextures = true;
+    Setup = [](RDGBuilder& graph) {
+        auto desc = ColorDescriptor();
+        desc.Dim = TextureDimension::Dim2DArray;
+        desc.DepthOrArraySize = 2;
+        desc.MipLevels = 2;
+        const auto color = graph.CreateTexture(desc);
+        graph.AddClearColor(color, {1, 0, 0, 1}, SubresourceRange{0, 2, 0, 1});
+        graph.AddClearColor(color, {0, 0, 1, 1}, SubresourceRange{1, 1, 1, 1}, Rect{3, 2, 4, 2});
+        graph.MarkOutput(color);
+    };
+    Run();
+    ASSERT_EQ(Trace.RasterScopes.size(), 2u);
+    const auto& second = Trace.RasterScopes.back();
+    ASSERT_TRUE(second.Area);
+    EXPECT_EQ(second.Area->X, 3);
+    EXPECT_EQ(second.Area->Y, 2);
+    EXPECT_EQ(second.Area->Width, 4u);
+    EXPECT_EQ(second.Area->Height, 2u);
+    const auto range = second.Colors.front().View->GetDesc().Range;
+    EXPECT_EQ(range.BaseArrayLayer, 1u);
+    EXPECT_EQ(range.ArrayLayerCount, 1u);
+    EXPECT_EQ(range.BaseMipLevel, 1u);
+}
+
+TEST_F(RDGExecutionTest, SubresourceViewsUseTheirTextureOwnersAndReleaseRawImportsAtWaitIdle) {
+    Device->EnableTextures = true;
+    Device->Capabilities.Limits.MaxTexture2DDimension = 32;
+    Device->Capabilities.Limits.MaxTextureArrayLayers = 1;
+    auto desc = ColorDescriptor();
+    desc.MipLevels = 2;
+    ProbeTexture raw{desc};
+    auto persistent = GpuTexture::Create(*Device, {.Width = desc.Width, .Height = desc.Height, .MipLevels = 2,
+        .Format = desc.Format, .Usage = desc.Usage}).Unwrap();
+    const RDGTextureViewDescriptor mip{.Range = {0, 1, 1, 1}, .Usage = TextureViewUsage::UnorderedAccess};
+    array<TextureView*, 3> views{};
+    struct Pass {
+        array<RDGTextureHandle, 3> Textures;
+        RDGTextureViewDescriptor Mip;
+        array<TextureView*, 3>* Views;
+    };
+    Setup = [&](RDGBuilder& graph) {
+        const array handles{graph.CreateTexture(desc), graph.ImportPersistentOwned(persistent),
+                            graph.ImportTexture(&raw, TextureState::Undefined)};
+        auto pass = graph.AddComputePass("mip views", Pass{handles, mip, &views},
+            +[](const Pass& data, RDGComputePassContext& context) noexcept {
+                for (size_t i = 0; i < data.Textures.size(); ++i)
+                    EXPECT_EQ(context.ResolveView(data.Textures[i], data.Mip).Get(), (*data.Views)[i]);
+                return true;
+            }, +[](Pass& data, RDGPrepareContext& context) noexcept {
+                for (size_t i = 0; i < data.Textures.size(); ++i) {
+                    const auto view = context.ResolveView(data.Textures[i], data.Mip);
+                    if (!view) return false;
+                    (*data.Views)[i] = view.Get();
+                }
+                return true;
+            });
+        for (const auto texture : handles) pass.WriteTexture(texture);
+        pass.NeverCull();
+    };
+    Run();
+    auto* transient = views[0];
+    auto* owned = views[1];
+    ASSERT_NE(transient, nullptr);
+    ASSERT_NE(owned, nullptr);
+    auto* transientTexture = transient->GetDesc().Target;
+    EXPECT_GT(Trace.LiveViews[&raw], 0u);
+    Scheduler->WaitIdle();
+    EXPECT_EQ(Trace.LiveViews[&raw], 0u);
+    EXPECT_GT(Trace.LiveViews[transientTexture], 0u);
+    EXPECT_EQ(persistent->GetOrCreateView(*Device, mip).Get(), owned);
+    Run();
+    EXPECT_EQ(views[0], transient);
+    EXPECT_EQ(views[1], owned);
+    Scheduler->WaitIdle();
+    EXPECT_EQ(Trace.LiveViews[&raw], 0u);
 }
 
 TEST(RDG, RejectsOverlappingDirectUploads) {
@@ -732,6 +954,72 @@ TEST_F(RDGExecutionTest, CombinesRepeatedReadOnlyBufferAccessesAndRestoresBounda
     EXPECT_EQ(barriers[0].After, BufferState::Vertex | BufferState::ShaderRead);
     EXPECT_EQ(barriers[1].Before, barriers[0].After);
     EXPECT_EQ(barriers[1].After, BufferStates{BufferState::Common});
+}
+
+TEST(RenderGraphFramePipeline, ExtractedGeometryUsesPageDeclaredWhileEmpty) {
+    class LateGeometryPipeline final : public RenderGraphFramePipeline {
+    public:
+        LateGeometryPipeline(DeviceContext& context, IndexBufferPool& pool) : RenderGraphFramePipeline(context, 1), Pool(pool) {}
+        void Wait(FrameSlot&) noexcept override {}
+        std::optional<IndexBufferSubAllocation> Geometry;
+
+    private:
+        void ExtractFrameData(FrameSlot&) noexcept override {}
+        void SetupGraph(RDGBuilder& graph, FrameSlot&) noexcept override {
+            const auto color = graph.CreateTexture(ColorDescriptor());
+            auto pass = graph.AddRasterPass("late geometry", MeshPassId{0}, +[](const MeshPassId& id, RDGRasterPassContext& ctx) noexcept { return SubmitMeshDrawCommands(ctx.GetEncoder(), ctx.GetVisibleCommands(id)); });
+            pass.UseMeshPass({0}).WriteColor(0, color, LoadAction::Clear, StoreAction::Store).NeverCull();
+            Pool.AddPassReadAccess(graph, pass);
+        }
+        void ExtractMeshPass(MeshPassId, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
+            Geometry = Pool.Allocate(3);
+            ASSERT_TRUE(Geometry);
+            Command.Pipeline = &Pipeline;
+            Command.IndexBuffer = Geometry->GetIndexBufferView();
+            Command.IndexCount = Geometry->GetIndexCount();
+            list.VisibleCommands.push_back({.CachedCommand = &Command});
+        }
+        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+        IndexBufferPool& Pool;
+        FakePipeline Pipeline;
+        MeshDrawCommand Command;
+    };
+
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    DeviceContext context{device, &device->Queue};
+    auto pool = IndexBufferPool::Create(*device, {.PageIndexCapacity = 3});
+    ASSERT_TRUE(pool);
+    auto first = pool->Allocate(3);
+    auto middle = pool->Allocate(3);
+    auto last = pool->Allocate(3);
+    ASSERT_TRUE(first && middle && last);
+    auto removed = middle->GetGpuBuffer();
+    middle.reset();
+    ASSERT_EQ(pool->TrimEmptyPages(), 1u);
+    auto owner = last->GetGpuBuffer();
+    owner->CommitSubmittedState(BufferState::CopyDestination);
+    last.reset();
+    auto pipeline = make_unique<LateGeometryPipeline>(context, *pool);
+    auto* observed = pipeline.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    ASSERT_TRUE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+    ASSERT_TRUE(observed->Geometry);
+    EXPECT_EQ(observed->Geometry->GetGpuBuffer(), owner);
+    vector<BarrierBufferDescriptor> transitions;
+    for (const auto& barrier : trace.Barriers) {
+        const auto* buffer = std::get_if<BarrierBufferDescriptor>(&barrier);
+        if (buffer) {
+            EXPECT_NE(buffer->Target, removed->GetBuffer());
+            if (buffer->Target == owner->GetBuffer()) transitions.push_back(*buffer);
+        }
+    }
+    ASSERT_EQ(transitions.size(), 2u);
+    EXPECT_EQ(transitions[0].Before, BufferStates{BufferState::CopyDestination});
+    EXPECT_EQ(transitions[0].After, BufferStates{BufferState::Index});
+    EXPECT_EQ(transitions[1].Before, transitions[0].After);
+    EXPECT_EQ(transitions[1].After, BufferStates{BufferState::Common});
 }
 
 TEST_F(RDGExecutionTest, GeometryPoolsShareUploadBoundaryAcrossUploadOnlyAndDrawFrames) {
@@ -1493,6 +1781,231 @@ TEST_F(RDGExecutionTest, ComputeSharedReadsMergeButTextureUavWritesSplit) {
     EXPECT_TRUE(std::holds_alternative<BarrierUavDescriptor>(Trace.Barriers.back()));
 }
 
+class LossTestDevice final : public FakeDevice {
+public:
+    bool LoseOnBegin{};
+    bool LoseOnTexture{};
+    vector<uint32_t> TimestampIndices;
+    int EndCalls{}, Resolves{}, BarrierBatches{};
+
+    Nullable<unique_ptr<QueryPool>> CreateQueryPool(const QueryPoolDescriptor& desc) noexcept override {
+        class Pool final : public QueryPool {
+        public:
+            explicit Pool(uint32_t count) : Count(count) {}
+            bool IsValid() const noexcept override { return true; }
+            void Destroy() noexcept override {}
+            void SetDebugName(std::string_view) noexcept override {}
+            QueryType GetType() const noexcept override { return QueryType::Timestamp; }
+            uint32_t GetCount() const noexcept override { return Count; }
+            TimestampQueryCalibration GetTimestampCalibration(CommandQueue*) const noexcept override { return {}; }
+            uint32_t Count;
+        };
+        return make_unique<Pool>(desc.Count);
+    }
+
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator*) noexcept override {
+        class Command final : public FakeCommandBuffer {
+        public:
+            explicit Command(LossTestDevice& device) : Device(device) {}
+            void Begin() noexcept override { if (Device.LoseOnBegin) Device.Lost = true; }
+            void End() noexcept override { ++Device.EndCalls; }
+            void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override { Device.TimestampIndices.push_back(desc.Index); }
+            void ResolveQueryData(const QueryResolveDescriptor&) noexcept override { ++Device.Resolves; }
+            void ResourceBarrier(std::span<const ResourceBarrierDescriptor>) noexcept override { ++Device.BarrierBatches; }
+            LossTestDevice& Device;
+        };
+        return make_unique<Command>(*this);
+    }
+    Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override {
+        if (LoseOnTexture) {
+            Lost = true;
+            return nullptr;
+        }
+        return FakeDevice::CreateTexture(desc);
+    }
+};
+
+class LossTestPipeline final : public RenderGraphFramePipeline {
+public:
+    explicit LossTestPipeline(DeviceContext& device) : RenderGraphFramePipeline(device, 1) {}
+    std::function<void(RDGBuilder&)> Setup;
+    int Submissions{};
+    void Wait(FrameSlot& slot) noexcept override { slot.GetQueue().Wait(); }
+
+private:
+    void ExtractFrameData(FrameSlot&) noexcept override {}
+    void SetupGraph(RDGBuilder& graph, FrameSlot&) noexcept override { Setup(graph); }
+    bool SubmitFrame(FrameSlot& slot, CommandBuffer& command) noexcept override {
+        ++Submissions;
+        auto* raw = &command;
+        return slot.GetQueue().Submit({.CmdBuffers = {&raw, 1}});
+    }
+};
+
+TEST(RenderGraphFramePipeline, ValidatedRecordingClosesAfterLossAtBeginOrInsidePass) {
+    for (const bool atBegin : {true, false}) {
+        auto native = make_shared<LossTestDevice>();
+        native->LoseOnBegin = atBegin;
+        vector<string> diagnostics;
+        auto device = gpu::detail::CreateValidationDevice(native, {.LogCallback = +[](LogLevel, std::string_view message, void* data) {
+            static_cast<vector<string>*>(data)->emplace_back(message);
+        }, .LogUserData = &diagnostics}).Unwrap();
+        {
+            auto* queue = device->GetCommandQueue(QueueType::Direct, 0).Get();
+            DeviceContext context{device, queue};
+            auto pipeline = make_unique<LossTestPipeline>(context);
+            auto* runner = pipeline.get();
+            bool entered = false;
+            runner->Setup = [&](RDGBuilder& graph) {
+                struct Data { LossTestDevice* Device; bool* Entered; };
+                graph.AddCopyPass("lose while recording", Data{native.get(), &entered}, +[](const Data& data, RDGCopyPassContext&) noexcept {
+                    *data.Entered = true;
+                    data.Device->Lost = true;
+                    return false;
+                }).NeverCull();
+            };
+            auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+            EXPECT_FALSE(scheduler->RunFrame());
+            EXPECT_TRUE(device->IsDeviceLost());
+            EXPECT_EQ(entered, !atBegin);
+            EXPECT_EQ(runner->Submissions, 0);
+            scheduler->WaitIdle();
+        }
+        device.reset();
+        EXPECT_TRUE(diagnostics.empty());
+    }
+}
+
+TEST(RenderGraphFramePipeline, DeviceLossEndsOnlyStartedRecordingAndSkipsFrameTimingTail) {
+    struct Scenario { bool LoseOnBegin, PassResult; };
+    for (const auto scenario : {Scenario{true, false}, Scenario{false, false}, Scenario{false, true}}) {
+        SCOPED_TRACE(::testing::Message() << "lose on Begin=" << scenario.LoseOnBegin << ", pass result=" << scenario.PassResult);
+        auto device = make_shared<LossTestDevice>();
+        device->LoseOnBegin = scenario.LoseOnBegin;
+        device->Capabilities.Features.TimestampQueries = true;
+        device->Queue.TimestampBits = 64;
+        device->EnableHostBuffers = true;
+        DeviceContext context{device, &device->Queue};
+        auto pipeline = make_unique<LossTestPipeline>(context);
+        auto* runner = pipeline.get();
+        int passCalls = 0;
+        runner->Setup = [&](RDGBuilder& graph) {
+            struct Data { LossTestDevice* Device; int* Calls; bool Result; };
+            graph.AddCopyPass("device loss", Data{device.get(), &passCalls, scenario.PassResult},
+                +[](const Data& data, RDGCopyPassContext&) noexcept {
+                    ++*data.Calls;
+                    data.Device->Lost = true;
+                    return data.Result;
+                }).NeverCull();
+        };
+        auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+        runner->SetGpuProfiling(scheduler->BeginFrame(), RDGGpuProfilingMode::FrameOnly, 1);
+        EXPECT_FALSE(scheduler->RunFrame());
+        const int started = scenario.LoseOnBegin ? 0 : 1;
+        EXPECT_EQ(passCalls, started);
+        EXPECT_EQ(device->EndCalls, started);
+        EXPECT_EQ(device->TimestampIndices, scenario.LoseOnBegin ? vector<uint32_t>{} : vector<uint32_t>{0});
+        EXPECT_EQ(device->Resolves, 0);
+        EXPECT_EQ(device->BarrierBatches, 0);
+        EXPECT_EQ(runner->Submissions, 0);
+        scheduler->WaitIdle();
+    }
+}
+
+TEST(RenderGraphFramePipeline, RequiredTextureAllocationSeparatesDeviceLossFromHealthyFailure) {
+    auto device = make_shared<LossTestDevice>();
+    device->EnableTextures = true;
+    DeviceContext context{device, &device->Queue};
+    auto pipeline = make_unique<LossTestPipeline>(context);
+    auto* runner = pipeline.get();
+    runner->Setup = [](RDGBuilder& graph) {
+        auto color = graph.CreateTexture(ColorDescriptor());
+        graph.AddClearColor(color, {});
+        graph.MarkOutput(color);
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    device->FailTextures = true;
+    EXPECT_DEATH({
+        SetLogCallback([](LogLevel, std::string_view message, void*) {
+            std::fwrite(message.data(), 1, message.size(), stderr);
+            std::fflush(stderr);
+        }, nullptr);
+        scheduler->RunFrame();
+    }, "RDG Prepare failed");
+    device->LoseOnTexture = true;
+    EXPECT_FALSE(scheduler->RunFrame());
+    EXPECT_TRUE(device->IsDeviceLost());
+    EXPECT_EQ(runner->Submissions, 0);
+    scheduler->WaitIdle();
+}
+
+TEST(RenderGraphFramePipeline, OptionalTimingAllocationFailureOnHealthyDeviceStillSubmits) {
+    auto device = make_shared<FakeDevice>();
+    device->Queue.TimestampBits = 64;
+    device->Capabilities.Features.TimestampQueries = true;
+    DeviceContext context{device, &device->Queue};
+    auto pipeline = make_unique<LossTestPipeline>(context);
+    auto* runner = pipeline.get();
+    runner->Setup = [](RDGBuilder& graph) {
+        graph.AddCopyPass("work", 0, +[](const int&, RDGCopyPassContext&) noexcept { return true; }).NeverCull();
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    runner->SetGpuProfiling(slot, RDGGpuProfilingMode::FrameAndPasses, 1);
+    EXPECT_TRUE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+    EXPECT_EQ(runner->Submissions, 1);
+    EXPECT_FALSE(runner->GetCompletedGpuTiming(slot));
+}
+
+TEST(RDG, ValidatedQueueRejectsUnrecordedCommandsAndPropagatesNativeLoss) {
+    auto native = make_shared<FakeDevice>();
+    int diagnostics = 0, submissions = 0;
+    auto device = gpu::detail::CreateValidationDevice(native, {.LogCallback = +[](LogLevel, std::string_view, void* data) {
+        ++*static_cast<int*>(data);
+    }, .LogUserData = &diagnostics}).Unwrap();
+    auto* queue = device->GetCommandQueue(QueueType::Direct, 0).Get();
+    auto allocator = device->CreateCommandAllocator(queue).Unwrap();
+    auto commands = device->CreateCommandBuffer(allocator.get()).Unwrap();
+    auto* raw = commands.get();
+    native->Queue.OnSubmit = [&] { ++submissions; native->Lost = true; return false; };
+    EXPECT_FALSE(queue->Submit({.CmdBuffers = {&raw, 1}}));
+    EXPECT_EQ(diagnostics, 1);
+    EXPECT_FALSE(device->IsDeviceLost());
+    EXPECT_EQ(submissions, 0);
+    commands->Begin();
+    commands->End();
+    EXPECT_FALSE(queue->Submit({.CmdBuffers = {&raw, 1}}));
+    EXPECT_EQ(submissions, 1);
+    EXPECT_TRUE(device->IsDeviceLost());
+    allocator->Reset();
+    commands.reset();
+    allocator.reset();
+    device.reset();
+    EXPECT_EQ(diagnostics, 1);
+}
+
+TEST(RenderGraphFramePipeline, RejectedNativeSubmissionDoesNotPublishPersistentState) {
+    auto device = make_shared<FakeDevice>();
+    device->EnableTextures = true;
+    device->Capabilities.Limits.MaxTexture2DDimension = 4;
+    device->Capabilities.Limits.MaxTextureArrayLayers = 1;
+    DeviceContext context{device, &device->Queue};
+    auto texture = GpuTexture::Create(*device, {.Dim = TextureDimension::Dim2D, .Width = 4, .Height = 4,
+        .ArrayLayers = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::CopyDestination}).Unwrap();
+    auto pipeline = make_unique<LossTestPipeline>(context);
+    pipeline->Setup = [&](RDGBuilder& graph) {
+        const auto target = graph.ImportPersistentOwned(texture);
+        graph.AddCopyPass("write", 0, +[](const int&, RDGCopyPassContext&) noexcept { return true; }).WriteTexture(target).NeverCull();
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    device->Queue.OnSubmit = [&] { device->Lost = true; return false; };
+    const auto before = texture->GetSubmittedState();
+    EXPECT_FALSE(scheduler->RunFrame());
+    EXPECT_EQ(texture->GetSubmittedState(), before);
+    scheduler->WaitIdle();
+}
+
 class RdgOnlyPipeline final : public RenderGraphFramePipeline {
 public:
     explicit RdgOnlyPipeline(DeviceContext& context) : RenderGraphFramePipeline(context, 2) {}
@@ -1532,7 +2045,7 @@ private:
             };
         }
     }
-    void SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override {}
+    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
     array<Nullable<uint32_t*>, 2> _values{nullptr, nullptr};
 };
 
@@ -1618,7 +2131,7 @@ private:
     void ExtractMeshPass(MeshPassId pass, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
         if (!Source->GatherVisiblePrimitives(pass, std::span{&Candidate, 1}, list)) RADRAY_ABORT("cannot gather test scene");
     }
-    void SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override {}
+    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
     Buffer& Vertices;
     Buffer& Indices;
 };
@@ -1739,7 +2252,7 @@ protected:
         Extracted.push_back(pass);
         list.VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
     }
-    void SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { Events.push_back("submit"); }
+    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { Events.push_back("submit"); return true; }
 };
 
 TEST(RenderGraphFramePipeline, ExtractsAndSortsOnlyAliveMeshPassesBeforeExecution) {
@@ -2333,7 +2846,7 @@ TEST(RDG, EmptyUploadDoesNotInitializeFixedBuffer) {
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
     RDGBuilder graph{scheduler->BeginFrame()};
     const auto target = graph.CreateBuffer(BufferDescriptor{.Size = 16, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
-    graph.UploadBuffer(target, 0, RDGUploadSource::BorrowedBytes({}));
+    EXPECT_FALSE(graph.UploadBuffer(target, 0, RDGUploadSource::BorrowedBytes({})).IsValid());
     graph.AddCopyPass("read", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).ReadBuffer(target).NeverCull();
     EXPECT_FALSE(graph.Compile());
 }
@@ -2450,4 +2963,1078 @@ TEST_F(RDGExecutionTest, GeneratedContextMovesAndIsDestroyedAfterPrepareExactlyO
     source.ReleaseSource();
     moved.ReleaseSource();
     EXPECT_EQ(destroyed, 1u);
+}
+
+TEST_F(RDGExecutionTest, AttachmentSliceOverloadsConfigureSingleMipColorDepthAndClears) {
+    constexpr RDGAttachmentSlice slice{.MipLevel = 1, .BaseArrayLayer = 1, .ArrayLayerCount = 1};
+    EXPECT_EQ(slice.ToSubresourceRange(), (SubresourceRange{1, 1, 1, 1}));
+
+    TextureDescriptor colorDesc = ColorDescriptor();
+    colorDesc.Dim = TextureDimension::Dim2DArray;
+    colorDesc.Width = 8;
+    colorDesc.Height = 8;
+    colorDesc.DepthOrArraySize = 2;
+    colorDesc.MipLevels = 2;
+    TextureDescriptor depthDesc = colorDesc;
+    depthDesc.Format = TextureFormat::D32_FLOAT;
+    depthDesc.Usage = TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead;
+
+    Setup = [&](RDGBuilder& graph) {
+        const auto color = graph.CreateTexture(colorDesc);
+        const auto depth = graph.CreateTexture(depthDesc);
+        EXPECT_TRUE(graph.AddClearColor(color, {{1, 0, 0, 1}}, slice, Rect{0, 0, 4, 4}).IsValid());
+        EXPECT_TRUE(graph.AddClearDepthStencil(depth, {1.0f, 0}, slice, true, false, Rect{0, 0, 4, 4}).IsValid());
+        graph.AddRasterPass("slice raster", uint32_t{0}, +[](const uint32_t&, RDGRasterPassContext&) noexcept { return true; })
+            .WriteColor(0, color, LoadAction::Load, StoreAction::Store, {}, slice)
+            .SetDepthStencil(depth, TextureState::DepthWrite, LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, {}, slice)
+            .NeverCull();
+    };
+    Run();
+    ASSERT_FALSE(Trace.RasterScopes.empty());
+    const auto& scope = Trace.RasterScopes.back();
+    ASSERT_EQ(scope.Colors.size(), 1u);
+    EXPECT_EQ(scope.Colors[0].View->GetDesc().Range.BaseMipLevel, 1u);
+    EXPECT_EQ(scope.Colors[0].View->GetDesc().Range.MipLevelCount, 1u);
+    EXPECT_EQ(scope.Colors[0].View->GetDesc().Range.BaseArrayLayer, 1u);
+    EXPECT_EQ(scope.Colors[0].View->GetDesc().Range.ArrayLayerCount, 1u);
+    ASSERT_TRUE(scope.Depth);
+    EXPECT_EQ(scope.Depth->View->GetDesc().Range.BaseMipLevel, 1u);
+    EXPECT_EQ(scope.Depth->View->GetDesc().Range.MipLevelCount, 1u);
+    EXPECT_EQ(scope.Depth->View->GetDesc().Range.BaseArrayLayer, 1u);
+    EXPECT_EQ(scope.Depth->View->GetDesc().Range.ArrayLayerCount, 1u);
+}
+
+TEST(RDG, DefaultBuilderInheritsDeviceMaxBufferSizeConstraint) {
+    FakeGpu gpu;
+    gpu.Device->Capabilities.Limits.MaxBufferSize = 1024;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    const auto compileWithSize = [&](bool explicitConstraints, uint64_t size) {
+        auto& slot = scheduler->BeginFrame();
+        bool ok = false;
+        if (explicitConstraints) {
+            RDGBuilder graph{slot, gpu.Context.GetRDGConstraints()};
+            const auto buf = graph.CreateBuffer(BufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
+            graph.AddCopyPass("write", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).WriteBuffer(buf);
+            graph.MarkOutput(buf);
+            ok = graph.Compile().HasValue();
+        } else {
+            RDGBuilder graph{slot};
+            const auto buf = graph.CreateBuffer(BufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
+            graph.AddCopyPass("write", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).WriteBuffer(buf);
+            graph.MarkOutput(buf);
+            ok = graph.Compile().HasValue();
+        }
+        scheduler->WaitIdle();
+        return ok;
+    };
+    EXPECT_TRUE(compileWithSize(false, 1024));
+    EXPECT_TRUE(compileWithSize(true, 1024));
+    EXPECT_FALSE(compileWithSize(false, 1025));
+    EXPECT_FALSE(compileWithSize(true, 1025));
+}
+
+TEST_F(RDGExecutionTest, DynamicIndirectBufferAlignsToFourBytesAfterOneByteVertexSlice) {
+    Device->Capabilities.Detail.BufferCopyOffsetAlignment = 1;
+    const array<byte, 1> vertexByte{byte{0x11}};
+    const array<byte, sizeof(DrawIndexedIndirectArguments)> indirectBytes{};
+    RDGBufferSlice vertexSlice{}, indirectSlice{};
+    Setup = [&](RDGBuilder& graph) {
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        const auto vertexBuf = graph.CreateBuffer(
+            RDGDynamicBufferDescriptor{.MaxSize = vertexByte.size(), .Usage = BufferUse::Vertex, .Alignment = 1},
+            RDGUploadSource::BorrowedBytes(vertexByte));
+        const auto indirectBuf = graph.CreateBuffer(
+            RDGDynamicBufferDescriptor{.MaxSize = indirectBytes.size(), .Usage = BufferUse::Indirect, .Alignment = 1},
+            RDGUploadSource::BorrowedBytes(indirectBytes));
+        struct Capture {
+            RDGBufferHandle Vertex;
+            RDGBufferHandle Indirect;
+            RDGBufferSlice* OutVertex;
+            RDGBufferSlice* OutIndirect;
+        };
+        graph.AddRasterPass("indirect align", Capture{vertexBuf, indirectBuf, &vertexSlice, &indirectSlice},
+                            +[](const Capture& cap, RDGRasterPassContext& ctx) noexcept {
+                                *cap.OutVertex = ctx.ResolveBuffer(cap.Vertex);
+                                *cap.OutIndirect = ctx.ResolveBuffer(cap.Indirect);
+                                return true;
+                            })
+            .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+            .ReadBuffer(vertexBuf, BufferState::Vertex)
+            .ReadBuffer(indirectBuf, BufferState::Indirect)
+            .NeverCull();
+    };
+    Run();
+    ASSERT_TRUE(vertexSlice.Buffer && indirectSlice.Buffer);
+    EXPECT_EQ(vertexSlice.Buffer.Get(), indirectSlice.Buffer.Get());
+    EXPECT_EQ(vertexSlice.Offset, 0u);
+    EXPECT_EQ(vertexSlice.Size, 1u);
+    EXPECT_EQ(indirectSlice.Offset, 4u);
+    EXPECT_EQ(indirectSlice.Size, sizeof(DrawIndexedIndirectArguments));
+}
+
+TEST(RDG, SteadyStatePassesAndInlineGeneratorUseZeroUpstreamAllocationsAndReturnOverflow) {
+    HeapMemoryResource heap;
+    ContainerProbe probe{heap};
+    FakeGpu gpu;
+    gpu.Device->EnableHostBuffers = true;
+    gpu.Device->EnableTextures = true;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1, &probe).Unwrap();
+    const string longRasterName(48, 'R');
+    const string longComputeName(48, 'C');
+    const string longCopyName(48, 'P');
+
+    const auto buildSmallFrame = [&](FrameSlot& slot) {
+        RDGBuilder graph{slot};
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        const auto buf = graph.CreateBuffer(
+            RDGDynamicBufferDescriptor{.MaxSize = 16, .Usage = BufferUse::CBuffer},
+            RDGUploadSource::Generated(16, uint64_t{0x12345678ULL},
+                                       +[](const uint64_t& value, RDGUploadWriteContext& ctx) noexcept {
+                                           std::memcpy(ctx.Bytes.data(), &value, sizeof(value));
+                                           return true;
+                                       }));
+        graph.AddRasterPass(longRasterName, uint32_t{1}, +[](const uint32_t&, RDGRasterPassContext&) noexcept { return true; })
+            .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+            .ReadBuffer(buf, BufferState::CBuffer)
+            .NeverCull();
+        graph.AddComputePass(longComputeName, uint32_t{2}, +[](const uint32_t&, RDGComputePassContext&) noexcept { return true; })
+            .ReadBuffer(buf, BufferState::CBuffer)
+            .NeverCull();
+        graph.AddCopyPass(longCopyName, uint32_t{3}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; })
+            .NeverCull();
+        ASSERT_TRUE(graph.Compile());
+    };
+
+    // Warmup settles the retained 128 KiB monotonic initial block and scratch pool chunks.
+    for (uint32_t warm = 0; warm < 4; ++warm) {
+        buildSmallFrame(scheduler->BeginFrame());
+        scheduler->WaitIdle();
+    }
+    const auto retainedBytes = probe.LiveBytes;
+    const auto warmedAllocations = probe.Allocations;
+    ASSERT_GT(retainedBytes, 0u);
+
+    // Steady-state frames within 128 KiB initial block: 0 upstream allocations.
+    for (uint32_t frame = 0; frame < 3; ++frame) {
+        buildSmallFrame(scheduler->BeginFrame());
+        EXPECT_EQ(probe.Allocations, warmedAllocations);
+        scheduler->WaitIdle();
+        EXPECT_EQ(probe.LiveBytes, retainedBytes);
+    }
+
+    // Overflow multi-pass large graph (> 128 KiB): settle scratch pool once, then verify overflow blocks are returned on ResetFrameData().
+    const auto buildLargeFrame = [&](FrameSlot& slot) {
+        RDGBuilder graph{slot};
+        const string extraLongName(2048, 'X');
+        for (uint32_t i = 0; i < 128; ++i) {
+            graph.AddCopyPass(extraLongName, i, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).NeverCull();
+        }
+        ASSERT_TRUE(graph.Compile());
+    };
+    for (uint32_t warm = 0; warm < 4; ++warm) {
+        buildLargeFrame(scheduler->BeginFrame());
+        scheduler->WaitIdle();
+    }
+    const auto largeRetainedBytes = probe.LiveBytes;
+    {
+        buildLargeFrame(scheduler->BeginFrame());
+        EXPECT_GT(probe.LiveBytes, largeRetainedBytes);
+    }
+    scheduler->WaitIdle();
+    EXPECT_EQ(probe.LiveBytes, largeRetainedBytes);
+    scheduler.reset();
+    EXPECT_EQ(probe.LiveBytes, 0u);
+}
+
+TEST(RDG, PassCallbackDestroysCapturedOwnerIfRegistrationAllocationFails) {
+    HeapMemoryResource heap;
+    ContainerProbe probe{heap};
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1, &probe).Unwrap();
+    struct TrackedOwner {
+        uint32_t* Destroyed{nullptr};
+        unique_ptr<int> Payload;
+        TrackedOwner(uint32_t& destroyed, int value) : Destroyed(&destroyed), Payload(make_unique<int>(value)) {}
+        TrackedOwner(TrackedOwner&& other) noexcept
+            : Destroyed(std::exchange(other.Destroyed, nullptr)), Payload(std::move(other.Payload)) {}
+        TrackedOwner& operator=(TrackedOwner&&) = delete;
+        ~TrackedOwner() noexcept {
+            if (Destroyed) ++(*Destroyed);
+        }
+    };
+
+    auto& slot = scheduler->BeginFrame();
+    RDGBuilder graph{slot};
+    // Callback (~24B) fits inside the 128 KiB initial block; 256 KiB pass name forces upstream PMR allocation failure.
+    const string hugeName(256 * 1024, 'N');
+    probe.Fail = true;
+    uint32_t rasterDestroyed = 0;
+    EXPECT_THROW(graph.AddRasterPass(hugeName, TrackedOwner{rasterDestroyed, 1},
+                                     +[](const TrackedOwner&, RDGRasterPassContext&) noexcept { return true; }),
+                 std::bad_function_call);
+    EXPECT_EQ(rasterDestroyed, 1u);
+
+    uint32_t computeDestroyed = 0;
+    EXPECT_THROW(graph.AddComputePass(hugeName, TrackedOwner{computeDestroyed, 2},
+                                      +[](const TrackedOwner&, RDGComputePassContext&) noexcept { return true; }),
+                 std::bad_function_call);
+    EXPECT_EQ(computeDestroyed, 1u);
+
+    uint32_t copyDestroyed = 0;
+    EXPECT_THROW(graph.AddCopyPass(hugeName, TrackedOwner{copyDestroyed, 3},
+                                   +[](const TrackedOwner&, RDGCopyPassContext&) noexcept { return true; }),
+                 std::bad_function_call);
+    EXPECT_EQ(copyDestroyed, 1u);
+
+    probe.Fail = false;
+    scheduler->WaitIdle();
+}
+
+TEST_F(RDGExecutionTest, GeneratedSourceSupportsSboFallbackAndDestroysExactlyOnce) {
+    static_assert(std::is_nothrow_move_constructible_v<RDGUploadSource>);
+    static_assert(std::is_nothrow_move_assignable_v<RDGUploadSource>);
+
+    // 1. Large (> 64 B) context falls back to heap.
+    struct LargeContext {
+        array<uint32_t, 20> Values{};
+        uint32_t* Destroyed{nullptr};
+        LargeContext(uint32_t tag, uint32_t& destroyed) noexcept : Destroyed(&destroyed) { Values[0] = tag; }
+        LargeContext(LargeContext&& other) noexcept : Values(other.Values), Destroyed(std::exchange(other.Destroyed, nullptr)) {}
+        LargeContext& operator=(LargeContext&&) = delete;
+        ~LargeContext() noexcept {
+            if (Destroyed) ++(*Destroyed);
+        }
+    };
+    // 2. Over-aligned (alignas(64)) context falls back to heap and preserves 64B alignment.
+    struct alignas(64) OverAlignedContext {
+        uint32_t Value{0};
+        uint32_t* Destroyed{nullptr};
+        OverAlignedContext(uint32_t value, uint32_t& destroyed) noexcept : Value(value), Destroyed(&destroyed) {}
+        OverAlignedContext(OverAlignedContext&& other) noexcept : Value(other.Value), Destroyed(std::exchange(other.Destroyed, nullptr)) {}
+        OverAlignedContext& operator=(OverAlignedContext&&) = delete;
+        ~OverAlignedContext() noexcept {
+            if (Destroyed) ++(*Destroyed);
+        }
+    };
+    // 3. Potentially-throwing move context falls back to heap while RDGUploadSource remains nothrow movable.
+    struct ThrowingMoveContext {
+        uint32_t Value{0};
+        uint32_t* Destroyed{nullptr};
+        ThrowingMoveContext(uint32_t value, uint32_t& destroyed) noexcept : Value(value), Destroyed(&destroyed) {}
+        ThrowingMoveContext(ThrowingMoveContext&& other) noexcept(false) : Value(other.Value), Destroyed(std::exchange(other.Destroyed, nullptr)) {}
+        ThrowingMoveContext& operator=(ThrowingMoveContext&&) = delete;
+        ~ThrowingMoveContext() noexcept {
+            if (Destroyed) ++(*Destroyed);
+        }
+    };
+    // 4. Inline SBO context (<= 64 B total, standard alignment, nothrow move) with unique_ptr & destroy count.
+    struct InlineContext {
+        unique_ptr<uint32_t> Value;
+        uint32_t* Destroyed{nullptr};
+        InlineContext(uint32_t value, uint32_t& destroyed) : Value(make_unique<uint32_t>(value)), Destroyed(&destroyed) {}
+        InlineContext(InlineContext&& other) noexcept : Value(std::move(other.Value)), Destroyed(std::exchange(other.Destroyed, nullptr)) {}
+        InlineContext& operator=(InlineContext&&) = delete;
+        ~InlineContext() noexcept {
+            if (Destroyed) ++(*Destroyed);
+        }
+    };
+
+    uint32_t largeDestroyed = 0, alignedDestroyed = 0, throwingDestroyed = 0, inlineDestroyed = 0, failedInlineDestroyed = 0;
+    bool alignedAddressOk = false;
+    ByteBuffer largeTarget{{.Size = 4, .Usage = BufferUse::CopyDestination}, Trace};
+    ByteBuffer alignedTarget{{.Size = 4, .Usage = BufferUse::CopyDestination}, Trace};
+    ByteBuffer throwingTarget{{.Size = 4, .Usage = BufferUse::CopyDestination}, Trace};
+    ByteBuffer inlineTarget{{.Size = 4, .Usage = BufferUse::CopyDestination}, Trace};
+
+    auto largeSrc = RDGUploadSource::Generated(4, LargeContext{101u, largeDestroyed}, +[](const LargeContext& c, RDGUploadWriteContext& out) noexcept {
+        std::memcpy(out.Bytes.data(), &c.Values[0], 4);
+        return true;
+    });
+    auto alignedSrc = RDGUploadSource::Generated(4, OverAlignedContext{202u, alignedDestroyed}, +[](const OverAlignedContext& c, RDGUploadWriteContext& out) noexcept {
+        std::memcpy(out.Bytes.data(), &c.Value, 4);
+        return (reinterpret_cast<uintptr_t>(&c) % 64) == 0;
+    });
+    auto throwingSrc = RDGUploadSource::Generated(4, ThrowingMoveContext{303u, throwingDestroyed}, +[](const ThrowingMoveContext& c, RDGUploadWriteContext& out) noexcept {
+        std::memcpy(out.Bytes.data(), &c.Value, 4);
+        return true;
+    });
+    auto inlineSrc = RDGUploadSource::Generated(4, InlineContext{404u, inlineDestroyed}, +[](const InlineContext& c, RDGUploadWriteContext& out) noexcept {
+        std::memcpy(out.Bytes.data(), c.Value.get(), 4);
+        return true;
+    });
+
+    // Exercise both move constructor and move assignment before upload.
+    RDGUploadSource movedLarge{std::move(largeSrc)};
+    RDGUploadSource movedAligned;
+    movedAligned = std::move(alignedSrc);
+    RDGUploadSource movedThrowing{std::move(throwingSrc)};
+    RDGUploadSource movedInline;
+    movedInline = std::move(inlineSrc);
+
+    Setup = [&](RDGBuilder& graph) {
+        const auto d0 = graph.ImportBuffer(&largeTarget, BufferState::Common);
+        const auto d1 = graph.ImportBuffer(&alignedTarget, BufferState::Common);
+        const auto d2 = graph.ImportBuffer(&throwingTarget, BufferState::Common);
+        const auto d3 = graph.ImportBuffer(&inlineTarget, BufferState::Common);
+        graph.UploadBuffer(d0, 0, std::move(movedLarge));
+        graph.UploadBuffer(d1, 0, std::move(movedAligned));
+        graph.UploadBuffer(d2, 0, std::move(movedThrowing));
+        graph.UploadBuffer(d3, 0, std::move(movedInline));
+        graph.MarkOutput(d0);
+        graph.MarkOutput(d1);
+        graph.MarkOutput(d2);
+        graph.MarkOutput(d3);
+    };
+    Run();
+    alignedAddressOk = Prepared;
+    EXPECT_TRUE(alignedAddressOk);
+    uint32_t v0 = 0, v1 = 0, v2 = 0, v3 = 0;
+    std::memcpy(&v0, largeTarget.Bytes.data(), 4);
+    std::memcpy(&v1, alignedTarget.Bytes.data(), 4);
+    std::memcpy(&v2, throwingTarget.Bytes.data(), 4);
+    std::memcpy(&v3, inlineTarget.Bytes.data(), 4);
+    EXPECT_EQ(v0, 101u);
+    EXPECT_EQ(v1, 202u);
+    EXPECT_EQ(v2, 303u);
+    EXPECT_EQ(v3, 404u);
+    EXPECT_EQ(largeDestroyed, 1u);
+    EXPECT_EQ(alignedDestroyed, 1u);
+    EXPECT_EQ(throwingDestroyed, 1u);
+    EXPECT_EQ(inlineDestroyed, 1u);
+
+    // Inline generator destroyed on failed compile / slot reset exactly once.
+    {
+        auto& slot = Scheduler->BeginFrame();
+        RDGBuilder badGraph{slot};
+        const auto target = badGraph.CreateBuffer(BufferDescriptor{.Size = 4, .Usage = BufferUse::CopyDestination});
+        badGraph.UploadBuffer(target, 0, RDGUploadSource::Generated(4, InlineContext{505u, failedInlineDestroyed}, +[](const InlineContext&, RDGUploadWriteContext&) noexcept { return true; }));
+        badGraph.CreateBuffer(BufferDescriptor{.Size = 0});
+        EXPECT_FALSE(badGraph.Compile());
+        EXPECT_EQ(failedInlineDestroyed, 0u);
+    }
+    Scheduler->WaitIdle();
+    EXPECT_EQ(failedInlineDestroyed, 1u);
+}
+
+TEST_F(RDGExecutionTest, DefaultShaderReadViewMatchesMultiMipDefaultViewWhileUavAndAttachmentsStaySingleMip) {
+    Device->EnableTextures = true;
+    Device->Capabilities.Limits.MaxTexture2DDimension = 4096;
+    Device->Capabilities.Limits.MaxTextureArrayLayers = 2048;
+    auto persistentColor = GpuTexture::Create(*Device, {.Dim = TextureDimension::Dim2D,
+                                                        .Width = 16,
+                                                        .Height = 16,
+                                                        .ArrayLayers = 1,
+                                                        .MipLevels = 4,
+                                                        .Format = TextureFormat::RGBA8_UNORM,
+                                                        .Usage = TextureUse::Resource | TextureUse::RenderTarget | TextureUse::UnorderedAccess})
+                               .Unwrap();
+    auto persistentDepth = GpuTexture::Create(*Device, {.Dim = TextureDimension::Dim2D,
+                                                        .Width = 16,
+                                                        .Height = 16,
+                                                        .ArrayLayers = 1,
+                                                        .MipLevels = 4,
+                                                        .Format = TextureFormat::D32_FLOAT,
+                                                        .Usage = TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead})
+                               .Unwrap();
+    Nullable<TextureView*> sampledView{nullptr};
+    Nullable<TextureView*> uavView{nullptr};
+    Nullable<TextureView*> rtView{nullptr};
+    Nullable<TextureView*> dsView{nullptr};
+
+    Setup = [&](RDGBuilder& graph) {
+        const auto color = graph.ImportPersistentBorrowed(*persistentColor);
+        const auto depth = graph.ImportPersistentBorrowed(*persistentDepth);
+        struct RasterCap {
+            RDGTextureHandle Color;
+            RDGTextureHandle Depth;
+            Nullable<TextureView*>* RtView;
+            Nullable<TextureView*>* DsView;
+        };
+        graph.AddRasterPass("raster default views", RasterCap{color, depth, &rtView, &dsView},
+                            +[](const RasterCap& cap, RDGRasterPassContext& ctx) noexcept {
+                                *cap.RtView = ctx.ResolveView(cap.Color, TextureViewUsage::RenderTarget);
+                                *cap.DsView = ctx.ResolveView(cap.Depth, TextureViewUsage::DepthWrite);
+                                return true;
+                            })
+            .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+            .SetDepthStencil(depth, TextureState::DepthWrite, LoadAction::Clear, StoreAction::Store);
+        struct ComputeCap {
+            RDGTextureHandle Color;
+            Nullable<TextureView*>* UavView;
+        };
+        graph.AddComputePass("compute uav default view", ComputeCap{color, &uavView},
+                             +[](const ComputeCap& cap, RDGComputePassContext& ctx) noexcept {
+                                 *cap.UavView = ctx.ResolveView(cap.Color, TextureViewUsage::UnorderedAccess);
+                                 return true;
+                             })
+            .WriteTexture(color, TextureState::UnorderedAccess);
+        struct SampleCap {
+            RDGTextureHandle Color;
+            Nullable<TextureView*>* SampledView;
+        };
+        graph.AddComputePass("compute shader read default view", SampleCap{color, &sampledView},
+                             +[](const SampleCap& cap, RDGComputePassContext& ctx) noexcept {
+                                 *cap.SampledView = ctx.ResolveView(cap.Color, TextureViewUsage::Resource);
+                                 return true;
+                             })
+            .ReadTexture(color, TextureState::ShaderRead)
+            .NeverCull();
+        graph.MarkOutput(color);
+        graph.MarkOutput(depth);
+    };
+    Run();
+    ASSERT_TRUE(sampledView);
+    EXPECT_EQ(sampledView.Get(), persistentColor->GetDefaultView().Get());
+    EXPECT_EQ(sampledView->GetDesc().Range.MipLevelCount, 4u);
+    ASSERT_TRUE(uavView);
+    EXPECT_EQ(uavView->GetDesc().Range.MipLevelCount, 1u);
+    ASSERT_TRUE(rtView);
+    EXPECT_EQ(rtView->GetDesc().Range.BaseMipLevel, 0u);
+    EXPECT_EQ(rtView->GetDesc().Range.MipLevelCount, 1u);
+    ASSERT_TRUE(dsView);
+    EXPECT_EQ(dsView->GetDesc().Range.BaseMipLevel, 0u);
+    EXPECT_EQ(dsView->GetDesc().Range.MipLevelCount, 1u);
+}
+
+TEST(RDGTransientPool, EvictsUnusedResourcesAndViewsAfterEightFramesAndBucketsBuffersWithFallback) {
+    class PoolProbeDevice final : public FakeDevice {
+    public:
+        PoolProbeDevice() {
+            EnableHostBuffers = true;
+            EnableTextures = true;
+        }
+        Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override {
+            CreatedBufferSizes.push_back(desc.Size);
+            if (RejectSizeAbove != 0 && desc.Size > RejectSizeAbove) return nullptr;
+            class TrackedBuffer final : public FakeBuffer {
+            public:
+                TrackedBuffer(const BufferDescriptor& d, uint32_t& liveCount) noexcept
+                    : FakeBuffer(d.Size, d.Usage), _liveCount(liveCount) {
+                    Desc = d;
+                    ++_liveCount;
+                }
+                ~TrackedBuffer() noexcept override { --_liveCount; }
+
+            private:
+                uint32_t& _liveCount;
+            };
+            return make_unique<TrackedBuffer>(desc, LiveBuffers);
+        }
+        uint64_t RejectSizeAbove{0};
+        uint32_t LiveBuffers{0};
+        vector<uint64_t> CreatedBufferSizes;
+    };
+
+    PoolProbeDevice device;
+    uint32_t destroyedTextures = 0, destroyedViews = 0;
+    vector<string> destroyOrder;
+    device.OnTextureDestroyed = [&] {
+        ++destroyedTextures;
+        destroyOrder.emplace_back("texture");
+    };
+    device.OnViewDestroyed = [&] {
+        ++destroyedViews;
+        destroyOrder.emplace_back("view");
+    };
+
+    RDGTransientResourcePool pool{device};
+    // 1. Default FakeDevice has MaxBufferSize == 0 (unlimited): 200 B and 240 B reuse the same 256 B bucket.
+    ASSERT_EQ(device.GetCapabilities().Limits.MaxBufferSize, 0u);
+    pool.BeginFrame();
+    const auto buf200 = pool.AcquireBuffer({.Size = 200, .Memory = MemoryType::Device, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
+    ASSERT_TRUE(buf200.Buffer);
+    EXPECT_EQ(buf200.Buffer->GetDesc().Size, 256u);
+    const auto tex = pool.AcquireTexture(ColorDescriptor());
+    ASSERT_TRUE(tex.Texture);
+    const auto view = pool.AcquireTextureView({tex.Texture.Get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget});
+    ASSERT_TRUE(view);
+
+    pool.BeginFrame();
+    const auto buf240 = pool.AcquireBuffer({.Size = 240, .Memory = MemoryType::Device, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
+    ASSERT_TRUE(buf240.Buffer);
+    EXPECT_EQ(buf240.Buffer.Get(), buf200.Buffer.Get());
+    // Texture was NOT re-acquired in this frame (1st unused frame).
+
+    // 7 more BeginFrame() calls advance texture UnusedFrames to 7 (still alive on 8th unused frame).
+    for (uint32_t f = 0; f < 7; ++f) {
+        pool.BeginFrame();
+        // Keep buf240 alive by re-acquiring it on frame 0 of loop? No, let buf240 also expire after its own 8 unused frames.
+        if (f < 6) EXPECT_EQ(destroyedTextures, 0u);
+    }
+    // Wait: at frame 1 BeginFrame, texture Used->false (UnusedFrames=0).
+    // After 7 more BeginFrames: UnusedFrames == 7 -> still alive!
+    EXPECT_EQ(destroyedTextures, 0u);
+    EXPECT_EQ(destroyedViews, 0u);
+    // Next BeginFrame() hits UnusedFrames == 8 -> evicts texture (and erases its view first!).
+    pool.BeginFrame();
+    EXPECT_EQ(destroyedTextures, 1u);
+    EXPECT_EQ(destroyedViews, 1u);
+    ASSERT_EQ(destroyOrder.size(), 2u);
+    EXPECT_EQ(destroyOrder[0], "view");
+    EXPECT_EQ(destroyOrder[1], "texture");
+    // Buffer was last acquired at frame 1 -> at frame 9 BeginFrame its UnusedFrames == 7, still alive; 1 more BeginFrame evicts it.
+    EXPECT_EQ(device.LiveBuffers, 1u);
+    pool.BeginFrame();
+    EXPECT_EQ(device.LiveBuffers, 0u);
+
+    // 2. Bucket creation failure fallback to exact requested size (513 MiB -> tries 1 GiB -> fails -> retries 513 MiB).
+    constexpr uint64_t k513MiB = 513ULL * 1024 * 1024;
+    constexpr uint64_t k514MiB = 514ULL * 1024 * 1024;
+    device.RejectSizeAbove = k514MiB;
+    device.CreatedBufferSizes.clear();
+    pool.BeginFrame();
+    const auto big = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    ASSERT_TRUE(big.Buffer);
+    EXPECT_EQ(big.Buffer->GetDesc().Size, k513MiB);
+    ASSERT_EQ(device.CreatedBufferSizes.size(), 2u);
+    EXPECT_EQ(device.CreatedBufferSizes[0], 1024ULL * 1024 * 1024);
+    EXPECT_EQ(device.CreatedBufferSizes[1], k513MiB);
+
+    // Reuses exact 513 MiB buffer on next frame, but does NOT reuse it for 514 MiB request.
+    pool.BeginFrame();
+    const auto bigReuse = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    EXPECT_EQ(bigReuse.Buffer.Get(), big.Buffer.Get());
+    pool.BeginFrame();
+    const auto bigger = pool.AcquireBuffer({.Size = k514MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    ASSERT_TRUE(bigger.Buffer);
+    EXPECT_NE(bigger.Buffer.Get(), big.Buffer.Get());
+    EXPECT_EQ(bigger.Buffer->GetDesc().Size, k514MiB);
+}
+
+TEST(RDG, IndirectGeneratorPrepareLayoutFailureStopsPrepareBeforeWrite) {
+    struct ArgsGen {
+        MeshPassId Pass{};
+        uint64_t MaxBytes{0};
+        uint32_t* WriteCalls{nullptr};
+    };
+    const MeshPassId passId{0};
+    FakePipeline pipeline;
+    FakeBuffer indices{128, BufferUse::Index};
+
+    const auto runBadCase = [&](VisibleMeshDrawCommand badVisible) {
+        Probe trace;
+        auto device = make_shared<ProbeDevice>(trace);
+        DeviceContext context{device, &device->Queue};
+        auto scheduler = FrameScheduler::Create(context, make_unique<CallbackPipeline>(), 1).Unwrap();
+        RDGTransientResourcePool pool{*device};
+        UploadArena uploads{*device, 256};
+
+        uint32_t writeCalls = 0;
+        auto& slot = scheduler->BeginFrame();
+        RDGBuilder graph{slot};
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        const uint64_t maxBytes = sizeof(DrawIndexedIndirectArguments);
+        const auto argsBuf = graph.CreateBuffer(
+            RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
+            RDGUploadSource::Generated(
+                maxBytes,
+                ArgsGen{passId, maxBytes, &writeCalls},
+                +[](const ArgsGen& data, RDGUploadWriteContext&) noexcept {
+                    ++(*data.WriteCalls);
+                    return true;
+                },
+                +[](ArgsGen& data, RDGUploadPrepareContext& ctx) noexcept -> uint64_t {
+                    auto& list = ctx.GetPassDrawList(data.Pass);
+                    list.IndirectDraws.Clear();
+                    MeshPassIndirectDrawCounts counts{};
+                    if (!CountMeshPassIndirectDraws(list.VisibleCommands, counts)) return data.MaxBytes + 1;
+                    return uint64_t{counts.IndexedArgumentCount} * sizeof(DrawIndexedIndirectArguments);
+                }));
+        graph.AddRasterPass("mdi bad", uint32_t{0}, +[](const uint32_t&, RDGRasterPassContext&) noexcept { return true; })
+            .UseMeshPass(passId)
+            .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+            .ReadBuffer(argsBuf, BufferState::Indirect)
+            .NeverCull();
+        auto compiled = graph.Compile();
+        ASSERT_TRUE(compiled);
+
+        slot.GetPassDrawList(passId).VisibleCommands.push_back(badVisible);
+        pool.BeginFrame();
+        uploads.Reset();
+        EXPECT_FALSE(compiled->Prepare(slot, pool, uploads));
+        EXPECT_EQ(writeCalls, 0u);
+        scheduler->WaitIdle();
+    };
+
+    // 1. 默认构造空 CachedCommand。
+    runBadCase(VisibleMeshDrawCommand{});
+
+    // 2. ValidElementMask = 0b0101 但缺失 ExtraElements。
+    MeshDrawCommand badMask{};
+    badMask.Pipeline = &pipeline;
+    badMask.IndexBuffer = {&indices, 0, 4};
+    badMask.IndexCount = 3;
+    badMask.ValidElementMask = 5;
+    runBadCase(VisibleMeshDrawCommand{.CachedCommand = &badMask});
+}
+
+TEST(RDG, DeviceLevelIndirectFallbackSkipsIndirectBuffersWhenUnsupportedOrZeroMaxCount) {
+    class FallbackPipeline final : public RenderGraphFramePipeline {
+    public:
+        FallbackPipeline(DeviceContext& device, const MeshDrawCommand& cmd)
+            : RenderGraphFramePipeline(device, 1, 64), _command(cmd) {}
+        void Wait(FrameSlot&) noexcept override {}
+
+        uint32_t DirectDraws{0};
+        uint32_t IndirectDraws{0};
+        bool IndirectArgsCreated{false};
+
+    private:
+        void ExtractFrameData(FrameSlot&) noexcept override {}
+        void ExtractMeshPass(MeshPassId, FrameSlot&, MeshPassFrameDrawList& drawList) noexcept override {
+            for (uint32_t i = 0; i < 4; ++i) {
+                drawList.VisibleCommands.push_back({.SortKey = i, .CachedCommand = &_command, .FirstInstance = i, .InstanceCount = 1});
+            }
+        }
+        void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
+            const auto& caps = slot.GetDevice().GetCapabilities();
+            const bool deviceCanDrawIndirect = caps.Features.IndirectDraw && caps.Limits.MaxDrawIndirectCount >= 1;
+            const auto color = graph.CreateTexture(ColorDescriptor());
+            if (!deviceCanDrawIndirect) {
+                struct PassData {
+                    FallbackPipeline* Self;
+                };
+                graph.AddRasterPass("direct fallback", PassData{this}, +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
+                    const bool ok = SubmitMeshDrawCommands(ctx.GetEncoder(), ctx.GetVisibleCommands({0}));
+                    auto& enc = static_cast<RecordingEncoder&>(ctx.GetEncoder());
+                    data.Self->DirectDraws = static_cast<uint32_t>(enc.Draws.size());
+                    data.Self->IndirectDraws = static_cast<uint32_t>(enc.IndexedIndirectDraws.size() + enc.IndirectDraws.size());
+                    return ok;
+                })
+                    .UseMeshPass({0})
+                    .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+                    .NeverCull();
+            } else {
+                IndirectArgsCreated = true;
+                const uint64_t maxBytes = 4 * sizeof(DrawIndexedIndirectArguments);  // 80 B > MaxBufferSize=64
+                const auto args = graph.CreateBuffer(
+                    RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
+                    RDGUploadSource::Generated(maxBytes, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext&) noexcept { return true; }));
+                graph.AddRasterPass("indirect", uint32_t{0}, +[](const uint32_t&, RDGRasterPassContext&) noexcept { return true; })
+                    .UseMeshPass({0})
+                    .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+                    .ReadBuffer(args, BufferState::Indirect)
+                    .NeverCull();
+            }
+        }
+        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+
+        const MeshDrawCommand& _command;
+    };
+
+    FakePipeline pipelineObj;
+    FakeBuffer indices{128, BufferUse::Index};
+    MeshDrawCommand cmd{};
+    cmd.Pipeline = &pipelineObj;
+    cmd.IndexBuffer = {&indices, 0, 4};
+    cmd.IndexCount = 3;
+
+    for (const auto [indirectFeature, maxIndirectCount] : array{std::pair{false, 16u}, std::pair{true, 0u}}) {
+        Probe trace;
+        auto device = make_shared<ProbeDevice>(trace);
+        device->Capabilities.Features.IndirectDraw = indirectFeature;
+        device->Capabilities.Limits.MaxDrawIndirectCount = maxIndirectCount;
+        device->Capabilities.Limits.MaxBufferSize = 64;
+        DeviceContext context{device, &device->Queue};
+        auto pipeOwner = make_unique<FallbackPipeline>(context, cmd);
+        auto* pipe = pipeOwner.get();
+        auto scheduler = FrameScheduler::Create(context, std::move(pipeOwner), 1).Unwrap();
+        ASSERT_TRUE(scheduler->RunFrame());
+        scheduler->WaitIdle();
+
+        EXPECT_FALSE(pipe->IndirectArgsCreated);
+        EXPECT_EQ(pipe->DirectDraws, 4u);
+        EXPECT_EQ(pipe->IndirectDraws, 0u);
+        for (const auto& alloc : trace.BufferAllocations) {
+            EXPECT_FALSE(alloc.Usage.HasFlag(BufferUse::Indirect));
+        }
+    }
+}
+
+TEST(RDG, BatchLevelIndirectFallbackSplitsZeroAndNonZeroFirstInstanceBatches) {
+    struct ArgsGen {
+        MeshPassId Pass{};
+        uint64_t MaxBytes{0};
+    };
+    class BatchFallbackPipeline final : public RenderGraphFramePipeline {
+    public:
+        BatchFallbackPipeline(DeviceContext& device, const MeshDrawCommand& cmd0, const MeshDrawCommand& cmd1)
+            : RenderGraphFramePipeline(device, 1, 1024), _cmd0(cmd0), _cmd1(cmd1) {}
+        void Wait(FrameSlot&) noexcept override {}
+
+        uint32_t DirectDraws{0};
+        uint32_t IndirectBatches{0};
+        uint32_t IndirectDrawCount{0};
+
+    private:
+        void ExtractFrameData(FrameSlot&) noexcept override {}
+        void ExtractMeshPass(MeshPassId, FrameSlot&, MeshPassFrameDrawList& drawList) noexcept override {
+            drawList.VisibleCommands.push_back({.SortKey = 0, .CachedCommand = &_cmd0, .FirstInstance = 0, .InstanceCount = 1});
+            drawList.VisibleCommands.push_back({.SortKey = 1, .CachedCommand = &_cmd0, .FirstInstance = 0, .InstanceCount = 1});
+            drawList.VisibleCommands.push_back({.SortKey = 2, .CachedCommand = &_cmd1, .FirstInstance = 1, .InstanceCount = 1});
+        }
+        void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
+            const uint64_t maxBytes = 4 * sizeof(DrawIndexedIndirectArguments);
+            const auto args = graph.CreateBuffer(
+                RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
+                RDGUploadSource::Generated(
+                    maxBytes,
+                    ArgsGen{{0}, maxBytes},
+                    +[](const ArgsGen&, RDGUploadWriteContext&) noexcept { return true; },
+                    +[](ArgsGen& data, RDGUploadPrepareContext& ctx) noexcept -> uint64_t {
+                        auto& list = ctx.GetPassDrawList(data.Pass);
+                        list.IndirectDraws.Clear();
+                        MeshPassIndirectDrawCounts counts{};
+                        if (!CountMeshPassIndirectDraws(list.VisibleCommands, counts)) return data.MaxBytes + 1;
+                        return uint64_t{counts.IndexedArgumentCount} * sizeof(DrawIndexedIndirectArguments);
+                    }));
+            const auto color = graph.CreateTexture(ColorDescriptor());
+            struct PassData {
+                BatchFallbackPipeline* Self;
+                FrameSlot* Slot;
+                RDGBufferHandle Args;
+            };
+            graph.AddRasterPass("batch fallback", PassData{this, &slot, args}, +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
+                auto& list = data.Slot->GetPassDrawList({0});
+                if (!BuildMeshPassIndirectDraws(list.VisibleCommands, list.IndirectDraws)) return false;
+                const auto slice = ctx.ResolveBuffer(data.Args);
+                const bool ok = SubmitMeshPassIndirectDraws(
+                    ctx.GetEncoder(), list.VisibleCommands, list.IndirectDraws, slice, {}, data.Slot->GetDevice().GetCapabilities());
+                auto& enc = static_cast<RecordingEncoder&>(ctx.GetEncoder());
+                data.Self->DirectDraws = static_cast<uint32_t>(enc.Draws.size());
+                data.Self->IndirectBatches = static_cast<uint32_t>(enc.IndexedIndirectDraws.size());
+                for (const auto& draw : enc.IndexedIndirectDraws) data.Self->IndirectDrawCount += draw.Count;
+                return ok;
+            })
+                .UseMeshPass({0})
+                .WriteColor(0, color, LoadAction::Clear, StoreAction::Store)
+                .ReadBuffer(args, BufferState::Indirect)
+                .NeverCull();
+        }
+        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+
+        const MeshDrawCommand& _cmd0;
+        const MeshDrawCommand& _cmd1;
+    };
+
+    FakePipeline pipelineObj;
+    FakeBuffer indices{128, BufferUse::Index};
+    MeshDrawCommand cmd0{};
+    cmd0.Pipeline = &pipelineObj;
+    cmd0.IndexBuffer = {&indices, 0, 4};
+    cmd0.IndexCount = 3;
+    cmd0.StencilReference = 0;
+
+    MeshDrawCommand cmd1 = cmd0;
+    cmd1.StencilReference = 1;
+
+    Probe trace;
+    auto device = make_shared<ProbeDevice>(trace);
+    device->Capabilities.Features.IndirectDraw = true;
+    device->Capabilities.Features.IndirectFirstInstance = false;
+    device->Capabilities.Limits.MaxDrawIndirectCount = 16;
+    DeviceContext context{device, &device->Queue};
+    auto pipeOwner = make_unique<BatchFallbackPipeline>(context, cmd0, cmd1);
+    auto* pipe = pipeOwner.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeOwner), 1).Unwrap();
+    ASSERT_TRUE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+
+    EXPECT_EQ(pipe->IndirectBatches, 1u);
+    EXPECT_EQ(pipe->IndirectDrawCount, 2u);
+    EXPECT_EQ(pipe->DirectDraws, 1u);
+}
+
+TEST(RDG, AccessTableSlotBucketsDistinguishHighBitBufferFromTextureZeroAndRespectThresholds) {
+    HeapMemoryResource heap;
+    ContainerProbe probe{heap};
+    std::pmr::monotonic_buffer_resource arena{&probe};
+    radray::detail::RDGAccessTable table{&arena};
+
+    // 直接构造含 (false, 0x80000000u) 与 (true, 0u) 的合成 RDGAccess 记录，验证无 32 位最高位别名冲突。
+    auto [bufHighBit, inserted0] = table.FindOrEmplace({false, 0x80000000u, 101u, true, false, false});
+    auto [texZero, inserted1] = table.FindOrEmplace({true, 0u, 202u, true, false, false});
+    ASSERT_TRUE(inserted0 && inserted1);
+    EXPECT_NE(bufHighBit, texZero);
+    EXPECT_TRUE(table.AccessBuckets.empty());
+    EXPECT_EQ(table.AccessBuckets.capacity(), 0u);
+
+    // 填满线性阈值 16 项：保持 AccessBuckets 为空且容量为 0。
+    for (uint32_t i = 0; i < 14; ++i) {
+        auto [entry, inserted] = table.FindOrEmplace({false, 1000u + i, 300u + i, true, false, false});
+        ASSERT_TRUE(inserted);
+        ASSERT_NE(entry, nullptr);
+    }
+    ASSERT_EQ(table.Accesses.size(), 16u);
+    EXPECT_TRUE(table.AccessBuckets.empty());
+    EXPECT_EQ(table.AccessBuckets.capacity(), 0u);
+    ASSERT_TRUE(table.Find(false, 0x80000000u));
+    ASSERT_TRUE(table.Find(true, 0u));
+    EXPECT_EQ(table.Find(false, 0x80000000u)->State, 101u);
+    EXPECT_EQ(table.Find(true, 0u)->State, 202u);
+
+    // 跨过 16 -> 17 项建桶阈值：分配 64 桶，最高位缓冲与 0 号纹理依然完全独立。
+    auto [entry17, inserted17] = table.FindOrEmplace({true, 1u, 401u, true, false, false});
+    ASSERT_TRUE(inserted17);
+    ASSERT_NE(entry17, nullptr);
+    EXPECT_EQ(table.Accesses.size(), 17u);
+    EXPECT_EQ(table.AccessBuckets.size(), 64u);
+    ASSERT_TRUE(table.Find(false, 0x80000000u));
+    ASSERT_TRUE(table.Find(true, 0u));
+    EXPECT_EQ(table.Find(false, 0x80000000u)->State, 101u);
+    EXPECT_EQ(table.Find(true, 0u)->State, 202u);
+    EXPECT_FALSE(table.Find(true, 0x80000000u));
+    EXPECT_FALSE(table.Find(false, 0u));
+
+    // 重复查找返回已有槽位且不插入。
+    auto [dupHigh, dupInserted] = table.FindOrEmplace({false, 0x80000000u, 999u, false, true, true});
+    EXPECT_FALSE(dupInserted);
+    EXPECT_EQ(dupHigh->State, 101u);
+    EXPECT_EQ(table.Accesses.size(), 17u);
+
+    // 填至 32 项仍保持 64 桶（装载率 32/64 = 1/2）。
+    for (uint32_t i = 0; i < 15; ++i) {
+        auto [_, inserted] = table.FindOrEmplace({true, 100u + i, 500u + i, true, false, false});
+        ASSERT_TRUE(inserted);
+    }
+    EXPECT_EQ(table.Accesses.size(), 32u);
+    EXPECT_EQ(table.AccessBuckets.size(), 64u);
+
+    // 跨过 32 -> 33 项首次扩桶重哈希（64 -> 128 桶），扩桶前后全部记录均可精确命中。
+    auto [entry33, inserted33] = table.FindOrEmplace({false, 0x80000001u, 601u, true, false, false});
+    ASSERT_TRUE(inserted33);
+    ASSERT_NE(entry33, nullptr);
+    EXPECT_EQ(table.Accesses.size(), 33u);
+    EXPECT_EQ(table.AccessBuckets.size(), 128u);
+    ASSERT_TRUE(table.Find(false, 0x80000000u));
+    ASSERT_TRUE(table.Find(true, 0u));
+    ASSERT_TRUE(table.Find(false, 0x80000001u));
+    EXPECT_EQ(table.Find(false, 0x80000000u)->State, 101u);
+    EXPECT_EQ(table.Find(true, 0u)->State, 202u);
+    EXPECT_EQ(table.Find(false, 0x80000001u)->State, 601u);
+    for (uint32_t i = 0; i < 14; ++i) {
+        const auto found = table.Find(false, 1000u + i);
+        ASSERT_TRUE(found);
+        EXPECT_EQ(found->State, 300u + i);
+    }
+    for (uint32_t i = 0; i < 15; ++i) {
+        const auto found = table.Find(true, 100u + i);
+        ASSERT_TRUE(found);
+        EXPECT_EQ(found->State, 500u + i);
+    }
+}
+
+TEST_F(RDGExecutionTest, DensePassCrossesBucketBuildAndRehashThresholdsAndResolvesPreRehashResources) {
+    constexpr uint32_t kBufferCount = 24;
+    constexpr uint32_t kTextureCount = 24;
+    vector<unique_ptr<ByteBuffer>> buffers;
+    buffers.reserve(kBufferCount);
+    for (uint32_t i = 0; i < kBufferCount; ++i) {
+        buffers.push_back(make_unique<ByteBuffer>(BufferDescriptor{.Size = 64, .Usage = BufferUse::Vertex | BufferUse::Resource}, Trace));
+    }
+    vector<unique_ptr<ProbeTexture>> textures;
+    textures.reserve(kTextureCount);
+    for (uint32_t i = 0; i < kTextureCount; ++i) {
+        textures.push_back(make_unique<ProbeTexture>(ColorDescriptor()));
+    }
+    ProbeTexture undeclaredTex{ColorDescriptor()};
+
+    uint32_t prepareResolved = 0;
+    uint32_t recordResolved = 0;
+    bool undeclaredRejected = false;
+
+    Setup = [&](RDGBuilder& graph) {
+        const auto color = graph.CreateTexture(ColorDescriptor());
+        const auto undeclared = graph.ImportTexture(&undeclaredTex, TextureState::ShaderRead);
+        array<RDGBufferHandle, kBufferCount> bufHandles{};
+        array<RDGTextureHandle, kTextureCount> texHandles{};
+        for (uint32_t i = 0; i < kBufferCount; ++i) {
+            bufHandles[i] = graph.ImportBuffer(buffers[i].get(), BufferState::Common, BufferState::Common);
+        }
+        for (uint32_t i = 0; i < kTextureCount; ++i) {
+            texHandles[i] = graph.ImportTexture(textures[i].get(), TextureState::ShaderRead, TextureState::ShaderRead);
+        }
+
+        struct PassData {
+            array<RDGTextureHandle, kTextureCount> Textures;
+            RDGTextureHandle Undeclared;
+            uint32_t* PrepareResolved;
+            uint32_t* RecordResolved;
+            bool* UndeclaredRejected;
+        };
+        auto pass = graph.AddRasterPass(
+            "dense_rehash",
+            PassData{texHandles, undeclared, &prepareResolved, &recordResolved, &undeclaredRejected},
+            +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
+                for (const auto handle : data.Textures) {
+                    if (!ctx.ResolveView(handle, TextureViewUsage::Resource)) return false;
+                    ++(*data.RecordResolved);
+                }
+                *data.UndeclaredRejected = !ctx.ResolveView(data.Undeclared, TextureViewUsage::Resource);
+                return *data.UndeclaredRejected;
+            },
+            +[](PassData& data, RDGPrepareContext& ctx) noexcept {
+                for (const auto handle : data.Textures) {
+                    if (!ctx.ResolveView(handle, TextureViewUsage::Resource)) return false;
+                    ++(*data.PrepareResolved);
+                }
+                return !ctx.ResolveView(data.Undeclared, TextureViewUsage::Resource);
+            });
+        // 1 个颜色附件 + 24 个 Buffer + 24 个 Texture = 49 项独立访问，越过 16->17 与 32->33（64->128 桶）。
+        pass.WriteColor(0, color, LoadAction::Clear, StoreAction::Store);
+        for (uint32_t i = 0; i < 8; ++i) pass.ReadTexture(texHandles[i], TextureState::ShaderRead);
+        for (uint32_t i = 0; i < kBufferCount; ++i) pass.ReadBuffer(bufHandles[i], BufferState::Vertex);
+        for (uint32_t i = 8; i < kTextureCount; ++i) pass.ReadTexture(texHandles[i], TextureState::ShaderRead);
+        // 扩桶重哈希后再对早期登记（< 16 项时）的 Buffer 声明只读状态合并，与对早期 Texture 重复读。
+        pass.ReadBuffer(bufHandles[0], BufferState::ShaderRead);
+        pass.ReadTexture(texHandles[0], TextureState::ShaderRead);
+        graph.MarkOutput(color);
+    };
+
+    Run();
+    EXPECT_EQ(prepareResolved, kTextureCount);
+    EXPECT_EQ(recordResolved, kTextureCount);
+    EXPECT_TRUE(undeclaredRejected);
+    // 验证 bufHandles[0] 在扩桶后合并的只读状态 Vertex | ShaderRead 出现在入口屏障中。
+    bool sawMergedBufferState = false;
+    for (const auto& barrier : Trace.Barriers) {
+        if (const auto* bufBarrier = std::get_if<BarrierBufferDescriptor>(&barrier)) {
+            if (bufBarrier->Target == buffers[0].get() &&
+                bufBarrier->After == (BufferState::Vertex | BufferState::ShaderRead)) {
+                sawMergedBufferState = true;
+            }
+        }
+    }
+    EXPECT_TRUE(sawMergedBufferState);
+}
+
+TEST_F(RDGExecutionTest, BucketedComputePassReadThenWriteSameUavMergesWriteFlagAndPreservesOrder) {
+    constexpr uint32_t kPaddingBuffers = 20;  // 超过 16 项阈值以激活 AccessBuckets
+    vector<unique_ptr<ByteBuffer>> padding;
+    padding.reserve(kPaddingBuffers);
+    for (uint32_t i = 0; i < kPaddingBuffers; ++i) {
+        padding.push_back(make_unique<ByteBuffer>(BufferDescriptor{.Size = 16, .Usage = BufferUse::Resource}, Trace));
+    }
+
+    Setup = [&](RDGBuilder& graph) {
+        const auto uav = graph.CreateBuffer({.Size = 16, .Usage = BufferUse::UnorderedAccess | BufferUse::Resource});
+        const auto output = graph.CreateBuffer({.Size = 16, .Usage = BufferUse::UnorderedAccess});
+        array<RDGBufferHandle, kPaddingBuffers> padHandles{};
+        for (uint32_t i = 0; i < kPaddingBuffers; ++i) {
+            padHandles[i] = graph.ImportBuffer(padding[i].get(), BufferState::ShaderRead);
+        }
+
+        struct TraceData {
+            Probe* TraceRef;
+            const char* Label;
+        };
+        const auto record = +[](const TraceData& data, RDGComputePassContext&) noexcept {
+            data.TraceRef->Executed.emplace_back(data.Label);
+            return true;
+        };
+
+        graph.AddComputePass("init", TraceData{&Trace, "init"}, record).WriteBuffer(uav, BufferState::UnorderedAccess);
+
+        // 不设 NeverCull：仅当同状态 Read + Write 正确合并 Write=true 并成为 LastWriter 时，该 Pass 才会被保留。
+        auto update = graph.AddComputePass("update", TraceData{&Trace, "update"}, record);
+        for (const auto handle : padHandles) {
+            update.ReadBuffer(handle, BufferState::ShaderRead);
+        }
+        update.ReadBuffer(uav, BufferState::UnorderedAccess);
+        update.WriteBuffer(uav, BufferState::UnorderedAccess);
+
+        graph.AddComputePass("consumer", TraceData{&Trace, "consumer"}, record)
+            .ReadBuffer(uav, BufferState::ShaderRead)
+            .WriteBuffer(output, BufferState::UnorderedAccess);
+        graph.MarkOutput(output);
+    };
+
+    Run();
+    EXPECT_EQ(Trace.Executed, (vector<string>{"init", "update", "consumer"}));
+}
+
+TEST(RDG, Sparse1024CopyPassesReadingHighIndexBufferDoNotAllocateBuckets) {
+    // 1. 直接核验 1,024 张单高编号缓冲访问表保持 AccessBuckets.empty() 与零桶容量。
+    {
+        HeapMemoryResource heap;
+        ContainerProbe probe{heap};
+        std::pmr::monotonic_buffer_resource arena{&probe};
+        vector<radray::detail::RDGAccessTable> tables;
+        tables.reserve(1024);
+        for (uint32_t i = 0; i < 1024; ++i) {
+            auto& table = tables.emplace_back(&arena);
+            auto [entry, inserted] = table.FindOrEmplace({false, 4095u, static_cast<uint32_t>(BufferState::CopySource), true, false, false});
+            ASSERT_TRUE(inserted && entry != nullptr);
+            EXPECT_TRUE(table.AccessBuckets.empty());
+            EXPECT_EQ(table.AccessBuckets.capacity(), 0u);
+        }
+    }
+
+    // 2. 端到端 RDG：1,024 个稀疏 AddCopyPass 读取高编号 Buffer[4095] 与读取 Buffer[0] 占用完全相同的槽 PMR 峰值字节，无按编号膨胀。
+    const auto measurePeakBytes = [](bool readHighIndex, size_t& outPeak) {
+        Probe trace;
+        auto device = make_shared<ProbeDevice>(trace);
+        DeviceContext context{device, &device->Queue};
+        RDGTransientResourcePool pool{*device};
+        UploadArena uploads{*device, 64 * 1024};
+        HeapMemoryResource heap;
+        struct PeakProbe final : public std::pmr::memory_resource {
+            explicit PeakProbe(std::pmr::memory_resource& upstream) noexcept : Upstream(upstream) {}
+            size_t Live{0}, Peak{0};
+            void* do_allocate(size_t bytes, size_t alignment) override {
+                void* p = Upstream.allocate(bytes, alignment);
+                Live += bytes;
+                Peak = std::max(Peak, Live);
+                return p;
+            }
+            void do_deallocate(void* p, size_t bytes, size_t alignment) override {
+                Live -= bytes;
+                Upstream.deallocate(p, bytes, alignment);
+            }
+            bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
+            std::pmr::memory_resource& Upstream;
+        } peakProbe{heap};
+        auto scheduler = FrameScheduler::Create(context, make_unique<CallbackPipeline>(), 1, &peakProbe).Unwrap();
+        ByteBuffer sharedBuf{{.Size = 64, .Usage = BufferUse::CopySource}, trace};
+        uint32_t executedCount = 0;
+        {
+            auto& slot = scheduler->BeginFrame();
+            RDGBuilder graph{slot};
+            RDGBufferHandle target;
+            if (!readHighIndex) target = graph.ImportBuffer(&sharedBuf, BufferState::CopySource);
+            for (uint32_t i = 0; i < 4095; ++i) {
+                (void)graph.CreateBuffer({.Size = 64, .Usage = BufferUse::CopySource});
+            }
+            if (readHighIndex) target = graph.ImportBuffer(&sharedBuf, BufferState::CopySource);
+            ASSERT_EQ(target.Index, readHighIndex ? 4095u : 0u);
+            for (uint32_t i = 0; i < 1024; ++i) {
+                graph.AddCopyPass("sparse_copy", &executedCount, +[](uint32_t* const& counter, RDGCopyPassContext&) noexcept {
+                    ++(*counter);
+                    return true;
+                })
+                    .ReadBuffer(target)
+                    .NeverCull();
+            }
+            auto compiled = graph.Compile();
+            ASSERT_TRUE(compiled);
+            ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+            auto cmd = slot.AcquireCommandBuffer();
+            ASSERT_TRUE(cmd);
+            cmd->Begin();
+            ASSERT_TRUE(compiled->Record(*cmd));
+            cmd->End();
+            compiled->CommitSubmittedStates();
+            ASSERT_TRUE(scheduler->RunFrame());
+        }
+        scheduler->WaitIdle();
+        EXPECT_EQ(executedCount, 1024u);
+        outPeak = peakProbe.Peak;
+    };
+
+    size_t peakLow = 0;
+    size_t peakHigh = 0;
+    measurePeakBytes(false, peakLow);
+    measurePeakBytes(true, peakHigh);
+    EXPECT_GT(peakLow, 0u);
+    EXPECT_EQ(peakHigh, peakLow);
 }

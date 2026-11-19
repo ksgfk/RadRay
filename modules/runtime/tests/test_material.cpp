@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include "test_asset_fakes.h"
+#include <radray/basic_math.h>
 #include <radray/runtime/shader_asset.h>
 
 namespace radray {
@@ -274,7 +275,7 @@ TEST(MaterialBindingMap, RejectsArraysAndImmutableSamplerParameters) {
 }
 TEST(MaterialBindingMap, SkipsInactiveResourcesAndRejectsInactiveConstants) {
     LayoutDevice device;
-    device.Backend = gpu::RenderBackend::Vulkan;
+    device.Backend = gpu::GpuBackend::Vulkan;
     AssetManager assets;
     auto desc = ResourceLayout();
     desc.Groups[0].Bindings[1].Binding.Vulkan.reset();
@@ -292,6 +293,110 @@ TEST(MaterialBindingMap, SkipsInactiveResourcesAndRejectsInactiveConstants) {
     const auto other = CreateTestShader(assets, device, MakeShaderDesc(constants, device.Backend));
     ASSERT_TRUE(other);
     EXPECT_FALSE(CreateMaterial(assets, MakeMaterialDesc(other.GetHandle(), {{"Roughness", 1.0f}}, {"Roughness"}, "Constants")));
+}
+
+TEST(MaterialBindingMap, SupportsAllValueTypesAndAutoTransposesMatrix4x4) {
+    const auto makeLayout = [](bool rowMajor) {
+        auto desc = MatrixLayout();
+        desc.Types.clear();
+        desc.Types.push_back({.Name = "MaterialData", .Size = 144, .ElementSize = 144});
+        desc.Types.push_back({.Name = "Transform", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Matrix, .ElementKind = shader::ShaderTypeKind::Matrix, .Offset = 0, .Size = 64, .ElementSize = 64, .MatrixStride = 16, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 4, .ColumnCount = 4, .RowMajor = rowMajor});
+        desc.Types.push_back({.Name = "I4", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Vector, .ElementKind = shader::ShaderTypeKind::Vector, .Offset = 64, .Size = 16, .ElementSize = 16, .ScalarKind = shader::ShaderScalarKind::SignedInteger, .RowCount = 1, .ColumnCount = 4});
+        desc.Types.push_back({.Name = "U4", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Vector, .ElementKind = shader::ShaderTypeKind::Vector, .Offset = 80, .Size = 16, .ElementSize = 16, .ScalarKind = shader::ShaderScalarKind::UnsignedInteger, .RowCount = 1, .ColumnCount = 4});
+        desc.Types.push_back({.Name = "F3", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Vector, .ElementKind = shader::ShaderTypeKind::Vector, .Offset = 96, .Size = 12, .ElementSize = 12, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 1, .ColumnCount = 3});
+        desc.Types.push_back({.Name = "F1", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Scalar, .ElementKind = shader::ShaderTypeKind::Scalar, .Offset = 108, .Size = 4, .ElementSize = 4, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 1, .ColumnCount = 1});
+        desc.Types.push_back({.Name = "F2", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Vector, .ElementKind = shader::ShaderTypeKind::Vector, .Offset = 112, .Size = 8, .ElementSize = 8, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 1, .ColumnCount = 2});
+        desc.Types.push_back({.Name = "I1", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Scalar, .ElementKind = shader::ShaderTypeKind::Scalar, .Offset = 120, .Size = 4, .ElementSize = 4, .ScalarKind = shader::ShaderScalarKind::SignedInteger, .RowCount = 1, .ColumnCount = 1});
+        desc.Types.push_back({.Name = "U1", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Scalar, .ElementKind = shader::ShaderTypeKind::Scalar, .Offset = 124, .Size = 4, .ElementSize = 4, .ScalarKind = shader::ShaderScalarKind::UnsignedInteger, .RowCount = 1, .ColumnCount = 1});
+        desc.Types.push_back({.Name = "F4", .ParentIndex = 0, .Kind = shader::ShaderTypeKind::Vector, .ElementKind = shader::ShaderTypeKind::Vector, .Offset = 128, .Size = 16, .ElementSize = 16, .ScalarKind = shader::ShaderScalarKind::Float, .RowCount = 1, .ColumnCount = 4});
+        desc.Groups[0].Bindings[0].BufferByteSize = 144;
+        return desc;
+    };
+
+    LayoutDevice device;
+    AssetManager assets;
+    const auto rowMajorShader = CreateTestShader(assets, device, MakeShaderDesc(makeLayout(true)));
+    const auto colMajorShader = CreateTestShader(assets, device, MakeShaderDesc(makeLayout(false)));
+    ASSERT_TRUE(rowMajorShader && colMajorShader);
+
+    Eigen::Matrix4f matrix;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            matrix(r, c) = static_cast<float>(r * 4 + c + 1);
+        }
+    }
+    array<float, 16> asymmetric{};
+    std::memcpy(asymmetric.data(), matrix.data(), sizeof(asymmetric));
+    const vector<string> subset{"Transform", "I4", "U4", "F3", "F1", "F2", "I1", "U1", "F4"};
+    MaterialAssetDesc matDesc;
+    matDesc.Programs = {{"Row", rowMajorShader.GetHandle(), 0, "VS", "PS"}, {"Col", colMajorShader.GetHandle(), 0, "VS", "PS"}};
+    matDesc.Parameters = {
+        {"Transform", asymmetric},
+        {"I4", array<int32_t, 4>{-1, 2, -3, 4}},
+        {"U4", array<uint32_t, 4>{10u, 20u, 30u, 40u}},
+        {"F3", array<float, 3>{1.5f, 2.5f, 3.5f}},
+        {"F1", 0.75f},
+        {"F2", array<float, 2>{4.25f, 5.25f}},
+        {"I1", int32_t{-42}},
+        {"U1", uint32_t{99u}},
+        {"F4", array<float, 4>{6.0f, 7.0f, 8.0f, 9.0f}}};
+    matDesc.Families = {
+        {rowMajorShader.GetHandle(), "Constants", subset},
+        {colMajorShader.GetHandle(), "Constants", subset}};
+    const auto material = CreateMaterial(assets, matDesc);
+    ASSERT_TRUE(material);
+
+    const auto rowMap = material.Get()->GetBindingMap(rowMajorShader.GetHandle());
+    const auto colMap = material.Get()->GetBindingMap(colMajorShader.GetHandle());
+    ASSERT_TRUE(rowMap && colMap);
+    EXPECT_TRUE(rowMap->GetConstantTargets()[0].TransposeMatrix4x4);
+    EXPECT_FALSE(colMap->GetConstantTargets()[0].TransposeMatrix4x4);
+
+    MaterialInstance instance{material.GetHandle()};
+    // 类型不匹配覆盖应被拒绝。
+    EXPECT_FALSE(instance.SetParameter(assets, 6, uint32_t{1u}));
+    ASSERT_TRUE(instance.SetParameter(assets, 6, int32_t{-77}));
+    MaterialRenderProxy proxy;
+    ASSERT_TRUE(proxy.Update(assets, instance));
+
+    array<byte, 144> rowBytes{};
+    array<byte, 144> colBytes{};
+    ASSERT_TRUE(rowMap->WriteConstants(proxy, rowBytes));
+    ASSERT_TRUE(colMap->WriteConstants(proxy, colBytes));
+
+    array<float, 16> outRow{};
+    array<float, 16> outCol{};
+    std::memcpy(outRow.data(), rowBytes.data(), 64);
+    std::memcpy(outCol.data(), colBytes.data(), 64);
+    EXPECT_EQ(outCol, asymmetric);
+    for (uint32_t r = 0; r < 4; ++r) {
+        for (uint32_t c = 0; c < 4; ++c) {
+            EXPECT_FLOAT_EQ(outRow[r * 4 + c], asymmetric[c * 4 + r]);
+            EXPECT_FLOAT_EQ(outRow[r * 4 + c], matrix(static_cast<int>(r), static_cast<int>(c)));
+        }
+    }
+    // 校验非矩阵字段字节一致且覆盖生效。
+    EXPECT_TRUE(std::equal(rowBytes.begin() + 64, rowBytes.end(), colBytes.begin() + 64));
+    int32_t writtenI1 = 0;
+    std::memcpy(&writtenI1, rowBytes.data() + 120, sizeof(writtenI1));
+    EXPECT_EQ(writtenI1, -77);
+
+    // 校验 signed/unsigned 不匹配以及错误矩阵步长/维度被 Create 拒绝。
+    auto badSigned = matDesc;
+    badSigned.Parameters[6].DefaultValue = uint32_t{1u};
+    EXPECT_FALSE(CreateMaterial(assets, badSigned));
+
+    auto badStrideLayout = makeLayout(true);
+    badStrideLayout.Types.resize(2);
+    badStrideLayout.Types[0].Size = 112;
+    badStrideLayout.Types[0].ElementSize = 112;
+    badStrideLayout.Types[1].Size = 112;
+    badStrideLayout.Types[1].ElementSize = 112;
+    badStrideLayout.Types[1].MatrixStride = 32;
+    badStrideLayout.Groups[0].Bindings[0].BufferByteSize = 112;
+    const auto badStrideShader = CreateTestShader(assets, device, MakeShaderDesc(badStrideLayout));
+    ASSERT_TRUE(badStrideShader);
+    EXPECT_FALSE(CreateMaterial(assets, MakeMaterialDesc(badStrideShader.GetHandle(), {{"Transform", asymmetric}}, {"Transform"}, "Constants")));
 }
 }  // namespace
 }  // namespace radray

@@ -27,7 +27,7 @@ public:
     void Extract(FrameSlot&) noexcept override {}
     void Prepare(FrameSlot&) noexcept override {}
     void Record(FrameSlot&) noexcept override {}
-    void Submit(FrameSlot&) noexcept override {}
+    bool Submit(FrameSlot&) noexcept override { return true; }
     void Wait(FrameSlot& slot) noexcept override { slot.GetQueue().Wait(); }
 };
 
@@ -44,7 +44,7 @@ double Percentile(vector<double> values, double fraction) {
     return values[static_cast<size_t>(fraction * (values.size() - 1))];
 }
 
-void Run(benchmark::State& state, RenderBackend backend, uint32_t warmup, const string& rawPath, bool& failed) {
+void Run(benchmark::State& state, GpuBackend backend, uint32_t warmup, const string& rawPath, bool& failed) {
     const auto fail = [&](const char* message) { state.SkipWithError(message); failed = true; };
     auto environment = Environment::Create(backend, false, "RDG upload GPU benchmark");
     if (!environment) return fail("environment creation failed");
@@ -170,7 +170,7 @@ void Run(benchmark::State& state, RenderBackend backend, uint32_t warmup, const 
 }  // namespace
 
 int main(int argc, char** argv) {
-    RenderBackend backend = RenderBackend::D3D12;
+    GpuBackend backend = GpuBackend::D3D12;
     uint32_t samples = 1000, warmup = 200;
     string rawPath;
     bool waitForCapture = false;
@@ -178,9 +178,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--rdg_backend=vulkan")
-            backend = RenderBackend::Vulkan;
+            backend = GpuBackend::Vulkan;
         else if (arg == "--rdg_backend=d3d12")
-            backend = RenderBackend::D3D12;
+            backend = GpuBackend::D3D12;
         else if (arg == "--rdg_capture_wait")
             waitForCapture = true;
         else if (arg.starts_with("--rdg_raw="))

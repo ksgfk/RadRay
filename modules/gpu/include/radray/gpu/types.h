@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <type_traits>
 #include <array>
-#include <cmath>
+#include <cstdint>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -13,16 +13,15 @@
 #include <string_view>
 #include <utility>
 
-#include <magic_enum/magic_enum.hpp>
-
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/logger.h>
-#include <radray/utility.h>
 #include <radray/viewport.h>
 
 namespace radray::gpu {
+
+// Enumerations
 
 enum class ShaderStage : uint32_t {
     UNKNOWN = 0x0,
@@ -123,7 +122,7 @@ enum class VertexFormat : int32_t {
     FLOAT32X4,
 };
 
-enum class RenderBackend : int32_t {
+enum class GpuBackend : int32_t {
     D3D12,
     Vulkan,
 
@@ -189,6 +188,21 @@ enum class TextureFormat : int32_t {
     D32_FLOAT,
     D24_UNORM_S8_UINT,
     D32_FLOAT_S8_UINT,
+
+    BC1_UNORM,
+    BC1_UNORM_SRGB,
+    BC2_UNORM,
+    BC2_UNORM_SRGB,
+    BC3_UNORM,
+    BC3_UNORM_SRGB,
+    BC4_UNORM,
+    BC4_SNORM,
+    BC5_UNORM,
+    BC5_SNORM,
+    BC6H_UFLOAT,
+    BC6H_SFLOAT,
+    BC7_UNORM,
+    BC7_UNORM_SRGB,
 };
 
 enum class TextureDimension : int32_t {
@@ -475,7 +489,13 @@ enum class VulkanBufferDescriptorPlacement : uint32_t {
     Dynamic = 1
 };
 
-enum class RenderObjectTag : uint32_t {
+enum class ExternalOwnershipTransfer : uint32_t {
+    None,
+    Acquire,
+    Release
+};
+
+enum class GpuObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
     CmdQueue = Device << 1,
@@ -503,7 +523,8 @@ enum class RenderObjectTag : uint32_t {
     RenderPass = QueryPool << 1,
     Framebuffer = RenderPass << 1,
     VkInstance = Framebuffer << 1,
-    DXGIFactory = VkInstance << 1
+    DXGIFactory = VkInstance << 1,
+    PipelineCache = DXGIFactory << 1
 };
 
 }  // namespace radray::gpu
@@ -519,9 +540,9 @@ template <>
 struct is_flags<gpu::ResourceHint> : public std::true_type {};
 
 template <>
-struct is_flags<gpu::RenderObjectTag> : public std::true_type {};
+struct is_flags<gpu::GpuObjectTag> : public std::true_type {};
 template <>
-struct is_compound_enum_flags<gpu::RenderObjectTag> : public std::true_type {};
+struct is_compound_enum_flags<gpu::GpuObjectTag> : public std::true_type {};
 
 template <>
 struct is_flags<gpu::BufferUse> : public std::true_type {};
@@ -548,7 +569,7 @@ namespace gpu {
 
 using ColorWrites = EnumFlags<gpu::ColorWrite>;
 using ResourceHints = EnumFlags<gpu::ResourceHint>;
-using RenderObjectTags = EnumFlags<gpu::RenderObjectTag>;
+using GpuObjectTags = EnumFlags<gpu::GpuObjectTag>;
 using BufferUses = EnumFlags<gpu::BufferUse>;
 using TextureUses = EnumFlags<gpu::TextureUse>;
 using SampleCountMask = EnumFlags<gpu::SampleCount>;
@@ -563,385 +584,6 @@ using TextureAspects = EnumFlags<TextureAspect>;
 }  // namespace radray
 
 namespace radray::gpu {
-
-inline BindingRegisterClass GetBindingRegisterClass(BindingKind kind) noexcept;
-inline bool IsWritableBinding(BindingKind kind) noexcept;
-inline bool CanBeRootDescriptor(BindingKind kind) noexcept;
-inline TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept;
-inline bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept;
-inline bool IsDepthReadOnly(TextureViewUsage usage) noexcept;
-inline bool IsStencilReadOnly(TextureViewUsage usage) noexcept;
-inline uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
-inline std::string_view format_as(ShaderStage v) noexcept;
-inline std::string_view format_as(ShaderBlobCategory v) noexcept;
-inline std::string_view format_as(VertexFormat v) noexcept;
-inline bool IsDepthStencilFormat(TextureFormat format) noexcept;
-inline TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept;
-inline bool IsUintFormat(TextureFormat format) noexcept;
-inline bool IsSintFormat(TextureFormat format) noexcept;
-inline uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
-inline IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
-inline uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
-inline std::string_view format_as(RenderBackend v) noexcept;
-inline std::string_view format_as(TextureFormat v) noexcept;
-inline std::string_view format_as(TextureAspect value) noexcept;
-inline std::string_view format_as(SampleCount value) noexcept;
-inline std::string_view format_as(QueueType v) noexcept;
-inline std::string_view format_as(PolygonMode v) noexcept;
-inline std::string_view format_as(TextureDimension v) noexcept;
-inline std::string_view format_as(BufferState v) noexcept;
-inline std::string_view format_as(ResolveMode v) noexcept;
-inline std::string_view format_as(TextureState v) noexcept;
-inline std::string_view format_as(TextureViewUsage v) noexcept;
-inline std::string_view format_as(RenderObjectTag v) noexcept;
-inline std::string_view format_as(PresentMode v) noexcept;
-inline std::string_view format_as(SwapChainStatus v) noexcept;
-
-inline BindingRegisterClass GetBindingRegisterClass(BindingKind kind) noexcept {
-    if (kind == BindingKind::CBuffer) return BindingRegisterClass::CBV;
-    if (kind == BindingKind::Sampler) return BindingRegisterClass::Sampler;
-    return IsWritableBinding(kind) ? BindingRegisterClass::UAV : BindingRegisterClass::SRV;
-}
-
-inline bool IsWritableBinding(BindingKind kind) noexcept {
-    return kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RWRawBuffer ||
-           kind == BindingKind::RWTypedBuffer || kind == BindingKind::RWTexture;
-}
-
-inline bool CanBeRootDescriptor(BindingKind kind) noexcept {
-    return kind == BindingKind::CBuffer || kind == BindingKind::StructuredBuffer ||
-           kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RawBuffer || kind == BindingKind::RWRawBuffer;
-}
-
-inline TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept {
-    const bool depthRead = states.HasFlag(TextureState::DepthReadStencilWrite);
-    const bool stencilRead = states.HasFlag(TextureState::DepthWriteStencilRead);
-    if (!depthRead && !stencilRead) return states;
-    const bool read = aspect == TextureAspect::Depth ? depthRead : stencilRead;
-    auto result = TextureStates{states.value() & ~(uint32_t(TextureState::DepthReadStencilWrite) | uint32_t(TextureState::DepthWriteStencilRead))};
-    if (!read) result = TextureStates{result.value() & ~uint32_t(TextureState::ShaderRead)};
-    result |= read ? TextureState::DepthRead : TextureState::DepthWrite;
-    return result;
-}
-
-inline bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept {
-    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthWrite ||
-           usage == TextureViewUsage::DepthReadStencilWrite || usage == TextureViewUsage::DepthWriteStencilRead;
-}
-
-inline bool IsDepthReadOnly(TextureViewUsage usage) noexcept {
-    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthReadStencilWrite;
-}
-
-inline bool IsStencilReadOnly(TextureViewUsage usage) noexcept {
-    return usage == TextureViewUsage::DepthRead || usage == TextureViewUsage::DepthWriteStencilRead;
-}
-
-inline uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
-    switch (format) {
-        case VertexFormat::UINT8X2:
-        case VertexFormat::SINT8X2:
-        case VertexFormat::UNORM8X2:
-        case VertexFormat::SNORM8X2: return 2;
-        case VertexFormat::UINT8X4:
-        case VertexFormat::SINT8X4:
-        case VertexFormat::UNORM8X4:
-        case VertexFormat::SNORM8X4:
-        case VertexFormat::UINT16X2:
-        case VertexFormat::SINT16X2:
-        case VertexFormat::UNORM16X2:
-        case VertexFormat::SNORM16X2:
-        case VertexFormat::FLOAT16X2:
-        case VertexFormat::UINT32:
-        case VertexFormat::SINT32:
-        case VertexFormat::FLOAT32: return 4;
-        case VertexFormat::UINT16X4:
-        case VertexFormat::SINT16X4:
-        case VertexFormat::UNORM16X4:
-        case VertexFormat::SNORM16X4:
-        case VertexFormat::FLOAT16X4:
-        case VertexFormat::UINT32X2:
-        case VertexFormat::SINT32X2:
-        case VertexFormat::FLOAT32X2: return 8;
-        case VertexFormat::UINT32X3:
-        case VertexFormat::SINT32X3:
-        case VertexFormat::FLOAT32X3: return 12;
-        case VertexFormat::UINT32X4:
-        case VertexFormat::SINT32X4:
-        case VertexFormat::FLOAT32X4: return 16;
-        case VertexFormat::UNKNOWN: return 0;
-    }
-    Unreachable();
-}
-
-inline std::string_view format_as(ShaderStage v) noexcept {
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(ShaderBlobCategory v) noexcept {
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(VertexFormat v) noexcept {
-    switch (v) {
-        case VertexFormat::UNKNOWN: return "UNKNOWN";
-        case VertexFormat::UINT8X2: return "byte2";
-        case VertexFormat::UINT8X4: return "byte4";
-        case VertexFormat::SINT8X2: return "char2";
-        case VertexFormat::SINT8X4: return "char4";
-        case VertexFormat::UNORM8X2: return "unorm8x2";
-        case VertexFormat::UNORM8X4: return "unorm8x4";
-        case VertexFormat::SNORM8X2: return "snorm8x2";
-        case VertexFormat::SNORM8X4: return "snorm8x4";
-        case VertexFormat::UINT16X2: return "ushort2";
-        case VertexFormat::UINT16X4: return "ushort4";
-        case VertexFormat::SINT16X2: return "short2";
-        case VertexFormat::SINT16X4: return "short4";
-        case VertexFormat::UNORM16X2: return "unorm16x2";
-        case VertexFormat::UNORM16X4: return "unorm16x4";
-        case VertexFormat::SNORM16X2: return "snorm16x2";
-        case VertexFormat::SNORM16X4: return "snorm16x4";
-        case VertexFormat::FLOAT16X2: return "half2";
-        case VertexFormat::FLOAT16X4: return "half4";
-        case VertexFormat::UINT32: return "uint";
-        case VertexFormat::UINT32X2: return "uint2";
-        case VertexFormat::UINT32X3: return "uint3";
-        case VertexFormat::UINT32X4: return "uint4";
-        case VertexFormat::SINT32: return "int";
-        case VertexFormat::SINT32X2: return "int2";
-        case VertexFormat::SINT32X3: return "int3";
-        case VertexFormat::SINT32X4: return "int4";
-        case VertexFormat::FLOAT32: return "float";
-        case VertexFormat::FLOAT32X2: return "float2";
-        case VertexFormat::FLOAT32X3: return "float3";
-        case VertexFormat::FLOAT32X4: return "float4";
-    }
-    Unreachable();
-}
-
-inline bool IsDepthStencilFormat(TextureFormat format) noexcept {
-    switch (format) {
-        case TextureFormat::D16_UNORM:
-        case TextureFormat::D32_FLOAT:
-        case TextureFormat::D24_UNORM_S8_UINT:
-        case TextureFormat::D32_FLOAT_S8_UINT: return true;
-        default: return false;
-    }
-}
-
-inline TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept {
-    if (format == TextureFormat::D24_UNORM_S8_UINT || format == TextureFormat::D32_FLOAT_S8_UINT) return TextureAspect::Depth | TextureAspect::Stencil;
-    return IsDepthStencilFormat(format) ? TextureAspects{TextureAspect::Depth} : TextureAspects{TextureAspect::Color};
-}
-
-inline bool IsUintFormat(TextureFormat format) noexcept {
-    switch (format) {
-        case TextureFormat::R8_UINT:
-        case TextureFormat::R16_UINT:
-        case TextureFormat::RG8_UINT:
-        case TextureFormat::R32_UINT:
-        case TextureFormat::RG16_UINT:
-        case TextureFormat::RGBA8_UINT:
-        case TextureFormat::RGB10A2_UINT:
-        case TextureFormat::RG32_UINT:
-        case TextureFormat::RGBA16_UINT:
-        case TextureFormat::RGBA32_UINT: return true;
-        default: return false;
-    }
-}
-
-inline bool IsSintFormat(TextureFormat format) noexcept {
-    switch (format) {
-        case TextureFormat::R8_SINT:
-        case TextureFormat::R16_SINT:
-        case TextureFormat::RG8_SINT:
-        case TextureFormat::R32_SINT:
-        case TextureFormat::RG16_SINT:
-        case TextureFormat::RGBA8_SINT:
-        case TextureFormat::RG32_SINT:
-        case TextureFormat::RGBA16_SINT:
-        case TextureFormat::RGBA32_SINT: return true;
-        default: return false;
-    }
-}
-
-inline uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept {
-    switch (format) {
-        case IndexFormat::UINT16: return 2;
-        case IndexFormat::UINT32: return 4;
-    }
-    Unreachable();
-}
-
-inline IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept {
-    switch (size) {
-        case 2: return IndexFormat::UINT16;
-        case 4: return IndexFormat::UINT32;
-        default: return IndexFormat::UINT32;
-    }
-}
-
-inline uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
-    switch (format) {
-        case TextureFormat::R8_SINT:
-        case TextureFormat::R8_UINT:
-        case TextureFormat::R8_SNORM:
-        case TextureFormat::R8_UNORM: return 1;
-        case TextureFormat::R16_SINT:
-        case TextureFormat::R16_UINT:
-        case TextureFormat::R16_SNORM:
-        case TextureFormat::R16_UNORM:
-        case TextureFormat::R16_FLOAT:
-        case TextureFormat::RG8_SINT:
-        case TextureFormat::RG8_UINT:
-        case TextureFormat::RG8_SNORM:
-        case TextureFormat::RG8_UNORM:
-        case TextureFormat::D16_UNORM: return 2;
-        case TextureFormat::R32_SINT:
-        case TextureFormat::R32_UINT:
-        case TextureFormat::R32_FLOAT:
-        case TextureFormat::RG16_SINT:
-        case TextureFormat::RG16_UINT:
-        case TextureFormat::RG16_SNORM:
-        case TextureFormat::RG16_UNORM:
-        case TextureFormat::RG16_FLOAT:
-        case TextureFormat::RGBA8_SINT:
-        case TextureFormat::RGBA8_UINT:
-        case TextureFormat::RGBA8_SNORM:
-        case TextureFormat::RGBA8_UNORM:
-        case TextureFormat::RGBA8_UNORM_SRGB:
-        case TextureFormat::BGRA8_UNORM:
-        case TextureFormat::BGRA8_UNORM_SRGB:
-        case TextureFormat::RGB10A2_UINT:
-        case TextureFormat::RGB10A2_UNORM:
-        case TextureFormat::RG11B10_FLOAT:
-        case TextureFormat::D32_FLOAT:
-        case TextureFormat::D24_UNORM_S8_UINT: return 4;
-        case TextureFormat::RG32_SINT:
-        case TextureFormat::RG32_UINT:
-        case TextureFormat::RG32_FLOAT:
-        case TextureFormat::RGBA16_SINT:
-        case TextureFormat::RGBA16_UINT:
-        case TextureFormat::RGBA16_SNORM:
-        case TextureFormat::RGBA16_UNORM:
-        case TextureFormat::RGBA16_FLOAT:
-        case TextureFormat::D32_FLOAT_S8_UINT: return 8;
-        case TextureFormat::RGBA32_SINT:
-        case TextureFormat::RGBA32_UINT:
-        case TextureFormat::RGBA32_FLOAT: return 16;
-        case TextureFormat::UNKNOWN: return 0;
-    }
-    Unreachable();
-}
-
-inline std::string_view format_as(RenderBackend v) noexcept {
-    // MAX_COUNT 是哨兵而非真实后端, 不暴露其成员名。
-    if (v == RenderBackend::MAX_COUNT) {
-        return "UNKNOWN";
-    }
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(TextureFormat v) noexcept {
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(TextureAspect value) noexcept {
-    return EnumNameOr(value);
-}
-
-inline std::string_view format_as(SampleCount value) noexcept {
-    return EnumNameOr(value);
-}
-
-inline std::string_view format_as(QueueType v) noexcept {
-    // MAX_COUNT 是哨兵而非真实队列类型, 不暴露其成员名。
-    if (v == QueueType::MAX_COUNT) {
-        return "UNKNOWN";
-    }
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(PolygonMode v) noexcept {
-    switch (v) {
-        case PolygonMode::Fill: return "Fill";
-        case PolygonMode::Line: return "Line";
-        case PolygonMode::Point: return "Point";
-    }
-    Unreachable();
-}
-
-inline std::string_view format_as(TextureDimension v) noexcept {
-    switch (v) {
-        case TextureDimension::UNKNOWN: return "UNKNOWN";
-        case TextureDimension::Dim1D: return "1D";
-        case TextureDimension::Dim2D: return "2D";
-        case TextureDimension::Dim3D: return "3D";
-        case TextureDimension::Dim1DArray: return "1DArray";
-        case TextureDimension::Dim2DArray: return "2DArray";
-        case TextureDimension::Cube: return "Cube";
-        case TextureDimension::CubeArray: return "CubeArray";
-    }
-    Unreachable();
-}
-
-inline std::string_view format_as(BufferState v) noexcept {
-    // 位标志枚举, 取值超出默认反射范围, 需按位反射。
-    return EnumFlagBitNameOr(v);
-}
-
-inline std::string_view format_as(ResolveMode v) noexcept { return magic_enum::enum_name(v); }
-
-inline std::string_view format_as(TextureState v) noexcept {
-    return EnumFlagBitNameOr(v);
-}
-
-inline std::string_view format_as(TextureViewUsage v) noexcept {
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(RenderObjectTag v) noexcept {
-    switch (v) {
-        case RenderObjectTag::UNKNOWN: return "UNKNOWN";
-        case RenderObjectTag::Device: return "Device";
-        case RenderObjectTag::CmdQueue: return "CmdQueue";
-        case RenderObjectTag::CmdBuffer: return "CmdBuffer";
-        case RenderObjectTag::CmdAllocator: return "CmdAllocator";
-        case RenderObjectTag::CmdEncoder: return "CmdEncoder";
-        case RenderObjectTag::GraphicsCmdEncoder: return "GraphicsCmdEncoder";
-        case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";
-        case RenderObjectTag::Fence: return "Fence";
-        case RenderObjectTag::Shader: return "Shader";
-        case RenderObjectTag::BindingGroupLayout: return "BindingGroupLayout";
-        case RenderObjectTag::ShaderParameterSet: return "ShaderParameterSet";
-        case RenderObjectTag::QueryPool: return "QueryPool";
-        case RenderObjectTag::PipelineLayout: return "PipelineLayout";
-        case RenderObjectTag::PipelineState: return "PipelineState";
-        case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
-        case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
-        case RenderObjectTag::SwapChain: return "SwapChain";
-        case RenderObjectTag::Resource: return "Resource";
-        case RenderObjectTag::Buffer: return "Buffer";
-        case RenderObjectTag::Texture: return "Texture";
-        case RenderObjectTag::RenderPass: return "RenderPass";
-        case RenderObjectTag::Framebuffer: return "Framebuffer";
-        case RenderObjectTag::ResourceView: return "ResourceView";
-        case RenderObjectTag::TextureView: return "TextureView";
-        case RenderObjectTag::Sampler: return "Sampler";
-        case RenderObjectTag::VkInstance: return "VkInstance";
-        case RenderObjectTag::DXGIFactory: return "DXGIFactory";
-        default: return "UNKNOWN";
-    }
-}
-
-inline std::string_view format_as(PresentMode v) noexcept {
-    return EnumNameOr(v);
-}
-
-inline std::string_view format_as(SwapChainStatus v) noexcept {
-    return EnumNameOr(v);
-}
-
 
 class DXGIDiagnosticContext;
 class Device;
@@ -963,10 +605,20 @@ class PipelineLayout;
 class BindingGroupLayout;
 class ShaderParameterSet;
 class GraphicsPipelineState;
+class PipelineCache;
 class ComputePipelineState;
 class Sampler;
 class QueryPool;
 class DXGIFactory;
+
+// Structures
+
+struct TextureFormatBlockInfo {
+    uint32_t BlockWidth, BlockHeight, BytesPerBlock;
+
+    constexpr uint32_t Columns(uint32_t width) const noexcept;
+    constexpr uint32_t Rows(uint32_t height) const noexcept;
+};
 
 struct ColorClearValue {
     std::array<float, 4> Value{};
@@ -979,19 +631,15 @@ struct DepthStencilClearValue {
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
+using GpuLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
 
-
-
-
-using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
-
-struct RhiValidationOptions {
+struct GpuValidationOptions {
 #if defined(RADRAY_IS_DEBUG) && !defined(NDEBUG)
     bool IsEnabled{true};
 #else
     bool IsEnabled{false};
 #endif
-    RenderLogCallback LogCallback{nullptr};
+    GpuLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
 };
 
@@ -1003,16 +651,14 @@ struct VulkanInstanceDescriptor {
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
     bool IsEnableSynchronizationValidation{false};
-    RenderLogCallback LogCallback{nullptr};
+    GpuLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
 };
-
-
 
 struct DXGIFactoryDescriptor {
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
-    RenderLogCallback LogCallback{nullptr};
+    GpuLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
     // Required with the debug layer. All concurrently live debug factories in
     // the process must share this context, including factories retained by devices.
@@ -1049,32 +695,11 @@ struct D3D12DeviceDescriptor {
     DXGIFactory* Factory{nullptr};
     std::optional<uint32_t> AdapterIndex{};
     array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> QueueCounts{1, 0, 0};
-    bool EnableExternalResource{false};
 };
 
 struct VulkanCommandQueueDescriptor {
     QueueType Type{QueueType::Direct};
     uint32_t Count{0};
-};
-
-class VulkanDeviceDescriptor {
-public:
-    std::optional<uint32_t> PhysicalDeviceIndex{};
-    std::span<const VulkanCommandQueueDescriptor> Queues{};
-    bool EnableExternalResource{false};
-};
-
-using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
-
-class SwapChainDescriptor {
-public:
-    CommandQueue* PresentQueue{nullptr};
-    const void* NativeHandler{nullptr};
-    uint32_t Width{0};
-    uint32_t Height{0};
-    uint32_t BackBufferCount{0};
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    PresentMode PresentMode{PresentMode::FIFO};
 };
 
 struct QueryPoolDescriptor {
@@ -1100,18 +725,33 @@ struct QueryResolveDescriptor {
 struct TextureRegion2D {
     uint32_t MipLevel{0}, ArrayLayer{0};
     uint32_t X{0}, Y{0}, Width{0}, Height{0};
+    uint32_t Z{0}, Depth{1};
 };
 
 struct BufferTextureCopyRegion {
     uint64_t SourceOffset{0};
     uint32_t RowPitch{0};
     TextureRegion2D Destination{};
+    uint32_t RowsPerImage{0};  // Block rows between slices; zero packs the copied block rows tightly.
 };
 
 struct BufferToTextureCopyDescriptor {
     Buffer* Source{nullptr};
     Texture* Destination{nullptr};
     BufferTextureCopyRegion Region{};
+};
+
+struct TextureBufferCopyRegion {
+    TextureRegion2D Source{};
+    uint64_t DestinationOffset{0};
+    uint32_t RowPitch{0};
+    uint32_t RowsPerImage{0};  // Block rows between slices. Zero packs the copied rows tightly.
+};
+
+struct TextureToBufferCopyDescriptor {
+    Texture* Source{nullptr};
+    Buffer* Destination{nullptr};
+    TextureBufferCopyRegion Region{};
 };
 
 struct TextureCopyDescriptor {
@@ -1172,73 +812,16 @@ struct CommandQueueSubmitDescriptor {
     std::span<SwapChainSyncObject*> ReadyToPresent{};
 };
 
-class SwapChainFrame {
-public:
-    SwapChainFrame() noexcept = default;
-    ~SwapChainFrame() noexcept = default;
-
-    SwapChainFrame(const SwapChainFrame&) = delete;
-    SwapChainFrame& operator=(const SwapChainFrame&) = delete;
-
-    SwapChainFrame(SwapChainFrame&& other) noexcept;
-    SwapChainFrame& operator=(SwapChainFrame&& other) noexcept;
-
-    Texture* GetBackBuffer() const noexcept;
-    uint32_t GetBackBufferIndex() const noexcept;
-    SwapChainSyncObject* GetWaitToDraw() const noexcept;
-    SwapChainSyncObject* GetReadyToPresent() const noexcept;
-    bool IsValid() const noexcept;
-    bool IsFrom(const SwapChain* owner) const noexcept;
-
-    friend constexpr void swap(SwapChainFrame& a, SwapChainFrame& b) noexcept {
-        std::swap(a._owner, b._owner);
-        std::swap(a._token, b._token);
-        std::swap(a._backBuffer, b._backBuffer);
-        std::swap(a._backBufferIndex, b._backBufferIndex);
-        std::swap(a._waitToDraw, b._waitToDraw);
-        std::swap(a._readyToPresent, b._readyToPresent);
-    }
-
-private:
-    SwapChain* _owner{nullptr};
-    uint64_t _token{0};
-    Texture* _backBuffer{nullptr};
-    uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
-    SwapChainSyncObject* _waitToDraw{nullptr};
-    SwapChainSyncObject* _readyToPresent{nullptr};
-
-    friend class SwapChain;
-};
-
-struct SwapChainAcquireResult {
-    SwapChainStatus Status{SwapChainStatus::Error};
-    int64_t NativeStatusCode{0};
-    std::optional<SwapChainFrame> Frame{};
-};
-
-struct SwapChainPresentResult {
-    int64_t NativeStatusCode{0};
-    SwapChainStatus Status{SwapChainStatus::Error};
-};
-
 struct BufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
 
-    static constexpr uint64_t All() noexcept {
-        return std::numeric_limits<uint64_t>::max();
-    }
+    static constexpr uint64_t All() noexcept;
 
-    static constexpr BufferRange AllRange() noexcept {
-        return BufferRange{0, BufferRange::All()};
-    }
+    static constexpr BufferRange AllRange() noexcept;
 
     friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
 };
-
-enum class ExternalOwnershipTransfer : uint32_t { None,
-                                                  Acquire,
-                                                  Release };
 
 struct BarrierBufferDescriptor {
     Buffer* Target{nullptr};
@@ -1259,9 +842,7 @@ struct SubresourceRange {
 
     static constexpr auto All = std::numeric_limits<uint32_t>::max();
 
-    static constexpr SubresourceRange AllSub() noexcept {
-        return SubresourceRange{0, SubresourceRange::All, 0, SubresourceRange::All};
-    }
+    static constexpr SubresourceRange AllSub() noexcept;
 
     friend bool operator==(const SubresourceRange&, const SubresourceRange&) noexcept = default;
 };
@@ -1507,16 +1088,7 @@ struct PrimitiveState {
     bool UnclippedDepth{false};
     bool Conservative{false};
 
-    constexpr static PrimitiveState Default() noexcept {
-        return {
-            PrimitiveTopology::TriangleList,
-            FrontFace::CW,
-            CullMode::Back,
-            PolygonMode::Fill,
-            std::nullopt,
-            true,
-            false};
-    }
+    constexpr static PrimitiveState Default() noexcept;
 
     friend bool operator==(const PrimitiveState&, const PrimitiveState&) = default;
 };
@@ -1538,23 +1110,7 @@ struct StencilState {
 
     constexpr static uint32_t DefaultMask = 0xFF;
 
-    constexpr static StencilState Default() noexcept {
-        return {
-            {
-                CompareFunction::Always,
-                StencilOperation::Keep,
-                StencilOperation::Keep,
-                StencilOperation::Keep,
-            },
-            {
-                CompareFunction::Always,
-                StencilOperation::Keep,
-                StencilOperation::Keep,
-                StencilOperation::Keep,
-            },
-            DefaultMask,
-            DefaultMask};
-    }
+    constexpr static StencilState Default() noexcept;
 
     friend bool operator==(const StencilState&, const StencilState&) = default;
 };
@@ -1575,19 +1131,7 @@ struct DepthStencilState {
     bool DepthTestEnable{false};
     bool DepthWriteEnable{false};
 
-    constexpr static DepthStencilState Default() noexcept {
-        return {
-            TextureFormat::D32_FLOAT,
-            CompareFunction::Less,
-            {
-                0,
-                0.0f,
-                0.0f,
-            },
-            std::nullopt,
-            true,
-            true};
-    }
+    constexpr static DepthStencilState Default() noexcept;
 
     friend bool operator==(const DepthStencilState&, const DepthStencilState&) = default;
 };
@@ -1597,12 +1141,7 @@ struct MultiSampleState {
     uint64_t Mask{0};
     bool AlphaToCoverageEnable{false};
 
-    constexpr static MultiSampleState Default() noexcept {
-        return {
-            1,
-            0xFFFFFFFF,
-            false};
-    }
+    constexpr static MultiSampleState Default() noexcept;
 
     friend bool operator==(const MultiSampleState&, const MultiSampleState&) = default;
 };
@@ -1619,15 +1158,7 @@ struct BlendState {
     BlendComponent Color{};
     BlendComponent Alpha{};
 
-    constexpr static BlendState Default() noexcept {
-        return {
-            {BlendFactor::One,
-             BlendFactor::Zero,
-             BlendOperation::Add},
-            {BlendFactor::One,
-             BlendFactor::Zero,
-             BlendOperation::Add}};
-    }
+    constexpr static BlendState Default() noexcept;
 
     friend bool operator==(const BlendState&, const BlendState&) = default;
 };
@@ -1637,12 +1168,7 @@ struct ColorTargetState {
     std::optional<BlendState> Blend{};
     ColorWrites WriteMask{};
 
-    constexpr static ColorTargetState Default(TextureFormat format) noexcept {
-        return {
-            format,
-            std::nullopt,
-            ColorWrite::All};
-    }
+    constexpr static ColorTargetState Default(TextureFormat format) noexcept;
 
     friend bool operator==(const ColorTargetState&, const ColorTargetState&) = default;
 };
@@ -1661,11 +1187,13 @@ struct GraphicsPipelineStateDescriptor {
     std::optional<DepthStencilState> DepthStencil{};
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
+    Nullable<PipelineCache*> Cache{nullptr};
 };
 
 struct ComputePipelineStateDescriptor {
     PipelineLayout* PipelineLayout{nullptr};
     ShaderEntry CS{};
+    Nullable<PipelineCache*> Cache{nullptr};
 };
 
 struct VertexBufferView {
@@ -1763,7 +1291,7 @@ struct DeviceFeatures {
     bool SamplerUnnormalizedCoordinates{false}, SamplerIntegerBorderColor{false};
 };
 
-struct RenderDeviceCapabilities {
+struct GpuDeviceCapabilities {
     DeviceDetail Detail;
     DeviceLimits Limits;
     DeviceFeatures Features;
@@ -1795,74 +1323,98 @@ struct AttachmentResolveSupport {
     bool IndependentResolve{false}, IndependentResolveNone{false};
 };
 
-
-inline AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
-inline SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
-
-inline AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc) {
-    AttachmentSignature result{{}, {}, desc.MultiSample.Count};
-    for (const auto& color : desc.ColorTargets) result.Colors.push_back(color.Format);
-    if (desc.DepthStencil) result.DepthStencil = desc.DepthStencil->Format;
-    return result;
-}
-
-inline SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
-    swap(*this, other);
-}
-
-inline SwapChainFrame& SwapChainFrame::operator=(SwapChainFrame&& other) noexcept {
-    SwapChainFrame tmp{std::move(other)};
-    swap(*this, tmp);
-    return *this;
-}
-
-inline Texture* SwapChainFrame::GetBackBuffer() const noexcept { return _backBuffer; }
-
-inline uint32_t SwapChainFrame::GetBackBufferIndex() const noexcept { return _backBufferIndex; }
-
-inline SwapChainSyncObject* SwapChainFrame::GetWaitToDraw() const noexcept { return _waitToDraw; }
-
-inline SwapChainSyncObject* SwapChainFrame::GetReadyToPresent() const noexcept { return _readyToPresent; }
-
-inline bool SwapChainFrame::IsValid() const noexcept { return _owner != nullptr; }
-
-inline bool SwapChainFrame::IsFrom(const SwapChain* owner) const noexcept { return IsValid() && _owner == owner; }
-
-inline SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept {
-    if (!range.Aspects) range.Aspects = GetTextureFormatAspects(desc.Format);
-    if (range.ArrayLayerCount == SubresourceRange::All) range.ArrayLayerCount = (desc.Dim == TextureDimension::Dim3D ? 1 : desc.DepthOrArraySize) - range.BaseArrayLayer;
-    if (range.MipLevelCount == SubresourceRange::All) range.MipLevelCount = desc.MipLevels - range.BaseMipLevel;
-    return range;
-}
-
-inline std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept {
-    const auto aspects = GetTextureFormatAspects(desc.Format);
-    if (!range.Aspects) range.Aspects = aspects;
-    if ((range.Aspects.value() & ~aspects.value()) != 0) return std::nullopt;
-    const uint32_t layers = desc.Dim == TextureDimension::Dim3D ? 1 : desc.DepthOrArraySize;
-    if (range.BaseArrayLayer >= layers || range.BaseMipLevel >= desc.MipLevels) return std::nullopt;
-    if (range.ArrayLayerCount == SubresourceRange::All) range.ArrayLayerCount = layers - range.BaseArrayLayer;
-    if (range.MipLevelCount == SubresourceRange::All) range.MipLevelCount = desc.MipLevels - range.BaseMipLevel;
-    if (range.ArrayLayerCount == 0 || range.ArrayLayerCount > layers - range.BaseArrayLayer ||
-        range.MipLevelCount == 0 || range.MipLevelCount > desc.MipLevels - range.BaseMipLevel) return std::nullopt;
-    return range;
-}
-
-
-class RenderBase {
+// The acquire result stores the complete frame type.
+class SwapChainFrame {
 public:
-    RenderBase() noexcept = default;
-    virtual ~RenderBase() noexcept = default;
-    RenderBase(const RenderBase&) = delete;
-    RenderBase(RenderBase&&) = delete;
-    RenderBase& operator=(const RenderBase&) = delete;
-    RenderBase& operator=(RenderBase&&) = delete;
+    SwapChainFrame() noexcept = default;
+    ~SwapChainFrame() noexcept = default;
 
-    virtual RenderObjectTags GetTag() const noexcept = 0;
+    SwapChainFrame(const SwapChainFrame&) = delete;
+    SwapChainFrame& operator=(const SwapChainFrame&) = delete;
+
+    SwapChainFrame(SwapChainFrame&& other) noexcept;
+    SwapChainFrame& operator=(SwapChainFrame&& other) noexcept;
+
+    Texture* GetBackBuffer() const noexcept;
+    uint32_t GetBackBufferIndex() const noexcept;
+    SwapChainSyncObject* GetWaitToDraw() const noexcept;
+    SwapChainSyncObject* GetReadyToPresent() const noexcept;
+    bool IsValid() const noexcept;
+    bool IsFrom(const SwapChain* owner) const noexcept;
+
+    friend constexpr void swap(SwapChainFrame& a, SwapChainFrame& b) noexcept {
+        std::swap(a._owner, b._owner);
+        std::swap(a._token, b._token);
+        std::swap(a._backBuffer, b._backBuffer);
+        std::swap(a._backBufferIndex, b._backBufferIndex);
+        std::swap(a._waitToDraw, b._waitToDraw);
+        std::swap(a._readyToPresent, b._readyToPresent);
+    }
+
+private:
+    SwapChain* _owner{nullptr};
+    uint64_t _token{0};
+    Texture* _backBuffer{nullptr};
+    uint32_t _backBufferIndex{std::numeric_limits<uint32_t>::max()};
+    SwapChainSyncObject* _waitToDraw{nullptr};
+    SwapChainSyncObject* _readyToPresent{nullptr};
+
+    friend class SwapChain;
+};
+
+struct SwapChainAcquireResult {
+    SwapChainStatus Status{SwapChainStatus::Error};
+    int64_t NativeStatusCode{0};
+    std::optional<SwapChainFrame> Frame{};
+};
+
+struct SwapChainPresentResult {
+    int64_t NativeStatusCode{0};
+    SwapChainStatus Status{SwapChainStatus::Error};
+};
+
+// Classes
+
+class VulkanDeviceDescriptor {
+public:
+    std::optional<uint32_t> PhysicalDeviceIndex{};
+    std::span<const VulkanCommandQueueDescriptor> Queues{};
+};
+
+using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
+
+class SwapChainDescriptor {
+public:
+    CommandQueue* PresentQueue{nullptr};
+    const void* NativeHandler{nullptr};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t BackBufferCount{0};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    PresentMode PresentMode{PresentMode::FIFO};
+};
+
+class GpuObject {
+public:
+    GpuObject() noexcept = default;
+    virtual ~GpuObject() noexcept = default;
+    GpuObject(const GpuObject&) = delete;
+    GpuObject(GpuObject&&) = delete;
+    GpuObject& operator=(const GpuObject&) = delete;
+    GpuObject& operator=(GpuObject&&) = delete;
+
+    virtual GpuObjectTags GetTag() const noexcept = 0;
 
     virtual bool IsValid() const noexcept = 0;
 
     virtual void Destroy() noexcept = 0;
+};
+
+class PipelineCache : public GpuObject {
+public:
+    GpuObjectTags GetTag() const noexcept final;
+    // Device/driver-specific bytes. An empty result is valid when persistence is unavailable.
+    virtual vector<byte> GetData() const noexcept = 0;
 };
 
 class IDebugName {
@@ -1878,25 +1430,25 @@ public:
     DXGIDiagnosticContext(const DXGIDiagnosticContext&) = delete;
     DXGIDiagnosticContext& operator=(const DXGIDiagnosticContext&) = delete;
 
-
 protected:
     DXGIDiagnosticContext() noexcept = default;
 };
 
-class Device : public enable_shared_from_this<Device>, public RenderBase {
+class Device : public enable_shared_from_this<Device>, public GpuObject {
 public:
     virtual ~Device() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Device; }
+    GpuObjectTags GetTag() const noexcept final;
 
-    virtual RenderBackend GetBackend() noexcept = 0;
+    virtual bool IsDeviceLost() const noexcept = 0;
+    virtual GpuBackend GetBackend() noexcept = 0;
 
-    // Borrowed from this device; null when disabled at creation or unavailable on this platform.
-    virtual Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept = 0;
+    // Each extension is caller-owned and must be released before this device. Null on unsupported platforms.
+    virtual Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept = 0;
 
     virtual DeviceDetail GetDetail() const noexcept = 0;
 
-    virtual const RenderDeviceCapabilities& GetCapabilities() const noexcept = 0;
+    virtual const GpuDeviceCapabilities& GetCapabilities() const noexcept = 0;
 
     virtual TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept = 0;
 
@@ -1928,6 +1480,8 @@ public:
 
     virtual Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<PipelineCache>> CreatePipelineCache(std::span<const byte> = {}) noexcept;
+
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
@@ -1935,20 +1489,21 @@ public:
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
     virtual Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept = 0;
-
 };
 
-class CommandQueue : public RenderBase {
+class CommandQueue : public GpuObject {
 public:
     virtual ~CommandQueue() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdQueue; }
+    GpuObjectTags GetTag() const noexcept final;
 
-    virtual void Submit(const CommandQueueSubmitDescriptor& desc) noexcept = 0;
+    virtual bool Submit(const CommandQueueSubmitDescriptor& desc) noexcept = 0;
 
     virtual void Wait() noexcept = 0;
 
     virtual QueueType GetQueueType() const noexcept = 0;
+    // Zero means this queue cannot record regular timestamp queries.
+    virtual uint32_t GetTimestampValidBits() const noexcept;
 
     /// Success associates this queue's GPU clock with CpuDomain. Call interval is
     /// observation latency, not a bound on hardware error. Never submits or waits.
@@ -1958,22 +1513,22 @@ public:
 /// Single recording thread, one queue. Children must be destroyed before their allocator.
 /// D3D12 owns one native allocator and permits one open recording. Vulkan owns one pool
 /// and permits interleaved recordings; all access to the pool and its children is serialized.
-class CommandAllocator : public RenderBase, public IDebugName {
+class CommandAllocator : public GpuObject, public IDebugName {
 public:
     virtual ~CommandAllocator() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdAllocator; }
+    GpuObjectTags GetTag() const noexcept final;
 
     /// Caller must finish all recording and GPU use, and discard unsubmitted old recordings.
     /// Invalidates every child's recording and releases its temporary CPU/GPU references; never waits.
     virtual void Reset() noexcept = 0;
 };
 
-class CommandBuffer : public RenderBase, public IDebugName {
+class CommandBuffer : public GpuObject, public IDebugName {
 public:
     virtual ~CommandBuffer() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
+    GpuObjectTags GetTag() const noexcept final;
 
     /// Begin once after creation or parent Reset, using the allocator bound at creation.
     /// Never resets shared storage. On D3D12, no sibling may have an open recording.
@@ -2002,6 +1557,7 @@ public:
 
     virtual void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept = 0;
 
+    virtual bool CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor&) noexcept = 0;
     virtual bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor&) noexcept = 0;
 
     virtual void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept = 0;
@@ -2017,11 +1573,11 @@ public:
     virtual void ResolveQueryData(const QueryResolveDescriptor& desc) noexcept = 0;
 };
 
-class QueryPool : public RenderBase, public IDebugName {
+class QueryPool : public GpuObject, public IDebugName {
 public:
     virtual ~QueryPool() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::QueryPool; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual QueryType GetType() const noexcept = 0;
 
@@ -2030,11 +1586,11 @@ public:
     virtual TimestampQueryCalibration GetTimestampCalibration(CommandQueue* queue) const noexcept = 0;
 };
 
-class CommandEncoder : public RenderBase {
+class CommandEncoder : public GpuObject {
 public:
     virtual ~CommandEncoder() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::CmdEncoder; }
+    GpuObjectTags GetTag() const noexcept override;
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
@@ -2051,7 +1607,7 @@ class GraphicsCommandEncoder : public CommandEncoder {
 public:
     virtual ~GraphicsCommandEncoder() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsCmdEncoder; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual void SetViewport(Viewport vp) noexcept = 0;
 
@@ -2083,7 +1639,7 @@ class ComputeCommandEncoder : public CommandEncoder {
 public:
     virtual ~ComputeCommandEncoder() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputeCmdEncoder; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual void BindComputePipelineState(ComputePipelineState* pso) noexcept = 0;
 
@@ -2092,11 +1648,11 @@ public:
     virtual void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept = 0;
 };
 
-class Fence : public RenderBase, public IDebugName {
+class Fence : public GpuObject, public IDebugName {
 public:
     virtual ~Fence() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Fence; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual uint64_t GetCompletedValue() const noexcept = 0;
 
@@ -2106,23 +1662,23 @@ public:
 
     virtual void Wait(uint64_t value) noexcept = 0;
 
-    // Finite CPU wait. False means timeout, never GPU completion; 0 only polls.
+    // Finite CPU wait. Timeout or detected device loss returns false. A zero timeout only polls.
     // The caller serializes waits on this fence. Even the maximum uint64_t timeout is finite.
     virtual bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept = 0;
 };
 
-class SwapChainSyncObject : public RenderBase {
+class SwapChainSyncObject : public GpuObject {
 public:
     virtual ~SwapChainSyncObject() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    GpuObjectTags GetTag() const noexcept final;
 };
 
-class SwapChain : public RenderBase {
+class SwapChain : public GpuObject {
 public:
     virtual ~SwapChain() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::SwapChain; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual SwapChainAcquireResult AcquireNext(uint64_t timeoutMs = std::numeric_limits<uint64_t>::max()) noexcept = 0;
 
@@ -2163,12 +1719,12 @@ protected:
     static void InvalidateFrame(SwapChainFrame& frame) noexcept;
 };
 
-class Resource : public RenderBase, public IDebugName {
+class Resource : public GpuObject, public IDebugName {
 public:
     virtual ~Resource() noexcept = default;
 };
 
-class ResourceView : public RenderBase, public IDebugName {
+class ResourceView : public GpuObject, public IDebugName {
 public:
     virtual ~ResourceView() noexcept = default;
 };
@@ -2177,7 +1733,7 @@ class Buffer : public Resource {
 public:
     virtual ~Buffer() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Buffer; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
 
@@ -2196,7 +1752,7 @@ class Texture : public Resource {
 public:
     virtual ~Texture() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Texture; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual TextureDescriptor GetDesc() const noexcept = 0;
 
@@ -2207,44 +1763,44 @@ class TextureView : public ResourceView {
 public:
     virtual ~TextureView() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual TextureViewDescriptor GetDesc() const noexcept = 0;
 };
 
-class Shader : public RenderBase {
+class Shader : public GpuObject {
 public:
     virtual ~Shader() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Shader; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual ShaderStages GetStages() const noexcept = 0;
 };
 
-class BindingGroupLayout : public RenderBase, public IDebugName {
+class BindingGroupLayout : public GpuObject, public IDebugName {
 public:
     virtual ~BindingGroupLayout() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindingGroupLayout; }
+    GpuObjectTags GetTag() const noexcept final;
 
     // Returned spans are borrowed until this layout is destroyed.
     virtual BindingGroupLayoutDescriptor GetDesc() const noexcept = 0;
 };
 
-class PipelineLayout : public RenderBase, public IDebugName {
+class PipelineLayout : public GpuObject, public IDebugName {
 public:
     virtual ~PipelineLayout() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual PipelineLayoutDescriptor GetDesc() const noexcept = 0;
 };
 
-class ShaderParameterSet : public RenderBase {
+class ShaderParameterSet : public GpuObject {
 public:
     virtual ~ShaderParameterSet() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterSet; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual bool Set(uint32_t bindingId, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
 
@@ -2254,135 +1810,190 @@ public:
     virtual void ResetBindingsForReuse() noexcept = 0;
 };
 
-class PipelineState : public RenderBase, public IDebugName {
+class PipelineState : public GpuObject, public IDebugName {
 public:
     virtual ~PipelineState() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::PipelineState; }
+    GpuObjectTags GetTag() const noexcept override;
+
+    // 返回该管线借用的 PipelineLayout；对象无效时返回空。
+    virtual Nullable<PipelineLayout*> GetLayout() const noexcept = 0;
 };
 
 class GraphicsPipelineState : public PipelineState {
 public:
     virtual ~GraphicsPipelineState() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::GraphicsPipelineState; }
+    GpuObjectTags GetTag() const noexcept final;
 };
 
 class ComputePipelineState : public PipelineState {
 public:
     virtual ~ComputePipelineState() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputePipelineState; }
+    GpuObjectTags GetTag() const noexcept final;
 };
 
-class Sampler : public RenderBase, public IDebugName {
+class Sampler : public GpuObject, public IDebugName {
 public:
     virtual ~Sampler() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
+    GpuObjectTags GetTag() const noexcept final;
 };
 
-class InstanceVulkan : public RenderBase {
+class InstanceVulkan : public GpuObject {
 public:
     virtual ~InstanceVulkan() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual vector<VulkanPhysicalDeviceInfo> GetPhysicalDevices() const noexcept = 0;
 
     virtual std::optional<uint32_t> SelectHighPerformancePhysicalDevice() const noexcept = 0;
     virtual bool IsValidationEnabled() const noexcept = 0;
-
 };
 
-class DXGIFactory : public RenderBase {
+class DXGIFactory : public GpuObject {
 public:
     virtual ~DXGIFactory() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DXGIFactory; }
+    GpuObjectTags GetTag() const noexcept final;
 
     virtual vector<DXGIAdapterInfo> GetAdapters() const noexcept = 0;
 
     virtual std::optional<uint32_t> SelectHighPerformanceAdapter() const noexcept = 0;
     virtual bool IsValidationEnabled() const noexcept = 0;
-
 };
 
-inline bool IsValidShaderStages(ShaderStages stages) noexcept {
-    return stages && !(stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute});
+// Function declarations
+
+AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
+SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
+std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
+bool IsValidShaderStages(ShaderStages stages) noexcept;
+bool IsValidSamplerDescriptor(const SamplerDescriptor& s) noexcept;
+bool IsValidBindingMapping(const BindingDescriptor& b, GpuBackend backend) noexcept;
+bool BindingMappingsOverlap(const BindingDescriptor& a, const BindingDescriptor& b, GpuBackend backend) noexcept;
+bool IsValidPushConstantRange(const PushConstantDescriptor& p, GpuBackend backend) noexcept;
+BindingRegisterClass GetBindingRegisterClass(BindingKind kind) noexcept;
+bool IsWritableBinding(BindingKind kind) noexcept;
+bool CanBeRootDescriptor(BindingKind kind) noexcept;
+TextureStates TextureStateForAspect(TextureStates states, TextureAspect aspect) noexcept;
+bool IsDepthStencilViewUsage(TextureViewUsage usage) noexcept;
+bool IsDepthReadOnly(TextureViewUsage usage) noexcept;
+bool IsStencilReadOnly(TextureViewUsage usage) noexcept;
+uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+bool IsDepthStencilFormat(TextureFormat format) noexcept;
+TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept;
+bool IsUintFormat(TextureFormat format) noexcept;
+bool IsSintFormat(TextureFormat format) noexcept;
+uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
+IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
+TextureFormatBlockInfo GetTextureFormatBlockInfo(TextureFormat format) noexcept;
+bool IsBlockCompressedFormat(TextureFormat format) noexcept;
+uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+
+std::string_view format_as(ShaderStage v) noexcept;
+std::string_view format_as(ShaderBlobCategory v) noexcept;
+std::string_view format_as(VertexFormat v) noexcept;
+std::string_view format_as(GpuBackend v) noexcept;
+std::string_view format_as(TextureFormat v) noexcept;
+std::string_view format_as(TextureAspect value) noexcept;
+std::string_view format_as(SampleCount value) noexcept;
+std::string_view format_as(QueueType v) noexcept;
+std::string_view format_as(PolygonMode v) noexcept;
+std::string_view format_as(TextureDimension v) noexcept;
+std::string_view format_as(BufferState v) noexcept;
+std::string_view format_as(ResolveMode v) noexcept;
+std::string_view format_as(TextureState v) noexcept;
+std::string_view format_as(TextureViewUsage v) noexcept;
+std::string_view format_as(GpuObjectTag v) noexcept;
+std::string_view format_as(PresentMode v) noexcept;
+std::string_view format_as(SwapChainStatus v) noexcept;
+
+// Constant expressions
+
+constexpr uint32_t TextureFormatBlockInfo::Columns(uint32_t width) const noexcept { return width / BlockWidth + (width % BlockWidth != 0); }
+
+constexpr uint32_t TextureFormatBlockInfo::Rows(uint32_t height) const noexcept { return height / BlockHeight + (height % BlockHeight != 0); }
+
+constexpr uint64_t BufferRange::All() noexcept {
+    return std::numeric_limits<uint64_t>::max();
 }
 
-inline bool IsValidSamplerDescriptor(const SamplerDescriptor& s) noexcept {
-    return EnumContains(s.AddressS) && EnumContains(s.AddressT) && EnumContains(s.AddressR) &&
-           EnumContains(s.MinFilter) && EnumContains(s.MagFilter) && EnumContains(s.MipmapFilter) &&
-           EnumContains(s.BorderColor) && EnumContains(s.Reduction) && (!s.Compare || EnumContains(*s.Compare)) &&
-           std::isfinite(s.LodMin) && std::isfinite(s.LodMax) && std::isfinite(s.MipLodBias) &&
-           s.LodMin <= s.LodMax && s.AnisotropyClamp <= 16 &&
-           (!s.Compare || s.Reduction == SamplerReductionMode::WeightedAverage) &&
-           (!s.UnnormalizedCoordinates ||
-            (s.MinFilter == s.MagFilter && s.MipmapFilter == FilterMode::Nearest && s.LodMin == 0 && s.LodMax == 0 &&
-             s.AnisotropyClamp <= 1 && !s.Compare &&
-             (s.AddressS == AddressMode::ClampToEdge || s.AddressS == AddressMode::ClampToBorder) &&
-             (s.AddressT == AddressMode::ClampToEdge || s.AddressT == AddressMode::ClampToBorder)));
+constexpr BufferRange BufferRange::AllRange() noexcept {
+    return BufferRange{0, BufferRange::All()};
 }
 
-inline bool IsValidBindingMapping(const BindingDescriptor& b, RenderBackend backend) noexcept {
-    if (!EnumContains(b.Kind) || !b.Count || !IsValidShaderStages(b.Stages) ||
-        (b.ImmutableSampler && (b.Kind != BindingKind::Sampler || b.Count != 1))) return false;
-    const bool singleRootBuffer = b.Count == 1 && CanBeRootDescriptor(b.Kind);
-    if (backend == RenderBackend::D3D12 && b.D3D12) {
-        const auto& d = *b.D3D12;
-        return d.RegisterType == GetBindingRegisterClass(b.Kind) && EnumContains(d.Placement) &&
-               b.Count - 1 <= std::numeric_limits<uint32_t>::max() - d.Register &&
-               (d.Placement != D3D12BufferPlacement::RootDescriptor || singleRootBuffer);
-    }
-    if (backend == RenderBackend::Vulkan && b.Vulkan) {
-        const auto& v = *b.Vulkan;
-        return EnumContains(v.Placement) && v.Set != std::numeric_limits<uint32_t>::max() &&
-               (v.Placement != VulkanBufferDescriptorPlacement::Dynamic || singleRootBuffer);
-    }
-    return false;
+constexpr SubresourceRange SubresourceRange::AllSub() noexcept {
+    return SubresourceRange{0, SubresourceRange::All, 0, SubresourceRange::All};
 }
 
-inline bool BindingMappingsOverlap(const BindingDescriptor& a, const BindingDescriptor& b, RenderBackend backend) noexcept {
-    if (backend == RenderBackend::D3D12 && a.D3D12 && b.D3D12)
-        return a.D3D12->Space == b.D3D12->Space && a.D3D12->RegisterType == b.D3D12->RegisterType &&
-               uint64_t{a.D3D12->Register} < uint64_t{b.D3D12->Register} + b.Count &&
-               uint64_t{b.D3D12->Register} < uint64_t{a.D3D12->Register} + a.Count;
-    return backend == RenderBackend::Vulkan && a.Vulkan && b.Vulkan &&
-           a.Vulkan->Set == b.Vulkan->Set && a.Vulkan->Binding == b.Vulkan->Binding;
+constexpr PrimitiveState PrimitiveState::Default() noexcept {
+    return {
+        PrimitiveTopology::TriangleList,
+        FrontFace::CW,
+        CullMode::Back,
+        PolygonMode::Fill,
+        std::nullopt,
+        true,
+        false};
 }
 
-inline bool IsValidPushConstantRange(const PushConstantDescriptor& p, RenderBackend backend) noexcept {
-    if (!p.Size || p.Size % 4 || !IsValidShaderStages(p.Stages)) return false;
-    if (backend == RenderBackend::D3D12) return p.D3D12.has_value();
-    return backend == RenderBackend::Vulkan && p.Vulkan && p.Vulkan->Offset % 4 == 0 &&
-           p.Size <= std::numeric_limits<uint32_t>::max() - p.Vulkan->Offset;
+constexpr StencilState StencilState::Default() noexcept {
+    return {
+        {
+            CompareFunction::Always,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        },
+        {
+            CompareFunction::Always,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+            StencilOperation::Keep,
+        },
+        DefaultMask,
+        DefaultMask};
 }
 
-inline SwapChainFrame SwapChain::MakeFrame(
-    SwapChain* owner,
-    uint64_t token,
-    Texture* backBuffer,
-    uint32_t backBufferIndex,
-    SwapChainSyncObject* waitToDraw,
-    SwapChainSyncObject* readyToPresent) noexcept {
-    SwapChainFrame f{};
-    f._owner = owner;
-    f._token = token;
-    f._backBuffer = backBuffer;
-    f._backBufferIndex = backBufferIndex;
-    f._waitToDraw = waitToDraw;
-    f._readyToPresent = readyToPresent;
-    return f;
+constexpr DepthStencilState DepthStencilState::Default() noexcept {
+    return {
+        TextureFormat::D32_FLOAT,
+        CompareFunction::Less,
+        {
+            0,
+            0.0f,
+            0.0f,
+        },
+        std::nullopt,
+        true,
+        true};
 }
 
-inline bool SwapChain::ValidateFrame(const SwapChainFrame& frame, const SwapChain* expectedOwner, uint64_t expectedToken) noexcept {
-    return frame.IsValid() && frame._owner == expectedOwner && frame._token == expectedToken;
+constexpr MultiSampleState MultiSampleState::Default() noexcept {
+    return {
+        1,
+        0xFFFFFFFF,
+        false};
 }
 
-inline void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
-    frame = SwapChainFrame{};
+constexpr BlendState BlendState::Default() noexcept {
+    return {
+        {BlendFactor::One,
+         BlendFactor::Zero,
+         BlendOperation::Add},
+        {BlendFactor::One,
+         BlendFactor::Zero,
+         BlendOperation::Add}};
+}
+
+constexpr ColorTargetState ColorTargetState::Default(TextureFormat format) noexcept {
+    return {
+        format,
+        std::nullopt,
+        ColorWrite::All};
 }
 
 }  // namespace radray::gpu

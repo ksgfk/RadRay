@@ -25,17 +25,36 @@ struct GeometryPoolStorage {
     GeometryPoolStorage(gpu::Device& device, uint32_t stride, uint32_t capacity, gpu::BufferUses usage, std::string_view name)
         : Device(device), Stride(stride), PageCapacity(capacity), Usage(usage), Name(name) {}
     ~GeometryPoolStorage() noexcept {
+#if RADRAY_IS_DEBUG
         for (const auto& page : Pages) {
-            RADRAY_ASSERT(page->Allocator.GetFreeCount() == page->Allocator.GetCapacity());
-            (void)page;
+            if (page) RADRAY_ASSERT(page->Allocator.GetFreeCount() == page->Allocator.GetCapacity());
         }
+        ValidateTotals();
+        RADRAY_ASSERT(TotalFreeElements == TotalCapacityElements);
+#endif
     }
+#if RADRAY_IS_DEBUG
+    void ValidateTotals() const noexcept {
+        uint32_t pages = 0;
+        uint64_t capacity = 0, free = 0;
+        for (const auto& page : Pages) {
+            if (!page) continue;
+            ++pages;
+            capacity += page->Allocator.GetCapacity();
+            free += page->Allocator.GetFreeCount();
+        }
+        RADRAY_ASSERT(pages == CommittedPageCount && capacity == TotalCapacityElements && free == TotalFreeElements);
+    }
+#endif
     gpu::Device& Device;
     uint32_t Stride;
     uint32_t PageCapacity;
     gpu::BufferUses Usage;
     string Name;
     vector<unique_ptr<GeometryPage>> Pages;
+    uint32_t CommittedPageCount{0};
+    uint64_t TotalCapacityElements{0};
+    uint64_t TotalFreeElements{0};
 };
 
 bool ValidAdditionalUsage(gpu::BufferUses usage) noexcept {
@@ -45,38 +64,78 @@ bool ValidAdditionalUsage(gpu::BufferUses usage) noexcept {
     return !(usage & ~kDeviceUsage);
 }
 
-std::optional<std::pair<uint32_t, BestFitAllocator::Allocation>> AllocateRange(GeometryPoolStorage& storage, uint32_t count, Nullable<const VertexInput*> input) {
-    if (!count) return std::nullopt;
-    for (uint32_t index = 0; index < storage.Pages.size(); ++index) {
-        if (const auto allocation = storage.Pages[index]->Allocator.Allocate(count)) return std::pair{index, *allocation};
-    }
-    const auto capacity = std::max(storage.PageCapacity, count);
+Nullable<unique_ptr<GeometryPage>> CreateCommittedPage(const GeometryPoolStorage& storage, uint32_t slot, uint32_t capacity, Nullable<const VertexInput*> input) {
     const uint64_t bytes = uint64_t{capacity} * storage.Stride;
-    if ((input && bytes > std::numeric_limits<uint32_t>::max()) || storage.Pages.size() >= std::numeric_limits<uint32_t>::max()) return std::nullopt;
+    if (input && bytes > std::numeric_limits<uint32_t>::max()) return nullptr;
     auto buffer = GpuBuffer::Create(storage.Device, {.Size = bytes, .Usage = storage.Usage});
-    if (!buffer) return std::nullopt;
-    buffer->GetBuffer()->SetDebugName(radray::format("{}[{}]", storage.Name, storage.Pages.size()));
+    if (!buffer) return nullptr;
+    buffer->GetBuffer()->SetDebugName(radray::format("{}[{}]", storage.Name, slot));
     auto page = make_unique<GeometryPage>(buffer.Release(), capacity);
     if (input) {
         page->Input = *input;
         const auto vertex = std::find_if(input->Layouts.begin(), input->Layouts.end(), [](const auto& layout) { return layout.StepMode == gpu::VertexStepMode::Vertex; });
         page->Input.Streams = {{page->Buffer->GetBuffer(), 0, bytes, vertex->Binding}};
-        if (!ValidateVertexInput(page->Input, true)) return std::nullopt;
+        if (!ValidateVertexInput(page->Input, true)) return nullptr;
     }
+    return page;
+}
+
+std::optional<std::pair<uint32_t, BestFitAllocator::Allocation>> AllocateRange(GeometryPoolStorage& storage, uint32_t count, Nullable<const VertexInput*> input) {
+    if (!count) return std::nullopt;
+    size_t slot = storage.Pages.size();
+    for (size_t i = 0; i < storage.Pages.size(); ++i) {
+        const auto& page = storage.Pages[i];
+        if (!page) {
+            if (slot == storage.Pages.size()) slot = i;
+            continue;
+        }
+        if (const auto allocation = page->Allocator.Allocate(count)) {
+            RADRAY_ASSERT(storage.TotalFreeElements >= count);
+            storage.TotalFreeElements -= count;
+            return std::pair{static_cast<uint32_t>(i), *allocation};
+        }
+    }
+    if (slot >= std::numeric_limits<uint32_t>::max()) return std::nullopt;
+    const auto index = static_cast<uint32_t>(slot);
+    const auto capacity = std::max(storage.PageCapacity, count);
+    auto page = CreateCommittedPage(storage, index, capacity, input);
+    if (!page) return std::nullopt;
     const auto allocation = page->Allocator.Allocate(count);
-    const auto index = static_cast<uint32_t>(storage.Pages.size());
-    storage.Pages.push_back(std::move(page));
+    RADRAY_ASSERT(allocation.has_value());
+    if (slot == storage.Pages.size())
+        storage.Pages.push_back(page.Release());
+    else
+        storage.Pages[slot] = page.Release();
+    ++storage.CommittedPageCount;
+    storage.TotalCapacityElements += capacity;
+    storage.TotalFreeElements += capacity - count;
     return std::pair{index, *allocation};
 }
 
+uint32_t TrimPages(GeometryPoolStorage& storage) noexcept {
+    const auto before = storage.CommittedPageCount;
+    for (auto& page : storage.Pages) {
+        if (!page || page->Allocator.GetFreeCount() != page->Allocator.GetCapacity()) continue;
+        const auto capacity = page->Allocator.GetCapacity();
+        storage.TotalFreeElements -= capacity;
+        storage.TotalCapacityElements -= capacity;
+        --storage.CommittedPageCount;
+        page.reset();
+    }
+    while (!storage.Pages.empty() && !storage.Pages.back()) storage.Pages.pop_back();
+    return before - storage.CommittedPageCount;
+}
+
 uint64_t FreeBytes(const GeometryPoolStorage& storage) noexcept {
-    uint64_t bytes = 0;
-    for (const auto& page : storage.Pages) bytes += uint64_t{page->Allocator.GetFreeCount()} * storage.Stride;
-    return bytes;
+#if RADRAY_IS_DEBUG
+    storage.ValidateTotals();
+#endif
+    return storage.TotalFreeElements * storage.Stride;
 }
 
 void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) {
     for (const auto& page : storage.Pages) {
+        if (!page) continue;
         pass.ReadBuffer(ImportPersistentOwned(graph, page->Buffer), state);
     }
 }
@@ -126,7 +185,10 @@ std::optional<VertexBufferSubAllocation> VertexBufferPool::Allocate(uint32_t ver
     return VertexBufferSubAllocation{*this, range->first, range->second};
 }
 
-uint32_t VertexBufferPool::GetPageCount() const noexcept { return static_cast<uint32_t>(_impl->Pages.size()); }
+uint32_t VertexBufferPool::GetPageCount() const noexcept { return _impl->CommittedPageCount; }
+uint64_t VertexBufferPool::GetCapacityBytes() const noexcept { return _impl->TotalCapacityElements * _impl->Stride; }
+uint64_t VertexBufferPool::GetAllocatedBytes() const noexcept { return (_impl->TotalCapacityElements - _impl->TotalFreeElements) * _impl->Stride; }
+uint32_t VertexBufferPool::TrimEmptyPages() noexcept { return TrimPages(*_impl); }
 uint64_t VertexBufferPool::GetFreeBytes() const noexcept { return FreeBytes(*_impl); }
 void VertexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
 
@@ -145,7 +207,10 @@ std::optional<IndexBufferSubAllocation> IndexBufferPool::Allocate(uint32_t index
     return IndexBufferSubAllocation{*this, range->first, range->second};
 }
 
-uint32_t IndexBufferPool::GetPageCount() const noexcept { return static_cast<uint32_t>(_impl->Pages.size()); }
+uint32_t IndexBufferPool::GetPageCount() const noexcept { return _impl->CommittedPageCount; }
+uint64_t IndexBufferPool::GetCapacityBytes() const noexcept { return _impl->TotalCapacityElements * _impl->Stride; }
+uint64_t IndexBufferPool::GetAllocatedBytes() const noexcept { return (_impl->TotalCapacityElements - _impl->TotalFreeElements) * _impl->Stride; }
+uint32_t IndexBufferPool::TrimEmptyPages() noexcept { return TrimPages(*_impl); }
 uint64_t IndexBufferPool::GetFreeBytes() const noexcept { return FreeBytes(*_impl); }
 void IndexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
 
@@ -164,9 +229,15 @@ VertexBufferSubAllocation& VertexBufferSubAllocation::operator=(VertexBufferSubA
     return *this;
 }
 void VertexBufferSubAllocation::Reset() noexcept {
-    if (_pool) _pool->_impl->Pages[_page]->Allocator.Destroy(_allocation);
+    if (_pool) {
+        _pool->_impl->Pages[_page]->Allocator.Destroy(_allocation);
+        _pool->_impl->TotalFreeElements += _allocation.Count;
+    }
     _pool = nullptr;
+    _page = 0;
+    _allocation = {};
 }
+uint32_t VertexBufferSubAllocation::GetPageIndex() const noexcept { return _pool ? _page : 0u; }
 VertexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
 const VertexInput& VertexBufferSubAllocation::GetVertexInput() const noexcept { return _pool->_impl->Pages[_page]->Input; }
 gpu::Buffer* VertexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
@@ -192,9 +263,15 @@ IndexBufferSubAllocation& IndexBufferSubAllocation::operator=(IndexBufferSubAllo
     return *this;
 }
 void IndexBufferSubAllocation::Reset() noexcept {
-    if (_pool) _pool->_impl->Pages[_page]->Allocator.Destroy(_allocation);
+    if (_pool) {
+        _pool->_impl->Pages[_page]->Allocator.Destroy(_allocation);
+        _pool->_impl->TotalFreeElements += _allocation.Count;
+    }
     _pool = nullptr;
+    _page = 0;
+    _allocation = {};
 }
+uint32_t IndexBufferSubAllocation::GetPageIndex() const noexcept { return _pool ? _page : 0u; }
 IndexBufferSubAllocation::operator bool() const noexcept { return bool{_pool}; }
 gpu::Buffer* IndexBufferSubAllocation::GetBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer->GetBuffer(); }
 IntrusivePtr<GpuBuffer> IndexBufferSubAllocation::GetGpuBuffer() const noexcept { return _pool->_impl->Pages[_page]->Buffer; }

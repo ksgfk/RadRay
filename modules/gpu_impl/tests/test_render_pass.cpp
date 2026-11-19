@@ -39,7 +39,7 @@ protected:
         unique_ptr<GraphicsPipelineState> State;
     };
 
-    Pipeline CreateSolidPipeline(std::optional<DepthStencilState> depth) {
+    Pipeline CreateSolidPipeline(std::optional<DepthStencilState> depth, Nullable<PipelineCache*> cache = nullptr) {
         auto& device = GetDevice();
         Pipeline pipeline;
         pipeline.VS = test::LoadShader(device, "graphics", "FullscreenVS", ShaderStage::Vertex).Unwrap();
@@ -58,7 +58,7 @@ protected:
                                                              .Primitive = primitive,
                                                              .DepthStencil = depth,
                                                              .MultiSample = MultiSampleState::Default(),
-                                                             .ColorTargets = std::span{&color, 1}})
+                                                             .ColorTargets = std::span{&color, 1}, .Cache = cache})
                              .Unwrap();
         return pipeline;
     }
@@ -79,6 +79,25 @@ protected:
         return test::FromBytes<uint32_t>(test::ReadTexture(GetDevice(), texture, TextureState::RenderTarget));
     }
 };
+
+TEST_P(RenderPassTest, PipelineCacheRoundTripOwnsImportedBytes) {
+    auto& device = GetDevice();
+    auto cache = device.CreatePipelineCache().Unwrap();
+    ASSERT_TRUE(CreateSolidPipeline(std::nullopt, cache.get()).State);
+    auto bytes = cache->GetData();
+    const bool persisted = !bytes.empty();
+    if (GetParam() == GpuBackend::Vulkan) ASSERT_TRUE(persisted);
+    cache.reset();
+    auto imported = device.CreatePipelineCache(bytes).Unwrap();
+    std::fill(bytes.begin(), bytes.end(), byte{0xa7});
+    bytes.clear();
+    bytes.shrink_to_fit();
+    ASSERT_TRUE(CreateSolidPipeline(std::nullopt, imported.get()).State);
+    EXPECT_EQ(!imported->GetData().empty(), persisted);
+    const array invalid{byte{0x37}, byte{0xff}};
+    auto fallback = device.CreatePipelineCache(invalid).Unwrap();
+    EXPECT_TRUE(CreateSolidPipeline(std::nullopt, fallback.get()).State);
+}
 
 TEST_P(RenderPassTest, ClearColorIsStored) {
     auto& device = GetDevice();
@@ -140,6 +159,64 @@ TEST_P(RenderPassTest, DepthTestKeepsNearestFragment) {
     test::SubmitAndWait(device, recording);
 
     EXPECT_EQ(ReadColor(*target.Image), Fill(0xff00ff00));
+}
+
+TEST_P(RenderPassTest, CopiedSinglePlaneDepthOccludesOnlyTheNearHalf) {
+    auto& device = GetDevice();
+    for (auto format : {TextureFormat::D16_UNORM, TextureFormat::D32_FLOAT}) {
+        auto color = CreateColorTarget();
+        auto source = CreateTarget(format, TextureUse::DepthStencilWrite | TextureUse::CopySource, TextureViewUsage::DepthWrite);
+        auto destination = CreateTarget(format, TextureUse::DepthStencilWrite | TextureUse::CopyDestination, TextureViewUsage::DepthWrite);
+        auto depthState = DepthStencilState::Default();
+        depthState.Format = format;
+        auto pipeline = CreateSolidPipeline(depthState);
+        auto recording = test::BeginRecording(device);
+        auto& commands = *recording.Commands;
+        test::Barrier(commands, {BarrierTextureDescriptor{.Target = source.Image.get(), .Before = TextureState::Undefined, .After = TextureState::DepthWrite},
+                                 BarrierTextureDescriptor{.Target = destination.Image.get(), .Before = TextureState::Undefined, .After = TextureState::CopyDestination},
+                                 BarrierTextureDescriptor{.Target = color.Image.get(), .Before = TextureState::Undefined, .After = TextureState::RenderTarget}});
+        RenderPassDepthStencilAttachment depth{.View = source.View.get(), .DepthLoad = LoadAction::Clear, .DepthStore = StoreAction::Store, .Clear = {1.f, 0}};
+        auto clear = commands.BeginRenderPass({.DepthStencil = depth, .Width = Size, .Height = Size}).Unwrap();
+        commands.EndRenderPass(std::move(clear));
+        depth.Clear.Depth = 0.25f;
+        clear = commands.BeginRenderPass({.DepthStencil = depth, .Width = Size, .Height = Size, .RenderArea = Rect{0, 0, Size / 2, Size}}).Unwrap();
+        commands.EndRenderPass(std::move(clear));
+        test::Barrier(commands, {BarrierTextureDescriptor{.Target = source.Image.get(), .Before = TextureState::DepthWrite, .After = TextureState::CopySource}});
+        TextureCopyDescriptor copy{.Destination = destination.Image.get(), .Source = source.Image.get(), .Width = Size / 2, .Height = Size};
+        commands.CopyTextureToTexture(copy);
+        EXPECT_EQ(TakeRhiValidationErrors(), 1u);
+        copy.Width = Size;
+        commands.CopyTextureToTexture(copy);
+        test::Barrier(commands, {BarrierTextureDescriptor{.Target = destination.Image.get(), .Before = TextureState::CopyDestination, .After = TextureState::DepthWrite}});
+        depth.View = destination.View.get();
+        depth.DepthLoad = LoadAction::Load;
+        const RenderPassColorAttachment attachment{color.View.get(), LoadAction::Clear, StoreAction::Store, {{0, 0, 0, 1}}};
+        auto encoder = commands.BeginRenderPass({.Colors = {&attachment, 1}, .DepthStencil = depth, .Width = Size, .Height = Size}).Unwrap();
+        encoder->BindGraphicsPipelineState(pipeline.State.get());
+        SetFullViewport(*encoder);
+        Draw(*encoder, {{1, 0, 0, 1}, 0.5f});
+        commands.EndRenderPass(std::move(encoder));
+        test::SubmitAndWait(device, recording);
+        const auto pixels = ReadColor(*color.Image);
+        ASSERT_EQ(pixels.size(), Size * Size);
+        for (uint32_t y = 0; y < Size; ++y)
+            for (uint32_t x = 0; x < Size; ++x)
+                EXPECT_EQ(pixels[y * Size + x], x < Size / 2 ? 0xff000000u : 0xff0000ffu);
+    }
+}
+
+TEST_P(RenderPassTest, RejectsTextureCopiesOfCombinedDepthStencil) {
+    auto& device = GetDevice();
+    for (auto format : {TextureFormat::D24_UNORM_S8_UINT, TextureFormat::D32_FLOAT_S8_UINT}) {
+        const auto usage = TextureUse::DepthStencilWrite | TextureUse::CopySource | TextureUse::CopyDestination;
+        if (!device.QueryTextureSupport({TextureDimension::Dim2D, format, usage}).Supported) continue;
+        auto a = CreateTarget(format, usage, TextureViewUsage::DepthWrite);
+        auto b = CreateTarget(format, usage, TextureViewUsage::DepthWrite);
+        auto recording = test::BeginRecording(device);
+        recording.Commands->CopyTextureToTexture({.Destination = b.Image.get(), .Source = a.Image.get(), .Width = Size, .Height = Size});
+        EXPECT_EQ(TakeRhiValidationErrors(), 1u);
+        test::SubmitAndWait(device, recording);
+    }
 }
 
 TEST_P(RenderPassTest, StencilReferenceIsDynamicAndResetsEachPass) {

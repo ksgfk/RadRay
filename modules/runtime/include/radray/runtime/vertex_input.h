@@ -15,6 +15,7 @@ struct VertexInputAttribute {
     string Semantic{};
     uint32_t SemanticIndex{0};
     gpu::VertexFormat Format{gpu::VertexFormat::UNKNOWN};
+    friend bool operator==(const VertexInputAttribute&, const VertexInputAttribute&) = default;
 };
 
 struct VertexInputStream {

@@ -50,8 +50,13 @@ bool SameParameterBinding(const MeshShaderParameterBinding& a, const MeshShaderP
     return a.GroupIndex == b.GroupIndex && a.ParameterSet.Get() == b.ParameterSet.Get() && a.DynamicOffsets == b.DynamicOffsets;
 }
 
+bool SamePushConstants(const MeshPushConstantCommandBinding& a, const MeshPushConstantCommandBinding& b) noexcept {
+    return a.PushConstantId == b.PushConstantId && a.Offset == b.Offset && a.Data == b.Data;
+}
+
 struct MeshDrawCommandStateCache {
     Nullable<gpu::GraphicsPipelineState*> Pipeline{nullptr};
+    Nullable<gpu::PipelineLayout*> Layout{nullptr};
     std::optional<gpu::IndexBufferView> IndexBuffer{};
     std::optional<uint8_t> StencilReference{};
     array<gpu::VertexBufferView, 32> BoundVertexSlots{};
@@ -60,18 +65,21 @@ struct MeshDrawCommandStateCache {
     uint32_t LastVertexBuffersIndex{kInvalidBindingIndex};
     Nullable<const MeshDrawCommandBindingStorage*> LastPayloadStorage{nullptr};
     uint32_t LastPayloadIndex{kInvalidBindingIndex};
-    Nullable<const MeshPushConstantCommandBinding*> LastPushConstants{nullptr};
+    Nullable<const MeshPushConstantCommandBinding*> BoundPushConstants{nullptr};
     InlineVector<MeshShaderParameterBinding, 4> CommandParameterSets;
 
-    void OnPipelineChanged(gpu::GraphicsPipelineState* pipeline) noexcept {
+    void OnPipelineChanged(gpu::GraphicsPipelineState* pipeline, Nullable<gpu::PipelineLayout*> layout, bool sameLayout) noexcept {
         Pipeline = pipeline;
+        Layout = layout;
         BoundVertexMask = 0;
         LastVertexStorage = nullptr;
         LastVertexBuffersIndex = kInvalidBindingIndex;
-        LastPayloadStorage = nullptr;
-        LastPayloadIndex = kInvalidBindingIndex;
-        LastPushConstants = nullptr;
-        CommandParameterSets.clear();
+        if (!sameLayout) {
+            LastPayloadStorage = nullptr;
+            LastPayloadIndex = kInvalidBindingIndex;
+            BoundPushConstants = nullptr;
+            CommandParameterSets.clear();
+        }
     }
 
     bool UpdateVertexBuffer(const gpu::VertexBufferBinding& binding) noexcept {
@@ -121,13 +129,24 @@ uint64_t HashBinding(const MeshVertexBufferBindings& value) noexcept {
         HashField(hash, binding.View.Offset);
         HashField(hash, binding.View.Size);
     }
+    HashField(hash, value.StreamLayouts.size());
+    for (const auto& layout : value.StreamLayouts) {
+        HashField(hash, layout.Binding);
+        HashField(hash, layout.ArrayStride);
+        HashField(hash, static_cast<uint64_t>(layout.StepMode));
+    }
     return hash;
 }
 
 bool SameBinding(const MeshVertexBufferBindings& a, const MeshVertexBufferBindings& b) noexcept {
-    return a.InstanceStreamBinding == b.InstanceStreamBinding && a.Bindings.size() == b.Bindings.size() &&
+    return a.InstanceStreamBinding == b.InstanceStreamBinding &&
+           a.Bindings.size() == b.Bindings.size() &&
+           a.StreamLayouts.size() == b.StreamLayouts.size() &&
            std::equal(a.Bindings.begin(), a.Bindings.end(), b.Bindings.begin(), [](const auto& x, const auto& y) {
                return x.Binding == y.Binding && SameVertexBufferView(x.View, y.View);
+           }) &&
+           std::equal(a.StreamLayouts.begin(), a.StreamLayouts.end(), b.StreamLayouts.begin(), [](const auto& x, const auto& y) {
+               return x.Binding == y.Binding && x.ArrayStride == y.ArrayStride && x.StepMode == y.StepMode;
            });
 }
 
@@ -198,9 +217,8 @@ void ReleaseBinding(Pool& pool, uint32_t index) noexcept {
     pool.Free.push_back(index);
 }
 
-uint32_t BindingBucket(uint32_t index, uint32_t maxBucket) noexcept {
-    if (index == kInvalidBindingIndex) return 0;
-    return (1 + (index < maxBucket ? index : static_cast<uint32_t>(MixBindingHash(index) % maxBucket))) & maxBucket;
+uint32_t BucketFromHash(uint64_t hash, uint32_t maxBucket) noexcept {
+    return 1u + static_cast<uint32_t>(MixBindingHash(hash) % maxBucket);
 }
 
 }  // namespace
@@ -216,9 +234,10 @@ void MeshDrawCommandBindingStorage::Reserve(uint32_t commands) {
 
 void MeshDrawCommandBindingStorage::Store(MeshDrawCommand& command, const MeshDrawCommandBindings& bindings) {
     RADRAY_ASSERT(command.VertexBuffersIndex == kInvalidBindingIndex && command.PayloadIndex == kInvalidBindingIndex && command.ExtraElementsIndex == kInvalidBindingIndex && !command.BindingStorage);
-    if (!bindings.VertexBuffers.empty() || bindings.InstanceStreamBinding) {
-        MeshVertexBufferBindings vertices{bindings.VertexBuffers, bindings.InstanceStreamBinding};
+    if (!bindings.VertexBuffers.empty() || !bindings.VertexStreamLayouts.empty() || bindings.InstanceStreamBinding) {
+        MeshVertexBufferBindings vertices{bindings.VertexBuffers, bindings.VertexStreamLayouts, bindings.InstanceStreamBinding};
         std::sort(vertices.Bindings.begin(), vertices.Bindings.end(), [](const auto& a, const auto& b) { return a.Binding < b.Binding; });
+        std::sort(vertices.StreamLayouts.begin(), vertices.StreamLayouts.end(), [](const auto& a, const auto& b) { return a.Binding < b.Binding; });
         command.VertexBuffersIndex = InternBinding(_vertices, std::move(vertices));
     }
     if (!bindings.ParameterSets.empty() || bindings.PushConstants) {
@@ -231,7 +250,27 @@ void MeshDrawCommandBindingStorage::Store(MeshDrawCommand& command, const MeshDr
             _elements.emplace_back();
         else
             _freeElements.pop_back();
-        _elements[index] = MeshDrawCommandElements{bindings.ExtraElements, bindings.ElementInstances, bindings.ContiguousMergeMask, bindings.AllElementsSharePrimaryIndexBuffer};
+        uint32_t extraMask = 0;
+        bool structureValid = bindings.ExtraElements.size() < 32 &&
+                              (bindings.ElementInstances.empty() ||
+                               bindings.ElementInstances.size() == bindings.ExtraElements.size() + 1);
+        uint32_t prevIndex = 0;
+        for (size_t i = 0; i < bindings.ExtraElements.size() && structureValid; ++i) {
+            const uint32_t idx = bindings.ExtraElements[i].ElementIndex;
+            if (idx == 0 || idx >= 32 || (i > 0 && idx <= prevIndex)) {
+                structureValid = false;
+                break;
+            }
+            prevIndex = idx;
+            extraMask |= (uint32_t{1} << idx);
+        }
+        _elements[index] = MeshDrawCommandElements{
+            .ExtraElements = bindings.ExtraElements,
+            .ElementInstances = bindings.ElementInstances,
+            .ContiguousMergeMask = bindings.ContiguousMergeMask,
+            .ValidatedExtraMask = structureValid ? extraMask : 0u,
+            .AllElementsSharePrimaryIndexBuffer = bindings.AllElementsSharePrimaryIndexBuffer,
+            .StructureValid = structureValid};
         command.ExtraElementsIndex = index;
     }
     if (command.VertexBuffersIndex != kInvalidBindingIndex || command.PayloadIndex != kInvalidBindingIndex || command.ExtraElementsIndex != kInvalidBindingIndex) command.BindingStorage = this;
@@ -257,7 +296,6 @@ void MeshDrawCommandBindingStorage::Clear() noexcept {
     _payloads.Lookup.clear();
     _elements.clear();
     _freeElements.clear();
-    _pipelineBuckets.clear();
 }
 
 Nullable<const MeshVertexBufferBindings*> MeshDrawCommandBindingStorage::GetVertexBuffers(uint32_t index) const noexcept {
@@ -269,9 +307,31 @@ Nullable<const MeshDrawCommandElements*> MeshDrawCommandBindingStorage::GetExtra
 Nullable<const MeshDrawCommandPayload*> MeshDrawCommandBindingStorage::GetPayload(uint32_t index) const noexcept {
     return index < _payloads.Entries.size() && _payloads.Entries[index].RefCount ? &_payloads.Entries[index].Value : nullptr;
 }
-uint32_t MeshDrawCommandBindingStorage::GetStateSortKey(const MeshDrawCommand& command) {
-    const auto [pipeline, inserted] = _pipelineBuckets.try_emplace(command.Pipeline.Get(), static_cast<uint32_t>(_pipelineBuckets.size()));
-    return (BindingBucket(pipeline->second, 255) << 24) | (BindingBucket(command.PayloadIndex, 4095) << 12) | BindingBucket(command.VertexBuffersIndex, 4095);
+uint32_t MeshDrawCommandBindingStorage::GetStateSortKey(const MeshDrawCommand& command) const noexcept {
+    const auto layout = command.Pipeline ? command.Pipeline->GetLayout() : Nullable<gpu::PipelineLayout*>{nullptr};
+    const uint32_t layoutBucket = layout ? BucketFromHash(reinterpret_cast<uintptr_t>(layout.Get()), 15u) : 0u;
+    const uint32_t pipelineBucket = command.Pipeline ? BucketFromHash(reinterpret_cast<uintptr_t>(command.Pipeline.Get()), 511u) : 0u;
+    const uint32_t payloadBucket =
+        (command.PayloadIndex != kInvalidBindingIndex && command.PayloadIndex < _payloads.Entries.size() && _payloads.Entries[command.PayloadIndex].RefCount != 0)
+            ? BucketFromHash(_payloads.Entries[command.PayloadIndex].Hash, 511u)
+            : 0u;
+    const bool hasVertices =
+        command.VertexBuffersIndex != kInvalidBindingIndex && command.VertexBuffersIndex < _vertices.Entries.size() && _vertices.Entries[command.VertexBuffersIndex].RefCount != 0;
+    const bool hasIndex = command.IndexBuffer.Target != nullptr;
+    uint32_t geometryBucket = 0u;
+    if (hasVertices || hasIndex) {
+        uint64_t geoHash = hasVertices ? _vertices.Entries[command.VertexBuffersIndex].Hash : 0u;
+        HashField(geoHash, hasIndex ? 1u : 0u);
+        if (hasIndex) {
+            HashField(geoHash, reinterpret_cast<uintptr_t>(command.IndexBuffer.Target));
+            HashField(geoHash, command.IndexBuffer.Offset);
+            HashField(geoHash, command.IndexBuffer.Stride);
+        }
+        geometryBucket = BucketFromHash(geoHash, 255u);
+    }
+    const uint32_t stencilBucket =
+        command.StencilReference == 0 ? 0u : 1u + static_cast<uint32_t>((command.StencilReference - 1u) % 3u);
+    return (layoutBucket << 28) | (pipelineBucket << 19) | (payloadBucket << 10) | (geometryBucket << 2) | stencilBucket;
 }
 
 CachedPassMeshDrawList::CachedPassMeshDrawList(CachedPassMeshDrawList&& other) noexcept { *this = std::move(other); }
@@ -370,19 +430,50 @@ bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStr
 
 namespace {
 
+bool StreamFitsRange(uint64_t viewSize, uint32_t stride, uint32_t first, uint32_t count) noexcept {
+    if (count == 0) return true;
+    const uint64_t end = uint64_t{first} + count;
+    if (stride == 0) return viewSize > 0;
+    return end <= viewSize / stride;
+}
+
+Nullable<const gpu::VertexBufferView*> FindActiveVertexView(std::span<const gpu::VertexBufferBinding> vertexBuffers,
+                                                            const MeshPassSubmitArgs& submitArgs,
+                                                            uint32_t binding) noexcept {
+    if (submitArgs.InstanceStream && submitArgs.InstanceStream->Binding == binding) {
+        return &submitArgs.InstanceStream->View;
+    }
+    for (const auto& entry : vertexBuffers) {
+        if (entry.Binding == binding) return &entry.View;
+    }
+    return nullptr;
+}
+
 // 调用方已经校验整个 Pass 共用的参数。
 bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const gpu::VertexBufferBinding> vertexBuffers,
+                                 std::span<const MeshVertexStreamLayout> streamLayouts,
                                  std::span<const MeshShaderParameterBinding> parameterSets,
                                  Nullable<const MeshPushConstantCommandBinding*> pushConstants, std::optional<uint32_t> instanceStreamBinding,
-                                 const MeshPassSubmitArgs& submitArgs, bool validateGeometry = true) noexcept {
+                                 const MeshPassSubmitArgs& submitArgs, bool validateGeometry = true, bool allowDeferredInstanceStream = false) noexcept {
     const auto& indices = command.IndexBuffer;
     if (!command.Pipeline || !command.Pipeline->IsValid()) return false;
     if (validateGeometry) {
-        if (!indices.Target || !indices.Target->IsValid() || command.IndexCount == 0 ||
-            (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
-        const auto desc = indices.Target->GetDesc();
-        const uint64_t end = uint64_t{indices.Offset} + (uint64_t{command.FirstIndex} + command.IndexCount) * indices.Stride;
-        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) || end > desc.Size) return false;
+        if (indices.Target != nullptr) {
+            if (!indices.Target->IsValid() || command.IndexCount == 0 ||
+                (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
+            const auto desc = indices.Target->GetDesc();
+            const uint64_t end = uint64_t{indices.Offset} + (uint64_t{command.FirstIndex} + command.IndexCount) * indices.Stride;
+            if (!desc.Usage.HasFlag(gpu::BufferUse::Index) || end > desc.Size) return false;
+        } else {
+            if (indices.Offset != 0 || indices.Stride != 0 || command.VertexOffset != 0 || command.IndexCount == 0) return false;
+        }
+    }
+    for (size_t index = 0; index < streamLayouts.size(); ++index) {
+        const auto& layout = streamLayouts[index];
+        if (layout.StepMode != gpu::VertexStepMode::Vertex && layout.StepMode != gpu::VertexStepMode::Instance) return false;
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (streamLayouts[previous].Binding == layout.Binding) return false;
+        }
     }
     bool hasDefaultInstanceStream = false;
     for (size_t index = 0; index < vertexBuffers.size(); ++index) {
@@ -394,7 +485,7 @@ bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const
             if (vertexBuffers[previous].Binding == binding.Binding) return false;
         }
     }
-    if (instanceStreamBinding && !hasDefaultInstanceStream &&
+    if (instanceStreamBinding && !hasDefaultInstanceStream && !allowDeferredInstanceStream &&
         (!submitArgs.InstanceStream || submitArgs.InstanceStream->Binding != *instanceStreamBinding)) return false;
     if (submitArgs.InstanceStream && (!instanceStreamBinding || submitArgs.InstanceStream->Binding != *instanceStreamBinding)) return false;
     if (!ValidateParameterSets({parameterSets.data(), parameterSets.size()})) return false;
@@ -412,23 +503,43 @@ bool ValidateMeshDrawCommandImpl(const MeshDrawCommand& command, std::span<const
 }
 
 bool ValidateElements(const MeshDrawCommand& command, std::span<const MeshDrawElement> extraElements,
-                      std::span<const MeshDrawElementInstances> instances, const VisibleMeshDrawCommand& visible, bool validateGeometry = true) noexcept {
+                      std::span<const MeshDrawElementInstances> instances,
+                      std::span<const gpu::VertexBufferBinding> vertexBuffers,
+                      std::span<const MeshVertexStreamLayout> streamLayouts,
+                      const VisibleMeshDrawCommand& visible, const MeshPassSubmitArgs& submitArgs,
+                      bool validateGeometry = true, bool allowDeferredInstanceStream = false) noexcept {
     if (command.ValidElementMask == 0 || extraElements.size() + 1 != static_cast<size_t>(std::popcount(command.ValidElementMask)) ||
         (!instances.empty() && instances.size() != extraElements.size() + 1)) return false;
+    const bool indexed = command.IndexBuffer.Target != nullptr;
     uint32_t remaining = command.ValidElementMask & (command.ValidElementMask - 1);
     for (const auto& element : extraElements) {
         if (element.ElementIndex != static_cast<uint32_t>(std::countr_zero(remaining))) return false;
         remaining &= remaining - 1;
         if (!validateGeometry) continue;
         const auto& indices = element.IndexBuffer;
-        if (!indices.Target || !indices.Target->IsValid() || element.IndexCount == 0 ||
-            (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
-        const auto desc = indices.Target->GetDesc();
-        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
-            uint64_t{indices.Offset} + (uint64_t{element.FirstIndex} + element.IndexCount) * indices.Stride > desc.Size) return false;
+        if (indexed) {
+            if (!indices.Target || !indices.Target->IsValid() || element.IndexCount == 0 ||
+                (indices.Stride != 2 && indices.Stride != 4) || indices.Offset % indices.Stride != 0) return false;
+            const auto desc = indices.Target->GetDesc();
+            if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
+                uint64_t{indices.Offset} + (uint64_t{element.FirstIndex} + element.IndexCount) * indices.Stride > desc.Size) return false;
+        } else {
+            if (indices.Target != nullptr || indices.Offset != 0 || indices.Stride != 0 || element.VertexOffset != 0 || element.IndexCount == 0) return false;
+        }
     }
     for (const auto& instance : instances) {
         if (instance.InstanceCount != 0 && uint64_t{instance.FirstInstance} + instance.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
+    }
+    if (!indexed && !streamLayouts.empty()) {
+        for (const auto& layout : streamLayouts) {
+            if (layout.StepMode != gpu::VertexStepMode::Vertex) continue;
+            const auto view = FindActiveVertexView(vertexBuffers, submitArgs, layout.Binding);
+            if (!view) return false;
+            if (!StreamFitsRange(view->Size, layout.ArrayStride, command.FirstIndex, command.IndexCount)) return false;
+            for (const auto& element : extraElements) {
+                if (!StreamFitsRange(view->Size, layout.ArrayStride, element.FirstIndex, element.IndexCount)) return false;
+            }
+        }
     }
     uint32_t mask = visible.ElementMask & command.ValidElementMask;
     while (mask != 0) {
@@ -438,6 +549,13 @@ bool ValidateElements(const MeshDrawCommand& command, std::span<const MeshDrawEl
         const auto first = !instances.empty() && visible.UseElementFirstInstance ? instances[ordinal].FirstInstance : visible.FirstInstance;
         const auto count = !instances.empty() && visible.UseElementInstanceCount ? instances[ordinal].InstanceCount : visible.InstanceCount;
         if (count != 0 && uint64_t{first} + count - 1 > std::numeric_limits<uint32_t>::max()) return false;
+        if (!indexed && validateGeometry && !allowDeferredInstanceStream && count != 0 && !streamLayouts.empty()) {
+            for (const auto& layout : streamLayouts) {
+                if (layout.StepMode != gpu::VertexStepMode::Instance) continue;
+                const auto view = FindActiveVertexView(vertexBuffers, submitArgs, layout.Binding);
+                if (!view || !StreamFitsRange(view->Size, layout.ArrayStride, first, count)) return false;
+            }
+        }
     }
     return true;
 }
@@ -454,33 +572,250 @@ bool ValidateStoredMeshDrawCommand(const MeshDrawCommand& command,
         for (size_t index = 1; index < vertices->Bindings.size(); ++index) {
             if (vertices->Bindings[index - 1].Binding >= vertices->Bindings[index].Binding) return false;
         }
+        for (size_t index = 1; index < vertices->StreamLayouts.size(); ++index) {
+            if (vertices->StreamLayouts[index - 1].Binding >= vertices->StreamLayouts[index].Binding) return false;
+        }
     }
-    return ValidateMeshDrawCommandImpl(command,
-                                       vertices ? std::span<const gpu::VertexBufferBinding>{vertices->Bindings.data(), vertices->Bindings.size()} : std::span<const gpu::VertexBufferBinding>{},
+    const std::span<const gpu::VertexBufferBinding> vertexBuffers =
+        vertices ? std::span<const gpu::VertexBufferBinding>{vertices->Bindings.data(), vertices->Bindings.size()} : std::span<const gpu::VertexBufferBinding>{};
+    const std::span<const MeshVertexStreamLayout> streamLayouts =
+        vertices ? std::span<const MeshVertexStreamLayout>{vertices->StreamLayouts.data(), vertices->StreamLayouts.size()} : std::span<const MeshVertexStreamLayout>{};
+    return ValidateMeshDrawCommandImpl(command, vertexBuffers, streamLayouts,
                                        payload ? std::span<const MeshShaderParameterBinding>{payload->ParameterSets.data(), payload->ParameterSets.size()} : std::span<const MeshShaderParameterBinding>{},
                                        payload && payload->PushConstants ? &*payload->PushConstants : nullptr,
                                        vertices ? vertices->InstanceStreamBinding : std::nullopt, submitArgs) &&
            ValidateElements(command, elements ? std::span<const MeshDrawElement>{elements->ExtraElements.data(), elements->ExtraElements.size()} : std::span<const MeshDrawElement>{},
-                            elements ? std::span<const MeshDrawElementInstances>{elements->ElementInstances.data(), elements->ElementInstances.size()} : std::span<const MeshDrawElementInstances>{}, visibleCommand);
+                            elements ? std::span<const MeshDrawElementInstances>{elements->ElementInstances.data(), elements->ElementInstances.size()} : std::span<const MeshDrawElementInstances>{},
+                            vertexBuffers, streamLayouts, visibleCommand, submitArgs);
 }
 
 }  // namespace
 
-bool MeshDrawCommandBindingStorage::ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements) noexcept {
-    return ValidateMeshDrawCommandImpl(command, {bindings.VertexBuffers.data(), bindings.VertexBuffers.size()}, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, {}, validateElements) &&
-           ValidateElements(command, {bindings.ExtraElements.data(), bindings.ExtraElements.size()}, {bindings.ElementInstances.data(), bindings.ElementInstances.size()}, visible, validateElements);
+bool ValidateMeshBatchElements(const MeshBatch& batch, bool allowDeferredInstanceStream) noexcept {
+    if (batch.Elements.size() > 32) return false;
+    const auto firstActive = std::find_if(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) {
+        return element.IndexCount != 0 && element.InstanceCount != 0;
+    });
+    if (firstActive == batch.Elements.end()) return true;
+    if (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, allowDeferredInstanceStream)) return false;
+    const bool indexed = firstActive->IndexBuffer != nullptr;
+    for (const auto& element : batch.Elements) {
+        if (element.IndexCount == 0 || element.InstanceCount == 0) continue;
+        if (uint64_t{element.FirstInstance} + element.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
+        if (indexed) {
+            if (!element.IndexBuffer || !element.IndexBuffer->IsValid() ||
+                (element.IndexStride != 2 && element.IndexStride != 4) ||
+                element.IndexBufferOffset % element.IndexStride != 0) return false;
+            const auto desc = element.IndexBuffer->GetDesc();
+            if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
+                uint64_t{element.IndexBufferOffset} + (uint64_t{element.FirstIndex} + element.IndexCount) * element.IndexStride > desc.Size) return false;
+        } else {
+            if (element.IndexBuffer != nullptr || element.IndexBufferOffset != 0 || element.VertexOffset != 0) return false;
+            for (const auto& layout : batch.VertexInput->Layouts) {
+                const auto stream = std::find_if(batch.VertexInput->Streams.begin(), batch.VertexInput->Streams.end(), [&](const VertexInputStream& value) {
+                    return value.Binding == layout.Binding;
+                });
+                if (layout.StepMode == gpu::VertexStepMode::Vertex) {
+                    if (stream == batch.VertexInput->Streams.end() ||
+                        !StreamFitsRange(stream->Size, layout.ArrayStride, element.FirstIndex, element.IndexCount)) return false;
+                } else if (layout.StepMode == gpu::VertexStepMode::Instance) {
+                    if (allowDeferredInstanceStream) continue;
+                    if (stream == batch.VertexInput->Streams.end() ||
+                        !StreamFitsRange(stream->Size, layout.ArrayStride, element.FirstInstance, element.InstanceCount)) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool MeshDrawCommandBindingStorage::ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements, bool allowDeferredInstanceStream) noexcept {
+    const std::span<const gpu::VertexBufferBinding> vertexBuffers{bindings.VertexBuffers.data(), bindings.VertexBuffers.size()};
+    const std::span<const MeshVertexStreamLayout> streamLayouts{bindings.VertexStreamLayouts.data(), bindings.VertexStreamLayouts.size()};
+    return ValidateMeshDrawCommandImpl(command, vertexBuffers, streamLayouts, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, {}, validateElements, allowDeferredInstanceStream) &&
+           ValidateElements(command, {bindings.ExtraElements.data(), bindings.ExtraElements.size()}, {bindings.ElementInstances.data(), bindings.ElementInstances.size()}, vertexBuffers, streamLayouts, visible, {}, validateElements, allowDeferredInstanceStream);
 }
 
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings,
                              const VisibleMeshDrawCommand& visibleCommand, const MeshPassSubmitArgs& submitArgs) noexcept {
-    return ValidateSubmitArgs(submitArgs) && ValidateMeshDrawCommandImpl(command, {bindings.VertexBuffers.data(), bindings.VertexBuffers.size()}, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, submitArgs) &&
-           ValidateElements(command, {bindings.ExtraElements.data(), bindings.ExtraElements.size()}, {bindings.ElementInstances.data(), bindings.ElementInstances.size()}, visibleCommand);
+    const std::span<const gpu::VertexBufferBinding> vertexBuffers{bindings.VertexBuffers.data(), bindings.VertexBuffers.size()};
+    const std::span<const MeshVertexStreamLayout> streamLayouts{bindings.VertexStreamLayouts.data(), bindings.VertexStreamLayouts.size()};
+    return ValidateSubmitArgs(submitArgs) &&
+           ValidateMeshDrawCommandImpl(command, vertexBuffers, streamLayouts, {bindings.ParameterSets.data(), bindings.ParameterSets.size()}, bindings.PushConstants ? &*bindings.PushConstants : nullptr, bindings.InstanceStreamBinding, submitArgs) &&
+           ValidateElements(command, {bindings.ExtraElements.data(), bindings.ExtraElements.size()}, {bindings.ElementInstances.data(), bindings.ElementInstances.size()}, vertexBuffers, streamLayouts, visibleCommand, submitArgs);
 }
 
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawCommandBindingStorage& storage,
                              const VisibleMeshDrawCommand& visibleCommand, const MeshPassSubmitArgs& submitArgs) noexcept {
     return (!command.BindingStorage || command.BindingStorage.Get() == &storage) &&
            ValidateSubmitArgs(submitArgs) && ValidateStoredMeshDrawCommand(command, visibleCommand, submitArgs);
+}
+
+namespace {
+
+bool BindMeshDrawCommandState(gpu::GraphicsCommandEncoder& encoder,
+                              MeshDrawCommandStateCache& stateCache,
+                              const MeshDrawCommand& command,
+                              const MeshPassSubmitArgs& submitArgs) noexcept {
+    const auto storage = command.BindingStorage;
+    const bool pipelineChanged = stateCache.Pipeline.Get() != command.Pipeline.Get();
+    if (pipelineChanged) {
+        const auto newLayout = command.Pipeline->GetLayout();
+        const bool sameLayout = stateCache.Pipeline != nullptr && newLayout != nullptr && stateCache.Layout.Get() == newLayout.Get();
+        encoder.BindGraphicsPipelineState(command.Pipeline.Get());
+        stateCache.OnPipelineChanged(command.Pipeline.Get(), newLayout, sameLayout);
+        if (!sameLayout) {
+            for (const auto& binding : submitArgs.ParameterSets) {
+                encoder.BindShaderParameterSet(binding.GroupIndex, binding.ParameterSet.Get(), {binding.DynamicOffsets.data(), binding.DynamicOffsets.size()});
+            }
+        }
+        if (submitArgs.InstanceStream) {
+            stateCache.UpdateVertexBuffer(*submitArgs.InstanceStream);
+            encoder.BindVertexBuffers(std::span{&*submitArgs.InstanceStream, 1});
+        }
+    }
+    if (command.VertexBuffersIndex != kInvalidBindingIndex &&
+        (stateCache.LastVertexStorage != storage || stateCache.LastVertexBuffersIndex != command.VertexBuffersIndex)) {
+        const auto& vertices = *storage->GetVertexBuffers(command.VertexBuffersIndex);
+        const std::span<const gpu::VertexBufferBinding> bindings{vertices.Bindings.data(), vertices.Bindings.size()};
+        size_t runStart = bindings.size();
+        for (size_t index = 0; index < bindings.size(); ++index) {
+            const auto& binding = bindings[index];
+            const bool dirty = (!submitArgs.InstanceStream || submitArgs.InstanceStream->Binding != binding.Binding) && stateCache.UpdateVertexBuffer(binding);
+            if (runStart != bindings.size() && (!dirty || binding.Binding - bindings[index - 1].Binding != 1)) {
+                encoder.BindVertexBuffers(bindings.subspan(runStart, index - runStart));
+                runStart = bindings.size();
+            }
+            if (dirty && runStart == bindings.size()) runStart = index;
+        }
+        if (runStart != bindings.size()) encoder.BindVertexBuffers(bindings.subspan(runStart));
+        stateCache.LastVertexStorage = storage;
+        stateCache.LastVertexBuffersIndex = command.VertexBuffersIndex;
+    }
+    if (!stateCache.StencilReference || *stateCache.StencilReference != command.StencilReference) {
+        encoder.SetStencilReference(command.StencilReference);
+        stateCache.StencilReference = command.StencilReference;
+    }
+    if (command.PayloadIndex != kInvalidBindingIndex &&
+        (stateCache.LastPayloadStorage != storage || stateCache.LastPayloadIndex != command.PayloadIndex)) {
+        const auto payload = storage->GetPayload(command.PayloadIndex);
+        if (payload) {
+            for (const auto& binding : payload->ParameterSets) {
+                if (stateCache.UpdateParameterSet(binding)) encoder.BindShaderParameterSet(binding.GroupIndex, binding.ParameterSet.Get(), {binding.DynamicOffsets.data(), binding.DynamicOffsets.size()});
+            }
+            if (payload->PushConstants) {
+                const auto& push = *payload->PushConstants;
+                if (!stateCache.BoundPushConstants ||
+                    (stateCache.BoundPushConstants.Get() != &push && !SamePushConstants(*stateCache.BoundPushConstants, push))) {
+                    if (!encoder.SetPushConstants(push.PushConstantId, push.Offset, {push.Data.data(), push.Data.size()})) return false;
+                    stateCache.BoundPushConstants = &push;
+                }
+            }
+        }
+        stateCache.LastPayloadStorage = storage;
+        stateCache.LastPayloadIndex = command.PayloadIndex;
+    }
+    return true;
+}
+
+bool ValidateCommandElementStructure(const MeshDrawCommand& command, Nullable<const MeshDrawCommandElements*> elements) noexcept {
+    if (command.ValidElementMask == 0) return false;
+    const uint32_t extraMask = command.ValidElementMask & (command.ValidElementMask - 1);
+    if (command.ExtraElementsIndex == kInvalidBindingIndex) {
+        return !elements && extraMask == 0;
+    }
+    return elements && elements->StructureValid && extraMask == elements->ValidatedExtraMask;
+}
+
+template <typename EmitFn>
+bool ForEachExpandedMeshDrawElement(std::span<const VisibleMeshDrawCommand> visibleCommands, EmitFn&& emit) {
+    if (visibleCommands.size() > std::numeric_limits<uint32_t>::max()) return false;
+    for (size_t commandIndex = 0; commandIndex < visibleCommands.size(); ++commandIndex) {
+        const auto& visible = visibleCommands[commandIndex];
+        if (visible.InstanceCount == 0 && !visible.UseElementInstanceCount) continue;
+        const auto commandPtr = visible.CachedCommand;
+        if (!commandPtr) return false;
+        const auto& command = *commandPtr;
+        const auto storage = command.BindingStorage;
+        const auto elements = (command.ExtraElementsIndex != kInvalidBindingIndex && storage)
+                                  ? storage->GetExtraElements(command.ExtraElementsIndex)
+                                  : nullptr;
+        if (!ValidateCommandElementStructure(command, elements)) return false;
+        uint32_t mask = visible.ElementMask & command.ValidElementMask;
+        if (mask == 0) continue;
+        if (!elements) {
+            if (visible.InstanceCount == 0) continue;
+            const MeshDrawElement primary{command.IndexBuffer, command.IndexCount, command.FirstIndex, command.VertexOffset,
+                                          static_cast<uint32_t>(std::countr_zero(mask))};
+            if (!emit(static_cast<uint32_t>(commandIndex), command, primary, command.IndexCount, visible.InstanceCount, visible.FirstInstance)) return false;
+            continue;
+        }
+        const bool allElementsVisible = (mask == command.ValidElementMask);
+        if (allElementsVisible && elements->ContiguousMergeMask == 0) {
+            const MeshDrawElement primary{command.IndexBuffer, command.IndexCount, command.FirstIndex, command.VertexOffset,
+                                          static_cast<uint32_t>(std::countr_zero(mask))};
+            if (elements->ElementInstances.empty()) {
+                if (visible.InstanceCount == 0) continue;
+                if (!emit(static_cast<uint32_t>(commandIndex), command, primary, primary.IndexCount, visible.InstanceCount, visible.FirstInstance)) return false;
+                for (const auto& extra : elements->ExtraElements) {
+                    if (!emit(static_cast<uint32_t>(commandIndex), command, extra, extra.IndexCount, visible.InstanceCount, visible.FirstInstance)) return false;
+                }
+            } else {
+                const uint32_t first0 = visible.UseElementFirstInstance ? elements->ElementInstances[0].FirstInstance : visible.FirstInstance;
+                const uint32_t count0 = visible.UseElementInstanceCount ? elements->ElementInstances[0].InstanceCount : visible.InstanceCount;
+                if (count0 != 0 && !emit(static_cast<uint32_t>(commandIndex), command, primary, primary.IndexCount, count0, first0)) return false;
+                for (size_t i = 0; i < elements->ExtraElements.size(); ++i) {
+                    const uint32_t first = visible.UseElementFirstInstance ? elements->ElementInstances[i + 1].FirstInstance : visible.FirstInstance;
+                    const uint32_t count = visible.UseElementInstanceCount ? elements->ElementInstances[i + 1].InstanceCount : visible.InstanceCount;
+                    if (count == 0) continue;
+                    const auto& extra = elements->ExtraElements[i];
+                    if (!emit(static_cast<uint32_t>(commandIndex), command, extra, extra.IndexCount, count, first)) return false;
+                }
+            }
+            continue;
+        }
+        uint32_t currentOrdinal = 0;
+        while (mask != 0) {
+            uint32_t bit = static_cast<uint32_t>(std::countr_zero(mask));
+            mask &= mask - 1;
+            const auto ordinal = allElementsVisible
+                                     ? currentOrdinal++
+                                     : static_cast<uint32_t>(std::popcount(command.ValidElementMask & ((uint32_t{1} << bit) - 1)));
+            const MeshDrawElement primary{command.IndexBuffer, command.IndexCount, command.FirstIndex, command.VertexOffset, bit};
+            const auto& element = ordinal == 0 ? primary : elements->ExtraElements[ordinal - 1];
+            uint32_t firstInstance = visible.FirstInstance;
+            uint32_t instanceCount = visible.InstanceCount;
+            if (!elements->ElementInstances.empty()) {
+                if (visible.UseElementFirstInstance) firstInstance = elements->ElementInstances[ordinal].FirstInstance;
+                if (visible.UseElementInstanceCount) instanceCount = elements->ElementInstances[ordinal].InstanceCount;
+            }
+            if (instanceCount == 0) continue;
+            auto indexCount = element.IndexCount;
+            auto nextOrdinal = ordinal;
+            if (instanceCount == 1) {
+                while (bit < 31 && (elements->ContiguousMergeMask & (uint32_t{1} << bit)) && (mask & (uint32_t{1} << (bit + 1)))) {
+                    indexCount += elements->ExtraElements[nextOrdinal++].IndexCount;
+                    mask &= ~(uint32_t{1} << ++bit);
+                    if (allElementsVisible) ++currentOrdinal;
+                }
+            }
+            if (!emit(static_cast<uint32_t>(commandIndex), command, element, indexCount, instanceCount, firstInstance)) return false;
+        }
+    }
+    return true;
+}
+
+bool CanBatchUseIndirect(const MeshPassIndirectBatch& batch, const gpu::GpuDeviceCapabilities& capabilities) noexcept {
+    const bool deviceCanDrawIndirect = capabilities.Features.IndirectDraw && capabilities.Limits.MaxDrawIndirectCount >= 1;
+    return deviceCanDrawIndirect && (!batch.HasNonZeroFirstInstance || capabilities.Features.IndirectFirstInstance);
+}
+
+}  // namespace
+
+void PreparedMeshPassIndirectDraws::Clear() noexcept {
+    Batches.clear();
+    IndexedArguments.clear();
+    NonIndexedArguments.clear();
 }
 
 bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
@@ -508,86 +843,246 @@ bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
         uint32_t mask = visible.ElementMask & command.ValidElementMask;
         if (mask == 0) continue;
         const auto storage = command.BindingStorage;
-        const auto elements = (command.ExtraElementsIndex != kInvalidBindingIndex) ? storage->GetExtraElements(command.ExtraElementsIndex) : nullptr;
-        const bool pipelineChanged = stateCache.Pipeline.Get() != command.Pipeline.Get();
-        if (pipelineChanged) {
-            encoder.BindGraphicsPipelineState(command.Pipeline.Get());
-            stateCache.OnPipelineChanged(command.Pipeline.Get());
-            for (const auto& binding : submitArgs.ParameterSets) {
-                encoder.BindShaderParameterSet(binding.GroupIndex, binding.ParameterSet.Get(), {binding.DynamicOffsets.data(), binding.DynamicOffsets.size()});
-            }
-            if (submitArgs.InstanceStream) {
-                stateCache.UpdateVertexBuffer(*submitArgs.InstanceStream);
-                encoder.BindVertexBuffers(std::span{&*submitArgs.InstanceStream, 1});
-            }
-        }
-        if (stateCache.LastVertexStorage != storage || stateCache.LastVertexBuffersIndex != command.VertexBuffersIndex) {
-            if (command.VertexBuffersIndex != kInvalidBindingIndex) {
-                const auto& vertices = *storage->GetVertexBuffers(command.VertexBuffersIndex);
-                const std::span<const gpu::VertexBufferBinding> bindings{vertices.Bindings.data(), vertices.Bindings.size()};
-                size_t runStart = bindings.size();
-                for (size_t index = 0; index < bindings.size(); ++index) {
-                    const auto& binding = bindings[index];
-                    const bool dirty = (!submitArgs.InstanceStream || submitArgs.InstanceStream->Binding != binding.Binding) && stateCache.UpdateVertexBuffer(binding);
-                    if (runStart != bindings.size() && (!dirty || binding.Binding - bindings[index - 1].Binding != 1)) {
-                        encoder.BindVertexBuffers(bindings.subspan(runStart, index - runStart));
-                        runStart = bindings.size();
-                    }
-                    if (dirty && runStart == bindings.size()) runStart = index;
+        const auto elements = (command.ExtraElementsIndex != kInvalidBindingIndex && storage) ? storage->GetExtraElements(command.ExtraElementsIndex) : nullptr;
+        if (!elements && visible.InstanceCount == 0) continue;
+        if (!BindMeshDrawCommandState(encoder, stateCache, command, submitArgs)) return false;
+        if (!elements) {
+            if (command.IndexBuffer.Target != nullptr) {
+                if (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, command.IndexBuffer)) {
+                    encoder.BindIndexBuffer(command.IndexBuffer);
+                    stateCache.IndexBuffer = command.IndexBuffer;
                 }
-                if (runStart != bindings.size()) encoder.BindVertexBuffers(bindings.subspan(runStart));
+                encoder.DrawIndexed(command.IndexCount, visible.InstanceCount, command.FirstIndex, command.VertexOffset, visible.FirstInstance);
+            } else {
+                encoder.Draw(command.IndexCount, visible.InstanceCount, command.FirstIndex, visible.FirstInstance);
             }
-            stateCache.LastVertexStorage = storage;
-            stateCache.LastVertexBuffersIndex = command.VertexBuffersIndex;
-        }
-        if (!stateCache.StencilReference || *stateCache.StencilReference != command.StencilReference) {
-            encoder.SetStencilReference(command.StencilReference);
-            stateCache.StencilReference = command.StencilReference;
-        }
-        if (stateCache.LastPayloadStorage != storage || stateCache.LastPayloadIndex != command.PayloadIndex) {
-            const auto payload = command.PayloadIndex != kInvalidBindingIndex ? storage->GetPayload(command.PayloadIndex) : nullptr;
-            if (payload) {
-                for (const auto& binding : payload->ParameterSets) {
-                    if (stateCache.UpdateParameterSet(binding)) encoder.BindShaderParameterSet(binding.GroupIndex, binding.ParameterSet.Get(), {binding.DynamicOffsets.data(), binding.DynamicOffsets.size()});
-                }
-            }
-            stateCache.LastPushConstants = payload && payload->PushConstants ? &*payload->PushConstants : nullptr;
-            stateCache.LastPayloadStorage = storage;
-            stateCache.LastPayloadIndex = command.PayloadIndex;
-        }
-        if (stateCache.LastPushConstants) {
-            const auto& push = *stateCache.LastPushConstants;
-            if (!encoder.SetPushConstants(push.PushConstantId, push.Offset, {push.Data.data(), push.Data.size()})) return false;
+            continue;
         }
         bool boundCommandIndexBuffer = false;
+        const bool allElementsVisible = (mask == command.ValidElementMask);
+        if (allElementsVisible && elements->ContiguousMergeMask == 0 && elements->ElementInstances.empty()) {
+            if (visible.InstanceCount == 0) continue;
+            if (elements->AllElementsSharePrimaryIndexBuffer) {
+                if (command.IndexBuffer.Target != nullptr) {
+                    if (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, command.IndexBuffer)) {
+                        encoder.BindIndexBuffer(command.IndexBuffer);
+                        stateCache.IndexBuffer = command.IndexBuffer;
+                    }
+                    encoder.DrawIndexed(command.IndexCount, visible.InstanceCount, command.FirstIndex, command.VertexOffset, visible.FirstInstance);
+                    for (const auto& extra : elements->ExtraElements) {
+                        encoder.DrawIndexed(extra.IndexCount, visible.InstanceCount, extra.FirstIndex, extra.VertexOffset, visible.FirstInstance);
+                    }
+                } else {
+                    encoder.Draw(command.IndexCount, visible.InstanceCount, command.FirstIndex, visible.FirstInstance);
+                    for (const auto& extra : elements->ExtraElements) {
+                        encoder.Draw(extra.IndexCount, visible.InstanceCount, extra.FirstIndex, visible.FirstInstance);
+                    }
+                }
+            } else {
+                const auto drawElement = [&](const gpu::IndexBufferView& ib, uint32_t indexCount, uint32_t firstIndex, int32_t vertexOffset) noexcept {
+                    if (ib.Target != nullptr) {
+                        if (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, ib)) {
+                            encoder.BindIndexBuffer(ib);
+                            stateCache.IndexBuffer = ib;
+                        }
+                        encoder.DrawIndexed(indexCount, visible.InstanceCount, firstIndex, vertexOffset, visible.FirstInstance);
+                    } else {
+                        encoder.Draw(indexCount, visible.InstanceCount, firstIndex, visible.FirstInstance);
+                    }
+                };
+                drawElement(command.IndexBuffer, command.IndexCount, command.FirstIndex, command.VertexOffset);
+                for (const auto& extra : elements->ExtraElements) {
+                    drawElement(extra.IndexBuffer, extra.IndexCount, extra.FirstIndex, extra.VertexOffset);
+                }
+            }
+            continue;
+        }
+        uint32_t currentOrdinal = 0;
         while (mask != 0) {
             uint32_t bit = static_cast<uint32_t>(std::countr_zero(mask));
             mask &= mask - 1;
-            const auto ordinal = static_cast<uint32_t>(std::popcount(command.ValidElementMask & ((uint32_t{1} << bit) - 1)));
+            const auto ordinal = allElementsVisible
+                                     ? currentOrdinal++
+                                     : static_cast<uint32_t>(std::popcount(command.ValidElementMask & ((uint32_t{1} << bit) - 1)));
             const MeshDrawElement primary{command.IndexBuffer, command.IndexCount, command.FirstIndex, command.VertexOffset, bit};
             const auto& element = ordinal == 0 ? primary : elements->ExtraElements[ordinal - 1];
             uint32_t firstInstance = visible.FirstInstance;
             uint32_t instanceCount = visible.InstanceCount;
-            if (elements && !elements->ElementInstances.empty()) {
+            if (!elements->ElementInstances.empty()) {
                 if (visible.UseElementFirstInstance) firstInstance = elements->ElementInstances[ordinal].FirstInstance;
                 if (visible.UseElementInstanceCount) instanceCount = elements->ElementInstances[ordinal].InstanceCount;
             }
             if (instanceCount == 0) continue;
-            if (!(boundCommandIndexBuffer && elements && elements->AllElementsSharePrimaryIndexBuffer) &&
-                (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, element.IndexBuffer))) {
-                encoder.BindIndexBuffer(element.IndexBuffer);
-                stateCache.IndexBuffer = element.IndexBuffer;
+            if (element.IndexBuffer.Target != nullptr) {
+                if (!(boundCommandIndexBuffer && elements->AllElementsSharePrimaryIndexBuffer) &&
+                    (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, element.IndexBuffer))) {
+                    encoder.BindIndexBuffer(element.IndexBuffer);
+                    stateCache.IndexBuffer = element.IndexBuffer;
+                }
+                boundCommandIndexBuffer = true;
             }
-            boundCommandIndexBuffer = true;
             auto indexCount = element.IndexCount;
             auto nextOrdinal = ordinal;
-            if (instanceCount == 1 && elements) {
+            if (instanceCount == 1) {
                 while (bit < 31 && (elements->ContiguousMergeMask & (uint32_t{1} << bit)) && (mask & (uint32_t{1} << (bit + 1)))) {
                     indexCount += elements->ExtraElements[nextOrdinal++].IndexCount;
                     mask &= ~(uint32_t{1} << ++bit);
+                    if (allElementsVisible) ++currentOrdinal;
                 }
             }
-            encoder.DrawIndexed(indexCount, instanceCount, element.FirstIndex, element.VertexOffset, firstInstance);
+            if (element.IndexBuffer.Target != nullptr) {
+                encoder.DrawIndexed(indexCount, instanceCount, element.FirstIndex, element.VertexOffset, firstInstance);
+            } else {
+                encoder.Draw(indexCount, instanceCount, element.FirstIndex, firstInstance);
+            }
+        }
+    }
+    return true;
+}
+
+bool CountMeshPassIndirectDraws(std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                MeshPassIndirectDrawCounts& out) noexcept {
+    out = {};
+    const bool ok = ForEachExpandedMeshDrawElement(
+        visibleCommands,
+        [&](uint32_t, const MeshDrawCommand&, const MeshDrawElement& element, uint32_t, uint32_t, uint32_t) noexcept {
+            if (element.IndexBuffer.Target != nullptr) {
+                if (out.IndexedArgumentCount == std::numeric_limits<uint32_t>::max()) return false;
+                ++out.IndexedArgumentCount;
+            } else {
+                if (out.NonIndexedArgumentCount == std::numeric_limits<uint32_t>::max()) return false;
+                ++out.NonIndexedArgumentCount;
+            }
+            return true;
+        });
+    if (!ok) out = {};
+    return ok;
+}
+
+bool BuildMeshPassIndirectDraws(std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                PreparedMeshPassIndirectDraws& out) {
+    out.Clear();
+    const bool ok = ForEachExpandedMeshDrawElement(
+        visibleCommands,
+        [&](uint32_t commandIndex, const MeshDrawCommand& command, const MeshDrawElement& element,
+            uint32_t indexCount, uint32_t instanceCount, uint32_t firstInstance) {
+            const bool indexed = element.IndexBuffer.Target != nullptr;
+            if (indexed) {
+                if (out.IndexedArguments.size() >= std::numeric_limits<uint32_t>::max()) return false;
+            } else {
+                if (out.NonIndexedArguments.size() >= std::numeric_limits<uint32_t>::max()) return false;
+            }
+            bool canMerge = false;
+            if (!out.Batches.empty()) {
+                const auto& prev = out.Batches.back();
+                const auto& prevCommand = *visibleCommands[prev.CommandIndex].CachedCommand;
+                const bool sameVertices =
+                    (command.VertexBuffersIndex == kInvalidBindingIndex && prevCommand.VertexBuffersIndex == kInvalidBindingIndex) ||
+                    (command.BindingStorage.Get() == prevCommand.BindingStorage.Get() && command.VertexBuffersIndex == prevCommand.VertexBuffersIndex);
+                const bool samePayload =
+                    (command.PayloadIndex == kInvalidBindingIndex && prevCommand.PayloadIndex == kInvalidBindingIndex) ||
+                    (command.BindingStorage.Get() == prevCommand.BindingStorage.Get() && command.PayloadIndex == prevCommand.PayloadIndex);
+                const bool sameIndex = (indexed == prev.Indexed) && (!indexed || SameIndexBufferView(element.IndexBuffer, prev.IndexBuffer));
+                canMerge = command.Pipeline.Get() == prevCommand.Pipeline.Get() &&
+                           command.StencilReference == prevCommand.StencilReference &&
+                           sameVertices && samePayload && sameIndex;
+            }
+            const uint32_t argIndex = static_cast<uint32_t>(indexed ? out.IndexedArguments.size() : out.NonIndexedArguments.size());
+            if (indexed) {
+                out.IndexedArguments.push_back({indexCount, instanceCount, element.FirstIndex, element.VertexOffset, firstInstance});
+            } else {
+                out.NonIndexedArguments.push_back({indexCount, instanceCount, element.FirstIndex, firstInstance});
+            }
+            if (canMerge) {
+                auto& batch = out.Batches.back();
+                ++batch.ArgumentCount;
+                batch.HasNonZeroFirstInstance |= (firstInstance != 0);
+            } else {
+                out.Batches.push_back({
+                    .CommandIndex = commandIndex,
+                    .Indexed = indexed,
+                    .IndexBuffer = indexed ? element.IndexBuffer : gpu::IndexBufferView{},
+                    .FirstArgument = argIndex,
+                    .ArgumentCount = 1,
+                    .HasNonZeroFirstInstance = firstInstance != 0});
+            }
+            return true;
+        });
+    if (!ok) out.Clear();
+    return ok;
+}
+
+bool SubmitMeshPassIndirectDraws(gpu::GraphicsCommandEncoder& encoder,
+                                 std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                 const PreparedMeshPassIndirectDraws& prepared,
+                                 RDGBufferSlice indexedArgBuffer,
+                                 RDGBufferSlice nonIndexedArgBuffer,
+                                 const gpu::GpuDeviceCapabilities& capabilities,
+                                 const MeshPassSubmitArgs& submitArgs) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RadRay.MeshDraw.SubmitIndirect");
+    RADRAY_PROFILE_PLOT("RadRay.MeshDraw.SubmitCommands", static_cast<int64_t>(visibleCommands.size()));
+    if (!encoder.IsValid()) return false;
+#if RADRAY_IS_DEBUG
+    {
+        RADRAY_PROFILE_SCOPE_N("RadRay.MeshDraw.Validate");
+        if (!ValidateSubmitArgs(submitArgs)) return false;
+        for (const auto& visible : visibleCommands) {
+            const auto command = visible.CachedCommand;
+            if (!command || !ValidateStoredMeshDrawCommand(*command, visible, submitArgs)) return false;
+        }
+    }
+#endif
+    for (const auto& batch : prepared.Batches) {
+        if (batch.CommandIndex >= visibleCommands.size() || batch.ArgumentCount == 0) return false;
+        if (!visibleCommands[batch.CommandIndex].CachedCommand) return false;
+        const size_t cpuCount = batch.Indexed ? prepared.IndexedArguments.size() : prepared.NonIndexedArguments.size();
+        if (uint64_t{batch.FirstArgument} + batch.ArgumentCount > cpuCount) return false;
+        if (CanBatchUseIndirect(batch, capabilities)) {
+            const RDGBufferSlice& slice = batch.Indexed ? indexedArgBuffer : nonIndexedArgBuffer;
+            const uint64_t stride = batch.Indexed ? sizeof(gpu::DrawIndexedIndirectArguments) : sizeof(gpu::DrawIndirectArguments);
+            if (!slice.Buffer || !slice.Buffer->IsValid()) return false;
+            const auto desc = slice.Buffer->GetDesc();
+            if (!desc.Usage.HasFlag(gpu::BufferUse::Indirect) || (slice.Offset % 4) != 0) return false;
+            if (slice.Offset > desc.Size || slice.Size > desc.Size - slice.Offset) return false;
+            if (uint64_t{batch.FirstArgument} + batch.ArgumentCount > slice.Size / stride) return false;
+        }
+    }
+
+    MeshDrawCommandStateCache stateCache;
+    for (const auto& batch : prepared.Batches) {
+        const auto& command = *visibleCommands[batch.CommandIndex].CachedCommand;
+        if (!BindMeshDrawCommandState(encoder, stateCache, command, submitArgs)) return false;
+        if (batch.Indexed) {
+            if (!stateCache.IndexBuffer || !SameIndexBufferView(*stateCache.IndexBuffer, batch.IndexBuffer)) {
+                encoder.BindIndexBuffer(batch.IndexBuffer);
+                stateCache.IndexBuffer = batch.IndexBuffer;
+            }
+        }
+        if (CanBatchUseIndirect(batch, capabilities)) {
+            const RDGBufferSlice& slice = batch.Indexed ? indexedArgBuffer : nonIndexedArgBuffer;
+            const uint64_t stride = batch.Indexed ? sizeof(gpu::DrawIndexedIndirectArguments) : sizeof(gpu::DrawIndirectArguments);
+            const uint32_t maxChunk = capabilities.Limits.MaxDrawIndirectCount;
+            uint32_t consumed = 0;
+            while (consumed < batch.ArgumentCount) {
+                const uint32_t chunk = std::min(batch.ArgumentCount - consumed, maxChunk);
+                const uint64_t byteOffset = slice.Offset + (uint64_t{batch.FirstArgument} + consumed) * stride;
+                if (batch.Indexed) {
+                    encoder.DrawIndexedIndirect(slice.Buffer.Get(), byteOffset, chunk);
+                } else {
+                    encoder.DrawIndirect(slice.Buffer.Get(), byteOffset, chunk);
+                }
+                consumed += chunk;
+            }
+        } else if (batch.Indexed) {
+            for (uint32_t i = 0; i < batch.ArgumentCount; ++i) {
+                const auto& arg = prepared.IndexedArguments[batch.FirstArgument + i];
+                encoder.DrawIndexed(arg.IndexCount, arg.InstanceCount, arg.FirstIndex, arg.VertexOffset, arg.FirstInstance);
+            }
+        } else {
+            for (uint32_t i = 0; i < batch.ArgumentCount; ++i) {
+                const auto& arg = prepared.NonIndexedArguments[batch.FirstArgument + i];
+                encoder.Draw(arg.VertexCount, arg.InstanceCount, arg.FirstVertex, arg.FirstInstance);
+            }
         }
     }
     return true;

@@ -6,6 +6,7 @@
 #include <radray/runtime/frame_slot.h>
 #include <radray/logger.h>
 #include <radray/profiler.h>
+#include <radray/scope_guard.h>
 
 namespace radray {
 
@@ -62,26 +63,33 @@ Nullable<FrameSlot*> FrameScheduler::GetCurrentSlot() noexcept {
     return _slotBegun ? Nullable<FrameSlot*>{_slots[_currentSlotIndex].get()} : nullptr;
 }
 
-void FrameScheduler::RunFrame() noexcept {
+bool FrameScheduler::RunFrame() noexcept {
     if (_running || _transitioning) RADRAY_ABORT("FrameScheduler: reentrant RunFrame");
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.RunFrame");
     RADRAY_PROFILE_PLOT("RadRay.FrameScheduler.Slot", static_cast<int64_t>(_currentSlotIndex));
     auto& slot = BeginFrame();
+#if RADRAY_IS_DEBUG
+    const auto closeRegistration = MakeScopeGuard([&slot]() noexcept { slot._inFrameCallback = false; });
+#endif
+    if (slot.GetDevice().IsDeviceLost()) return false;
     _running = true;
     const auto passes = _pipeline->GetMeshPassRegistrations();
     for (const auto& pass : passes) slot.GetPassDrawList(pass.Pass).SetSortMode(pass.SortMode);
     _pipeline->Extract(slot);
-    _pipeline->Prepare(slot);
-    _pipeline->Record(slot);
-    _pipeline->Submit(slot);
-#if RADRAY_IS_DEBUG
-    slot._inFrameCallback = false;
-#endif
+    if (!slot.GetDevice().IsDeviceLost()) _pipeline->Prepare(slot);
+    if (!slot.GetDevice().IsDeviceLost()) _pipeline->Record(slot);
+    const bool submitted = !slot.GetDevice().IsDeviceLost() && _pipeline->Submit(slot);
+    if (!submitted) {
+        if (!slot.GetDevice().IsDeviceLost()) RADRAY_ABORT("FrameScheduler: submission rejected on a healthy device");
+        _running = false;
+        return false;
+    }
     slot._inFlight = true;
     _slotBegun = false;
     _running = false;
     ++_nextFrameId;
     _currentSlotIndex = (_currentSlotIndex + 1) % GetSlotCount();
+    return true;
 }
 
 void FrameScheduler::WaitIdle() noexcept {
@@ -104,6 +112,7 @@ void FrameScheduler::WaitSlot(FrameSlot& slot) noexcept {
     if (!slot._inFlight) return;
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitSlot");
     _pipeline->Wait(slot);
+    if (!slot.GetDevice().IsDeviceLost()) _pipeline->OnSlotCompleted(slot);
     slot._inFlight = false;
 }
 

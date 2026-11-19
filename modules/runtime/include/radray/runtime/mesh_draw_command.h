@@ -12,6 +12,7 @@
 #include <radray/types.h>
 #include <radray/inline_vector.h>
 #include <radray/gpu/types.h>
+#include <radray/runtime/mesh_batch.h>
 #include <radray/runtime/vertex_input.h>
 
 namespace radray {
@@ -96,9 +97,16 @@ static_assert(sizeof(MeshDrawCommand) == 64 && alignof(MeshDrawCommand) == 64);
 
 using MeshParameterSetBindings = InlineVector<MeshShaderParameterBinding, 2>;
 
+struct MeshVertexStreamLayout {
+    uint32_t Binding{0};
+    uint32_t ArrayStride{0};
+    gpu::VertexStepMode StepMode{gpu::VertexStepMode::Vertex};
+};
+
 // 命令构建数据；Store 复制字节、偏移与元素，并对顶点绑定排序。
 struct MeshDrawCommandBindings {
     InlineVector<gpu::VertexBufferBinding, 4> VertexBuffers;
+    InlineVector<MeshVertexStreamLayout, 4> VertexStreamLayouts;
     MeshParameterSetBindings ParameterSets;
     std::optional<MeshPushConstantCommandBinding> PushConstants{};
     std::optional<uint32_t> InstanceStreamBinding{};
@@ -112,6 +120,8 @@ struct MeshDrawCommandBindings {
 struct MeshVertexBufferBindings {
     // 按 Binding 严格递增保存；不得将主顶点流从此数组中拆出。
     InlineVector<gpu::VertexBufferBinding, 4> Bindings;
+    // 按 Binding 严格递增保存各顶点/实例输入流的步长与步进模式，用于无索引绘制容量校验。
+    InlineVector<MeshVertexStreamLayout, 4> StreamLayouts;
     std::optional<uint32_t> InstanceStreamBinding{};
 };
 
@@ -124,7 +134,9 @@ struct MeshDrawCommandElements {
     InlineVector<MeshDrawElement, 6> ExtraElements;
     InlineVector<MeshDrawElementInstances, 7> ElementInstances;
     uint32_t ContiguousMergeMask{0};
+    uint32_t ValidatedExtraMask{0};
     bool AllElementsSharePrimaryIndexBuffer{false};
+    bool StructureValid{false};
 };
 
 template <typename T>
@@ -149,7 +161,7 @@ public:
     Nullable<const MeshVertexBufferBindings*> GetVertexBuffers(uint32_t index) const noexcept;
     Nullable<const MeshDrawCommandElements*> GetExtraElements(uint32_t index) const noexcept;
     Nullable<const MeshDrawCommandPayload*> GetPayload(uint32_t index) const noexcept;
-    uint32_t GetStateSortKey(const MeshDrawCommand& command);
+    uint32_t GetStateSortKey(const MeshDrawCommand& command) const noexcept;
     size_t GetVertexBufferCount() const noexcept;
     size_t GetPayloadCount() const noexcept;
     size_t GetExtraElementsCount() const noexcept;
@@ -158,7 +170,7 @@ private:
     friend class MeshPassProcessor;
     friend class CachedPassMeshDrawList;
     void Reserve(uint32_t commands);
-    static bool ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements) noexcept;
+    static bool ValidateConstruction(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings, const VisibleMeshDrawCommand& visible, bool validateElements, bool allowDeferredInstanceStream) noexcept;
 
     template <typename T>
     struct Pool {
@@ -170,7 +182,6 @@ private:
     Pool<MeshDrawCommandPayload> _payloads;
     vector<std::optional<MeshDrawCommandElements>> _elements;
     vector<uint32_t> _freeElements;
-    unordered_map<gpu::GraphicsPipelineState*, uint32_t> _pipelineBuckets;
 };
 
 struct PassBatchCacheSlot {
@@ -230,7 +241,37 @@ struct MeshPassSubmitArgs {
     std::optional<gpu::VertexBufferBinding> InstanceStream{};
 };
 
+struct RDGBufferSlice {
+    Nullable<gpu::Buffer*> Buffer{nullptr};
+    uint64_t Offset{0};
+    uint64_t Size{0};
+};
+
+struct MeshPassIndirectDrawCounts {
+    uint32_t IndexedArgumentCount{0};
+    uint32_t NonIndexedArgumentCount{0};
+};
+
+struct MeshPassIndirectBatch {
+    uint32_t CommandIndex{0};  // 指向代表本批次 PSO / VB / IB / Payload 状态的首条 VisibleMeshDrawCommand
+    bool Indexed{true};
+    gpu::IndexBufferView IndexBuffer{};
+    uint32_t FirstArgument{0};  // 相对于 IndexedArguments 或 NonIndexedArguments 的起始下标
+    uint32_t ArgumentCount{0};
+    bool HasNonZeroFirstInstance{false};
+};
+
+class PreparedMeshPassIndirectDraws {
+public:
+    vector<MeshPassIndirectBatch> Batches;
+    vector<gpu::DrawIndexedIndirectArguments> IndexedArguments;
+    vector<gpu::DrawIndirectArguments> NonIndexedArguments;
+
+    void Clear() noexcept;
+};
+
 bool ValidateVertexInput(const VertexInput& input, bool allowDeferredInstanceStream = false) noexcept;
+bool ValidateMeshBatchElements(const MeshBatch& batch, bool allowDeferredInstanceStream = false) noexcept;
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawCommandBindings& bindings,
                              const VisibleMeshDrawCommand& visibleCommand = {},
                              const MeshPassSubmitArgs& submitArgs = {}) noexcept;
@@ -244,5 +285,26 @@ bool ValidateMeshDrawCommand(const MeshDrawCommand& command, const MeshDrawComma
 bool SubmitMeshDrawCommands(gpu::GraphicsCommandEncoder& encoder,
                             std::span<const VisibleMeshDrawCommand> visibleCommands,
                             const MeshPassSubmitArgs& submitArgs = {}) noexcept;
+
+// 与 SubmitMeshDrawCommands 共用元素展开、实例数覆盖与连续单实例合并规则；
+// 遇空命令指针或掩码/附加元素结构不一致时返回 false。
+bool CountMeshPassIndirectDraws(std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                MeshPassIndirectDrawCounts& out) noexcept;
+
+// 入口无条件清空 out；相邻且 PSO / StencilReference / (BindingStorage, VertexBuffersIndex) /
+// (BindingStorage, PayloadIndex) / 绘制类型与 IndexBufferView 完全一致的展开元素合并为同一批次。
+bool BuildMeshPassIndirectDraws(std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                PreparedMeshPassIndirectDraws& out);
+
+// 在下发第一条编码器绑定/绘制前一次性完成全部预检（含全部批次 CPU 下标与间接批次 GPU 切片范围）；
+// 任一预检失败返回 false 且编码器保持 0 绑定 0 绘制。
+// 录制中途 SetPushConstants 失败时立即返回 false，调用方须丢弃可能仅完成部分录制的命令缓冲。
+bool SubmitMeshPassIndirectDraws(gpu::GraphicsCommandEncoder& encoder,
+                                 std::span<const VisibleMeshDrawCommand> visibleCommands,
+                                 const PreparedMeshPassIndirectDraws& prepared,
+                                 RDGBufferSlice indexedArgBuffer,
+                                 RDGBufferSlice nonIndexedArgBuffer,
+                                 const gpu::GpuDeviceCapabilities& capabilities,
+                                 const MeshPassSubmitArgs& submitArgs = {}) noexcept;
 
 }  // namespace radray

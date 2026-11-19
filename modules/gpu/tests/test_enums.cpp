@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 
 namespace radray::gpu {
-TEST(GpuContract, BindingQueriesAndFormattingLinkWithoutImplementation) {
+TEST(GpuContract, BindingQueriesAndFormatting) {
     EXPECT_EQ(GetBindingRegisterClass(BindingKind::RWStructuredBuffer), BindingRegisterClass::UAV);
     EXPECT_TRUE(CanBeRootDescriptor(BindingKind::CBuffer));
     EXPECT_FALSE(CanBeRootDescriptor(BindingKind::Texture));

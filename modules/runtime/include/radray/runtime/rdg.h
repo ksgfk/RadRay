@@ -2,17 +2,27 @@
 
 // 渲染图、上传与槽位所有权契约见 docs/architecture/runtime.md。
 
+#include <cstddef>
 #include <limits>
+#include <memory>
+#include <memory_resource>
+#include <new>
 #include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
+#include <typeindex>
+#include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <radray/nullable.h>
+#include <radray/scope_guard.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/mesh_draw_command.h>
 #include <radray/types.h>
+#include <radray/viewport.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/gpu/types.h>
 #include <radray/runtime/frame_slot.h>
@@ -20,8 +30,45 @@
 
 namespace radray {
 
-class GpuBuffer;
-class GpuTexture;
+using RDGTextureViewDescriptor = GpuTextureViewKey;
+
+class RDGAttachmentSlice {
+public:
+    uint32_t MipLevel{0};
+    uint32_t BaseArrayLayer{0};
+    uint32_t ArrayLayerCount{gpu::SubresourceRange::All};
+    constexpr gpu::SubresourceRange ToSubresourceRange(gpu::TextureAspects aspects = {}) const noexcept {
+        return {BaseArrayLayer, ArrayLayerCount, MipLevel, 1, aspects};
+    }
+    friend constexpr bool operator==(const RDGAttachmentSlice&, const RDGAttachmentSlice&) noexcept = default;
+};
+
+class RDGBlackboard final {
+public:
+    explicit RDGBlackboard(FrameSlot& slot);
+    RDGBlackboard(const RDGBlackboard&) = delete;
+    RDGBlackboard& operator=(const RDGBlackboard&) = delete;
+
+    template <class T, class... Args>
+    Nullable<T*> Emplace(Args&&... args) {
+        const std::type_index key{typeid(T)};
+        if (!_entries.try_emplace(key, nullptr).second) return nullptr;
+        auto rollback = MakeScopeGuard([&]() noexcept { _entries.erase(key); });
+        auto* value = _slot.Emplace<T>(std::forward<Args>(args)...);
+        _entries.at(key) = value;
+        rollback.Dismiss();
+        return value;
+    }
+
+    template <class T>
+    Nullable<T*> Get() const noexcept {
+        const auto entry = _entries.find(typeid(T));
+        return entry == _entries.end() ? nullptr : static_cast<T*>(entry->second);
+    }
+private:
+    FrameSlot& _slot;
+    std::pmr::unordered_map<std::type_index, void*> _entries;
+};
 
 struct RDGDeviceConstraints {
     uint64_t BufferCopyAlignment{1};
@@ -38,12 +85,6 @@ struct RDGDeviceConstraints {
 
 struct RDGCompileOptions {
     bool FullValidation{true};
-};
-
-struct RDGBufferSlice {
-    Nullable<gpu::Buffer*> Buffer{nullptr};
-    uint64_t Offset{0};
-    uint64_t Size{0};
 };
 
 struct RDGDynamicBufferDescriptor {
@@ -71,6 +112,7 @@ struct RDGUploadWriteContext {
     uint64_t RowPitch{0};
     uint64_t RowBytes{0};
     uint32_t Rows{1};
+    uint32_t Depth{1};  // Rows is the number of block rows per tightly staged slice.
 };
 
 class RDGUploadSource final {
@@ -95,32 +137,73 @@ public:
             bool (*Write)(const T&, RDGUploadWriteContext&) noexcept;
             Nullable<uint64_t (*)(T&, RDGUploadPrepareContext&) noexcept> Layout;
         };
+        constexpr bool kInlineGenerator = sizeof(Generator) <= 64 &&
+                                          alignof(Generator) <= alignof(std::max_align_t) &&
+                                          std::is_nothrow_move_constructible_v<Generator>;
         RDGUploadSource result;
         result._maxSize = maxSize;
-        auto owner = unique_ptr<void, void (*)(void*) noexcept>{
-            new Generator{std::move(context), write, layout},
-            [](void* ptr) noexcept { delete static_cast<Generator*>(ptr); }};
-        auto& source = result._storage.emplace<GeneratedSource>(GeneratedSource{std::move(owner)});
-        source.Layout = [](void* ptr, RDGUploadPrepareContext& ctx, uint64_t maximum) noexcept {
-            auto& generator = *static_cast<Generator*>(ptr);
-            return generator.Layout ? generator.Layout.Get()(generator.Context, ctx) : maximum;
-        };
-        source.Write = [](const void* ptr, RDGUploadWriteContext& ctx) noexcept {
-            const auto& generator = *static_cast<const Generator*>(ptr);
-            return generator.Write(generator.Context, ctx);
-        };
+        auto& source = result._storage.emplace<GeneratedSource>();
+        if constexpr (kInlineGenerator) {
+            ::new (static_cast<void*>(source.Storage)) Generator{std::move(context), write, layout};
+            source.Layout = [](void* ptr, RDGUploadPrepareContext& ctx, uint64_t maximum) noexcept {
+                auto& generator = *std::launder(reinterpret_cast<Generator*>(ptr));
+                return generator.Layout ? generator.Layout.Get()(generator.Context, ctx) : maximum;
+            };
+            source.Write = [](const void* ptr, RDGUploadWriteContext& ctx) noexcept {
+                const auto& generator = *std::launder(reinterpret_cast<const Generator*>(ptr));
+                return generator.Write(generator.Context, ctx);
+            };
+            source.Move = [](void* dst, void* src) noexcept {
+                auto* from = std::launder(reinterpret_cast<Generator*>(src));
+                ::new (dst) Generator(std::move(*from));
+                std::destroy_at(from);
+            };
+            source.Destroy = [](void* ptr) noexcept {
+                std::destroy_at(std::launder(reinterpret_cast<Generator*>(ptr)));
+            };
+        } else {
+            auto* heapPtr = new Generator{std::move(context), write, layout};
+            ::new (static_cast<void*>(source.Storage)) Generator*(heapPtr);
+            source.Layout = [](void* ptr, RDGUploadPrepareContext& ctx, uint64_t maximum) noexcept {
+                auto* generator = *std::launder(reinterpret_cast<Generator**>(ptr));
+                return generator->Layout ? generator->Layout.Get()(generator->Context, ctx) : maximum;
+            };
+            source.Write = [](const void* ptr, RDGUploadWriteContext& ctx) noexcept {
+                const auto* generator = *std::launder(reinterpret_cast<Generator* const*>(ptr));
+                return generator->Write(generator->Context, ctx);
+            };
+            source.Move = [](void* dst, void* src) noexcept {
+                auto* generator = *std::launder(reinterpret_cast<Generator**>(src));
+                ::new (dst) Generator*(generator);
+            };
+            source.Destroy = [](void* ptr) noexcept {
+                auto* generator = *std::launder(reinterpret_cast<Generator**>(ptr));
+                delete generator;
+            };
+        }
         return result;
     }
     uint64_t GetMaxSize() const noexcept;
     uint64_t PrepareLayout(RDGUploadPrepareContext& context) noexcept;
-    bool Write(RDGUploadWriteContext& context, uint64_t sourceRowPitch = 0) const noexcept;
+    bool Write(RDGUploadWriteContext& context, uint64_t sourceRowPitch = 0, uint32_t sourceRowsPerImage = 0) const noexcept;
     void ReleaseSource() noexcept;
 
 private:
-    struct GeneratedSource {
-        unique_ptr<void, void (*)(void*) noexcept> Context;
+    class GeneratedSource final {
+    public:
+        GeneratedSource() noexcept = default;
+        GeneratedSource(GeneratedSource&& other) noexcept;
+        GeneratedSource& operator=(GeneratedSource&& other) noexcept;
+        GeneratedSource(const GeneratedSource&) = delete;
+        GeneratedSource& operator=(const GeneratedSource&) = delete;
+        ~GeneratedSource() noexcept;
+        void Reset() noexcept;
+
+        alignas(std::max_align_t) byte Storage[64]{};
         Nullable<uint64_t (*)(void*, RDGUploadPrepareContext&, uint64_t) noexcept> Layout{nullptr};
         Nullable<bool (*)(const void*, RDGUploadWriteContext&) noexcept> Write{nullptr};
+        void (*Move)(void*, void*) noexcept {nullptr};
+        void (*Destroy)(void*) noexcept {nullptr};
     };
     std::variant<std::span<const byte>, vector<byte>, GeneratedSource> _storage;
     uint64_t _maxSize{0};
@@ -128,21 +211,77 @@ private:
 
 class RDGTextureUploadSource final {
 public:
-    static RDGTextureUploadSource BorrowedBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0) noexcept;
-    static RDGTextureUploadSource OwnedBytes(vector<byte>&& bytes, uint64_t sourceRowPitch = 0) noexcept;
-    static RDGTextureUploadSource SnapshotBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0);
+    static RDGTextureUploadSource BorrowedBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0, uint32_t rowsPerImage = 0) noexcept;
+    static RDGTextureUploadSource OwnedBytes(vector<byte>&& bytes, uint64_t sourceRowPitch = 0, uint32_t rowsPerImage = 0) noexcept;
+    static RDGTextureUploadSource SnapshotBytes(std::span<const byte> bytes, uint64_t sourceRowPitch = 0, uint32_t rowsPerImage = 0);
     template <class T>
     static RDGTextureUploadSource Generated(uint64_t size, T data, bool (*write)(const T&, RDGUploadWriteContext&) noexcept) {
         return {RDGUploadSource::Generated(size, std::move(data), write), 0};
     }
     RDGUploadSource Source;
     uint64_t SourceRowPitch;
+    uint32_t RowsPerImage{0};
 };
 
 namespace detail {
+inline constexpr uint32_t kRDGLinearAccessThreshold = 16;
+inline constexpr uint32_t kRDGInvalidAccessSlot = std::numeric_limits<uint32_t>::max();
+
+struct RDGAccess {
+    bool Texture{false};
+    uint32_t Index{0};
+    uint32_t State{0};
+    bool Read{false};
+    bool Write{false};
+    bool Preserve{false};
+};
+
+class RDGAccessTable {
+public:
+    explicit RDGAccessTable(std::pmr::memory_resource* memory) noexcept;
+    RDGAccessTable(RDGAccessTable&&) noexcept = default;
+    RDGAccessTable& operator=(RDGAccessTable&&) = default;
+    RDGAccessTable(const RDGAccessTable&) = delete;
+    RDGAccessTable& operator=(const RDGAccessTable&) = delete;
+
+    Nullable<RDGAccess*> Find(bool texture, uint32_t index) noexcept;
+    Nullable<const RDGAccess*> Find(bool texture, uint32_t index) const noexcept;
+    std::pair<RDGAccess*, bool> FindOrEmplace(const RDGAccess& access);
+
+    std::pmr::vector<RDGAccess> Accesses;
+    std::pmr::vector<uint32_t> AccessBuckets;
+
+private:
+    void Rehash(size_t bucketCount);
+};
+
 struct RDGData;
 struct RDGExecution;
+class ErasedPassCallback final {
+public:
+    ErasedPassCallback() noexcept = default;
+    ErasedPassCallback(void* instance, void (*destroy)(void*) noexcept) noexcept;
+    ErasedPassCallback(ErasedPassCallback&& other) noexcept;
+    ErasedPassCallback& operator=(ErasedPassCallback&& other) noexcept;
+    ErasedPassCallback(const ErasedPassCallback&) = delete;
+    ErasedPassCallback& operator=(const ErasedPassCallback&) = delete;
+    ~ErasedPassCallback() noexcept;
+    void* Get() const noexcept;
+    void Reset() noexcept;
+
+private:
+    void* _instance{nullptr};
+    void (*_destroy)(void*) noexcept {nullptr};
+};
+RDGDeviceConstraints QueryRDGDeviceConstraints(const gpu::Device& device) noexcept;
 }  // namespace detail
+
+class RDGPassHandle {
+public:
+    uint32_t Index{std::numeric_limits<uint32_t>::max()};
+    constexpr bool IsValid() const noexcept { return Index != std::numeric_limits<uint32_t>::max(); }
+    friend constexpr bool operator==(RDGPassHandle, RDGPassHandle) = default;
+};
 
 class RDGTextureHandle {
 public:
@@ -197,6 +336,7 @@ public:
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
     gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept;
 
 private:
     detail::RDGExecution& _execution;
@@ -212,6 +352,7 @@ public:
     gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
     Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept;
 
 private:
     friend class CompiledRDG;
@@ -229,6 +370,7 @@ public:
     gpu::Texture& Resolve(RDGTextureHandle handle) const noexcept;
     RDGBufferSlice ResolveBuffer(RDGBufferHandle handle) const noexcept;
     Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept;
+    Nullable<gpu::TextureView*> ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept;
 
 private:
     friend class CompiledRDG;
@@ -254,6 +396,8 @@ private:
 
 class RDGRasterPassBuilder final {
 public:
+    RDGPassHandle GetHandle() const noexcept;
+    RDGRasterPassBuilder& SetRenderArea(Rect area);
     RDGRasterPassBuilder& UseMeshPass(MeshPassId pass);
     RDGRasterPassBuilder& ReadBuffer(RDGBufferHandle buffer, gpu::BufferStates state);
     RDGRasterPassBuilder& WriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
@@ -263,11 +407,23 @@ public:
     RDGRasterPassBuilder& ReadWriteTexture(RDGTextureHandle texture, gpu::TextureState state = gpu::TextureState::UnorderedAccess);
     RDGRasterPassBuilder& WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
                                      gpu::ColorClearValue clear = {}, Nullable<gpu::TextureView*> explicitView = nullptr);
+    RDGRasterPassBuilder& WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                     gpu::ColorClearValue clear, gpu::SubresourceRange range);
+    RDGRasterPassBuilder& WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                     gpu::ColorClearValue clear, RDGAttachmentSlice slice);
     RDGRasterPassBuilder& SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
                                           gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
                                           gpu::LoadAction stencilLoad = gpu::LoadAction::DontCare,
                                           gpu::StoreAction stencilStore = gpu::StoreAction::Discard,
                                           gpu::DepthStencilClearValue clear = {}, Nullable<gpu::TextureView*> explicitView = nullptr);
+    RDGRasterPassBuilder& SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
+                                          gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
+                                          gpu::LoadAction stencilLoad, gpu::StoreAction stencilStore,
+                                          gpu::DepthStencilClearValue clear, gpu::SubresourceRange range);
+    RDGRasterPassBuilder& SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
+                                          gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
+                                          gpu::LoadAction stencilLoad, gpu::StoreAction stencilStore,
+                                          gpu::DepthStencilClearValue clear, RDGAttachmentSlice slice);
     RDGRasterPassBuilder& NeverCull() noexcept;
 
 private:
@@ -279,6 +435,7 @@ private:
 
 class RDGComputePassBuilder final {
 public:
+    RDGPassHandle GetHandle() const noexcept;
     RDGComputePassBuilder& ReadBuffer(RDGBufferHandle buffer, gpu::BufferStates state = gpu::BufferState::ShaderRead);
     RDGComputePassBuilder& WriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
     RDGComputePassBuilder& ReadWriteBuffer(RDGBufferHandle buffer, gpu::BufferState state = gpu::BufferState::UnorderedAccess);
@@ -296,6 +453,7 @@ private:
 
 class RDGCopyPassBuilder final {
 public:
+    RDGPassHandle GetHandle() const noexcept;
     RDGCopyPassBuilder& ReadTexture(RDGTextureHandle texture);
     RDGCopyPassBuilder& WriteTexture(RDGTextureHandle texture);
     RDGCopyPassBuilder& ReadBuffer(RDGBufferHandle buffer);
@@ -317,7 +475,9 @@ public:
     // 失败使本帧不可恢复；不支持重试、状态回滚或部分提交。
     ~CompiledRDG() noexcept;
     bool Prepare(FrameSlot& slot, RDGTransientResourcePool& transientPool, UploadArena& uploadArena) noexcept;
-    bool Record(gpu::CommandBuffer& commandBuffer) noexcept;
+    // 计时查询 0/1 保留给整帧，之后按实际 GPU 录制顺序每个 Pass 两项。
+    vector<string> GetRecordedPassNames() const;
+    bool Record(gpu::CommandBuffer& commandBuffer, Nullable<gpu::QueryPool*> passTimestamps = nullptr) noexcept;
     void CommitSubmittedStates() noexcept;
 
 private:
@@ -344,7 +504,8 @@ public:
 class RDGBuilder final {
 public:
     // 要求当前槽已 BeginFrame；图声明、编译和 Prepare 使用同一槽。
-    explicit RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints = {}, RDGCompileOptions options = {}) noexcept;
+    explicit RDGBuilder(FrameSlot& slot, RDGCompileOptions options = {}) noexcept;
+    RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints, RDGCompileOptions options = {}) noexcept;
     RDGBuilder(const RDGBuilder&) = delete;
     RDGBuilder& operator=(const RDGBuilder&) = delete;
 
@@ -353,14 +514,26 @@ public:
     RDGBufferHandle ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates initialState,
                                  std::optional<gpu::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGTextureHandle CreateTexture(const gpu::TextureDescriptor& desc);
+    RDGBlackboard& GetBlackboard() noexcept;
+    std::optional<gpu::TextureDescriptor> GetTextureDescriptor(RDGTextureHandle texture) const noexcept;
+    RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value);
+    RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value, gpu::SubresourceRange range, std::optional<Rect> renderArea = std::nullopt);
+    RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value, RDGAttachmentSlice slice, std::optional<Rect> renderArea = std::nullopt);
+    RDGPassHandle AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, bool clearDepth = true, bool clearStencil = true);
+    RDGPassHandle AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, gpu::SubresourceRange range,
+                                       bool clearDepth = true, bool clearStencil = true, std::optional<Rect> renderArea = std::nullopt);
+    RDGPassHandle AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, RDGAttachmentSlice slice,
+                                       bool clearDepth = true, bool clearStencil = true, std::optional<Rect> renderArea = std::nullopt);
     RDGBufferHandle CreateBuffer(const gpu::BufferDescriptor& desc);
     RDGBufferHandle CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
     RDGBufferHandle ImportPersistentBorrowed(GpuBuffer& buffer);
     RDGTextureHandle ImportPersistentBorrowed(GpuTexture& texture);
     RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuBuffer>& buffer);
     RDGTextureHandle ImportPersistentOwned(const IntrusivePtr<GpuTexture>& texture);
-    void UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGUploadSource source);
-    void UploadTexture(RDGTextureHandle dst, const gpu::TextureRegion2D& region, RDGTextureUploadSource source);
+    RDGPassHandle UploadBuffer(RDGBufferHandle dst, uint64_t dstOffset, RDGUploadSource source);
+    RDGPassHandle UploadTexture(RDGTextureHandle dst, const gpu::TextureRegion2D& region, RDGTextureUploadSource source);
+    void AddOrderDependency(RDGPassHandle before, RDGPassHandle after);
+    void AddOrderBarrier(RDGPassHandle barrier);
     void MarkOutput(RDGTextureHandle texture);
     void MarkOutput(RDGBufferHandle buffer);
 
@@ -374,12 +547,18 @@ public:
             bool (*Record)(const T&, RDGRasterPassContext&) noexcept;
             Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
         };
-        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        std::pmr::polymorphic_allocator<> allocator{&_slot.GetMemoryResource()};
+        void* storage = allocator.allocate_bytes(sizeof(Callback), alignof(Callback));
+        auto* instance = ::new (storage) Callback{std::move(data), record, prepare};
+        constexpr void (*destroy)(void*) noexcept = std::is_trivially_destructible_v<Callback>
+                                                        ? nullptr
+                                                        : +[](void* ptr) noexcept { std::destroy_at(static_cast<Callback*>(ptr)); };
+        detail::ErasedPassCallback callback{instance, destroy};
         const auto index = AddRasterPassImpl(name, std::move(callback), [](const void* value, RDGRasterPassContext& context) noexcept {
-                const auto& callback = *static_cast<const Callback*>(value);
-                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
-                auto& callback = *static_cast<Callback*>(value);
-                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+                const auto& cb = *static_cast<const Callback*>(value);
+                return cb.Record(cb.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& cb = *static_cast<Callback*>(value);
+                return !cb.Prepare || cb.Prepare.Get()(cb.Data, context); });
         return {_data, index};
     }
 
@@ -393,12 +572,18 @@ public:
             bool (*Record)(const T&, RDGComputePassContext&) noexcept;
             Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
         };
-        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        std::pmr::polymorphic_allocator<> allocator{&_slot.GetMemoryResource()};
+        void* storage = allocator.allocate_bytes(sizeof(Callback), alignof(Callback));
+        auto* instance = ::new (storage) Callback{std::move(data), record, prepare};
+        constexpr void (*destroy)(void*) noexcept = std::is_trivially_destructible_v<Callback>
+                                                        ? nullptr
+                                                        : +[](void* ptr) noexcept { std::destroy_at(static_cast<Callback*>(ptr)); };
+        detail::ErasedPassCallback callback{instance, destroy};
         const auto index = AddComputePassImpl(name, std::move(callback), [](const void* value, RDGComputePassContext& context) noexcept {
-                const auto& callback = *static_cast<const Callback*>(value);
-                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
-                auto& callback = *static_cast<Callback*>(value);
-                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+                const auto& cb = *static_cast<const Callback*>(value);
+                return cb.Record(cb.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& cb = *static_cast<Callback*>(value);
+                return !cb.Prepare || cb.Prepare.Get()(cb.Data, context); });
         return {_data, index};
     }
 
@@ -412,12 +597,18 @@ public:
             bool (*Record)(const T&, RDGCopyPassContext&) noexcept;
             Nullable<bool (*)(T&, RDGPrepareContext&) noexcept> Prepare;
         };
-        auto callback = make_shared<Callback>(Callback{std::move(data), record, prepare});
+        std::pmr::polymorphic_allocator<> allocator{&_slot.GetMemoryResource()};
+        void* storage = allocator.allocate_bytes(sizeof(Callback), alignof(Callback));
+        auto* instance = ::new (storage) Callback{std::move(data), record, prepare};
+        constexpr void (*destroy)(void*) noexcept = std::is_trivially_destructible_v<Callback>
+                                                        ? nullptr
+                                                        : +[](void* ptr) noexcept { std::destroy_at(static_cast<Callback*>(ptr)); };
+        detail::ErasedPassCallback callback{instance, destroy};
         const auto index = AddCopyPassImpl(name, std::move(callback), [](const void* value, RDGCopyPassContext& context) noexcept {
-                const auto& callback = *static_cast<const Callback*>(value);
-                return callback.Record(callback.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
-                auto& callback = *static_cast<Callback*>(value);
-                return !callback.Prepare || callback.Prepare.Get()(callback.Data, context); });
+                const auto& cb = *static_cast<const Callback*>(value);
+                return cb.Record(cb.Data, context); }, [](void* value, RDGPrepareContext& context) noexcept {
+                auto& cb = *static_cast<Callback*>(value);
+                return !cb.Prepare || cb.Prepare.Get()(cb.Data, context); });
         return {_data, index};
     }
 
@@ -425,11 +616,12 @@ public:
     Nullable<CompiledRDG*> Compile();
 
 private:
-    uint32_t AddRasterPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGRasterPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
-    uint32_t AddComputePassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGComputePassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
-    uint32_t AddCopyPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGCopyPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    uint32_t AddRasterPassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGRasterPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    uint32_t AddComputePassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGComputePassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
+    uint32_t AddCopyPassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGCopyPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept);
     FrameSlot& _slot;
     detail::RDGData& _data;
+    RDGBlackboard& _blackboard;
 };
 
 }  // namespace radray

@@ -8,22 +8,20 @@
 namespace radray {
 
 RDGDeviceConstraints DeviceContext::GetRDGConstraints() const noexcept {
-    const auto detail = _device->GetDetail();
-    const auto& limits = _device->GetCapabilities().Limits;
-    return {detail.BufferCopyOffsetAlignment, detail.TextureDataPlacementAlignment, detail.TextureDataPitchAlignment,
-            detail.CBufferAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment,
-            limits.TexelBufferOffsetAlignment, limits.MaxBufferSize, limits.MaxUniformBufferRange, limits.MaxStorageBufferRange};
+    return detail::QueryRDGDeviceConstraints(*_device);
 }
 
 DeviceContext::DeviceContext(
     shared_ptr<gpu::Device> device,
     gpu::CommandQueue* directQueue) noexcept
     : _device(std::move(device)),
-      _directQueue(directQueue) {}
+      _directQueue(directQueue),
+      _pipelineCache(_device ? _device->CreatePipelineCache().Release() : nullptr) {}
 
 DeviceContext::~DeviceContext() noexcept {
     RADRAY_INFO_LOG("DeviceContext: waiting for Direct queue");
     _directQueue->Wait();
+    _pipelineCache.reset();
     _device.reset();
 }
 
@@ -40,7 +38,7 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
 
     switch (backend) {
 #if defined(RADRAY_ENABLE_D3D12)
-        case gpu::RenderBackend::D3D12: {
+        case gpu::GpuBackend::D3D12: {
             auto* factory = &environment.GetFactory();
             auto adapter = factory->SelectHighPerformanceAdapter();
             if (!adapter) {
@@ -62,7 +60,7 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
         }
 #endif
 #if defined(RADRAY_ENABLE_VULKAN)
-        case gpu::RenderBackend::Vulkan: {
+        case gpu::GpuBackend::Vulkan: {
             auto* instance = &environment.GetVulkanInstance();
             auto adapter = instance->SelectHighPerformancePhysicalDevice();
             if (!adapter) {
@@ -100,7 +98,7 @@ Nullable<unique_ptr<DeviceContext>> DeviceContext::Create(
     }
     RADRAY_INFO_LOG("DeviceContext: ready backend={} GPU={} Direct queues=1 RHI validation={} driver validation={}",
                     runtime->_device->GetBackend(), runtime->_device->GetCapabilities().Detail.GpuName,
-                    gpu::RhiValidationOptions{}.IsEnabled, environment.IsValidationEnabled());
+                    gpu::GpuValidationOptions{}.IsEnabled, environment.IsValidationEnabled());
     return runtime;
 }
 
@@ -110,6 +108,14 @@ gpu::Device& DeviceContext::GetDevice() noexcept {
 
 gpu::CommandQueue& DeviceContext::GetQueue() noexcept {
     return *_directQueue;
+}
+
+Nullable<gpu::PipelineCache*> DeviceContext::GetPipelineCache() const noexcept {
+    return _pipelineCache.get();
+}
+
+vector<byte> DeviceContext::GetPipelineCacheData() const noexcept {
+    return _pipelineCache ? _pipelineCache->GetData() : vector<byte>{};
 }
 
 }  // namespace radray

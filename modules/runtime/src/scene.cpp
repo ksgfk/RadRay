@@ -9,19 +9,8 @@
 namespace radray {
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
-    if (!_materials.IsAlive(batch.Material._handle) || batch.Elements.size() > 32) return false;
-    const bool draws = std::any_of(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0 && element.InstanceCount != 0; });
-    if (draws && (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, true))) return false;
-    for (const auto& element : batch.Elements) {
-        if (element.IndexCount == 0 || element.InstanceCount == 0) continue;
-        if (!element.IndexBuffer || !element.IndexBuffer->IsValid() || (element.IndexStride != 2 && element.IndexStride != 4) ||
-            element.IndexBufferOffset % element.IndexStride != 0 ||
-            uint64_t{element.FirstInstance} + element.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
-        const auto desc = element.IndexBuffer->GetDesc();
-        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
-            uint64_t{element.IndexBufferOffset} + (uint64_t{element.FirstIndex} + element.IndexCount) * element.IndexStride > desc.Size) return false;
-    }
-    return true;
+    if (!_materials.IsAlive(batch.Material._handle)) return false;
+    return ValidateMeshBatchElements(batch, true);
 }
 
 void Scene::Reserve(uint32_t primitives, uint32_t batches, uint32_t materials) {
@@ -209,50 +198,87 @@ void Scene::SyncCachedMeshDrawCommands(std::span<const MeshPassRegistration> pas
     _dirtyCount = 0;
 }
 
+bool Scene::GatherVisibleBatch(MeshPassSortMode sortMode,
+                               std::span<const PassBatchCacheSlot> batchSlots,
+                               std::span<const MeshDrawCommand> commands,
+                               const VisibleMeshBatch& visible,
+                               vector<VisibleMeshDrawCommand>& output,
+                               size_t initialSize) const {
+    const uint32_t batchIndex = visible.Batch.GetIndex();
+    if (!_meshes.IsAlive(visible.Batch._handle) || _batchDirty[batchIndex]) {
+        output.resize(initialSize);
+        return false;
+    }
+    if (batchIndex >= batchSlots.size()) return true;
+    const auto& slot = batchSlots[batchIndex];
+    if (slot.CommandDenseIndex == kInvalidBindingIndex) return true;
+    const auto& command = commands[slot.CommandDenseIndex];
+    const auto mask = visible.ElementMask & command.ValidElementMask;
+    if (!mask) return true;
+    output.push_back({.SortKey = ComposeMeshDrawSortKey(sortMode, slot.StateSortKey, visible.VisibilitySortKey),
+                      .CachedCommand = &command,
+                      .FirstInstance = visible.FirstInstanceOverride.value_or(slot.FirstInstance),
+                      .InstanceCount = visible.InstanceCountOverride.value_or(slot.InstanceCount),
+                      .ElementMask = mask,
+                      .UseElementFirstInstance = !visible.FirstInstanceOverride.has_value(),
+                      .UseElementInstanceCount = !visible.InstanceCountOverride.has_value()});
+    return true;
+}
+
 bool Scene::GatherVisibleMeshDrawCommands(MeshPassId pass, std::span<const VisibleMeshBatch> visibleBatches, vector<VisibleMeshDrawCommand>& output) const {
     RADRAY_PROFILE_SCOPE_N("RadRay.Scene.GatherVisibleHandles");
     RADRAY_PROFILE_PLOT("RadRay.Scene.VisibleBatches", static_cast<int64_t>(visibleBatches.size()));
     const auto initialSize = output.size();
-    const auto required = initialSize + visibleBatches.size();
-    if (output.capacity() < required) output.reserve(std::max(required, output.capacity() + output.capacity() / 2));
     const auto cache = GetPassCache(pass);
+    const auto sortMode = cache ? cache->GetSortMode() : MeshPassSortMode::StateFirst;
+    const std::span<const PassBatchCacheSlot> batchSlots =
+        cache ? std::span<const PassBatchCacheSlot>{cache->_batchSlots} : std::span<const PassBatchCacheSlot>{};
+    const std::span<const MeshDrawCommand> commands =
+        cache ? std::span<const MeshDrawCommand>{cache->_commands} : std::span<const MeshDrawCommand>{};
+    if (cache) {
+        const auto required = initialSize + visibleBatches.size();
+        if (output.capacity() < required) output.reserve(std::max(required, output.capacity() + output.capacity() / 2));
+    }
     for (const auto& visible : visibleBatches) {
-        if (!_meshes.IsAlive(visible.Batch._handle) || _batchDirty[visible.Batch.GetIndex()]) {
-            output.resize(initialSize);
-            return false;
-        }
-        const auto slot = cache ? cache->GetBatchSlot(visible.Batch.GetIndex()) : nullptr;
-        if (!slot || slot->CommandDenseIndex == kInvalidBindingIndex) continue;
-        const auto& command = cache->_commands[slot->CommandDenseIndex];
-        const auto mask = visible.ElementMask & command.ValidElementMask;
-        if (!mask) continue;
-        output.push_back({.SortKey = ComposeMeshDrawSortKey(cache->_sortMode, slot->StateSortKey, visible.VisibilitySortKey),
-                          .CachedCommand = &command,
-                          .FirstInstance = visible.FirstInstanceOverride.value_or(slot->FirstInstance),
-                          .InstanceCount = visible.InstanceCountOverride.value_or(slot->InstanceCount),
-                          .ElementMask = mask,
-                          .UseElementFirstInstance = !visible.FirstInstanceOverride.has_value(),
-                          .UseElementInstanceCount = !visible.InstanceCountOverride.has_value()});
+        if (!GatherVisibleBatch(sortMode, batchSlots, commands, visible, output, initialSize)) return false;
     }
     return true;
 }
 
 bool Scene::GatherVisiblePrimitives(MeshPassId pass, std::span<const PrimitiveHandle> visiblePrimitives,
                                     vector<VisibleMeshDrawCommand>& outCommands) const {
+    RADRAY_PROFILE_SCOPE_N("RadRay.Scene.GatherVisibleHandles");
     const auto initialSize = outCommands.size();
+    const auto cache = GetPassCache(pass);
+    const auto sortMode = cache ? cache->GetSortMode() : MeshPassSortMode::StateFirst;
+    const std::span<const PassBatchCacheSlot> batchSlots =
+        cache ? std::span<const PassBatchCacheSlot>{cache->_batchSlots} : std::span<const PassBatchCacheSlot>{};
+    const std::span<const MeshDrawCommand> commands =
+        cache ? std::span<const MeshDrawCommand>{cache->_commands} : std::span<const MeshDrawCommand>{};
+    if (cache) {
+        const auto required = initialSize + visiblePrimitives.size();
+        if (outCommands.capacity() < required) outCommands.reserve(std::max(required, outCommands.capacity() + outCommands.capacity() / 2));
+    }
+#ifdef RADRAY_ENABLE_PROFILER
+    size_t visitedBatches = 0;
+#endif
     for (const auto handle : visiblePrimitives) {
         if (!_primitives.IsAlive(handle._handle)) {
             outCommands.resize(initialSize);
             return false;
         }
-        for (const auto batch : _primitives.Get(handle._handle).Meshes) {
+        const auto& meshes = _primitives.Get(handle._handle).Meshes;
+#ifdef RADRAY_ENABLE_PROFILER
+        visitedBatches += meshes.size();
+#endif
+        for (const auto batch : meshes) {
             const VisibleMeshBatch visible{.Batch = batch};
-            if (!GatherVisibleMeshDrawCommands(pass, std::span{&visible, 1}, outCommands)) {
-                outCommands.resize(initialSize);
-                return false;
-            }
+            if (!GatherVisibleBatch(sortMode, batchSlots, commands, visible, outCommands, initialSize)) return false;
         }
     }
+#ifdef RADRAY_ENABLE_PROFILER
+    RADRAY_PROFILE_PLOT("RadRay.Scene.VisibleBatches", static_cast<int64_t>(visitedBatches));
+#endif
     return true;
 }
 

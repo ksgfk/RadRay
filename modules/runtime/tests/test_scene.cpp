@@ -713,5 +713,213 @@ TEST_F(SceneTest, RemovedDepthPassDoesNotChangeExistingFrameSortMode) {
     EXPECT_EQ(list.GetSortMode(), MeshPassSortMode::StateFirst);
 }
 
+TEST_F(SceneTest, NonIndexedBatchFullPipelineMergingAndValidationBoundaries) {
+    class MergingProcessor final : public MeshPassProcessor {
+    public:
+        explicit MergingProcessor(gpu::GraphicsPipelineState& pipeline) noexcept : _pipeline(&pipeline) {}
+        void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
+            BuildMeshDrawCommands(context, {.Pipeline = _pipeline, .AllowElementMerging = true}, output);
+        }
+
+    private:
+        gpu::GraphicsPipelineState* _pipeline;
+    };
+
+    // 1. 拒绝混用有索引与无索引元素、非零 IndexBufferOffset/VertexOffset 以及顶点越界。
+    {
+        MeshBatch mixed;
+        mixed.Material = Material;
+        mixed.VertexInput = &Input;
+        mixed.Elements.push_back({.IndexBuffer = &Indices, .FirstIndex = 0, .IndexCount = 3});
+        mixed.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(mixed)).IsValid());
+
+        MeshBatch badOffset;
+        badOffset.Material = Material;
+        badOffset.VertexInput = &Input;
+        badOffset.Elements.push_back({.IndexBuffer = nullptr, .IndexBufferOffset = 4, .FirstIndex = 0, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(badOffset)).IsValid());
+
+        MeshBatch badVertexOffset;
+        badVertexOffset.Material = Material;
+        badVertexOffset.VertexInput = &Input;
+        badVertexOffset.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3, .VertexOffset = 1});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(badVertexOffset)).IsValid());
+
+        // Input.Streams[0] = 48 B, stride 12 => 4 vertices max; FirstIndex=2, IndexCount=3 needs 5 vertices.
+        MeshBatch oobVertices;
+        oobVertices.Material = Material;
+        oobVertices.VertexInput = &Input;
+        oobVertices.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 2, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(oobVertices)).IsValid());
+    }
+
+    // 2. 全链路无索引 TriangleList 连续单实例合并。
+    Vertices.Desc.Size = 256;
+    Input.Streams[0].Size = 144;  // 12 vertices at stride 12
+    MeshBatch mergedBatch;
+    mergedBatch.Material = Material;
+    mergedBatch.VertexInput = &Input;
+    mergedBatch.Topology = gpu::PrimitiveTopology::TriangleList;
+    mergedBatch.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3});
+    mergedBatch.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 3, .IndexCount = 3});
+    const auto mergedHandle = World.AddMeshBatch(Primitive, mergedBatch);
+    ASSERT_TRUE(mergedHandle.IsValid());
+
+    // 3. TriangleStrip、非完整图元、不同 FirstInstance 均不合并。
+    MeshBatch stripBatch = mergedBatch;
+    stripBatch.Topology = gpu::PrimitiveTopology::TriangleStrip;
+    const auto stripHandle = World.AddMeshBatch(Primitive, stripBatch);
+    ASSERT_TRUE(stripHandle.IsValid());
+
+    MeshBatch incompleteBatch = mergedBatch;
+    incompleteBatch.Elements[0].IndexCount = 2;
+    incompleteBatch.Elements[1].FirstIndex = 2;
+    incompleteBatch.Elements[1].IndexCount = 3;
+    const auto incompleteHandle = World.AddMeshBatch(Primitive, incompleteBatch);
+    ASSERT_TRUE(incompleteHandle.IsValid());
+
+    MeshBatch diffInstanceBatch = mergedBatch;
+    diffInstanceBatch.Elements[1].FirstInstance = 1;
+    const auto diffInstanceHandle = World.AddMeshBatch(Primitive, diffInstanceBatch);
+    ASSERT_TRUE(diffInstanceHandle.IsValid());
+
+    MergingProcessor mergingProcessor{Pipeline};
+    const MeshPassRegistration pass{Pass, &mergingProcessor};
+    World.SyncCachedMeshDrawCommands(std::span{&pass, 1});
+
+    const auto submitSingle = [&](MeshBatchHandle handle, test::RecordingEncoder& encoder) {
+        vector<VisibleMeshDrawCommand> visible;
+        const VisibleMeshBatch req{.Batch = handle};
+        EXPECT_TRUE(Gather(std::span{&req, 1}, visible));
+        EXPECT_TRUE(SubmitMeshDrawCommands(encoder, visible));
+    };
+
+    test::RecordingEncoder mergedEnc;
+    submitSingle(mergedHandle, mergedEnc);
+    EXPECT_TRUE(mergedEnc.IndexBuffers.empty());
+    EXPECT_TRUE(mergedEnc.Draws.empty());
+    ASSERT_EQ(mergedEnc.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].VertexCount, 6u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].InstanceCount, 1u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].FirstVertex, 0u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].FirstInstance, 0u);
+
+    test::RecordingEncoder stripEnc;
+    submitSingle(stripHandle, stripEnc);
+    EXPECT_TRUE(stripEnc.IndexBuffers.empty());
+    ASSERT_EQ(stripEnc.NonIndexedDraws.size(), 2u);
+
+    test::RecordingEncoder incompleteEnc;
+    submitSingle(incompleteHandle, incompleteEnc);
+    EXPECT_TRUE(incompleteEnc.IndexBuffers.empty());
+    ASSERT_EQ(incompleteEnc.NonIndexedDraws.size(), 2u);
+
+    test::RecordingEncoder diffInstEnc;
+    submitSingle(diffInstanceHandle, diffInstEnc);
+    EXPECT_TRUE(diffInstEnc.IndexBuffers.empty());
+    ASSERT_EQ(diffInstEnc.NonIndexedDraws.size(), 2u);
+    EXPECT_EQ(diffInstEnc.NonIndexedDraws[0].FirstInstance, 0u);
+    EXPECT_EQ(diffInstEnc.NonIndexedDraws[1].FirstInstance, 1u);
+}
+
+TEST_F(SceneTest, BothGatherEntryPointsValidateHandlesAndDirtyBeforeNullCacheAndSkipFilteredTailBatches) {
+    // 1. 未注册 Pass（cache == nullptr）：干净有效 Batch 返回 true 且输出 0 条；
+    //    混入失效句柄或尚未同步的新脏 Batch 时返回 false 并回滚 output（双入口一致）。
+    {
+        const auto cleanBatch = AddBatch();
+        Sync();
+        constexpr MeshPassId kUnregisteredPass{7};
+        ASSERT_FALSE(World.GetPassCache(kUnregisteredPass));
+
+        vector<VisibleMeshDrawCommand> outBatches(1);
+        outBatches[0].SortKey = 999u;
+        const VisibleMeshBatch cleanReq{.Batch = cleanBatch};
+        EXPECT_TRUE(World.GatherVisibleMeshDrawCommands(kUnregisteredPass, std::span{&cleanReq, 1}, outBatches));
+        EXPECT_EQ(outBatches.size(), 1u);
+        EXPECT_EQ(outBatches[0].SortKey, 999u);
+
+        vector<VisibleMeshDrawCommand> outPrims(1);
+        outPrims[0].SortKey = 888u;
+        EXPECT_TRUE(World.GatherVisiblePrimitives(kUnregisteredPass, std::span{&Primitive, 1}, outPrims));
+        EXPECT_EQ(outPrims.size(), 1u);
+        EXPECT_EQ(outPrims[0].SortKey, 888u);
+
+        // 混入失效句柄 -> 必须返回 false 并保持原有输出不变。
+        const array<VisibleMeshBatch, 2> withStaleBatch{{cleanReq, {.Batch = {}}}};
+        EXPECT_FALSE(World.GatherVisibleMeshDrawCommands(kUnregisteredPass, withStaleBatch, outBatches));
+        EXPECT_EQ(outBatches.size(), 1u);
+        EXPECT_EQ(outBatches[0].SortKey, 999u);
+
+        const array<PrimitiveHandle, 2> withStalePrim{Primitive, {}};
+        EXPECT_FALSE(World.GatherVisiblePrimitives(kUnregisteredPass, withStalePrim, outPrims));
+        EXPECT_EQ(outPrims.size(), 1u);
+        EXPECT_EQ(outPrims[0].SortKey, 888u);
+
+        // 新增未同步的脏 Batch -> 即使目标 Pass 未注册，双入口也必须拒绝并回滚。
+        const auto dirtyPrim = World.AddPrimitive();
+        const auto dirtyBatch = World.AddMeshBatch(dirtyPrim, MakeBatch());
+        ASSERT_TRUE(dirtyBatch.IsValid());
+        const array<VisibleMeshBatch, 2> withDirtyBatch{{cleanReq, {.Batch = dirtyBatch}}};
+        EXPECT_FALSE(World.GatherVisibleMeshDrawCommands(kUnregisteredPass, withDirtyBatch, outBatches));
+        EXPECT_EQ(outBatches.size(), 1u);
+
+        const array<PrimitiveHandle, 2> withDirtyPrim{Primitive, dirtyPrim};
+        EXPECT_FALSE(World.GatherVisiblePrimitives(kUnregisteredPass, withDirtyPrim, outPrims));
+        EXPECT_EQ(outPrims.size(), 1u);
+
+        ASSERT_TRUE(World.RemovePrimitive(dirtyPrim));
+    }
+
+    // 2. 已注册 Pass 下最高编号存活 Batch 被处理器过滤（batchIndex >= _batchSlots.size()）时安全跳过并保留前面命令。
+    {
+        class FilterTailProcessor final : public MeshPassProcessor {
+        public:
+            FilterTailProcessor(gpu::GraphicsPipelineState& pipeline, MaterialProxyHandle accepted) noexcept
+                : _pipeline(&pipeline), _accepted(accepted) {}
+            void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
+                if (context.Batch.Material != _accepted) return;
+                BuildMeshDrawCommands(context, {.Pipeline = _pipeline, .CustomStateSortKey = 5u}, output);
+            }
+
+        private:
+            gpu::GraphicsPipelineState* _pipeline;
+            MaterialProxyHandle _accepted;
+        };
+
+        const auto filteredMat = World.AddMaterial({});
+        const auto primAccepted = World.AddPrimitive();
+        const auto primFilteredTail = World.AddPrimitive();
+        const auto acceptedBatch = World.AddMeshBatch(primAccepted, MakeBatch());
+        auto tailBatchDesc = MakeBatch();
+        tailBatchDesc.Material = filteredMat;
+        const auto filteredTailBatch = World.AddMeshBatch(primFilteredTail, std::move(tailBatchDesc));
+        ASSERT_TRUE(acceptedBatch.IsValid() && filteredTailBatch.IsValid());
+        ASSERT_GT(filteredTailBatch.GetIndex(), acceptedBatch.GetIndex());
+
+        FilterTailProcessor filterProc{Pipeline, Material};
+        const MeshPassRegistration reg{Pass, &filterProc};
+        World.SyncCachedMeshDrawCommands(std::span{&reg, 1});
+        // 确认 filteredTailBatch 未生成槽位（batchIndex >= _batchSlots.size()）。
+        ASSERT_FALSE(World.GetPassCache(Pass)->GetBatchSlot(filteredTailBatch.GetIndex()));
+
+        // 批量入口
+        const array<VisibleMeshBatch, 2> batchReqs{{{.Batch = acceptedBatch, .VisibilitySortKey = 11}, {.Batch = filteredTailBatch, .VisibilitySortKey = 22}}};
+        vector<VisibleMeshDrawCommand> outBatches;
+        ASSERT_TRUE(World.GatherVisibleMeshDrawCommands(Pass, batchReqs, outBatches));
+        ASSERT_EQ(outBatches.size(), 1u);
+        EXPECT_EQ(outBatches[0].CachedCommand.Get(), &CachedCommand(acceptedBatch));
+        EXPECT_EQ(outBatches[0].SortKey, (uint64_t{5} << 32) | 11u);
+
+        // Primitive 入口
+        const array<PrimitiveHandle, 2> primReqs{primAccepted, primFilteredTail};
+        vector<VisibleMeshDrawCommand> outPrims;
+        ASSERT_TRUE(World.GatherVisiblePrimitives(Pass, primReqs, outPrims));
+        ASSERT_EQ(outPrims.size(), 1u);
+        EXPECT_EQ(outPrims[0].CachedCommand.Get(), &CachedCommand(acceptedBatch));
+        EXPECT_EQ(outPrims[0].SortKey, uint64_t{5} << 32);
+    }
+}
+
 }  // namespace
 }  // namespace radray

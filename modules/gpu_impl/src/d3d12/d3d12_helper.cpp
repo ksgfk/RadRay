@@ -338,6 +338,20 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+        case TextureFormat::BC1_UNORM: return DXGI_FORMAT_BC1_UNORM;
+        case TextureFormat::BC1_UNORM_SRGB: return DXGI_FORMAT_BC1_UNORM_SRGB;
+        case TextureFormat::BC2_UNORM: return DXGI_FORMAT_BC2_UNORM;
+        case TextureFormat::BC2_UNORM_SRGB: return DXGI_FORMAT_BC2_UNORM_SRGB;
+        case TextureFormat::BC3_UNORM: return DXGI_FORMAT_BC3_UNORM;
+        case TextureFormat::BC3_UNORM_SRGB: return DXGI_FORMAT_BC3_UNORM_SRGB;
+        case TextureFormat::BC4_UNORM: return DXGI_FORMAT_BC4_UNORM;
+        case TextureFormat::BC4_SNORM: return DXGI_FORMAT_BC4_SNORM;
+        case TextureFormat::BC5_UNORM: return DXGI_FORMAT_BC5_UNORM;
+        case TextureFormat::BC5_SNORM: return DXGI_FORMAT_BC5_SNORM;
+        case TextureFormat::BC6H_UFLOAT: return DXGI_FORMAT_BC6H_UF16;
+        case TextureFormat::BC6H_SFLOAT: return DXGI_FORMAT_BC6H_SF16;
+        case TextureFormat::BC7_UNORM: return DXGI_FORMAT_BC7_UNORM;
+        case TextureFormat::BC7_UNORM_SRGB: return DXGI_FORMAT_BC7_UNORM_SRGB;
     }
     Unreachable();
 }

@@ -2,9 +2,11 @@
 
 #ifdef RADRAY_ENABLE_D3D12
 
+#include <atomic>
 #include <concepts>
 #include <cstddef>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -17,10 +19,11 @@
 #include <radray/types.h>
 #include <radray/viewport.h>
 #include <radray/allocator.h>
+#include <radray/hash.h>
 
 #include <radray/gpu_impl/backend/d3d12_helper.h>
 #include <radray/gpu/types.h>
-#include <radray/gpu_impl/external_resource.h>
+#include <radray/gpu/external_resource.h>
 #include <radray/gpu_impl/sampler_cache.h>
 
 namespace radray::gpu::d3d12 {
@@ -275,11 +278,21 @@ private:
     DeviceD3D12* _device;
     unique_ptr<DescriptorHeap> _heap;
     FirstFitAllocator _allocator;
+#ifdef RADRAY_ENABLE_PROFILER
+    UINT _liveDescriptors{};
+    UINT _peakDescriptors{};
+#endif
 };
 
 static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>, "GpuDescriptorAllocator is not an allocator");
 
 using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>;
+
+struct SamplerTableD3D12 {
+    GpuDescriptorHeapViewRAII Descriptors;
+    size_t Owners{0};
+};
+using SamplerTablesD3D12 = map<vector<uint64_t>, SamplerTableD3D12>;
 
 class DXGIFactoryImpl final : public DXGIFactory {
 public:
@@ -324,13 +337,16 @@ public:
 
     void Destroy() noexcept override;
 
-    RenderBackend GetBackend() noexcept override;
+    bool IsDeviceLost() const noexcept override;
+    bool MarkDeviceLost(HRESULT result, std::string_view operation) noexcept;
+    std::atomic<bool> _deviceLost{false};
+    GpuBackend GetBackend() noexcept override;
 
-    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
+    Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override;
 
     DeviceDetail GetDetail() const noexcept override;
 
-    const RenderDeviceCapabilities& GetCapabilities() const noexcept override;
+    const GpuDeviceCapabilities& GetCapabilities() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     TextureSupport QueryTextureSupportWithNativeStatus(const TextureSupportQuery& query, HRESULT& status) const noexcept;
@@ -354,6 +370,7 @@ public:
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc, uint32_t volumeSlices) noexcept;
 
     std::pair<bool, string> ValidateTextureView(const TextureViewDescriptor& desc) const;
 
@@ -366,6 +383,7 @@ public:
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<PipelineCache>> CreatePipelineCache(std::span<const byte> initialData) noexcept override;
 
     Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
 
@@ -394,15 +412,16 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    SamplerTablesD3D12 _samplerTables;
+    uint64_t _nextSamplerId{1};
     SamplerCache _samplerCache;
-    RenderDeviceCapabilities _capabilities;
+    GpuDeviceCapabilities _capabilities;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
 
     shared_ptr<detail::DiagnosticSession> _diagnostics;
     shared_ptr<detail::DiagnosticChannel> _diagnosticChannel;
-    unique_ptr<ExternalResourceExtension> _externalExtension;
 };
 
 class CmdQueueD3D12 final : public CommandQueue {
@@ -418,11 +437,12 @@ public:
 
     void Destroy() noexcept override;
 
-    void Submit(const CommandQueueSubmitDescriptor& desc) noexcept override;
+    bool Submit(const CommandQueueSubmitDescriptor& desc) noexcept override;
 
     void Wait() noexcept override;
 
     QueueType GetQueueType() const noexcept override;
+    uint32_t GetTimestampValidBits() const noexcept override;
 
     TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override;
 
@@ -467,6 +487,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Fence> _fence;
+    mutable std::atomic<uint64_t> _lastCompletedValue{0};
     uint64_t _fenceValue{0};
     Win32Event _event{};
     std::optional<ExternalFenceInfo> _externalInfo;
@@ -527,6 +548,7 @@ public:
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
 
+    bool CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept override;
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
@@ -882,6 +904,8 @@ public:
 struct DescriptorTableStorageD3D12 {
     CpuDescriptorHeapViewRAII Mirror;
     GpuDescriptorHeapViewRAII Descriptors;
+    vector<uint64_t> SamplerIds;
+    std::optional<SamplerTablesD3D12::iterator> SharedTable;
     vector<uint8_t> InitializedSlots;
     DescriptorDirtyRangesD3D12 Dirty;
 };
@@ -906,6 +930,7 @@ public:
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
     vector<PushConstantBindingD3D12> _pushConstantBindings;
     ComPtr<ID3D12RootSignature> _rootSignature;
+    Hash128 _serializedHash{};
 };
 
 class ShaderParameterSetD3D12 final : public ShaderParameterSet {
@@ -922,6 +947,10 @@ public:
     bool FlushWrites() noexcept override;
 
     void ResetBindingsForReuse() noexcept override;
+
+private:
+    bool FlushSamplerTable(DescriptorTableStorageD3D12& storage) noexcept;
+    void ReleaseSamplerTable(DescriptorTableStorageD3D12& storage) noexcept;
 
 public:
     DeviceD3D12* _device{nullptr};
@@ -943,6 +972,21 @@ public:
     vector<UINT> _copyCounts;
 };
 
+class PipelineCacheD3D12 final : public PipelineCache {
+public:
+    PipelineCacheD3D12(uint64_t adapter, uint64_t driver) noexcept;
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    vector<byte> GetData() const noexcept override;
+
+    // The driver borrows these bytes until the library is released.
+    vector<byte> _initialData;
+    ComPtr<ID3D12PipelineLibrary1> _library;
+    mutable std::mutex _mutex;
+    bool _live{true};
+    uint64_t _adapter, _driver;
+};
+
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {
 public:
     GraphicsPsoD3D12(
@@ -958,6 +1002,8 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+
+    Nullable<PipelineLayout*> GetLayout() const noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -981,6 +1027,8 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    Nullable<PipelineLayout*> GetLayout() const noexcept override;
+
 public:
     DeviceD3D12* _device;
     RootSigD3D12* _layout;
@@ -1003,6 +1051,7 @@ public:
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
+    const uint64_t _samplerId;
     string _name;
 };
 

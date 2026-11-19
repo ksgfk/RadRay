@@ -7,6 +7,10 @@
 #include <radray/json.h>
 #include <radray/shader/shader_layout.h>
 #include <radray/shader/shader_compiler_contract.h>
+#include <radray/shader/shader_reflector.h>
+#include <radray/shader/client.h>
+
+#include "compiler_test_utils.h"
 
 namespace radray::shader {
 namespace {
@@ -96,6 +100,107 @@ TEST_F(ShaderReflectCli, OutputFailureInvalidatesPreviousSuccessIndex) {
     ASSERT_TRUE(std::filesystem::create_directory(Directory / "result.layout.bin"));
     EXPECT_NE(Run(), 0);
     EXPECT_FALSE(std::filesystem::exists(Directory / "result.index.json"));
+}
+
+TEST_F(ShaderReflectCli, SupportsPromoteDxilCBufferAndAllowDxilOnlyInManifestPolicy) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    constexpr std::string_view kSource = R"hlsl(
+#include <core/platform.hlsli>
+struct SharedPushData {
+    uint A;
+    uint B;
+};
+VK_PUSH_CONSTANT ConstantBuffer<SharedPushData> SharedPush : register(b0, space2);
+#if !defined(__spirv__)
+struct AuxPushData {
+    uint BaseInstance;
+};
+ConstantBuffer<AuxPushData> DxAux : register(b1, space2);
+#endif
+VK_BINDING(0, 0) RWStructuredBuffer<uint> OutBuf : register(u0, space0);
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain() {
+#if !defined(__spirv__)
+    OutBuf[0] = SharedPush.A + SharedPush.B + DxAux.BaseInstance;
+#else
+    OutBuf[0] = SharedPush.A + SharedPush.B;
+#endif
+}
+)hlsl";
+    auto compiled = test::DiscoverAndCompile(client, {.SourceName = "reflect_cli/promoted_push.hlsl", .Source = test::ToBytes(kSource), .Targets = ShaderTargetMask::All});
+    ASSERT_TRUE(compiled.Succeeded()) << compiled.Diagnostics;
+
+    vector<byte> dxBytes, vkBytes;
+    WireMetadataEnvelope dxEnv{}, vkEnv{};
+    for (const auto& lane : *compiled.Value) {
+        if (lane.Target == ShaderTarget::DXIL) {
+            dxBytes = lane.Metadata;
+            ASSERT_TRUE(DecodeShaderMetadataEnvelope(std::span<const byte>{dxBytes}.first(152), dxEnv));
+            ASSERT_TRUE(WriteBinaryFile(Directory / "promoted.dxil.bin", dxBytes));
+        } else {
+            vkBytes = lane.Metadata;
+            ASSERT_TRUE(DecodeShaderMetadataEnvelope(std::span<const byte>{vkBytes}.first(152), vkEnv));
+            ASSERT_TRUE(WriteBinaryFile(Directory / "promoted.spirv.bin", vkBytes));
+        }
+    }
+
+    auto writeManifest = [&](bool badBool) {
+        JsonWriter writer;
+        auto root = writer.RootObject();
+        root.AddUint("version", 1);
+        auto policy = root.AddObject("policy");
+        policy.AddBool("allowTargetOnlyBindings", false);
+        auto pushes = policy.AddArray("pushConstants");
+        auto first = pushes.AppendObject();
+        first.AddString("name", "SharedPush");
+        first.AddUint("pushId", 1);
+        if (badBool)
+            first.AddString("promoteDxilCBufferToRootConstants", "yes");
+        else
+            first.AddBool("promoteDxilCBufferToRootConstants", true);
+        auto second = pushes.AppendObject();
+        second.AddString("name", "DxAux");
+        second.AddUint("pushId", 2);
+        second.AddBool("promoteDxilCBufferToRootConstants", true);
+        second.AddBool("allowDxilOnly", true);
+
+        auto variant = root.AddArray("variants").AppendObject();
+        variant.AddString("name", "Default");
+        auto dx = variant.AddObject("dxil");
+        dx.AddString("path", "promoted.dxil.bin");
+        dx.AddString("gpuArtifactHash", dxEnv.GpuArtifact.ToHex());
+        dx.AddUint("toolchainIdentity", dxEnv.ToolchainIdentity);
+        auto vk = variant.AddObject("spirv");
+        vk.AddString("path", "promoted.spirv.bin");
+        vk.AddString("gpuArtifactHash", vkEnv.GpuArtifact.ToHex());
+        vk.AddUint("toolchainIdentity", vkEnv.ToolchainIdentity);
+        ASSERT_TRUE(writer.WriteFile(Directory / "input.json"));
+    };
+
+    writeManifest(true);
+    EXPECT_NE(Run(), 0);
+
+    writeManifest(false);
+    ASSERT_EQ(Run(), 0);
+
+    auto dxDecoded = DecodeDxilShaderArtifact(dxBytes, {ShaderTarget::DXIL, dxEnv.GpuArtifact, kShaderToolchainIdentity});
+    auto vkDecoded = DecodeSpirvShaderArtifact(vkBytes, {ShaderTarget::SPIRV, vkEnv.GpuArtifact, kShaderToolchainIdentity});
+    ASSERT_TRUE(dxDecoded.Succeeded() && vkDecoded.Succeeded());
+    ShaderReflectionPolicy expectedPolicy;
+    expectedPolicy.PushConstants.push_back({.Name = "SharedPush", .PushId = 1, .PromoteDxilCBufferToRootConstants = true});
+    expectedPolicy.PushConstants.push_back({.Name = "DxAux", .PushId = 2, .PromoteDxilCBufferToRootConstants = true, .AllowDxilOnly = true});
+    const ShaderVariantArtifacts variant{"Default", &*dxDecoded.Value, &*vkDecoded.Value};
+    const auto online = ReflectShaderFamily(std::span{&variant, size_t{1}}, expectedPolicy);
+    ASSERT_TRUE(online.Succeeded()) << online.Diagnostics;
+    const auto expectedJson = WriteShaderFamilyLayoutJson(*online.Value);
+    ASSERT_TRUE(expectedJson);
+    const auto cliJsonBytes = ReadBinaryFile(Directory / "result.layout.json");
+    ASSERT_TRUE(cliJsonBytes);
+    const string cliJson{reinterpret_cast<const char*>(cliJsonBytes->data()), cliJsonBytes->size()};
+    EXPECT_EQ(cliJson, *expectedJson);
 }
 
 }  // namespace

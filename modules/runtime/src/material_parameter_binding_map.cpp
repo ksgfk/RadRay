@@ -1,19 +1,61 @@
 #include <radray/runtime/material_parameter_binding_map.h>
 
-#include <cstring>
 #include <algorithm>
+#include <cstring>
+#include <type_traits>
+#include <variant>
+
 #include <radray/runtime/material.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/logger.h>
 
 namespace radray {
+namespace {
+
+struct ExpectedConstantLayout {
+    shader::ShaderTypeKind Kind;
+    shader::ShaderScalarKind ScalarKind;
+    uint32_t RowCount;
+    uint32_t ColumnCount;
+    uint32_t Size;
+    bool IsMatrix4x4{false};
+};
+
+std::optional<ExpectedConstantLayout> DescribeConstantValue(const MaterialParameterValue& value) noexcept {
+    return std::visit(
+        []<class T>(const T&) noexcept -> std::optional<ExpectedConstantLayout> {
+            if constexpr (std::is_same_v<T, float>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Scalar, shader::ShaderScalarKind::Float, 1, 1, 4};
+            else if constexpr (std::is_same_v<T, int32_t>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Scalar, shader::ShaderScalarKind::SignedInteger, 1, 1, 4};
+            else if constexpr (std::is_same_v<T, uint32_t>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Scalar, shader::ShaderScalarKind::UnsignedInteger, 1, 1, 4};
+            else if constexpr (std::is_same_v<T, array<float, 2>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Vector, shader::ShaderScalarKind::Float, 1, 2, 8};
+            else if constexpr (std::is_same_v<T, array<float, 3>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Vector, shader::ShaderScalarKind::Float, 1, 3, 12};
+            else if constexpr (std::is_same_v<T, array<float, 4>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Vector, shader::ShaderScalarKind::Float, 1, 4, 16};
+            else if constexpr (std::is_same_v<T, array<int32_t, 4>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Vector, shader::ShaderScalarKind::SignedInteger, 1, 4, 16};
+            else if constexpr (std::is_same_v<T, array<uint32_t, 4>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Vector, shader::ShaderScalarKind::UnsignedInteger, 1, 4, 16};
+            else if constexpr (std::is_same_v<T, array<float, 16>>)
+                return ExpectedConstantLayout{shader::ShaderTypeKind::Matrix, shader::ShaderScalarKind::Float, 4, 4, 64, true};
+            else
+                return std::nullopt;
+        },
+        value);
+}
+
+}  // namespace
 
 std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(std::span<const MaterialParameter> parameters, const ShaderAsset& layout,
                                                                                std::span<const string> subset, std::string_view constantBlockName) {
     MaterialParameterBindingMap result;
     for (const auto& group : layout.GetLayoutDesc().Groups)
         if (std::any_of(group.Bindings.begin(), group.Bindings.end(), [&](const auto& entry) {
-                return layout.GetBackend() == gpu::RenderBackend::D3D12 ? entry.Binding.D3D12.has_value() : entry.Binding.Vulkan.has_value();
+                return layout.GetBackend() == gpu::GpuBackend::D3D12 ? entry.Binding.D3D12.has_value() : entry.Binding.Vulkan.has_value();
             })) result._activeGroups.push_back(group.GroupSlot);
     unordered_set<string> names;
     for (const auto& name : subset) {
@@ -24,7 +66,7 @@ std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(s
         }
         const size_t index = static_cast<size_t>(found - parameters.begin());
         const auto& parameter = *found;
-        if (std::holds_alternative<float>(parameter.DefaultValue) || std::holds_alternative<array<float, 4>>(parameter.DefaultValue)) {
+        if (const auto expected = DescribeConstantValue(parameter.DefaultValue)) {
             if (constantBlockName.empty()) {
                 RADRAY_ERR_LOG("Material constants need a block name");
                 return std::nullopt;
@@ -42,15 +84,15 @@ std::optional<MaterialParameterBindingMap> MaterialParameterBindingMap::Create(s
                 }
             }
             const auto member = layout.FindBufferMember(constantBlockName, parameter.Name);
-            const bool scalar = std::holds_alternative<float>(parameter.DefaultValue);
-            const uint32_t size = scalar ? 4 : 16;
-            if (!member || member->Kind != (scalar ? shader::ShaderTypeKind::Scalar : shader::ShaderTypeKind::Vector) ||
-                member->ScalarKind != shader::ShaderScalarKind::Float || member->ElementCount != 1 || member->RowCount != 1 ||
-                member->ColumnCount != (scalar ? 1u : 4u) || member->Size != size || member->HasInternalPadding()) {
+            if (!member || member->Kind != expected->Kind || member->ScalarKind != expected->ScalarKind ||
+                member->ElementCount != 1 || member->RowCount != expected->RowCount ||
+                member->ColumnCount != expected->ColumnCount || member->Size != expected->Size ||
+                member->HasInternalPadding() || (expected->IsMatrix4x4 && member->MatrixStride != 16)) {
                 RADRAY_ERR_LOG("Material constant type mismatch: {}", parameter.Name);
                 return std::nullopt;
             }
-            result._constants.push_back({index, member->AbsoluteOffset, size});
+            const bool transpose = expected->IsMatrix4x4 && member->RowMajor;
+            result._constants.push_back({index, member->AbsoluteOffset, expected->Size, parameter.DefaultValue.index(), transpose});
         } else {
             const auto binding = layout.FindBinding(parameter.Name);
             const bool texture = std::holds_alternative<Nullable<gpu::TextureView*>>(parameter.DefaultValue);
@@ -77,14 +119,31 @@ bool MaterialParameterBindingMap::WriteConstants(const MaterialRenderProxy& prox
     for (const auto& target : _constants) {
         const auto parameter = proxy.GetParameter(target.ParameterIndex);
         if (!parameter || target.AbsoluteOffset > destination.size() || target.Size > destination.size() - target.AbsoluteOffset ||
-            (target.Size == 4 ? !std::holds_alternative<float>(*parameter.Get()) : !std::holds_alternative<array<float, 4>>(*parameter.Get()))) return false;
+            parameter->index() != target.ExpectedVariantIndex) return false;
     }
     for (const auto& target : _constants) {
         const auto& parameter = *proxy.GetParameter(target.ParameterIndex).Get();
-        if (target.Size == 4)
-            std::memcpy(destination.data() + target.AbsoluteOffset, &std::get<float>(parameter), 4);
-        else
-            std::memcpy(destination.data() + target.AbsoluteOffset, std::get<array<float, 4>>(parameter).data(), 16);
+        byte* dst = destination.data() + target.AbsoluteOffset;
+        std::visit(
+            [&]<class T>(const T& val) noexcept {
+                if constexpr (std::is_same_v<T, array<float, 16>>) {
+                    if (!target.TransposeMatrix4x4) {
+                        std::memcpy(dst, val.data(), 64);
+                    } else {
+                        for (uint32_t row = 0; row < 4; ++row) {
+                            for (uint32_t col = 0; col < 4; ++col) {
+                                std::memcpy(dst + row * 16 + col * 4, &val[col * 4 + row], sizeof(float));
+                            }
+                        }
+                    }
+                } else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, int32_t> || std::is_same_v<T, uint32_t>) {
+                    std::memcpy(dst, &val, sizeof(T));
+                } else if constexpr (std::is_same_v<T, array<float, 2>> || std::is_same_v<T, array<float, 3>> || std::is_same_v<T, array<float, 4>> ||
+                                     std::is_same_v<T, array<int32_t, 4>> || std::is_same_v<T, array<uint32_t, 4>>) {
+                    std::memcpy(dst, val.data(), sizeof(T));
+                }
+            },
+            parameter);
     }
     return true;
 }

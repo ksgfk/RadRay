@@ -6,6 +6,6 @@
 
 namespace radray::gpu::detail {
 
-Nullable<shared_ptr<Device>> CreateValidationDevice(shared_ptr<Device> device, const RhiValidationOptions& options);
+Nullable<shared_ptr<Device>> CreateValidationDevice(shared_ptr<Device> device, const GpuValidationOptions& options);
 
 }  // namespace radray::gpu::detail
