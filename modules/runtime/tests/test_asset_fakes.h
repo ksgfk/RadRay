@@ -52,7 +52,7 @@ public:
     uint32_t& Destroyed;
 };
 
-class LayoutDevice final : public test::FakeDevice {
+class LayoutDevice : public test::FakeDevice {
 public:
     uint32_t ShaderCreates{0}, GroupCreates{0}, LayoutCreates{0}, ShaderDestroys{0};
     uint32_t GroupDestroys{0}, LayoutDestroys{0};

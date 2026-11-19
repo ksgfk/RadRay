@@ -1,5 +1,7 @@
 #pragma once
 
+#include <radray/uri.h>
+
 #include <string>
 #include <vector>
 #include <array>
@@ -363,6 +365,19 @@ requires(std::same_as<T, float> || std::same_as<T, double>)
 struct JsonSerializer<T> {
     static bool Write(JsonWriteContext& context, T value) noexcept {
         return context.Double(static_cast<double>(value));
+    }
+};
+
+template <>
+struct JsonSerializer<Uri> {
+    static bool Write(JsonWriteContext& context, const Uri& uri) noexcept { return context.String(uri.AsString()); }
+};
+
+template <>
+struct JsonDeserializer<Uri> {
+    static bool Read(const JsonValue& value, Uri& uri) noexcept {
+        std::string_view text;
+        return value.TryGetString(text) && Uri::TryParse(text, UriKind::RelativeOrAbsolute, uri);
     }
 };
 

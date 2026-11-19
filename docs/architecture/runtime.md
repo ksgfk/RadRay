@@ -633,7 +633,7 @@ runtime 消费 shader 模块的拥有型布局与变体接口；描述、验证�
 `Create(device, ShaderAssetDesc)` 接受内存描述与 stage 字节码；`Load(device, indexPath)` 读取 reflect CLI
 生成的版本 1 `.index.json`，以索引目录为基准加载 `.layout.bin` 和当前后端的独立 stage 文件。
 另一个后端的 stage 文件不必部署。非法索引、重复 stage、缺少当前后端必需 stage 或创建 Shader 失败时不发布资产。
-runtime 不调用 DXC，也不在加载时重新反射 artifact。离线产物入口见 [家族反射](shader-pipeline.md#家族反射)。
+离线加载不调用 DXC。内存根源码通过 `ShaderAsset::Compile` 和调用方提供的 Client 编译为设备后端的 Shader。离线产物入口见 [家族反射](shader-pipeline.md#家族反射)。
 
 ShaderAsset 不引用布局注册表，也不保存原生 PipelineLayout/BindingGroupLayout。
 `GetLayoutDesc()` 返回共享的 `shader::ShaderPipelineLayoutDesc`。`GetVariantInterface(variant)` 按变体索引和当前后端
@@ -644,6 +644,9 @@ ShaderAsset 不引用布局注册表，也不保存原生 PipelineLayout/Binding
 绑定查询与材质资源目标共用 `shader::ShaderBindingReference`，通过 `Reference.GroupSlot` 和
 `Reference.BindingId` 读取组槽和组内 ID。
 借用的指针和入口字符串不得跨所属资产的搬移或销毁保存。
+
+持有 PSO 的渲染方在 owner 线程调用 `CheckReplacement` 校验设备、共享布局、类型与成员、变体顺序、当前后端接口和各 stage 入口，并针对候选 Shader 准备全部相关 PSO。准备失败时继续使用原 Shader 和原 PSO。
+成功后在 `BeginFrame()` 返回至场景提取前调用 `AssetManager::ReplaceShader`。它再次校验兼容性，仅接受本 manager 的就绪强引用，保留槽位、引用计数和依赖，返回旧 Shader。渲染方交换准备好的 PSO、标脏相关材质代理，把旧 Shader、PSO 和布局 owner 组合移入当前帧槽退役。该保活顺序适用于同一 scheduler 的单队列提交。
 
 ### PipelineLayoutRegistry
 
@@ -665,9 +668,9 @@ GroupSlot 独立于 space/set；过滤后空组不创建。
 
 ### 资产登记与生命周期
 
-`AssetManager` 在 owner 线程串行使用。`UntypedAssetHandle` 用两个 32 位字段保存所属 manager 的槽位索引和代次。`AssetHandle<T>` 在同一份 8 字节表示上提供类型约束，`Acquire` 校验存活与类型后取得强引用。`AssetRef<T>` 在 64 位平台占 16 字节，允许拷贝、移动和显式释放。`Get` 返回就绪资产的只读借用，持有相应强引用可覆盖借用期间。`Resolve` 对无法取得真实资产的句柄查询对应 loader 的 fallback。Fallback 由 loader 或应用保活至所有借用它的帧槽完成重置。
+`AssetManager` 在 owner 线程串行使用。`UntypedAssetHandle` 用两个 32 位字段保存所属 manager 的槽位索引和代次。`AssetHandle<T>` 在同一份 8 字节表示上提供类型约束，`Acquire` 校验存活与类型后取得强引用。`AssetRef<T>` 在 64 位平台占 16 字节，允许拷贝、移动和显式释放。`Get` 返回就绪资产的只读借用。强引用保活逻辑资产；Shader 发布替换前须结束对旧版本的 CPU 借用，发布后重新 `Get()`。`Resolve` 对无法取得真实资产的句柄查询对应 loader 的 fallback。Fallback 由 loader 或应用保活至所有借用它的帧槽完成重置。
 
-`MakeAssetId` 对非空逻辑路径的原始字节做 64 位哈希，零 ID 用于匿名内存资产。`RegisterMeta<T>` 登记 ID、类型、物理路径与直接依赖，每种类型注册一个 loader。`Emplace` 登记内存资产，`EmplaceWithHandle` 在工厂执行前预留 ID 与槽位。预留期间无法按 ID 请求或提升该句柄，失败会撤销预留并推进代次。`FindLoaded` 返回已发布的具名槽位，可用 `GetState` 区分 Loading、Ready 和 Failed。
+`MakeAssetId` 对非空逻辑名或绝对 `Uri` 的规范化字符串做 64 位哈希。字符串含 `://` 时先解析，失败返回无效 ID。零 ID 用于匿名内存资产。`RegisterMeta<T>` 登记 ID、类型、独立的 `Uri Location` 与直接依赖，磁盘 Shader 索引使用 `Uri::FromFilePath` 转换绝对路径，每种类型注册一个 loader。`Emplace` 登记内存资产，`EmplaceWithHandle` 在工厂执行前预留 ID 与槽位。预留期间无法按 ID 请求或提升该句柄，失败会撤销预留并推进代次。`FindLoaded` 返回已发布的具名槽位，可用 `GetState` 区分 Loading、Ready 和 Failed。
 
 `Request<T>` 只排队，同 ID、同类型的请求共用槽位。`Pump()` 启动待加载任务，按批派发已就绪等待者，直到本次没有可推进的工作。若 loader 仍等待外部事件，`HasPendingWork()` 可以继续为真。`ShaderAssetLoader` 借用 Device，在 Pump 期间同步读索引并创建当前后端的 Shader。场景同步和命令录制与资产登记、加载和 GC 由调用方串行安排。
 

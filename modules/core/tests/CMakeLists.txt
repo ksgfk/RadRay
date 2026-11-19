@@ -21,6 +21,7 @@ set(radray_core_test_sources
     test_structured_buffer.cpp
     test_text_encoding.cpp
     test_utility.cpp
+    test_uri.cpp
     test_wavefront_obj.cpp
     test_xml.cpp)
 if (RADRAY_ENABLE_LIBPNG)

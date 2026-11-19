@@ -18,6 +18,11 @@ add_executable(test_radray_runtime
     ../../gpu_impl/tests/gpu_test_fixture.cpp
     test_rdg.cpp
     test_gpu_device.cpp)
+if (RADRAY_BUILD_EXAMPLES)
+    target_sources(test_radray_runtime PRIVATE test_shader_publish.cpp
+        ${RADRAY_SOURCE_ROOT}/examples/mesh_drawing_pipeline/gpu_support.cpp)
+    target_compile_definitions(test_radray_runtime PRIVATE RADRAY_SAMPLE_ROOT="${RADRAY_SOURCE_ROOT}")
+endif()
 target_link_libraries(test_radray_runtime PRIVATE RadRay::runtime GTest::gtest_main)
 radray_default_compile_flags(test_radray_runtime)
 radray_optimize_flags_binary(test_radray_runtime)

@@ -9,6 +9,16 @@
 namespace radray {
 namespace {
 using namespace test;
+TEST(ShaderAsset, CanonicalUriFindsNamedAsset) {
+    AssetManager assets;
+    auto uri = Uri::TryCreate("virtual://shaders/example");
+    ASSERT_TRUE(uri);
+    auto ref = assets.Emplace(42, {}, MakeAssetId(*uri));
+    EXPECT_EQ(assets.Request<int>(MakeAssetId("VIRTUAL://SHADERS/./example")).Get(), ref.Get());
+    EXPECT_EQ(MakeAssetId("named").Value, HashData64("named", 5));
+    EXPECT_FALSE(MakeAssetId("://bad").IsValid());
+}
+
 TEST(ShaderAsset, EmptyFamilyCannotPublishAnAsset) {
     LayoutDevice device;
     AssetManager assets;
@@ -57,6 +67,55 @@ TEST(ShaderAsset, InvalidStagesFailBeforeGpuCreationAndPartialCreationIsReleased
     ASSERT_TRUE(handle);
     EXPECT_EQ(handle.GetHandle().GetIndex(), 0u);
 }
+TEST(ShaderAsset, ReplaceRejectsIncompatibleAndUnavailableTargetsWithoutConsumingCandidate) {
+    LayoutDevice device, otherDevice;
+    AssetManager assets, foreign;
+    auto desc = MakeShaderDesc();
+    desc.Family.Variants.push_back(desc.Family.Variants.front());
+    desc.Family.Variants.back().Name = "Second";
+    auto stages = desc.Stages;
+    for (auto stage : stages) {
+        stage.VariantIndex = 1;
+        desc.Stages.push_back(std::move(stage));
+    }
+    auto target = CreateTestShader(assets, device, desc);
+    ASSERT_TRUE(target);
+    auto candidate = ShaderAsset::Create(device, desc);
+    ASSERT_TRUE(candidate);
+    auto reordered = desc;
+    std::swap(reordered.Family.Variants[0], reordered.Family.Variants[1]);
+    auto changed = ShaderAsset::Create(device, reordered);
+    ASSERT_TRUE(changed);
+    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    auto renamed = desc;
+    renamed.Stages[0].Entry = "changed";
+    changed = ShaderAsset::Create(device, renamed);
+    ASSERT_TRUE(changed);
+    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    auto layoutChange = desc;
+    layoutChange.Family.SharedLayout = MaterialLayout();
+    changed = ShaderAsset::Create(device, layoutChange);
+    ASSERT_TRUE(changed);
+    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    auto other = ShaderAsset::Create(otherDevice, desc);
+    ASSERT_TRUE(other);
+    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*other)).Succeeded());
+    EXPECT_FALSE(foreign.ReplaceShader(target, std::move(*candidate)).Succeeded());
+    EXPECT_FALSE(assets.ReplaceShader({}, std::move(*candidate)).Succeeded());
+    assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
+    auto id = MakeAssetId("pending");
+    ASSERT_TRUE(assets.RegisterMeta<ShaderAsset>({id, {}, {}}));
+    auto pending = assets.Request<ShaderAsset>(id);
+    EXPECT_FALSE(assets.ReplaceShader(pending, std::move(*candidate)).Succeeded());
+    assets.Pump();
+    EXPECT_EQ(pending.GetState(), AssetState::Failed);
+    EXPECT_FALSE(assets.ReplaceShader(pending, std::move(*candidate)).Succeeded());
+    assets.Shutdown();
+    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*candidate)).Succeeded());
+    EXPECT_EQ(target.Get()->GetStage(0, gpu::ShaderStage::Vertex)->EntryPoint, "VS");
+    EXPECT_TRUE(candidate->GetStage(0, gpu::ShaderStage::Vertex));
+}
+
 TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
     auto device = make_shared<LayoutDevice>();
     DeviceContext context{device, &device->Queue};
@@ -139,7 +198,9 @@ protected:
         ASSERT_TRUE(std::filesystem::create_directory(Directory, error));
         ASSERT_FALSE(error);
         Assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(Device);
-        ASSERT_TRUE(Assets.RegisterMeta<ShaderAsset>({MakeAssetId("shader.index.json"), Directory / "shader.index.json", {}}));
+        auto location = Uri::FromFilePath(Directory / "shader.index.json");
+        ASSERT_TRUE(location);
+        ASSERT_TRUE(Assets.RegisterMeta<ShaderAsset>({MakeAssetId("shader.index.json"), *location, {}}));
     }
     void TearDown() override {
         std::error_code error;
@@ -185,6 +246,43 @@ protected:
         ASSERT_TRUE(WriteBinaryFile(Directory / "ps.bin", desc.Stages[1].Bytecode));
     }
 };
+TEST_F(ShaderAssetFiles, CompileInMemoryWithDiskIncludesAndVariantIndices) {
+    const auto uri = Uri::TryCreate("virtual://shaders/generated.hlsl");
+    ASSERT_TRUE(uri);
+    ASSERT_TRUE(WriteTextFile(Directory / "position.hlsli", "float4 position(float3 p) {return float4(p,1);}"));
+    constexpr std::string_view source = R"(
+#include <position.hlsli>
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position {return position(p);}
+)";
+    array directories{Directory};
+    ShaderCompileDesc desc{.SourceUri = *uri, .Source = std::as_bytes(std::span{source}),
+                           .IncludePaths = directories, .Variants = {{"Second", {}}, {"First", {}}}};
+    shader::Client compiler;
+    for (const auto backend : {gpu::RenderBackend::D3D12, gpu::RenderBackend::Vulkan}) {
+        Device.Backend = backend;
+        auto result = ShaderAsset::Compile(Device, compiler, desc);
+        ASSERT_TRUE(result.Succeeded()) << result.Diagnostics;
+        EXPECT_EQ(result.Value->GetBackend(), backend);
+        EXPECT_EQ(result.Value->GetFamilyDesc().Variants.front().Name, "Second");
+        ASSERT_TRUE(result.Value->GetStage(1, gpu::ShaderStage::Vertex));
+        EXPECT_EQ(result.Value->GetVariantInterface(0)->VertexInputs.size(), 1u);
+    }
+    const auto expectFailure = [&](const shader::Client& client) {
+        auto result = ShaderAsset::Compile(Device, client, desc);
+        EXPECT_FALSE(result.Succeeded());
+        EXPECT_FALSE(result.Diagnostics.empty());
+    };
+    shader::Client missing{"radray_missing_shader_compiler_probe"};
+    expectFailure(missing);
+    desc.IncludePaths = {};
+    expectFailure(compiler);
+    constexpr std::string_view invalid = "invalid HLSL!";
+    desc.Source = std::as_bytes(std::span{invalid});
+    expectFailure(compiler);
+    desc.SourceUri = {};
+    expectFailure(compiler);
+}
+
 TEST_F(ShaderAssetFiles, LoadsRelativePathsWithoutOtherBackendFilesOrLayouts) {
     Write();
     ASSERT_TRUE(Load());

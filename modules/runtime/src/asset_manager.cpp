@@ -1,6 +1,7 @@
 #include <radray/runtime/asset_manager.h>
 
 #include <algorithm>
+#include <radray/runtime/shader_asset.h>
 #include <limits>
 
 #include <radray/inline_vector.h>
@@ -77,6 +78,18 @@ AssetManager::~AssetManager() noexcept {
     for (const auto& slot : _storage->Slots) {
         if (slot.Alive) RADRAY_ABORT("AssetManager destroyed with live asset id={} refs={}", slot.Id.Value, slot.Refs);
     }
+}
+
+shader::DiagnosticResult<ShaderAsset> AssetManager::ReplaceShader(const AssetRef<ShaderAsset>& target, ShaderAsset&& candidate) {
+    if (_shuttingDown || _callbackDepth || target._manager.Get() != this || !target.IsReady())
+        return {std::nullopt, "replacement requires a ready shader reference from this active manager"};
+    auto& slot = _storage->Slots[target.GetHandle().GetIndex()];
+    auto& current = *static_cast<ShaderAsset*>(slot.Asset.get());
+    auto diagnostic = current.CheckReplacement(candidate);
+    if (!diagnostic.empty()) return {std::nullopt, std::move(diagnostic)};
+    ShaderAsset old = std::move(current);
+    current = std::move(candidate);
+    return {std::move(old), {}};
 }
 
 void AssetManager::AddLoader(std::type_index type, unique_ptr<detail::ErasedAssetLoader> loader) {

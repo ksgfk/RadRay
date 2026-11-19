@@ -374,11 +374,11 @@ void MeshDrawingFramePipeline::Wait(FrameSlot& slot) noexcept {
     RADRAY_INFO_LOG("等待完成：Frame={} Slot={} Fence={}", slot.GetFrameId(), slot.GetIndex(), resources.CompletionValue);
 }
 
-bool MeshDrawingFramePipeline::SaveImage(uint32_t slotIndex, const std::filesystem::path& output) const {
-    if (slotIndex >= _frames.size()) return false;
+std::optional<ImageData> MeshDrawingFramePipeline::ReadImage(uint32_t slotIndex) const {
+    if (slotIndex >= _frames.size()) return std::nullopt;
     const auto& resources = *_frames[slotIndex];
-    if (resources.CompletionValue == 0 || resources.CompletionFence->GetCompletedValue() < resources.CompletionValue) return false;
-    return resources.SaveImage(output);
+    if (resources.CompletionValue == 0 || resources.CompletionFence->GetCompletedValue() < resources.CompletionValue) return std::nullopt;
+    return resources.ReadImage();
 }
 
 }  // namespace radray::examples::mesh_drawing

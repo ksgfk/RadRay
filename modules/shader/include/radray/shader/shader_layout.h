@@ -29,6 +29,7 @@ struct ShaderTypeRecord {
     uint32_t RowCount{0};
     uint32_t ColumnCount{0};
     bool RowMajor{false};
+    friend bool operator==(const ShaderTypeRecord&, const ShaderTypeRecord&) noexcept = default;
 };
 
 class ShaderResolvedMember {
@@ -60,18 +61,21 @@ struct ShaderBindingDesc {
     gpu::BindingDescriptor Binding;
     std::optional<uint32_t> TypeIndex;
     uint32_t BufferByteSize{0};
+    friend bool operator==(const ShaderBindingDesc&, const ShaderBindingDesc&) noexcept = default;
 };
 
 struct ShaderBindingGroupDesc {
     string Name;
     uint32_t GroupSlot{0};
     vector<ShaderBindingDesc> Bindings;
+    friend bool operator==(const ShaderBindingGroupDesc&, const ShaderBindingGroupDesc&) noexcept = default;
 };
 
 struct ShaderPushConstantDesc {
     string Name;
     gpu::PushConstantDescriptor Push;
     std::optional<uint32_t> TypeIndex;
+    friend bool operator==(const ShaderPushConstantDesc&, const ShaderPushConstantDesc&) noexcept = default;
 };
 
 struct ShaderPipelineLayoutDesc {
@@ -86,11 +90,13 @@ struct ShaderVertexAttributeSignatureDesc {
     uint32_t Location{0};
     shader::ShaderVertexComponentType ComponentKind{shader::ShaderVertexComponentType::Float};
     uint32_t ComponentCount{0};
+    friend bool operator==(const ShaderVertexAttributeSignatureDesc&, const ShaderVertexAttributeSignatureDesc&) noexcept = default;
 };
 
 struct ShaderBindingReference {
     uint32_t GroupSlot{0};
     uint32_t BindingId{0};
+    friend bool operator==(const ShaderBindingReference&, const ShaderBindingReference&) noexcept = default;
 };
 
 struct ShaderVariantTargetInterfaceDesc {

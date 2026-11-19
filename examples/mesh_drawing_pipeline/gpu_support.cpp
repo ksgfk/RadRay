@@ -11,8 +11,21 @@
 #include <radray/scope_guard.h>
 
 namespace radray::examples::mesh_drawing {
-bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory) {
-    RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证，读取预编译 shader", backend);
+shader::DiagnosticResult<ShaderAsset> GpuResources::CompileCube(const shader::Client& compiler, const Uri& uri, bool swapColors) {
+    const std::filesystem::path root{RADRAY_SAMPLE_ROOT};
+    const auto source = ReadBinaryFile(root / "examples/mesh_drawing_pipeline/cube.hlsl");
+    if (!source) return {std::nullopt, "cannot read cube HLSL"};
+    const array includes{root / "shaderlib"};
+    ShaderCompileDesc desc{.SourceUri = uri, .Source = *source, .IncludePaths = includes};
+    if (swapColors) desc.Defines.push_back({"SWAP_COLORS", "1"});
+    desc.ReflectionPolicy.Bindings.push_back({.Name = "Pass", .GroupSlot = 0, .BindingId = 0});
+    desc.ReflectionPolicy.PushConstants.push_back({"MaterialPush", 0});
+    return ShaderAsset::Compile(Device->GetDevice(), compiler, desc);
+}
+
+bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory,
+                              Nullable<const shader::Client*> compiler) {
+    RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证", backend);
     Env = Environment::Create(backend, true, "RadRay Mesh Drawing tutorial");
     if (!Env) {
         RADRAY_ERR_LOG("GPU 环境初始化失败，backend={}；不切换其他后端", backend);
@@ -26,11 +39,26 @@ bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem:
     auto& device = Device->GetDevice();
     LayoutRegistry = make_unique<PipelineLayoutRegistry>(device);
     Assets = make_unique<AssetManager>();
-    Assets->RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
-    const auto id = MakeAssetId("cube.index.json");
-    if (!Assets->RegisterMeta<ShaderAsset>({id, shaderDirectory / "cube.index.json", {}})) return false;
-    Shader = Assets->Request<ShaderAsset>(id);
-    Assets->Pump();
+    if (compiler) {
+        const auto uri = Uri::TryCreate("virtual://shaders/cube.hlsl");
+        if (!uri) return false;
+        auto compiled = CompileCube(*compiler, *uri, false);
+        if (!compiled.Succeeded()) {
+            RADRAY_ERR_LOG("{}", compiled.Diagnostics);
+            return false;
+        }
+        Shader = Assets->Emplace(std::move(*compiled.Value), {}, MakeAssetId(*uri));
+        if (!Shader) return false;
+    } else {
+        Assets->RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
+        const auto id = MakeAssetId("cube.index.json");
+        std::error_code error;
+        const auto index = std::filesystem::absolute(shaderDirectory / "cube.index.json", error);
+        const auto location = error ? std::nullopt : Uri::FromFilePath(index);
+        if (!location || !Assets->RegisterMeta<ShaderAsset>({id, *location, {}})) return false;
+        Shader = Assets->Request<ShaderAsset>(id);
+        Assets->Pump();
+    }
     const auto shaderAsset = Shader.Get();
     if (!shaderAsset) return false;
     const auto pass = shaderAsset->FindBinding("Pass");
@@ -101,37 +129,35 @@ bool GpuFrameResources::Initialize(const GpuResources& shared) {
     return CompletionFence.HasValue();
 }
 
-bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material) {
+std::optional<MaterialPipelines> GpuResources::PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material, const ShaderAsset& shader) {
     // 步骤 M4：材质程序 + 材质性质 + 顶点输入 + Pass 状态，形成具体 PSO。
     // 为什么：材质提供状态默认值；Depth/Outline 明确覆盖状态，Color/Transparent 沿用材质，附件格式由 Pass 补充。
     // UE5 对照：Renderer/Private/DepthRendering.cpp 的 FDepthPassMeshProcessor::Process；
     // Renderer/Public/MeshPassProcessor.inl 的 BuildMeshDrawCommands 组装 GraphicsPSOInitializer。
     // 本例简化：启动时按已知标签准备有限的 PSO；实际 Batch 是否参与仍由 Processor 判断，不提供通用 PSO 缓存。
     const auto resource = Assets->Get(material);
-    if (!resource) return false;
+    if (!resource) return std::nullopt;
     const auto depthIndex = resource->FindProgram("Depth");
     const auto colorIndex = resource->FindProgram("Color");
     if (!depthIndex || !colorIndex) {
         RADRAY_ERR_LOG("样例材质需要 Depth/Color 程序；Surface 标签由 Processor 筛选");
-        return false;
+        return std::nullopt;
     }
     const auto& depthProgram = *resource->GetProgram(*depthIndex);
     const auto& colorProgram = *resource->GetProgram(*colorIndex);
-    const auto depthShader = Assets->Get(depthProgram.Shader), colorShader = Assets->Get(colorProgram.Shader);
-    if (!depthShader || !colorShader) return false;
-    const auto vs = depthShader->GetStage(depthProgram.VariantIndex, gpu::ShaderStage::Vertex);
-    const auto colorVs = colorShader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Vertex);
-    const auto ps = colorShader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Pixel);
-    if (!vs || !colorVs || !ps || vs->Target != colorVs->Target || !depthProgram.PixelEntry.empty()) return false;
-    auto layout = LayoutRegistry->Acquire(depthShader->GetLayoutDesc());
-    const auto colorLayout = LayoutRegistry->Acquire(colorShader->GetLayoutDesc());
-    if (!layout || !colorLayout || layout.Get() != colorLayout.Get()) return false;
+    if (depthProgram.Shader != Shader.GetHandle() || colorProgram.Shader != Shader.GetHandle()) return std::nullopt;
+    const auto vs = shader.GetStage(depthProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto colorVs = shader.GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto ps = shader.GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Pixel);
+    if (!vs || !colorVs || !ps || vs->Target != colorVs->Target || !depthProgram.PixelEntry.empty()) return std::nullopt;
+    auto layout = LayoutRegistry->Acquire(shader.GetLayoutDesc());
+    if (!layout) return std::nullopt;
     auto passGroup = layout->GetGroupLayout(0);
-    if (!passGroup || (PassGroupLayout && PassGroupLayout.Get() != passGroup.Get())) return false;
+    if (!passGroup || (PassGroupLayout && PassGroupLayout.Get() != passGroup.Get())) return std::nullopt;
     auto& device = Device->GetDevice();
     ResolvedVertexInputState depthInput, colorInput;
-    if (!PrepareMaterialVertexInput(*depthShader->GetVariantInterface(depthProgram.VariantIndex), input, depthInput) ||
-        !PrepareMaterialVertexInput(*colorShader->GetVariantInterface(colorProgram.VariantIndex), input, colorInput)) return false;
+    if (!PrepareMaterialVertexInput(*shader.GetVariantInterface(depthProgram.VariantIndex), input, depthInput) ||
+        !PrepareMaterialVertexInput(*shader.GetVariantInterface(colorProgram.VariantIndex), input, colorInput)) return std::nullopt;
     auto primitive = gpu::PrimitiveState::Default();
     const auto& state = resource->GetProperties().RenderState;
     primitive.Cull = state.Cull;
@@ -144,7 +170,7 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
     MaterialPipelines pipelines{material, layout.Release()};
     if (resource->GetProperties().Tags.Matches(OpaqueTag.Key, OpaqueTag.Value)) {
         pipelines.Depth = device.CreateGraphicsPipelineState(descriptor);
-        if (!pipelines.Depth) return false;
+        if (!pipelines.Depth) return std::nullopt;
     }
 
     // ColorOnly 没有预深度，Equal 会错误丢弃它；LessEqual 既复用已有深度，也接纳更近的新表面。
@@ -161,7 +187,7 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
     descriptor.DepthStencil = depth;
     descriptor.ColorTargets = std::span{&color, 1};
     pipelines.Color = device.CreateGraphicsPipelineState(descriptor);
-    if (!pipelines.Color) return false;
+    if (!pipelines.Color) return std::nullopt;
     if (resource->GetProperties().Tags.Matches(OutlineTag.Key, OutlineTag.Value)) {
         // 步骤 M4a：描边 PSO 只保留模板不等于 7 的像素，禁止改写深度和模板。
         // 为什么：Color 已为原物体写入 7；放大的外壳被内部模板挖空，只留下轮廓，深度测试仍遮住被前景挡住的部分。
@@ -180,13 +206,50 @@ bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<Materia
         color.Blend = std::nullopt;
         color.WriteMask = gpu::ColorWrite::All;
         pipelines.Outline = device.CreateGraphicsPipelineState(descriptor);
-        if (!pipelines.Outline) return false;
+        if (!pipelines.Outline) return std::nullopt;
     }
     RADRAY_INFO_LOG("材质 PSO：Cull={}，Blend={}，DepthWrite={}，模板参考值={}；Depth={} Color={} Outline={}",
                     static_cast<int32_t>(state.Cull), state.Blend.has_value(), state.DepthWriteEnable, state.StencilReference,
                     pipelines.Depth.HasValue(), pipelines.Color.HasValue(), pipelines.Outline.HasValue());
-    Pipelines.push_back(std::move(pipelines));
-    PassGroupLayout = std::move(passGroup);
+    return pipelines;
+}
+
+bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material) {
+    auto prepared = PreparePipelines(input, material, *Shader.Get());
+    if (!prepared) return false;
+    PassGroupLayout = prepared->Layout->GetGroupLayout(0);
+    Pipelines.push_back(std::move(*prepared));
+    return true;
+}
+
+bool GpuResources::PublishShader(ShaderAsset&& candidate, const VertexInput& input, Scene& scene,
+                                 std::span<const MaterialProxyHandle> proxies, FrameSlot& slot) {
+    const auto diagnostic = Shader.Get()->CheckReplacement(candidate);
+    if (!diagnostic.empty()) {
+        RADRAY_ERR_LOG("{}", diagnostic);
+        return false;
+    }
+    vector<MaterialPipelines> prepared;
+    for (const auto& current : Pipelines) {
+        auto next = PreparePipelines(input, current.Material, candidate);
+        if (!next) return false;
+        prepared.push_back(std::move(*next));
+    }
+    struct Retired {
+        std::optional<ShaderAsset> Shader;
+        vector<MaterialPipelines> Pipelines;
+    };
+    auto* retired = slot.Emplace<Retired>();
+    auto result = Assets->ReplaceShader(Shader, std::move(candidate));
+    if (!result.Succeeded()) {
+        RADRAY_ERR_LOG("{}", result.Diagnostics);
+        return false;
+    }
+    retired->Shader = std::move(result.Value);
+    // Pass processors borrow this array for their lifetime. Keep its backing storage stable.
+    std::swap_ranges(prepared.begin(), prepared.end(), Pipelines.begin());
+    retired->Pipelines = std::move(prepared);
+    for (const auto proxy : proxies) scene.MarkMaterialDirty(proxy);
     return true;
 }
 
@@ -205,11 +268,11 @@ bool PrepareOutputDirectory(const std::filesystem::path& output) {
     return true;
 }
 
-bool GpuFrameResources::SaveImage(const std::filesystem::path& output) const {
+std::optional<ImageData> GpuFrameResources::ReadImage() const {
     Nullable<void*> mapped = Readback->Map(0, RowPitch * Height);
     if (!mapped) {
         RADRAY_ERR_LOG("无法映射图片读回缓冲");
-        return false;
+        return std::nullopt;
     }
     const auto unmap = MakeScopeGuard([&]() noexcept { Readback->Unmap(); });
     Readback->InvalidateMappedRange({0, RowPitch * Height});
@@ -222,13 +285,7 @@ bool GpuFrameResources::SaveImage(const std::filesystem::path& output) const {
     for (uint32_t row = 0; row < Height; ++row) {
         std::memcpy(image.Data.get() + size_t{row} * Width * 4, source + row * RowPitch, size_t{Width} * 4);
     }
-    const auto outputName = output.string();
-    if (!image.WritePNG({outputName, false})) {
-        RADRAY_ERR_LOG("PNG 写入失败：{}", outputName);
-        return false;
-    }
-    RADRAY_INFO_LOG("PNG 已写入：{}（{}×{}，GPU row pitch={}）", outputName, Width, Height, RowPitch);
-    return true;
+    return image;
 }
 
 }  // namespace radray::examples::mesh_drawing

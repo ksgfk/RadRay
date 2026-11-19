@@ -1,6 +1,12 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
+#include <radray/runtime/scene.h>
+#include <radray/runtime/frame_slot.h>
+#include <radray/shader/client.h>
+#include <radray/uri.h>
+#include <radray/image_data.h>
 #include <span>
 #include <string_view>
 
@@ -61,7 +67,11 @@ struct GpuResources {
     GpuResources(const GpuResources&) = delete;
     GpuResources& operator=(const GpuResources&) = delete;
 
-    bool Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory);
+    bool Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory, Nullable<const shader::Client*> compiler = nullptr);
+    shader::DiagnosticResult<ShaderAsset> CompileCube(const shader::Client& compiler, const Uri& uri, bool swapColors);
+    std::optional<MaterialPipelines> PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material, const ShaderAsset& shader);
+    bool PublishShader(ShaderAsset&& candidate, const VertexInput& input, Scene& scene,
+                       std::span<const MaterialProxyHandle> proxies, FrameSlot& slot);
     // Creates Device buffers and retains CPU bytes for the first frame's graph upload.
     bool PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
     bool CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
@@ -91,8 +101,8 @@ struct GpuResources {
 // Each slot owns distinct writable resources; release only after its allocator has reset.
 struct GpuFrameResources {
     bool Initialize(const GpuResources& shared);
-    // Requires the corresponding completion fence; saves the latest frame recorded into this slot.
-    bool SaveImage(const std::filesystem::path& output) const;
+    // Requires completion of the latest frame recorded into this slot.
+    std::optional<ImageData> ReadImage() const;
 
     uint32_t Width{0};
     uint32_t Height{0};

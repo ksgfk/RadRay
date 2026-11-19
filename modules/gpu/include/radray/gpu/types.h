@@ -1476,6 +1476,7 @@ struct PushConstantDescriptor {
     ShaderStages Stages{ShaderStage::UNKNOWN};
     std::optional<D3D12Location> D3D12;
     std::optional<VulkanLocation> Vulkan;
+    friend bool operator==(const PushConstantDescriptor&, const PushConstantDescriptor&) noexcept = default;
 };
 
 struct PipelineLayoutDescriptor {

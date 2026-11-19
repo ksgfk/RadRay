@@ -6,6 +6,10 @@
 
 `radraycore` 不涉及 GPU。写新代码前先看这里有没有现成的东西。
 
+## URI
+
+`uri.h` 的 `Uri` 持有规范化字符串，组件视图借用该值。Scheme 和 host 按 ASCII 转小写，路径保留大小写。未保留字符先解码，再折叠绝对 URI 路径中的点段。`TryCreate(base, reference)` 解析相对引用，`FromFilePath` 和 `ToFilePath` 转换绝对文件位置。哈希、比较、格式化和 JSON 共享规范化表示。
+
 ## 常用头文件
 
 几乎每个 `.cpp` 都会碰到的：

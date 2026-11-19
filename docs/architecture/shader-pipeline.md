@@ -7,7 +7,7 @@
 ## 当前边界
 
 HLSL 是 compiler client 的 pass source authoring 输入。统一 shader 模块通过 RadRay DXC fork 生成独立
-target lanes，将已解码 artifact 合并为拥有型布局。runtime 的 ShaderAsset 接收手写描述或离线布局索引，
+target lanes，将已解码 artifact 合并为拥有型布局。runtime 的 ShaderAsset 接收内存源码编译结果、手写描述或离线布局索引，
 创建当前后端的 Shader；加载阶段不调用 DXC。RHI 本身不消费 metadata。
 布局与参数 ABI、稳定槽位、原生兼容性和共享策略由调用方负责，见 [RHI 绑定模型](render-rhi.md#绑定模型)。
 
@@ -67,6 +67,8 @@ Variant 是一组 target-independent keyword assignments；Compiled Variant arti
 entry topology 在合法 keyword domain 内保持不变；keyword 可以改变资源使用和函数体，不能
 让 entry 声明只在部分 Variant 出现。discovery 与 compile 共享 Defines、CompilePolicy 和
 include 配置，语义由 Clang/DXC frontend 校验，不再建立独立的 source/metadata scanner。
+
+`ShaderAsset::Compile` 将 `virtual://host/path` 映射为逻辑源名 `host/path`，使用外部 Client 发现一次契约，再以相同编译选项编译当前设备目标的各变体。typed artifact 解码后由 `ReflectShaderFamily` 生成布局，stage 字节码经 `ShaderAsset::Create` 创建 GPU 对象。诊断随结果返回。
 
 Root source 以调用方提供的内存 bytes 编译，`SourceName` 是诊断与 virtual main-file context，
 不是从磁盘重读 root 的位置。共享 include 才由每次 invocation 的 DXC default handler 按

@@ -52,7 +52,7 @@ std::optional<ShaderAsset> ShaderAsset::Create(gpu::Device& device, const Shader
         available = true;
     }
     if (!available) return std::nullopt;
-    ShaderAsset result;
+    ShaderAsset result{device};
     result._family = desc.Family;
     result._backend = backend;
     for (const auto& entry : desc.Stages) {
@@ -65,6 +65,87 @@ std::optional<ShaderAsset> ShaderAsset::Create(gpu::Device& device, const Shader
         result._stages.push_back({entry.VariantIndex, entry.Stage, entry.Entry, shader.Release()});
     }
     return result;
+}
+
+shader::DiagnosticResult<ShaderAsset> ShaderAsset::Compile(
+    gpu::Device& device, const shader::Client& client, const ShaderCompileDesc& desc) {
+    const Uri& uri = desc.SourceUri;
+    string diagnostics;
+    const auto failure = [&](std::string_view reason) -> shader::DiagnosticResult<ShaderAsset> {
+        shader::AppendDiagnostic(diagnostics, reason);
+        return {std::nullopt, radray::format("{}: {}", uri.AsString(), diagnostics)};
+    };
+    if (uri.Scheme() != "virtual" || uri.Host().empty() || uri.Authority() != uri.Host() ||
+        uri.AbsolutePath().empty() || uri.AbsolutePath().ends_with('/') || !uri.Query().empty() || !uri.Fragment().empty())
+        return failure("expected virtual://host/path with a root source filename");
+    string sourceName{uri.Host()};
+    sourceName += uri.AbsolutePath();
+    if (!shader::IsLogicalSourceName(sourceName)) return failure("invalid compiler source name");
+    if (!client.IsAvailable()) return failure("shader compiler unavailable");
+    const auto backend = device.GetBackend();
+    if (backend != gpu::RenderBackend::D3D12 && backend != gpu::RenderBackend::Vulkan) return failure("unsupported backend");
+    const bool dxil = backend == gpu::RenderBackend::D3D12;
+    const auto target = dxil ? shader::ShaderTarget::DXIL : shader::ShaderTarget::SPIRV;
+    shader::SourceContractRequest source{
+        sourceName, {desc.Source.begin(), desc.Source.end()}, desc.Defines,
+        dxil ? shader::ShaderTargetMask::DXIL : shader::ShaderTargetMask::SPIRV, desc.Policy};
+    const auto discovery = client.DiscoverSourceContract(source, desc.IncludePaths);
+    shader::AppendDiagnostic(diagnostics, discovery.Diagnostics);
+    if (!discovery.Succeeded()) return failure("source contract discovery failed");
+    shader::CompileVariantRequest request{
+        std::move(source.SourceName), std::move(source.RootSource), std::move(source.Defines), {},
+        source.Targets, source.Policy, discovery.Value->Hash};
+
+    const ShaderVariantCompileDesc defaultVariant{};
+    const auto variants = desc.Variants.empty() ? std::span{&defaultVariant, 1} : std::span<const ShaderVariantCompileDesc>{desc.Variants};
+    vector<shader::DxilShaderArtifactView> dxArtifacts;
+    vector<shader::SpirvShaderArtifactView> vkArtifacts;
+    if (dxil) dxArtifacts.reserve(variants.size());
+    else vkArtifacts.reserve(variants.size());
+    vector<shader::ShaderVariantArtifacts> family;
+    ShaderAssetDesc asset;
+    for (const auto& variant : variants) {
+        request.Assignments = variant.Keywords;
+        auto compiled = client.CompileVariant(request, desc.IncludePaths);
+        shader::AppendDiagnostic(diagnostics, compiled.Diagnostics);
+        if (!compiled.Succeeded() || compiled.Value->size() != 1) return failure(radray::format("compiling variant {}", variant.Name));
+        auto& lane = compiled.Value->front();
+        shader::WireMetadataEnvelope envelope{};
+        const std::span<const byte> metadata{lane.Metadata};
+        if (metadata.size() < sizeof(envelope) || !shader::DecodeShaderMetadataEnvelope(metadata.first(sizeof(envelope)), envelope))
+            return failure("invalid compiler metadata envelope");
+        shader::ShaderArtifactDecodeOptions options{target, envelope.GpuArtifact, shader::kShaderToolchainIdentity};
+        shader::ShaderVariantArtifacts reflected{variant.Name};
+        if (dxil) {
+            auto result = shader::DecodeDxilShaderArtifact(metadata, options);
+            if (!result.Succeeded()) return failure(result.Diagnostics);
+            reflected.DXIL = &dxArtifacts.emplace_back(std::move(*result.Value));
+        } else {
+            auto result = shader::DecodeSpirvShaderArtifact(metadata, options);
+            if (!result.Succeeded()) return failure(result.Diagnostics);
+            reflected.SPIRV = &vkArtifacts.emplace_back(std::move(*result.Value));
+        }
+        for (auto& stage : lane.Stages) {
+            const auto gpuStage = stage.Stage == shader::ShaderStage::Vertex ? gpu::ShaderStage::Vertex :
+                                  stage.Stage == shader::ShaderStage::Pixel ? gpu::ShaderStage::Pixel : gpu::ShaderStage::Compute;
+            asset.Stages.push_back({static_cast<uint32_t>(family.size()), backend, gpuStage, std::move(stage.EntryPoint), std::move(stage.Bytecode)});
+        }
+        family.push_back(std::move(reflected));
+    }
+    auto layout = shader::ReflectShaderFamily(family, desc.ReflectionPolicy);
+    shader::AppendDiagnostic(diagnostics, layout.Diagnostics);
+    if (!layout.Succeeded()) return failure("shader family reflection failed");
+    asset.Family.SharedLayout = std::move(layout.Value->SharedLayout);
+    // The reflector orders variants by name. Public indices follow the compile descriptor.
+    for (const auto& variant : variants) {
+        const auto found = std::find_if(layout.Value->Variants.begin(), layout.Value->Variants.end(),
+                                        [&](const auto& item) { return item.Name == variant.Name; });
+        if (found == layout.Value->Variants.end()) return failure("missing reflected variant");
+        asset.Family.Variants.push_back(std::move(*found));
+    }
+    auto value = Create(device, asset);
+    if (!value) return failure("GPU shader creation failed");
+    return {std::move(value), std::move(diagnostics)};
 }
 
 std::optional<ShaderAsset> ShaderAsset::Load(gpu::Device& device, const std::filesystem::path& indexPath) {
@@ -116,6 +197,36 @@ std::optional<ShaderAsset> ShaderAsset::Load(gpu::Device& device, const std::fil
     return Create(device, desc);
 }
 
+string ShaderAsset::CheckReplacement(const ShaderAsset& candidate) const {
+    if (_device != candidate._device) return "shader device changed";
+    const auto& before = GetLayoutDesc();
+    const auto& after = candidate.GetLayoutDesc();
+    if (before.Groups.size() != after.Groups.size()) return "binding group count changed";
+    for (size_t i = 0; i < before.Groups.size(); ++i)
+        if (before.Groups[i] != after.Groups[i]) return radray::format("binding group {} changed", before.Groups[i].GroupSlot);
+    if (before.PushConstants != after.PushConstants) return "push constant layout changed";
+    if (before.Types.size() != after.Types.size()) return "shader type count changed";
+    for (size_t i = 0; i < before.Types.size(); ++i)
+        if (before.Types[i] != after.Types[i]) return radray::format("shader type/member {} changed", before.Types[i].Name);
+    if (_family.Variants.size() != candidate._family.Variants.size()) return "variant count changed";
+    for (uint32_t i = 0; i < _family.Variants.size(); ++i) {
+        const auto& name = _family.Variants[i].Name;
+        if (name != candidate._family.Variants[i].Name) return radray::format("variant {} changed at index {}", name, i);
+        const auto a = GetVariantInterface(i), b = candidate.GetVariantInterface(i);
+        if (a.HasValue() != b.HasValue()) return radray::format("{} target availability changed", name);
+        if (!a) continue;
+        if (a->Stages != b->Stages) return radray::format("{} stages changed", name);
+        if (a->VertexInputs != b->VertexInputs) return radray::format("{} vertex inputs changed", name);
+        if (a->ActiveBindings != b->ActiveBindings) return radray::format("{} active bindings changed", name);
+        if (a->ActivePushConstants != b->ActivePushConstants) return radray::format("{} active push constants changed", name);
+        for (auto stage : {gpu::ShaderStage::Vertex, gpu::ShaderStage::Pixel, gpu::ShaderStage::Compute}) {
+            if (a->Stages.HasFlag(stage) && GetStage(i, stage)->EntryPoint != candidate.GetStage(i, stage)->EntryPoint)
+                return radray::format("{} stage entry changed", name);
+        }
+    }
+    return {};
+}
+
 const shader::ShaderPipelineLayoutDesc& ShaderAsset::GetLayoutDesc() const noexcept { return _family.SharedLayout; }
 const shader::ShaderFamilyLayoutDesc& ShaderAsset::GetFamilyDesc() const noexcept { return _family; }
 gpu::RenderBackend ShaderAsset::GetBackend() const noexcept { return _backend; }
@@ -154,7 +265,8 @@ ShaderAssetLoader::ShaderAssetLoader(gpu::Device& device, Nullable<const ShaderA
     : _device(device), _fallback(fallback) {}
 
 task<std::optional<ShaderAsset>> ShaderAssetLoader::LoadAsync(AssetLoadContext& context) {
-    co_return ShaderAsset::Load(_device, context.GetMeta().Path);
+    const auto path = context.GetMeta().Location.ToFilePath();
+    co_return path ? ShaderAsset::Load(_device, *path) : std::nullopt;
 }
 
 Nullable<const ShaderAsset*> ShaderAssetLoader::GetFallback() const noexcept { return _fallback; }

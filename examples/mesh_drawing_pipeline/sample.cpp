@@ -18,11 +18,13 @@
 
 namespace radray::examples::mesh_drawing {
 int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory,
-              const std::filesystem::path& output, uint32_t slotCount, uint32_t frameCount) {
-    if (slotCount == 0 || frameCount < 2) return 2;
+              const std::filesystem::path& output, uint32_t slotCount, uint32_t frameCount, bool hotReload) {
+    if (slotCount == 0 || frameCount < (hotReload ? 3u : 2u)) return 2;
     if (!PrepareOutputDirectory(output)) return 2;
     GpuResources gpu;
-    if (!gpu.Initialize(backend, shaderDirectory)) return 3;
+    std::optional<shader::Client> compiler;
+    if (hotReload) compiler.emplace();
+    if (!gpu.Initialize(backend, shaderDirectory, compiler ? &*compiler : nullptr)) return 3;
 
     // 步骤 1：准备一份立方体几何，再把索引分成两个 Section。
     // 为什么：submesh 是索引范围与材质槽，所有立方体和 Section 都能共享同一份顶点缓冲。
@@ -218,14 +220,43 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
     RADRAY_INFO_LOG("增量缓存验证：仅绿色材质的 {} 个 Batch 重建，其余 {} 个 Batch 的驻留状态索引保持不变", rebuiltBatches, policies.size() - rebuiltBatches);
     RADRAY_INFO_LOG("命令颜色验证：绿色材质 Brightness 从 0.5 更新为 1.0，缓存 PushConstants 的 RGB 已翻倍，alpha 保持不变");
 
+    bool published = false;
     for (uint32_t frame = 2; frame < frameCount; ++frame) {
+        if (frame == 2 && compiler) {
+            const auto uri = Uri::TryCreate("virtual://shaders/cube.hlsl");
+            if (!uri) return 3;
+            auto next = gpu.CompileCube(*compiler, *uri, true);
+            if (!next.Succeeded()) {
+                RADRAY_ERR_LOG("{}", next.Diagnostics);
+            } else {
+                published = gpu.PublishShader(std::move(*next.Value), vertexInput, scene, materials, scheduler->BeginFrame());
+                if (!published) RADRAY_ERR_LOG("Shader replacement failed; drawing with previous pipelines");
+            }
+        }
         drawing->SetInput(scene);
         scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
         scheduler->RunFrame();
         drawing->ClearInput();
     }
     scheduler->WaitIdle();
-    if (!drawing->SaveImage((frameCount - 1) % slotCount, output)) return 6;
+    auto image = drawing->ReadImage((frameCount - 1) % slotCount);
+    if (!image || !image->WritePNG({output.string(), false})) return 6;
+    RADRAY_INFO_LOG("PNG 已写入：{}", output.string());
+    if (hotReload && !published) return 3;
+    // Slot 1 still contains the last pre-publication frame until it is reused.
+    if (published && frameCount - 2 < slotCount) {
+        const auto before = drawing->ReadImage(1);
+        if (!before || before->GetSize() != image->GetSize()) return 6;
+        size_t swapped = 0;
+        for (size_t i = 0; i < image->GetSize(); i += 4) {
+            const auto* oldColor = before->Data.get() + i;
+            const auto* newColor = image->Data.get() + i;
+            if (oldColor[0] != oldColor[2] && oldColor[0] == newColor[2] && oldColor[2] == newColor[0] &&
+                oldColor[1] == newColor[1] && oldColor[3] == newColor[3]) ++swapped;
+        }
+        RADRAY_INFO_LOG("热替换前后帧读回：{} 个像素交换红蓝通道", swapped);
+        if (!swapped) return 6;
+    }
     RADRAY_INFO_LOG("多槽帧循环完成：{} 帧、{} 个 Slot，所有在途帧已完成并重置录制存储", frameCount, slotCount);
     return 0;
 }
@@ -241,11 +272,16 @@ int SampleMain(int argc, char** argv) {
     std::filesystem::path output;
     uint32_t slotCount = 2;
     uint32_t frameCount = 6;
+    bool hotReload = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view option{argv[i]};
+        if (option == "--hot-reload") {
+            hotReload = true;
+            continue;
+        }
         if (option == "--help" || option == "-h") {
             fmt::print(
-                "用法：radray_mesh_drawing_sample [--backend d3d12|vulkan] [--shader-dir 目录] [--output 图片.png] [--slots 槽数] [--frames 帧数]\n"
+                "用法：radray_mesh_drawing_sample [--backend d3d12|vulkan] [--shader-dir 目录] [--output 图片.png] [--slots 槽数] [--frames 帧数] [--hot-reload]\n"
                 "默认双槽六帧；槽数必须大于 0，帧数至少为 2。先运行 examples/mesh_drawing_pipeline/compile_shaders.py。\n");
             return 0;
         }
@@ -287,7 +323,7 @@ int SampleMain(int argc, char** argv) {
         output = root / "build/mesh_drawing_pipeline" /
                  (backend == gpu::RenderBackend::Vulkan ? "vulkan.png" : "d3d12.png");
     }
-    return RunSample(backend, shaderDirectory, output, slotCount, frameCount);
+    return RunSample(backend, shaderDirectory, output, slotCount, frameCount, hotReload);
 }
 
 }  // namespace radray::examples::mesh_drawing

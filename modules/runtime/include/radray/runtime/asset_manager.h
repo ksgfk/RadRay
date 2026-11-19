@@ -2,7 +2,7 @@
 
 #include <cstddef>
 #include <concepts>
-#include <filesystem>
+#include <radray/uri.h>
 #include <optional>
 #include <span>
 #include <typeindex>
@@ -10,6 +10,7 @@
 #include <utility>
 
 #include <radray/logger.h>
+#include <radray/shader/diagnostic_result.h>
 #include <radray/types.h>
 #include <radray/coroutine.h>
 #include <radray/nullable.h>
@@ -20,7 +21,7 @@ namespace radray {
 
 struct AssetMeta {
     AssetId Id{};
-    std::filesystem::path Path;
+    Uri Location;
     vector<AssetId> Dependencies;
 };
 
@@ -137,6 +138,8 @@ public:
     }
     AssetState GetState(UntypedAssetHandle handle) const noexcept;
     uint32_t GetRefCount(UntypedAssetHandle handle) const noexcept;
+    // Publish on the owner thread after CPU borrowers finish. Retire the returned version with its PSOs.
+    shader::DiagnosticResult<ShaderAsset> ReplaceShader(const AssetRef<ShaderAsset>& target, ShaderAsset&& candidate);
     // 运行到当前没有可推进的任务；外部事件仍可能持有挂起任务。
     void Pump();
     bool HasPendingWork() const noexcept;

@@ -729,7 +729,9 @@ cmake --build --preset win-x64-release-clangcl --target radray_mesh_drawing_samp
 [预编译脚本](../../examples/mesh_drawing_pipeline/compile_shaders.py) 默认使用
 `build/windows-x64-msvc/Debug/_build/Debug/` 的两个 CLI，可通过 `--tools-dir` 改写。
 先加载开发环境以提供 DXC/mimalloc 运行库；脚本显式完成编译、反射和完整产物替换，CMake 不自动执行。
-样例运行从 `cube.index.json` 加载 `cube.layout.bin` 与当前后端的独立 stage 字节码，不加载 DXC，按后端签名解析顶点 Location。
+样例默认从 `cube.index.json` 加载 `cube.layout.bin` 与当前后端的独立 stage 字节码，不加载 DXC，按后端签名解析顶点 Location。
+使用 `--hot-reload --frames 3` 可运行内存编译路径。样例从 cube HLSL 生成两个版本，在第三帧开始时发布交换红蓝通道的像素 Shader，并重建全部材质 PSO。该模式需要 DXC 运行库和源码树中的 shaderlib。
+
 布局 manifest 显式固定 Pass 的 GroupSlot/BindingId 和 MaterialPush 的 PushId，样例不再手写原生布局。
 
 ### 运行与核对

@@ -32,5 +32,9 @@ float4 VSMain(VSInput input) : SV_Position {
 [RootSignature("RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT),DescriptorTable(CBV(b0)),RootConstants(num32BitConstants=4,b1)")]
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
+#ifdef SWAP_COLORS
+    return MaterialPush.Color.bgra;
+#else
     return MaterialPush.Color;
+#endif
 }

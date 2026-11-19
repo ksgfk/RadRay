@@ -9,6 +9,12 @@
 #include <radray/gpu/types.h>
 
 #include <filesystem>
+#include <span>
+#include <radray/uri.h>
+#include <radray/shader/client.h>
+#include <radray/shader/diagnostic_result.h>
+#include <radray/shader/shader_compiler_contract.h>
+#include <radray/shader/shader_reflector.h>
 #include <radray/shader/shader_layout.h>
 #include <radray/runtime/asset_manager.h>
 
@@ -44,10 +50,27 @@ struct ShaderAssetDesc {
     vector<ShaderStageBytecode> Stages;
 };
 
+struct ShaderVariantCompileDesc {
+    string Name{"Default"};
+    vector<shader::KeywordAssignment> Keywords;
+};
+
+struct ShaderCompileDesc {
+    Uri SourceUri;
+    std::span<const byte> Source;
+    std::span<const std::filesystem::path> IncludePaths;
+    vector<shader::Define> Defines;
+    shader::CompilePolicy Policy{};
+    vector<ShaderVariantCompileDesc> Variants;
+    shader::ShaderReflectionPolicy ReflectionPolicy{};
+};
+
 class ShaderAsset final {
 public:
+    static shader::DiagnosticResult<ShaderAsset> Compile(gpu::Device& device, const shader::Client& client, const ShaderCompileDesc& desc);
     static std::optional<ShaderAsset> Create(gpu::Device& device, const ShaderAssetDesc& desc);
     static std::optional<ShaderAsset> Load(gpu::Device& device, const std::filesystem::path& indexPath);
+    string CheckReplacement(const ShaderAsset& candidate) const;
     ShaderAsset(ShaderAsset&&) noexcept = default;
     ShaderAsset& operator=(ShaderAsset&&) noexcept = default;
     ShaderAsset(const ShaderAsset&) = delete;
@@ -63,7 +86,8 @@ public:
     std::optional<shader::ShaderResolvedMember> FindBufferMember(std::string_view block, std::string_view path) const;
 
 private:
-    ShaderAsset() = default;
+    explicit ShaderAsset(gpu::Device& device) noexcept : _device(&device) {}
+    gpu::Device* _device;
     struct StageObject {
         uint32_t VariantIndex;
         gpu::ShaderStage Stage;

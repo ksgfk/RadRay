@@ -1,7 +1,8 @@
 #pragma once
 
 #include <cstddef>
-#include <filesystem>
+#include <optional>
+#include <radray/image_data.h>
 #include <span>
 #include <string_view>
 
@@ -125,7 +126,7 @@ public:
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override;
     void Wait(FrameSlot& slot) noexcept override;
     // Call after scheduler.WaitIdle(); the pipeline remains owned by the scheduler.
-    bool SaveImage(uint32_t slotIndex, const std::filesystem::path& output) const;
+    std::optional<ImageData> ReadImage(uint32_t slotIndex) const;
 
 private:
     void ExtractFrameData(FrameSlot& slot) noexcept override;
