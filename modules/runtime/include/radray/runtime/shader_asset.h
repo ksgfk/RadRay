@@ -3,7 +3,6 @@
 #include <optional>
 #include <string_view>
 
-#include <radray/coroutine.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
 #include <radray/gpu/types.h>
@@ -70,7 +69,7 @@ public:
     static shader::DiagnosticResult<ShaderAsset> Compile(gpu::Device& device, const shader::Client& client, const ShaderCompileDesc& desc);
     static std::optional<ShaderAsset> Create(gpu::Device& device, const ShaderAssetDesc& desc);
     static std::optional<ShaderAsset> Load(gpu::Device& device, const std::filesystem::path& indexPath);
-    string CheckReplacement(const ShaderAsset& candidate) const;
+    AssetReloadDecision ClassifyReload(const ShaderAsset& candidate) const;
     ShaderAsset(ShaderAsset&&) noexcept = default;
     ShaderAsset& operator=(ShaderAsset&&) noexcept = default;
     ShaderAsset(const ShaderAsset&) = delete;
@@ -97,17 +96,6 @@ private:
     shader::ShaderFamilyLayoutDesc _family;
     gpu::RenderBackend _backend{gpu::RenderBackend::D3D12};
     vector<StageObject> _stages;
-};
-
-class ShaderAssetLoader final : public AssetLoader<ShaderAsset> {
-public:
-    explicit ShaderAssetLoader(gpu::Device& device, Nullable<const ShaderAsset*> fallback = nullptr) noexcept;
-    task<std::optional<ShaderAsset>> LoadAsync(AssetLoadContext& context) override;
-    Nullable<const ShaderAsset*> GetFallback() const noexcept override;
-
-private:
-    gpu::Device& _device;
-    Nullable<const ShaderAsset*> _fallback;
 };
 
 }  // namespace radray

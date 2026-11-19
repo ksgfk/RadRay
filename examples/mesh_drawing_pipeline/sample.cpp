@@ -220,19 +220,35 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
     RADRAY_INFO_LOG("增量缓存验证：仅绿色材质的 {} 个 Batch 重建，其余 {} 个 Batch 的驻留状态索引保持不变", rebuiltBatches, policies.size() - rebuiltBatches);
     RADRAY_INFO_LOG("命令颜色验证：绿色材质 Brightness 从 0.5 更新为 1.0，缓存 PushConstants 的 RGB 已翻倍，alpha 保持不变");
 
+    array<uint32_t, 8> proxyRevisions{};
+    for (size_t i = 0; i < instances.size(); ++i) proxyRevisions[i] = gpu.Assets->GetRevision(instances[i].GetMaterial().Untyped());
     bool published = false;
     for (uint32_t frame = 2; frame < frameCount; ++frame) {
+        auto& slot = scheduler->BeginFrame();
+        std::optional<AssetTransaction> pending;
         if (frame == 2 && compiler) {
             const auto uri = Uri::TryCreate("virtual://shaders/cube.hlsl");
             if (!uri) return 3;
             auto next = gpu.CompileCube(*compiler, *uri, true);
-            if (!next.Succeeded()) {
-                RADRAY_ERR_LOG("{}", next.Diagnostics);
+            if (next.Succeeded()) {
+                pending.emplace(*gpu.Assets);
+                pending->StageReplace(gpu.Shader, std::move(*next.Value));
             } else {
-                published = gpu.PublishShader(std::move(*next.Value), vertexInput, scene, materials, scheduler->BeginFrame());
-                if (!published) RADRAY_ERR_LOG("Shader replacement failed; drawing with previous pipelines");
+                RADRAY_ERR_LOG("{}", next.Diagnostics);
             }
         }
+        AssetCommitResult commit;
+        if (pending || gpu.Assets->HasPendingGarbage()) {
+            auto* retired = slot.Emplace<AssetGarbageBatch>();
+            gpu.Assets->CollectGarbage(*retired);
+            if (pending) {
+                commit = gpu.Assets->Commit(std::move(*pending), *retired);
+                published = commit.Succeeded;
+                if (!published) RADRAY_ERR_LOG("{}", commit.Diagnostic);
+            }
+        }
+        if (!SyncMaterialProxies(*gpu.Assets, scene, instances, materials, proxyRevisions)) return 4;
+        gpu.SyncPipelines(vertexInput, commit.Events, scene, materials, slot);
         drawing->SetInput(scene);
         scene.SyncCachedMeshDrawCommands(drawing->GetMeshPassRegistrations());
         scheduler->RunFrame();
@@ -242,7 +258,17 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
     auto image = drawing->ReadImage((frameCount - 1) % slotCount);
     if (!image || !image->WritePNG({output.string(), false})) return 6;
     RADRAY_INFO_LOG("PNG 已写入：{}", output.string());
-    if (hotReload && !published) return 3;
+    if (hotReload) {
+        if (!published) return 3;
+        const auto shaderRevision = gpu.Assets->GetRevision(gpu.Shader.Untyped());
+        for (const auto& pipelines : gpu.Pipelines) {
+            if (!pipelines.Color || pipelines.AppliedShaderRevision != shaderRevision ||
+                pipelines.AppliedMaterialRevision != gpu.Assets->GetRevision(pipelines.Material.Untyped())) {
+                RADRAY_ERR_LOG("热替换验收失败：最后一帧材质 {} 的 PSO 尚未追平已提交版本", pipelines.Material);
+                return 3;
+            }
+        }
+    }
     // Slot 1 still contains the last pre-publication frame until it is reused.
     if (published && frameCount - 2 < slotCount) {
         const auto before = drawing->ReadImage(1);

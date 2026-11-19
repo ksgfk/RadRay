@@ -15,13 +15,17 @@
 #include <radray/runtime/material_tag.h>
 #include <radray/runtime/vertex_input.h>
 #include <radray/runtime/asset_handle.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_parameter_binding_map.h>
 
 namespace radray {
+class MaterialAsset;
+class ShaderAsset;
 
 // 材质默认状态；每个 Pass 显式选择沿用或覆盖哪些字段。
 // 附件格式、采样与几何拓扑由 Pass 提供。
-struct MaterialRenderState {
+class MaterialRenderState {
+public:
     gpu::CullMode Cull{gpu::CullMode::Back};
     std::optional<gpu::BlendState> Blend;
     gpu::ColorWrites ColorWriteMask{gpu::ColorWrite::All};
@@ -34,6 +38,7 @@ struct MaterialRenderState {
     bool DepthTestEnable{true};
     bool DepthWriteEnable{true};
     uint8_t StencilReference{0};
+    friend bool operator==(const MaterialRenderState&, const MaterialRenderState&) = default;
 };
 
 struct MaterialProperties {
@@ -41,12 +46,14 @@ struct MaterialProperties {
     MaterialRenderState RenderState;
 };
 
-struct MaterialShaderProgram {
+class MaterialShaderProgram {
+public:
     string Name;
     AssetHandle<ShaderAsset> Shader;
     uint32_t VariantIndex{0};
     string VertexEntry;
     string PixelEntry;
+    friend bool operator==(const MaterialShaderProgram&, const MaterialShaderProgram&) = default;
 };
 
 using MaterialParameterValue = std::variant<float, array<float, 4>, Nullable<gpu::TextureView*>, Nullable<gpu::Sampler*>>;
@@ -71,12 +78,16 @@ struct MaterialAssetDesc {
 
 AssetRef<MaterialAsset> CreateMaterial(AssetManager& assets, const MaterialAssetDesc& desc, AssetId id = {});
 
+bool StageMaterial(AssetTransaction& tx, AssetHandle<MaterialAsset> target, const MaterialAssetDesc& desc);
+bool StageMaterial(AssetTransaction& tx, const AssetRef<MaterialAsset>& target, const MaterialAssetDesc& desc);
+
 class MaterialAsset final {
 public:
     MaterialAsset(MaterialAsset&&) noexcept = default;
     MaterialAsset& operator=(MaterialAsset&&) noexcept = default;
     MaterialAsset(const MaterialAsset&) = delete;
     MaterialAsset& operator=(const MaterialAsset&) = delete;
+    AssetReloadDecision ClassifyReload(const MaterialAsset& candidate) const;
     const MaterialProperties& GetProperties() const noexcept;
     std::span<const MaterialShaderProgram> GetPrograms() const noexcept;
     std::optional<size_t> FindProgram(std::string_view name) const noexcept;
@@ -88,8 +99,13 @@ public:
 
 private:
     friend AssetRef<MaterialAsset> CreateMaterial(AssetManager&, const MaterialAssetDesc&, AssetId);
+    friend bool StageMaterial(AssetTransaction&, AssetHandle<MaterialAsset>, const MaterialAssetDesc&);
+    friend bool StageMaterial(AssetTransaction&, const AssetRef<MaterialAsset>&, const MaterialAssetDesc&);
     MaterialAsset() = default;
-    static std::optional<MaterialAsset> Create(const AssetManager& assets, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self);
+    template <typename Target>
+    static bool Stage(AssetTransaction& tx, const Target& target, AssetHandle<MaterialAsset> self, const MaterialAssetDesc& desc);
+    template <typename Resolve>
+    static std::optional<MaterialAsset> Create(Resolve&& resolve, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self);
     struct FamilyBinding {
         AssetHandle<ShaderAsset> Shader;
         MaterialParameterBindingMap Map;

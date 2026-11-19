@@ -398,7 +398,7 @@ ctest --preset win-x64-debug-clangcl
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader`（同一程序内的编译能力用例） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_gpu_impl` | 见下文 [gpu_impl 测试](#gpu_impl-测试) |
-| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
+| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`ShaderPublish`（开启样例）、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -596,7 +596,7 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 ```powershell
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|UploadArena|Backends/((Geometry|Buffer|Texture)UploadGpuTest|ShaderLayoutGpuTest))' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|ShaderPublish|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|UploadArena|Backends/((Geometry|Buffer|Texture)UploadGpuTest|ShaderLayoutGpuTest))' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -638,7 +638,7 @@ A/B/C 使用背面剔除不透明材质，D 使用关闭剔除并写模板的不
 样例还先把绿色实例的 Brightness 同步为 0.5，再改为 1.0：日志先显示实例为 1、Proxy 仍为 0.5，
 显式 Update 后 Proxy 才变为 1。Frame 0 提交后执行 Scene::UpdateMaterial，Frame 1 先显式同步当前 registrations，再设置管线输入并调用 `RunFrame()`；日志验证仅绿色材质关联的一个 Batch 重建，其余九个 Batch 的驻留状态索引不变，
 且该命令对应绑定池载荷的颜色常量 RGB 从 0.5 倍更新为 1.0 倍、alpha 不变。
-可调整参数覆盖观察颜色；调整 Tags / RenderState 需要在 MaterialAsset 发布和 PSO 创建之前进行。
+调整实例覆盖后重新同步 Proxy 即可观察颜色变化。运行时用 `StageMaterial` 提交 Tags 或 RenderState 的变化，样例在下一次场景提取前按版本重建对应的 PSO 和缓存命令。
 四个 Pass 按以下顺序执行；每个 Pass 仍自行决定采用或覆盖材质状态：
 
 1. **Depth**：只收不透明材质，沿用剔除和深度偏移，覆盖为 Less、深度测试/写入开启、模板关闭。
@@ -704,7 +704,7 @@ Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数
 主循环只调用 RunFrame，结束时调用 WaitIdle，再从 `(frameCount - 1) % slotCount` 对应的读回缓冲保存图片。
 Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才销毁 Pipeline 的每槽资源和瞬态池；外部共享资源和源 Scene 晚于 Scheduler 销毁。
 完整接口、裁剪与上传约束见 [RDG 与 RenderGraphFramePipeline](../architecture/runtime.md#rdg-与-rendergraphframepipeline)。
-样例 Processor 检查到材质句柄失效、未同步材质、标签表身份不一致、缺失 BatchPassPolicy 或 PSO、参数提取失败时均带诊断终止程序。
+样例 Processor 检查到材质句柄失效、未同步材质、标签表身份不一致、缺失 BatchPassPolicy、缺失已启用的 Pass 所需的 PSO 或参数提取失败时均带诊断终止程序。热替换失败时已暂停的材质跳过命令生成。
 runtime 构建 helper 的输入校验仅在 Debug 启用，Release 信任前置条件，不保证构建违约诊断；
 未绑定材质标签表或标签不匹配仍合法跳过该 Pass。具体构建契约见 [增量持久缓存](../architecture/runtime.md#增量持久缓存)。
 
@@ -730,7 +730,7 @@ cmake --build --preset win-x64-release-clangcl --target radray_mesh_drawing_samp
 `build/windows-x64-msvc/Debug/_build/Debug/` 的两个 CLI，可通过 `--tools-dir` 改写。
 先加载开发环境以提供 DXC/mimalloc 运行库；脚本显式完成编译、反射和完整产物替换，CMake 不自动执行。
 样例默认从 `cube.index.json` 加载 `cube.layout.bin` 与当前后端的独立 stage 字节码，不加载 DXC，按后端签名解析顶点 Location。
-使用 `--hot-reload --frames 3` 可运行内存编译路径。样例从 cube HLSL 生成两个版本，在第三帧开始时发布交换红蓝通道的像素 Shader，并重建全部材质 PSO。该模式需要 DXC 运行库和源码树中的 shaderlib。
+使用 `--hot-reload --frames 3` 可运行内存编译路径。样例从 cube HLSL 生成两个版本，在第三帧开始时发布交换红蓝通道的像素 Shader，并按版本重建各材质的 PSO。最后一帧所有材质须追平已提交版本。使用双槽三帧时还会读回替换前后的图像，校验像素红蓝通道互换。该模式需要 DXC 运行库和源码树中的 shaderlib。
 
 布局 manifest 显式固定 Pass 的 GroupSlot/BindingId 和 MaterialPush 的 PushId，样例不再手写原生布局。
 
@@ -783,6 +783,6 @@ Depth 与 Color 之间仍保留跨组 `DepthWrite → DepthWrite` barrier；组�
 ```powershell
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime test_radray_gpu_impl --parallel 8
 $env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
-ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline)|StencilReference' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|ShaderPublish|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline)|StencilReference' --output-on-failure
 Remove-Item Env:RADRAY_TEST_REQUIRED_BACKENDS
 ```

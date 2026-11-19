@@ -11,6 +11,7 @@ CSV/JSON/图片与报告一起保留；`build*/` 中未入库的日志和 trace 
 
 | 历史资料 | 记录范围 |
 |---|---|
+| [Runtime 资产仓库极简收敛、事务热替换与统一帧退役重构计划](2026-11-19-runtime-asset-hot-reload-plan.md) | `aea0dee6` 基线下剥离 `AssetManager` 内置异步协程调度器与 `ReplaceShader` 特化后门，收敛为生而有效的 8 字节稳定句柄仓库、正反向依赖追踪、`Revision` 内容版本、`AssetTransaction` 原子事务热替换（含 `ClassifyReload`、`StageMaterial` 与三色 DFS 验环）及零堆分配侵入式 `AssetGarbageBatch` 帧首退役机制的已确认重构计划 |
 | [Runtime MeshPassProcessor 无状态化、单步发布与移除软失败路径重构计划](2026-11-09-runtime-stateless-mesh-pass-processor-plan.md) | `75da7a9` 基线下移除 `MeshPassProcessor` 内部可变 `DrawListContext` 绑定与哑上下文占位、将 `MeshPassDrawListContext` 两阶段提交协议收敛为单步 `AddCommand`、取消命令构建软失败回滚与跨帧重试路径（全链路 `void` + 违约 `RADRAY_ABORT`）的已确认重构计划 |
 | [Runtime 帧槽准备阶段、RDG 只读组合状态、几何子分配池与分页批量上传演进计划](2026-11-09-runtime-geometry-pool-and-upload-plan.md) | 2026-11-09 的设计快照：BeginFrame、BufferStates、SpanAllocator、顶点/索引池与分页上传；当前已实现接口与约束见 [Rendering runtime](../architecture/runtime.md#几何子分配池与持久映射上传) |
 | [Runtime 架构边界收紧、状态驻留与数据导向重构计划](2026-11-08-runtime-dod-and-state-interning-plan.md) | 2026-11-08 基于架构审视，收紧 `Scene` 与缓存池封装边界（终结公开裸容器后门）、实现 `VertexBuffers`/`Payloads` 跨 Batch 引用计数驻留并将 `MeshDrawCommand` 收敛至 `64 B` 单缓存行、正交拆分 32 位 `StateSortKey` 与 `VisibilitySortKey` 支持 Pass 级 `StateFirst`/`DepthFirst` 排序、构建期预计算 `ContiguousMergeMask` 合并单实例连续子网格、引入 `16 B` Pass 热表与零分配稳定基数排序及修复 `SparseSet` 几何扩容的分阶段重构计划 |

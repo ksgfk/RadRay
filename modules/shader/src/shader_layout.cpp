@@ -498,7 +498,7 @@ bool DecodeLayoutValue(BinaryReader& reader, T& value) {
             value.reset();
             return true;
         }
-        value.emplace();
+        value.emplace(typename T::value_type{});
         return DecodeLayoutValue(reader, *value);
     } else if constexpr (requires { typename LayoutVector<T>::Element; }) {
         uint32_t count = 0;
@@ -577,7 +577,7 @@ bool ReadLayoutJsonValue(JsonValue input, T& value) {
             value.reset();
             return true;
         }
-        value.emplace();
+        value.emplace(typename T::value_type{});
         return ReadLayoutJsonValue(input, *value);
     } else if constexpr (requires { typename LayoutVector<T>::Element; }) {
         if (!input.IsArray()) return false;

@@ -87,8 +87,9 @@ void DepthPassProcessor::AddMeshBatch(const MeshBatchContext& context, MeshPassD
         LogSkipped("Depth", context, *policy, "ColorOnly：不参加 Depth Pass");
         return;
     }
-    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Depth")) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
+    if (!pipelines->Color) return;
+    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Depth")) return;
     if (!pipelines->Depth) RADRAY_ABORT("缺失 Depth PSO");
     BuildMeshDrawCommands(context, {.Pipeline = pipelines->Depth.Get(), .AllowDeferredInstanceStream = true}, output);
 }
@@ -110,9 +111,9 @@ void ColorPassProcessor::AddMeshBatch(const MeshBatchContext& context, MeshPassD
         LogSkipped("Color", context, *policy, "DepthOnly：仅作深度遮挡，不参加 Color Pass");
         return;
     }
-    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Color")) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
-    if (!pipelines->Color) RADRAY_ABORT("缺失 Color PSO");
+    if (!pipelines->Color) return;
+    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Color")) return;
     MaterialConstants constants;
     if (!ExtractMaterialColor(*_scene, context.Batch.Material, _parameters, constants)) {
         RADRAY_ABORT("Color Pass 的材质参数缺失或类型不匹配");
@@ -138,9 +139,10 @@ void OutlinePassProcessor::AddMeshBatch(const MeshBatchContext& context, MeshPas
         LogSkipped("Outline", context, *policy, "DepthOnly：不参加颜色绘制，也不描边");
         return;
     }
+    const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
+    if (!pipelines->Color) return;
     if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _opaqueFilter, "Outline") ||
         !AcceptsMaterial(*_scene, *_assets, context, *policy, _outlineFilter, "Outline")) return;
-    const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
     if (!pipelines->Outline) RADRAY_ABORT("缺失 Outline PSO");
     const MaterialConstants gold{{1.0f, 0.72f, 0.08f, 1.0f}};
     BuildMeshDrawCommands(context, {.Pipeline = pipelines->Outline.Get(), .StencilReference = _assets->Get(pipelines->Material)->GetProperties().RenderState.StencilReference, .PushConstants = MeshPushConstantBinding{0, 0, std::as_bytes(std::span{&gold, 1})}, .AllowDeferredInstanceStream = true}, output);
@@ -164,9 +166,9 @@ void TransparentPassProcessor::AddMeshBatch(const MeshBatchContext& context, Mes
         LogSkipped("Transparent", context, *policy, "DepthOnly：不参加透明颜色绘制");
         return;
     }
-    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Transparent")) return;
     const auto pipelines = FindMaterialPipelines(*_scene, context.Batch.Material, _pipelines);
-    if (!pipelines->Color) RADRAY_ABORT("缺失 Color PSO");
+    if (!pipelines->Color) return;
+    if (!AcceptsMaterial(*_scene, *_assets, context, *policy, _materialFilter, "Transparent")) return;
     MaterialConstants constants;
     if (!ExtractMaterialColor(*_scene, context.Batch.Material, _parameters, constants)) {
         RADRAY_ABORT("Transparent Pass 的材质参数缺失或类型不匹配");

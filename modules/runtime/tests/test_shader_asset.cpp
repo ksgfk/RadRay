@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <chrono>
 #include <radray/file.h>
 #include <radray/hash.h>
@@ -15,7 +16,7 @@ TEST(ShaderAsset, CanonicalUriFindsNamedAsset) {
     auto uri = Uri::TryCreate("virtual://shaders/example");
     ASSERT_TRUE(uri);
     auto ref = assets.Emplace(42, {}, MakeAssetId(*uri));
-    EXPECT_EQ(assets.Request<int>(MakeAssetId("VIRTUAL://SHADERS/./example")).Get(), ref.Get());
+    EXPECT_EQ(assets.Get(assets.Find<int>(MakeAssetId("VIRTUAL://SHADERS/./example"))), ref.Get());
     EXPECT_EQ(MakeAssetId("named").Value, HashData64("named", 5));
     EXPECT_FALSE(MakeAssetId("://bad").IsValid());
 }
@@ -68,9 +69,9 @@ TEST(ShaderAsset, InvalidStagesFailBeforeGpuCreationAndPartialCreationIsReleased
     ASSERT_TRUE(handle);
     EXPECT_EQ(handle.GetHandle().GetIndex(), 0u);
 }
-TEST(ShaderAsset, ReplaceRejectsIncompatibleAndUnavailableTargetsWithoutConsumingCandidate) {
+TEST(ShaderAsset, ClassifiesLayoutProgramAndDeviceChanges) {
     LayoutDevice device, otherDevice;
-    AssetManager assets, foreign;
+    AssetManager assets;
     auto desc = MakeShaderDesc();
     desc.Family.Variants.push_back(desc.Family.Variants.front());
     desc.Family.Variants.back().Name = "Second";
@@ -87,34 +88,21 @@ TEST(ShaderAsset, ReplaceRejectsIncompatibleAndUnavailableTargetsWithoutConsumin
     std::swap(reordered.Family.Variants[0], reordered.Family.Variants[1]);
     auto changed = ShaderAsset::Create(device, reordered);
     ASSERT_TRUE(changed);
-    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    EXPECT_EQ(target.Get()->ClassifyReload(*changed).Kind, AssetReloadKind::Breaking);
     auto renamed = desc;
     renamed.Stages[0].Entry = "changed";
     changed = ShaderAsset::Create(device, renamed);
     ASSERT_TRUE(changed);
-    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    EXPECT_EQ(target.Get()->ClassifyReload(*changed).Kind, AssetReloadKind::Breaking);
     auto layoutChange = desc;
     layoutChange.Family.SharedLayout = MaterialLayout();
     changed = ShaderAsset::Create(device, layoutChange);
     ASSERT_TRUE(changed);
-    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*changed)).Succeeded());
+    EXPECT_EQ(target.Get()->ClassifyReload(*changed).Kind, AssetReloadKind::Breaking);
     auto other = ShaderAsset::Create(otherDevice, desc);
     ASSERT_TRUE(other);
-    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*other)).Succeeded());
-    EXPECT_FALSE(foreign.ReplaceShader(target, std::move(*candidate)).Succeeded());
-    EXPECT_FALSE(assets.ReplaceShader({}, std::move(*candidate)).Succeeded());
-    assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
-    auto id = MakeAssetId("pending");
-    ASSERT_TRUE(assets.RegisterMeta<ShaderAsset>({id, {}, {}}));
-    auto pending = assets.Request<ShaderAsset>(id);
-    EXPECT_FALSE(assets.ReplaceShader(pending, std::move(*candidate)).Succeeded());
-    assets.Pump();
-    EXPECT_EQ(pending.GetState(), AssetState::Failed);
-    EXPECT_FALSE(assets.ReplaceShader(pending, std::move(*candidate)).Succeeded());
-    assets.Shutdown();
-    EXPECT_FALSE(assets.ReplaceShader(target, std::move(*candidate)).Succeeded());
-    EXPECT_EQ(target.Get()->GetStage(0, gpu::ShaderStage::Vertex)->EntryPoint, "VS");
-    EXPECT_TRUE(candidate->GetStage(0, gpu::ShaderStage::Vertex));
+    EXPECT_EQ(target.Get()->ClassifyReload(*other).Kind, AssetReloadKind::Rejected);
+    EXPECT_EQ(target.Get()->ClassifyReload(*candidate).Kind, AssetReloadKind::Compatible);
 }
 
 TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
@@ -151,42 +139,58 @@ TEST(ShaderAsset, OwnersSurviveEveryFrameSlotWaitAndCommandReset) {
     EXPECT_EQ(device->ShaderDestroys, 2u);
 }
 
-TEST(ShaderAsset, ExplicitShutdownRetainsShaderUntilBothSlotsReset) {
-    auto device = make_shared<LayoutDevice>();
-    DeviceContext context{device, &device->Queue};
-    auto fallback = ShaderAsset::Create(*device, MakeShaderDesc());
-    ASSERT_TRUE(fallback);
+TEST(ShaderAsset, BorrowedTextureViewRetiresInTheReloadSlotAcrossFailedRetries) {
+    vector<string> trace;
+    vector<gpu::Texture*> recorded;
+    FakeGpu gpu;
+    gpu.Device->EnableTextures = true;
+    gpu.Device->OnViewDestroyed = [&] { trace.push_back("view"); };
+    gpu.Device->OnTextureDestroyed = [&] { trace.push_back("texture"); };
+    gpu.Device->OnAllocatorReset = [&] { trace.push_back("reset"); };
     AssetManager assets;
-    assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(*device, &*fallback);
-    const auto id = MakeAssetId("pending");
-    ASSERT_TRUE(assets.RegisterMeta<ShaderAsset>({id, {}, {}}));
-    auto pending = assets.Request<ShaderAsset>(id);
-    const auto borrowed = pending.Resolve();
-    ASSERT_EQ(borrowed.Get(), &*fallback);
-    auto shader = CreateTestShader(assets, *device, MakeShaderDesc());
-    ASSERT_TRUE(shader);
-    CallbackPipeline* pipeline{nullptr};
-    auto scheduler = CreateScheduler(context, pipeline, 2);
+    auto texture = assets.Emplace(gpu.Device->CreateTexture({}).Release());
+    auto view = gpu.Device->CreateTextureView({.Target = texture.Get()->get()});
+    ASSERT_TRUE(view);
+    uint32_t applied = assets.GetRevision(texture.Untyped());
+    CallbackPipeline* pipeline{};
+    auto scheduler = CreateScheduler(gpu.Context, pipeline, 2);
     ASSERT_TRUE(scheduler);
-    pipeline->OnPrepare = [&](FrameSlot& slot) {
-        slot.Emplace<AssetRef<ShaderAsset>>(shader);
-        slot.Emplace<AssetRef<ShaderAsset>>(pending);
+    pipeline->OnWait = [&](FrameSlot&) { trace.push_back("wait"); };
+    pipeline->OnRecord = [&](FrameSlot& slot) {
         EXPECT_TRUE(slot.AcquireCommandBuffer());
+        if (view) recorded.push_back(view->GetDesc().Target);
     };
-    pipeline->OnWait = [&](FrameSlot&) { EXPECT_TRUE(borrowed->GetStage(0, gpu::ShaderStage::Vertex)); };
     scheduler->RunFrame();
+    ASSERT_EQ(recorded.size(), 1u);
+    auto& reloadSlot = scheduler->BeginFrame();
+    AssetTransaction tx(assets);
+    ASSERT_TRUE(tx.StageReplace(texture, gpu.Device->CreateTexture({}).Release()));
+    ASSERT_TRUE(assets.Commit(std::move(tx), *reloadSlot.Emplace<AssetGarbageBatch>()).Succeeded);
+    reloadSlot.Emplace<unique_ptr<gpu::TextureView>>(view.Release());
+    const auto sync = [&] {
+        const auto revision = assets.GetRevision(texture.Untyped());
+        if (applied == revision) return;
+        view = gpu.Device->CreateTextureView({.Target = texture.Get()->get()});
+        if (view) applied = revision;
+    };
+    gpu.Device->FailViews = true;
+    sync();
     scheduler->RunFrame();
-    pipeline->OnPrepare = {};
-    shader.Reset();
-    pending.Reset();
-    assets.Shutdown();
-    EXPECT_EQ(assets.CollectGarbage(), 0u);
-    scheduler->RunFrame();
-    EXPECT_EQ(assets.CollectGarbage(), 0u);
-    EXPECT_EQ(device->ShaderDestroys, 0u);
     scheduler->BeginFrame();
-    EXPECT_EQ(assets.CollectGarbage(), 2u);
-    EXPECT_EQ(device->ShaderDestroys, 2u);
+    sync();
+    scheduler->RunFrame();
+    EXPECT_EQ(recorded.size(), 1u);
+    EXPECT_EQ(applied, 1u);
+    EXPECT_EQ(std::count(trace.begin(), trace.end(), "view"), 0);
+    trace.clear();
+    scheduler->BeginFrame();
+    EXPECT_EQ(trace, (vector<string>{"wait", "reset", "view", "texture"}));
+    gpu.Device->FailViews = false;
+    sync();
+    scheduler->RunFrame();
+    EXPECT_EQ(applied, 2u);
+    ASSERT_EQ(recorded.size(), 2u);
+    EXPECT_EQ(recorded.back(), texture.Get()->get());
 }
 
 class ShaderAssetFiles : public testing::Test {
@@ -198,23 +202,12 @@ protected:
         std::error_code error;
         ASSERT_TRUE(std::filesystem::create_directory(Directory, error));
         ASSERT_FALSE(error);
-        Assets.RegisterLoader<ShaderAsset, ShaderAssetLoader>(Device);
-        auto location = Uri::FromFilePath(Directory / "shader.index.json");
-        ASSERT_TRUE(location);
-        ASSERT_TRUE(Assets.RegisterMeta<ShaderAsset>({MakeAssetId("shader.index.json"), *location, {}}));
     }
     void TearDown() override {
         std::error_code error;
         if (Directory.parent_path() == std::filesystem::temp_directory_path()) std::filesystem::remove_all(Directory, error);
     }
-    AssetManager Assets;
-    bool Load() {
-        const auto id = MakeAssetId("shader.index.json");
-        Assets.CollectGarbage();
-        auto ref = Assets.Request<ShaderAsset>(id);
-        Assets.Pump();
-        return ref.IsReady();
-    }
+    bool Load() { return ShaderAsset::Load(Device, Directory / "shader.index.json").has_value(); }
     void Write(bool duplicate = false, bool missing = false, uint32_t version = 1) {
         auto desc = MakeShaderDesc(MaterialLayout());
         desc.Family.Variants[0].SPIRV = desc.Family.Variants[0].DXIL;

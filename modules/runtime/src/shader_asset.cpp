@@ -197,31 +197,30 @@ std::optional<ShaderAsset> ShaderAsset::Load(gpu::Device& device, const std::fil
     return Create(device, desc);
 }
 
-string ShaderAsset::CheckReplacement(const ShaderAsset& candidate) const {
-    if (_device != candidate._device) return "shader device changed";
+AssetReloadDecision ShaderAsset::ClassifyReload(const ShaderAsset& candidate) const {
+    if (_device != candidate._device) return {AssetReloadKind::Rejected, "shader device changed"};
     const auto& before = GetLayoutDesc();
     const auto& after = candidate.GetLayoutDesc();
-    if (before.Groups.size() != after.Groups.size()) return "binding group count changed";
+    if (before.Groups.size() != after.Groups.size()) return {AssetReloadKind::Breaking, "binding group count changed"};
     for (size_t i = 0; i < before.Groups.size(); ++i)
-        if (before.Groups[i] != after.Groups[i]) return radray::format("binding group {} changed", before.Groups[i].GroupSlot);
-    if (before.PushConstants != after.PushConstants) return "push constant layout changed";
-    if (before.Types.size() != after.Types.size()) return "shader type count changed";
+        if (before.Groups[i] != after.Groups[i]) return {AssetReloadKind::Breaking, radray::format("binding group {} changed", before.Groups[i].GroupSlot)};
+    if (before.PushConstants != after.PushConstants) return {AssetReloadKind::Breaking, "push constant layout changed"};
+    if (before.Types.size() != after.Types.size()) return {AssetReloadKind::Breaking, "shader type count changed"};
     for (size_t i = 0; i < before.Types.size(); ++i)
-        if (before.Types[i] != after.Types[i]) return radray::format("shader type/member {} changed", before.Types[i].Name);
-    if (_family.Variants.size() != candidate._family.Variants.size()) return "variant count changed";
+        if (before.Types[i] != after.Types[i]) return {AssetReloadKind::Breaking, radray::format("shader type/member {} changed", before.Types[i].Name)};
+    if (_family.Variants.size() != candidate._family.Variants.size()) return {AssetReloadKind::Breaking, "variant count changed"};
     for (uint32_t i = 0; i < _family.Variants.size(); ++i) {
         const auto& name = _family.Variants[i].Name;
-        if (name != candidate._family.Variants[i].Name) return radray::format("variant {} changed at index {}", name, i);
+        if (name != candidate._family.Variants[i].Name) return {AssetReloadKind::Breaking, radray::format("variant {} changed at index {}", name, i)};
         const auto a = GetVariantInterface(i), b = candidate.GetVariantInterface(i);
-        if (a.HasValue() != b.HasValue()) return radray::format("{} target availability changed", name);
+        if (a.HasValue() != b.HasValue()) return {AssetReloadKind::Breaking, radray::format("{} target availability changed", name)};
         if (!a) continue;
-        if (a->Stages != b->Stages) return radray::format("{} stages changed", name);
-        if (a->VertexInputs != b->VertexInputs) return radray::format("{} vertex inputs changed", name);
-        if (a->ActiveBindings != b->ActiveBindings) return radray::format("{} active bindings changed", name);
-        if (a->ActivePushConstants != b->ActivePushConstants) return radray::format("{} active push constants changed", name);
+        if (a->Stages != b->Stages) return {AssetReloadKind::Breaking, radray::format("{} stages changed", name)};
+        if (a->ActiveBindings != b->ActiveBindings) return {AssetReloadKind::Breaking, radray::format("{} active bindings changed", name)};
+        if (a->ActivePushConstants != b->ActivePushConstants) return {AssetReloadKind::Breaking, radray::format("{} active push constants changed", name)};
         for (auto stage : {gpu::ShaderStage::Vertex, gpu::ShaderStage::Pixel, gpu::ShaderStage::Compute}) {
             if (a->Stages.HasFlag(stage) && GetStage(i, stage)->EntryPoint != candidate.GetStage(i, stage)->EntryPoint)
-                return radray::format("{} stage entry changed", name);
+                return {AssetReloadKind::Breaking, radray::format("{} stage entry changed", name)};
         }
     }
     return {};
@@ -260,16 +259,6 @@ std::optional<shader::ShaderResolvedMember> ShaderAsset::FindBufferMember(std::s
     if (push && push->TypeIndex) return shader::FindShaderTypeMember(_family.SharedLayout.Types, *push->TypeIndex, path);
     return std::nullopt;
 }
-
-ShaderAssetLoader::ShaderAssetLoader(gpu::Device& device, Nullable<const ShaderAsset*> fallback) noexcept
-    : _device(device), _fallback(fallback) {}
-
-task<std::optional<ShaderAsset>> ShaderAssetLoader::LoadAsync(AssetLoadContext& context) {
-    const auto path = context.GetMeta().Location.ToFilePath();
-    co_return path ? ShaderAsset::Load(_device, *path) : std::nullopt;
-}
-
-Nullable<const ShaderAsset*> ShaderAssetLoader::GetFallback() const noexcept { return _fallback; }
 
 ShaderAsset::ShaderAsset(gpu::Device& device) noexcept : _device(&device) {}
 

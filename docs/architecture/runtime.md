@@ -28,8 +28,8 @@
 | `vertex_input.h` | 几何描述、`ValidateVertexInputLayout`、`ResolveVertexInputState` | 有 |
 | `shader_asset.h` | `ShaderAsset`、内存与离线索引加载 | 有 |
 | `gpu_pipeline_layout.h`、`pipeline_layout_registry.h` | `GpuPipelineLayout` 持有原生布局，`PipelineLayoutRegistry` 按签名复用组布局和完整布局 | 有 |
-| `asset_handle.h` | `AssetId`、`AssetState`、类型化和擦除类型的弱句柄 | 无 |
-| `asset_manager.h` | `AssetManager`、`AssetRef<T>`、`AssetLoader<T>`、依赖加载与回收 | 有 |
+| `asset_handle.h` | `AssetId`、类型化和擦除类型的弱句柄 | 无 |
+| `asset_manager.h` | `AssetManager`、`AssetRef<T>`、`AssetTransaction`、`AssetGarbageBatch` | 有 |
 | `material_parameter_binding_map.h` | `MaterialParameterBindingMap`、常量写入与资源绑定 | 有 |
 | `mesh_draw_command.h` | `MeshPassId`、命令绑定、`MeshDrawCommand`、`PassBatchCacheSlot`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`；`ValidateVertexInput`、`ValidateMeshDrawCommand`、`SubmitMeshDrawCommands` | 有 |
 | `mesh_batch.h` | `MeshSection`、`MeshBatchElement`、`MeshBatch`、`PrimitiveSceneInfo` | 无 |
@@ -645,8 +645,9 @@ ShaderAsset 不引用布局注册表，也不保存原生 PipelineLayout/Binding
 `Reference.BindingId` 读取组槽和组内 ID。
 借用的指针和入口字符串不得跨所属资产的搬移或销毁保存。
 
-持有 PSO 的渲染方在 owner 线程调用 `CheckReplacement` 校验设备、共享布局、类型与成员、变体顺序、当前后端接口和各 stage 入口，并针对候选 Shader 准备全部相关 PSO。准备失败时继续使用原 Shader 和原 PSO。
-成功后在 `BeginFrame()` 返回至场景提取前调用 `AssetManager::ReplaceShader`。它再次校验兼容性，仅接受本 manager 的就绪强引用，保留槽位、引用计数和依赖，返回旧 Shader。渲染方交换准备好的 PSO、标脏相关材质代理，把旧 Shader、PSO 和布局 owner 组合移入当前帧槽退役。该保活顺序适用于同一 scheduler 的单队列提交。
+`ShaderAsset::ClassifyReload` 拒绝跨 Device 替换。仅字节码或顶点输入变化时返回 `Compatible`。
+共享布局、反射类型或成员、变体数量或顺序、名称、后端可用性、活跃绑定、阶段或入口变化时返回 `Breaking`。
+持有 PSO 的渲染方按当前 Shader 和材质版本重新准备管线。样例校验所选变体的活跃绑定、顶点输入和 Pass 常量 ABI，包括 ViewProjection、LocalScale 和 Color 的类型、大小及字节偏移。
 
 ### PipelineLayoutRegistry
 
@@ -668,17 +669,42 @@ GroupSlot 独立于 space/set；过滤后空组不创建。
 
 ### 资产登记与生命周期
 
-`AssetManager` 在 owner 线程串行使用。`UntypedAssetHandle` 用两个 32 位字段保存所属 manager 的槽位索引和代次。`AssetHandle<T>` 在同一份 8 字节表示上提供类型约束，`Acquire` 校验存活与类型后取得强引用。`AssetRef<T>` 在 64 位平台占 16 字节，允许拷贝、移动和显式释放。`Get` 返回就绪资产的只读借用。强引用保活逻辑资产；Shader 发布替换前须结束对旧版本的 CPU 借用，发布后重新 `Get()`。`Resolve` 对无法取得真实资产的句柄查询对应 loader 的 fallback。Fallback 由 loader 或应用保活至所有借用它的帧槽完成重置。
+`AssetManager` 在 owner 线程管理已经构造好的资产。离线 Shader 先由 `ShaderAsset::Load` 读取索引，再用 `Emplace` 登记。
+`MakeAssetId` 对逻辑名或规范化的绝对 URI 做 64 位哈希，零 ID 表示匿名。`EmplaceWithHandle` 在调用工厂前预留槽位和 ID，
+工厂可用传入的句柄建立资产自身标识。此时同名登记会失败，预留槽位在成功发布后才能查询。工厂失败会撤销预留并推进代次。
 
-`MakeAssetId` 对非空逻辑名或绝对 `Uri` 的规范化字符串做 64 位哈希。字符串含 `://` 时先解析，失败返回无效 ID。零 ID 用于匿名内存资产。`RegisterMeta<T>` 登记 ID、类型、独立的 `Uri Location` 与直接依赖，磁盘 Shader 索引使用 `Uri::FromFilePath` 转换绝对路径，每种类型注册一个 loader。`Emplace` 登记内存资产，`EmplaceWithHandle` 在工厂执行前预留 ID 与槽位。预留期间无法按 ID 请求或提升该句柄，失败会撤销预留并推进代次。`FindLoaded` 返回已发布的具名槽位，可用 `GetState` 区分 Loading、Ready 和 Failed。
+弱句柄用两个 32 位字段保存索引和代次，仅在所属 manager 中解析。`Find<T>(id)` 和 `AsHandle<T>(handle)` 校验存活、代次和类型，
+`Acquire` 增加强引用。`AssetRef<T>` 在 64 位平台占 16 字节，保活逻辑资产。`Get` 借用当前版本，提交后须重新获取。
+`GetRevision` 自首次发布的 1 开始，失效句柄返回 0。`GetDependents` 返回直接依赖此槽位的父句柄，修改仓库后须重新查询该视图。
 
-`Request<T>` 只排队，同 ID、同类型的请求共用槽位。`Pump()` 启动待加载任务，按批派发已就绪等待者，直到本次没有可推进的工作。若 loader 仍等待外部事件，`HasPendingWork()` 可以继续为真。`ShaderAssetLoader` 借用 Device，在 Pump 期间同步读索引并创建当前后端的 Shader。场景同步和命令录制与资产登记、加载和 GC 由调用方串行安排。
+#### 事务提交
 
-`LoadAsync<T>` 在调用方预取消时传播 stopped，在缓存命中时立即返回强引用，缺失或加载失败时返回空引用。取消单个等待者只释放该等待者的引用。静态依赖先全部请求，就绪后调用 loader。已发布的具名内存资产可以直接作为依赖，冷加载按元数据确定类型。动态请求通过 `AssetLoadContext::LoadDependencyAsync` 建边，静态和动态依赖均在等待前检查环路。同一直接依赖保活一次，成功边保留至父资产销毁，失败立即归还全部依赖。context 的借用仅在本次 loader 调用内有效。Failed 槽位在回收后可以按原 ID 重试。
+`AssetTransaction` 绑定一个 manager。`StageReplace` 暂存已准备的值，`StageBuild` 暂存构建函数和直接依赖。
+`StageMaterial` 复制材质描述，在提交时根据最终 Shader 同时解析程序与参数映射。暂存失败会保留首条诊断并使整笔事务失败。
+`Commit` 校验目标仍有引用、依赖仍存活，并在拟提交的依赖图上验环，再按子先父后运行构建函数。
+构建函数通过 `tx.Get` 读取已声明依赖的最终值，未声明的依赖或尚未构建的候选返回空。
+构建与 `ClassifyReload` 回调期间只能读取仓库，变更引用计数、修改事务或重入提交会触发 `RADRAY_ABORT`。
 
-强引用归零时进入槽内回收链，Loading 状态推迟到加载结束。`CollectGarbage()` 跳过已复活的槽位，回收时先撤销身份，再销毁资产并级联释放依赖。每个实际使用资产的在途帧槽可在 `FrameSlot::Emplace` 中持有一份强引用，直至 GPU 等待与该槽的命令存储重置完成。材质参数资源与标签表继续由外部持有。
+`Compatible` 允许单独提交。`Breaking` 要求当前全部存活的直接父资产同批暂存，可通过 `GetDependents` 和 `AsHandle<T>` 找到它们。
+`Rejected`、缺失父资产、构建失败或依赖环都会返回失败诊断并保留线上版本。成功时仓库按旧图父先子后将旧值挂入 `AssetGarbageBatch`，
+更新反向依赖并递增各槽位版本，再按新图子先父后返回 `AssetReloadEvent`。
+依赖持有子槽位，父资产可以保存句柄和反射值拷贝。若父资产借用子资产内部的原生对象，替换该对象的子资产须分类为 `Breaking`。
 
-`Shutdown()` 由 owner 线程在回调外调用，可重复执行。它关闭注册、创建、请求和弱转强入口，取消并汇合加载；已持有的强引用仍可查询、拷贝、释放和回收。外部事件在 owner 线程通过 `DispatchExternal` 同步恢复 loader，所有挂起点须响应 stop，关闭不依赖下一次 Pump。manager 必须晚于外部强引用及使用它们的帧槽销毁；析构时会检查残留引用。设备应覆盖其创建的所有 GPU 对象。
+#### 回收与帧同步
+
+引用归零的槽位进入回收链，回收前仍可用 `Acquire` 复活。`CollectGarbage(batch)` 先撤销槽位身份，再将当前版本移入调用方的批次。
+清理批次时先析构各资产，再释放它持有的子槽位引用。无参 `CollectGarbage()` 同步排空由此产生的级联回收。
+manager 的寿命须覆盖外部强引用和非空退役批次，析构时会检查两者。Device 的寿命须覆盖其 GPU 对象。
+
+单队列样例在 `BeginFrame()` 返回后、场景提取前提交。当有事务或 `HasPendingGarbage()` 为真时，先在当前 `FrameSlot`
+登记 `AssetGarbageBatch`，再回收、提交，最后登记换下的 PSO 或视图。复用帧槽时先等待 GPU 并重置命令存储，
+再逆序销毁派生对象与退役资产。跨帧使用 `TextureView` 的缓存同时持有底层资产的强引用。发生替换时，旧视图须在同帧退役。
+新视图创建失败期间跳过受影响的绘制，按线上版本重试。
+
+样例为每套 PSO 记录 Shader 和材质已应用的版本，以及现有管线连续收到 `Compatible` 事件的最新版本。
+重建失败时，只有这两个兼容版本都追平线上版本才能继续使用旧 PSO。遇到 `Breaking` 或漏掉事件时退役旧管线，
+暂停相关 draw，后续帧持续按版本重试。每次暂停或成功换入都在 `Extract` 前标脏关联材质代理并同步驻留命令，
+使 `MeshDrawCommand::Pipeline` 与当前 PSO 一致。
 
 ### 顶点接口解析
 
@@ -717,7 +743,9 @@ VertexInput 保存几何 layout、semantic、格式、步长与偏移，不保�
 实例没有父链、静态开关或运行时 shader 编译。
 
 默认 Proxy 没有有效资产。`Update(assets, handle)` 复制默认值，`Update(assets, instance)` 复制解析后的参数；
-失败保留原快照。实例后续变化必须再次显式同步。
+失败保留原快照。实例后续变化必须再次显式同步。材质热替换保持参数数量、顺序、名称和类型，保留实例按索引保存的覆盖。
+仅默认值或绑定映射变化属于 `Compatible`，程序、标签或渲染状态变化属于 `Breaking`。
+样例记录各代理已应用的材质版本，发现版本变化时用原实例重新 `Update`，再调用 `Scene::UpdateMaterial`，漏收事件也能更新继承的默认值。
 Proxy 不保留实例地址，其参数引用不能跨 Update、对象移动或 Scene 的 SparseSet 搬移保存。
 `Scene::UpdateMaterial(MaterialProxyHandle, proxy)` 标脏引用该快照的所有 Batch；
 同步和读取由调用方串行组织，没有自动 GPU 上传。
@@ -785,7 +813,7 @@ Transparent Pass 筛选透明标签，使用材质 alpha 混合、深度测试�
 附件采用 D32_FLOAT_S8_UINT，参考值由持久 `MeshDrawCommand` 保存并在 Draw 前录制；生命周期见 [RHI 模板参考值](render-rhi.md#模板参考值)。
 颜色默认值/覆盖和 Brightness 都由 Processor 从 Proxy 获取，准备阶段解析参数名称，构建命令时使用索引。
 Processor 同时检查各自要求的材质标签与样例 `BatchPassPolicy`。没有材质图、编译/静态变体、fallback、纹理绑定演示、
-uniform expression 求值、GPU 参数缓存或热重载。
+uniform expression 求值或 GPU 参数缓存。
 
 ### 材质标签的身份和存储
 

@@ -59,6 +59,10 @@ struct MaterialPipelines {
     Nullable<unique_ptr<gpu::GraphicsPipelineState>> Depth{nullptr};
     Nullable<unique_ptr<gpu::GraphicsPipelineState>> Color{nullptr};
     Nullable<unique_ptr<gpu::GraphicsPipelineState>> Outline{nullptr};
+    uint32_t AppliedShaderRevision{};
+    uint32_t AppliedMaterialRevision{};
+    uint32_t CompatibleShaderRevision{};
+    uint32_t CompatibleMaterialRevision{};
 };
 
 // 资源按依赖顺序声明，析构时逆序释放；仅供本教学样例使用。
@@ -69,9 +73,9 @@ struct GpuResources {
 
     bool Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory, Nullable<const shader::Client*> compiler = nullptr);
     shader::DiagnosticResult<ShaderAsset> CompileCube(const shader::Client& compiler, const Uri& uri, bool swapColors);
-    std::optional<MaterialPipelines> PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material, const ShaderAsset& shader);
-    bool PublishShader(ShaderAsset&& candidate, const VertexInput& input, Scene& scene,
-                       std::span<const MaterialProxyHandle> proxies, FrameSlot& slot);
+    std::optional<MaterialPipelines> PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
+    void SyncPipelines(const VertexInput& input, std::span<const AssetReloadEvent> events,
+                       Scene& scene, std::span<const MaterialProxyHandle> proxies, FrameSlot& slot);
     // Creates Device buffers and retains CPU bytes for the first frame's graph upload.
     bool PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices);
     bool CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
@@ -114,6 +118,9 @@ struct GpuFrameResources {
     Nullable<unique_ptr<gpu::Fence>> CompletionFence{nullptr};
     uint64_t CompletionValue{0};
 };
+
+bool SyncMaterialProxies(const AssetManager& assets, Scene& scene, std::span<const MaterialInstance> instances,
+                         std::span<const MaterialProxyHandle> proxies, std::span<uint32_t> appliedRevisions);
 
 bool PrepareOutputDirectory(const std::filesystem::path& output);
 

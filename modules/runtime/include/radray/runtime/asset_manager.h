@@ -1,8 +1,8 @@
 #pragma once
 
-#include <cstddef>
 #include <concepts>
-#include <radray/uri.h>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <typeindex>
@@ -10,91 +10,95 @@
 #include <utility>
 
 #include <radray/logger.h>
-#include <radray/shader/diagnostic_result.h>
-#include <radray/types.h>
-#include <radray/coroutine.h>
 #include <radray/nullable.h>
-#include <radray/scope_guard.h>
 #include <radray/runtime/asset_handle.h>
+#include <radray/scope_guard.h>
+#include <radray/types.h>
 
 namespace radray {
 
-struct AssetMeta {
+enum class AssetReloadKind : uint8_t { Compatible,
+                                       Breaking,
+                                       Rejected };
+
+struct AssetReloadDecision {
+    AssetReloadKind Kind{AssetReloadKind::Compatible};
+    string Diagnostic{};
+};
+struct AssetReloadEvent {
+    UntypedAssetHandle Handle{};
     AssetId Id{};
-    Uri Location;
-    vector<AssetId> Dependencies;
+    std::type_index Type{typeid(void)};
+    uint32_t Revision{};
+    AssetReloadKind Kind{AssetReloadKind::Compatible};
+};
+struct AssetCommitResult {
+    bool Succeeded{};
+    vector<AssetReloadEvent> Events;
+    string Diagnostic{};
 };
 
 namespace detail {
 using ErasedAsset = unique_ptr<void, void (*)(void*) noexcept>;
-
 template <typename T>
 ErasedAsset OwnAsset(T&& value) {
-    using Value = std::remove_cvref_t<T>;
+    using Value = std::decay_t<T>;
     return {new Value(std::forward<T>(value)), [](void* ptr) noexcept { delete static_cast<Value*>(ptr); }};
 }
-
-class ErasedAssetLoader {
-public:
-    virtual ~ErasedAssetLoader() noexcept = default;
-    virtual task<ErasedAsset> Read(AssetLoadContext& context) = 0;
-    virtual Nullable<const void*> Fallback() const noexcept = 0;
-};
+struct AssetVersionNode;
 }  // namespace detail
 
-template <typename T>
-class AssetLoader : public detail::ErasedAssetLoader {
+class AssetTransaction;
+
+// 移动独占所有权。非空批次必须在其 manager 之前清理或销毁。
+class AssetGarbageBatch final {
 public:
-    // 外部挂起点须在 owner 线程响应 stop，关闭期间无需再次 Pump。
-    virtual task<std::optional<T>> LoadAsync(AssetLoadContext& context) = 0;
-    virtual Nullable<const T*> GetFallback() const noexcept { return nullptr; }
+    AssetGarbageBatch() noexcept = default;
+    ~AssetGarbageBatch() noexcept;
+    AssetGarbageBatch(AssetGarbageBatch&& other) noexcept;
+    AssetGarbageBatch& operator=(AssetGarbageBatch&& other) noexcept;
+    AssetGarbageBatch(const AssetGarbageBatch&) = delete;
+    AssetGarbageBatch& operator=(const AssetGarbageBatch&) = delete;
+    void Clear() noexcept;
+    bool Empty() const noexcept;
+    size_t Size() const noexcept;
 
 private:
-    task<detail::ErasedAsset> Read(AssetLoadContext& context) final;
-    Nullable<const void*> Fallback() const noexcept final { return GetFallback().Get(); }
+    friend class AssetManager;
+    void Append(AssetManager& manager, unique_ptr<detail::AssetVersionNode> node) noexcept;
+    Nullable<AssetManager*> _manager{nullptr};
+    Nullable<detail::AssetVersionNode*> _head{nullptr};
+    Nullable<detail::AssetVersionNode*> _tail{nullptr};
+    size_t _count{};
 };
 
-// 创建、等待、复制/释放强引用和请求取消均由 owner 线程串行执行。
+// 所有操作限 owner 线程。Get 借用当前版本，跨提交使用旧对象须单独保活。
 class AssetManager final {
-    auto EnterCallback() const noexcept {
-        ++_callbackDepth;
-        return MakeScopeGuard([this]() noexcept { --_callbackDepth; });
-    }
-
 public:
     AssetManager();
     ~AssetManager() noexcept;
     AssetManager(const AssetManager&) = delete;
     AssetManager& operator=(const AssetManager&) = delete;
 
-    template <typename T, typename LoaderT, typename... Args>
-    LoaderT& RegisterLoader(Args&&... args) {
-        static_assert(std::derived_from<LoaderT, AssetLoader<T>>);
-        if (_shuttingDown) RADRAY_ABORT("Cannot register an asset loader after shutdown");
-        auto callback = EnterCallback();
-        auto loader = make_unique<LoaderT>(std::forward<Args>(args)...);
-        auto& registered = *loader;
-        AddLoader(typeid(T), std::move(loader));
-        return registered;
+    std::optional<UntypedAssetHandle> Find(AssetId id) const noexcept;
+    template <typename T>
+    AssetHandle<T> AsHandle(UntypedAssetHandle handle) const noexcept {
+        return Matches(handle, typeid(T)) ? AssetHandle<T>{handle} : AssetHandle<T>{};
     }
     template <typename T>
-    bool RegisterMeta(AssetMeta meta) { return AddMeta(typeid(T), std::move(meta)); }
-    Nullable<const AssetMeta*> FindMeta(AssetId id) const noexcept;
-    std::optional<UntypedAssetHandle> FindLoaded(AssetId id) const noexcept;
-
-    // 具名预留在工厂返回前不可查询或提升；失败释放依赖并撤销预留。
+    AssetHandle<T> Find(AssetId id) const noexcept {
+        const auto found = Find(id);
+        return found ? AsHandle<T>(*found) : AssetHandle<T>{};
+    }
     template <typename T, typename Factory>
     AssetRef<T> EmplaceWithHandle(std::span<const UntypedAssetHandle> deps, AssetId id, Factory&& factory) {
-        const auto target = Reserve(id, typeid(T));
+        const auto target = Reserve(id, typeid(T), deps);
         if (!target.IsValid()) return {};
-        auto rollback = MakeScopeGuard([&]() noexcept { Recycle(target); });
-        for (const auto dep : deps) {
-            if (GetState(dep) != AssetState::Ready) return {};
-            AddDependency(target, dep);
-        }
+        auto rollback = MakeScopeGuard([&]() noexcept { CancelReservation(target); });
         const AssetHandle<T> handle{target};
-        auto callback = EnterCallback();
-        auto value = std::forward<Factory>(factory)(handle);
+        ++_callbackDepth;
+        auto callback = MakeScopeGuard([this]() noexcept { --_callbackDepth; });
+        std::optional<T> value = std::forward<Factory>(factory)(handle);
         if (!value) return {};
         Publish(target, detail::OwnAsset(std::move(*value)));
         rollback.Dismiss();
@@ -107,84 +111,49 @@ public:
             return std::optional<Value>{std::in_place, std::forward<T>(value)};
         });
     }
-
-    template <typename T>
-    AssetRef<T> Request(AssetId id) {
-        const auto target = RequestSlot(id, typeid(T));
-        return target.IsValid() ? AssetRef<T>{*this, AssetHandle<T>{target}} : AssetRef<T>{};
-    }
-    template <typename T>
-    task<AssetRef<T>> LoadAsync(AssetId id) {
-        const auto stop = co_await CurrentStopToken();
-        if (stop.stop_requested()) co_await StopCurrentTask();
-        auto ref = Request<T>(id);
-        if (ref.GetState() == AssetState::Loading) co_await WaitFor(ref.Untyped(), stop, false);
-        if (ref.IsReady()) co_return std::move(ref);
-        co_return AssetRef<T>{};
-    }
     template <typename T>
     AssetRef<T> Acquire(AssetHandle<T> handle) noexcept {
-        if (_shuttingDown || !Matches(handle.Untyped(), typeid(T))) return {};
+        CheckWritable();
+        if (!Matches(handle.Untyped(), typeid(T))) return {};
         Retain(handle.Untyped());
         return AssetRef<T>{*this, handle};
     }
     template <typename T>
     Nullable<const T*> Get(AssetHandle<T> handle) const noexcept {
-        return static_cast<const T*>(Lookup(handle.Untyped(), typeid(T), false).Get());
+        if (_building) RADRAY_ABORT("Asset builder must resolve dependencies through its transaction");
+        return static_cast<const T*>(Lookup(handle.Untyped(), typeid(T)).Get());
     }
-    template <typename T>
-    Nullable<const T*> Resolve(AssetHandle<T> handle) const noexcept {
-        return static_cast<const T*>(Lookup(handle.Untyped(), typeid(T), true).Get());
-    }
-    AssetState GetState(UntypedAssetHandle handle) const noexcept;
     uint32_t GetRefCount(UntypedAssetHandle handle) const noexcept;
-    // Publish on the owner thread after CPU borrowers finish. Retire the returned version with its PSOs.
-    shader::DiagnosticResult<ShaderAsset> ReplaceShader(const AssetRef<ShaderAsset>& target, ShaderAsset&& candidate);
-    // 运行到当前没有可推进的任务；外部事件仍可能持有挂起任务。
-    void Pump();
-    bool HasPendingWork() const noexcept;
+    uint32_t GetRevision(UntypedAssetHandle handle) const noexcept;
+    // 修改仓库后须重新获取该视图。
+    std::span<const UntypedAssetHandle> GetDependents(UntypedAssetHandle handle) const noexcept;
+    // 成功时返回新图子先父后的事件，并按旧图父先子后追加退役版本。
+    AssetCommitResult Commit(AssetTransaction&& tx, AssetGarbageBatch& retired);
+    bool HasPendingGarbage() const noexcept;
+    size_t CollectGarbage(AssetGarbageBatch& retired) noexcept;
     size_t CollectGarbage() noexcept;
-    // 从 owner 线程顶层关闭加载。已有强引用和相应借用仍然有效。
-    void Shutdown() noexcept;
-
-    // 外部事件通过此同步调用派发或取消 loader 的续体。
-    template <typename Fn>
-    decltype(auto) DispatchExternal(Fn&& dispatch) {
-        auto callback = EnterCallback();
-        return std::forward<Fn>(dispatch)();
-    }
 
 private:
-    friend class AssetLoadContext;
     template <typename T>
     friend class AssetRef;
+    friend class AssetTransaction;
+    friend class AssetGarbageBatch;
     class Storage;
-    class SlotAwaiter;
-
-    void AddLoader(std::type_index type, unique_ptr<detail::ErasedAssetLoader> loader);
-    bool AddMeta(std::type_index type, AssetMeta meta);
+    void CheckWritable() const noexcept;
     bool Matches(UntypedAssetHandle target, std::type_index type) const noexcept;
-    Nullable<const void*> Lookup(UntypedAssetHandle target, std::type_index type, bool fallback) const noexcept;
-    UntypedAssetHandle Reserve(AssetId id, std::type_index type);
-    UntypedAssetHandle RequestSlot(AssetId id, std::type_index type);
+    Nullable<const void*> Lookup(UntypedAssetHandle target, std::type_index type) const noexcept;
+    UntypedAssetHandle Reserve(AssetId id, std::type_index type, std::span<const UntypedAssetHandle> deps);
+    void Publish(UntypedAssetHandle target, detail::ErasedAsset value);
+    void CancelReservation(UntypedAssetHandle target) noexcept;
     void Retain(UntypedAssetHandle target) noexcept;
     void Release(UntypedAssetHandle target) noexcept;
-    void QueueIfUnused(UntypedAssetHandle target) noexcept;
-    void ReleaseDependencies(UntypedAssetHandle target) noexcept;
-    void Recycle(UntypedAssetHandle target) noexcept;
-    void Publish(UntypedAssetHandle target, detail::ErasedAsset value) noexcept;
-    void FailSlot(UntypedAssetHandle target) noexcept;
-    void AddDependency(UntypedAssetHandle parent, UntypedAssetHandle child);
-    UntypedAssetHandle RequestDependency(UntypedAssetHandle parent, AssetId id, std::optional<std::type_index> type);
-    UntypedAssetHandle FindDependency(UntypedAssetHandle parent, AssetId id, std::type_index type) const noexcept;
-    AssetState DependencyState(UntypedAssetHandle parent) const noexcept;
-    task<void> WaitFor(UntypedAssetHandle target, stop_token stop, bool dependencies);
-    task<void> RunSlotLoad(UntypedAssetHandle target);
-
+    void FreeSlot(UntypedAssetHandle target) noexcept;
+    void DestroyNode(detail::AssetVersionNode& node) noexcept;
+    void CheckBatch(const AssetGarbageBatch& retired) const noexcept;
     unique_ptr<Storage> _storage;
-    TaskScope _loadScope;
-    mutable size_t _callbackDepth{};
-    bool _shuttingDown{};
+    size_t _callbackDepth{};
+    bool _inCommit{};
+    bool _building{};
 };
 
 template <typename T>
@@ -216,57 +185,89 @@ public:
     AssetHandle<T> GetHandle() const noexcept { return _handle; }
     operator AssetHandle<T>() const noexcept { return _handle; }
     UntypedAssetHandle Untyped() const noexcept { return _handle.Untyped(); }
-    AssetState GetState() const noexcept { return _manager ? _manager->GetState(Untyped()) : AssetState::Unloaded; }
-    bool IsReady() const noexcept { return GetState() == AssetState::Ready; }
     Nullable<const T*> Get() const noexcept { return _manager ? _manager->Get(_handle) : nullptr; }
-    Nullable<const T*> Resolve() const noexcept { return _manager ? _manager->Resolve(_handle) : nullptr; }
 
 private:
     friend class AssetManager;
+    friend class AssetTransaction;
     AssetRef(AssetManager& manager, AssetHandle<T> handle) noexcept : _manager(&manager), _handle(handle) {}
     Nullable<AssetManager*> _manager{nullptr};
     AssetHandle<T> _handle{};
 };
 
-class AssetLoadContext final {
+class AssetTransaction final {
 public:
-    AssetLoadContext(const AssetLoadContext&) = delete;
-    AssetLoadContext& operator=(const AssetLoadContext&) = delete;
-    const AssetMeta& GetMeta() const noexcept;
-    stop_token GetStopToken() const noexcept;
+    explicit AssetTransaction(const AssetManager& manager) noexcept;
+    AssetTransaction(AssetTransaction&& other) noexcept;
+    AssetTransaction& operator=(AssetTransaction&& other) noexcept;
+    AssetTransaction(const AssetTransaction&) = delete;
+    AssetTransaction& operator=(const AssetTransaction&) = delete;
+
     template <typename T>
-    AssetHandle<T> GetTargetHandle() const noexcept {
-        return _manager.Matches(_target, typeid(T)) ? AssetHandle<T>{_target} : AssetHandle<T>{};
+    bool StageReplace(AssetHandle<T> target, T&& candidate, std::span<const UntypedAssetHandle> deps = {}) {
+        if (!Validate(target.Untyped(), typeid(T), deps)) return false;
+        Item item{target.Untyped(), typeid(T), UniqueDependencies(deps), &Classify<T>};
+        item.Value = detail::OwnAsset(std::move(candidate));
+        _items.push_back(std::move(item));
+        return true;
     }
     template <typename T>
-    task<AssetHandle<T>> LoadDependencyAsync(AssetId id) {
-        const auto child = _manager.RequestDependency(_target, id, typeid(T));
-        if (child.IsValid()) {
-            co_await _manager.WaitFor(child, GetStopToken(), false);
-            if (_manager.GetState(child) == AssetState::Ready) co_return AssetHandle<T>{child};
-        }
-        _dependencyFailed = true;
-        co_return AssetHandle<T>{};
+    bool StageReplace(const AssetRef<T>& target, T&& candidate, std::span<const UntypedAssetHandle> deps = {}) {
+        return CheckOwner(target._manager) && StageReplace(target.GetHandle(), std::move(candidate), deps);
+    }
+    // builder 在提交预检时执行，只能通过传入事务读取 deps 中的最终版本。
+    template <typename T, typename Builder>
+    bool StageBuild(AssetHandle<T> target, std::span<const UntypedAssetHandle> deps, Builder&& builder) {
+        if (!Validate(target.Untyped(), typeid(T), deps)) return false;
+        Item item{target.Untyped(), typeid(T), UniqueDependencies(deps), &Classify<T>};
+        item.Builder = detail::OwnAsset(std::forward<Builder>(builder));
+        item.Build = [](void* erased, const AssetTransaction& tx) -> detail::ErasedAsset {
+            std::optional<T> value = (*static_cast<std::decay_t<Builder>*>(erased))(tx);
+            return value ? detail::OwnAsset(std::move(*value)) : detail::ErasedAsset{nullptr, nullptr};
+        };
+        _items.push_back(std::move(item));
+        return true;
+    }
+    template <typename T, typename Builder>
+    bool StageBuild(const AssetRef<T>& target, std::span<const UntypedAssetHandle> deps, Builder&& builder) {
+        return CheckOwner(target._manager) && StageBuild(target.GetHandle(), deps, std::forward<Builder>(builder));
     }
     template <typename T>
-    Nullable<const T*> GetDependency(AssetId id) const noexcept {
-        return _manager.Get(AssetHandle<T>{_manager.FindDependency(_target, id, typeid(T))});
+    Nullable<const T*> Get(AssetHandle<T> handle) const noexcept {
+        return static_cast<const T*>(Lookup(handle.Untyped(), typeid(T)).Get());
     }
 
 private:
     friend class AssetManager;
-    AssetLoadContext(AssetManager& manager, UntypedAssetHandle target, const AssetMeta& meta) noexcept;
-    AssetManager& _manager;
-    UntypedAssetHandle _target;
-    const AssetMeta& _meta;
-    bool _dependencyFailed{};
+    struct Item {
+        UntypedAssetHandle Target;
+        std::type_index Type;
+        vector<UntypedAssetHandle> Dependencies;
+        AssetReloadDecision (*Classify)(const void*, const void*);
+        detail::ErasedAsset Value{nullptr, nullptr};
+        detail::ErasedAsset Builder{nullptr, nullptr};
+        detail::ErasedAsset (*Build)(void*, const AssetTransaction&){};
+        AssetReloadKind Kind{};
+    };
+    template <typename T>
+    static AssetReloadDecision Classify(const void* before, const void* after) {
+        if constexpr (requires(const T& a, const T& b) { { a.ClassifyReload(b) } -> std::same_as<AssetReloadDecision>; }) {
+            return static_cast<const T*>(before)->ClassifyReload(*static_cast<const T*>(after));
+        } else {
+            return {};
+        }
+    }
+    bool CheckOwner(Nullable<AssetManager*> owner);
+    void CheckMutable() const noexcept;
+    bool Fail(string diagnostic);
+    bool Validate(UntypedAssetHandle target, std::type_index type, std::span<const UntypedAssetHandle> deps);
+    static vector<UntypedAssetHandle> UniqueDependencies(std::span<const UntypedAssetHandle> deps);
+    Nullable<const void*> Lookup(UntypedAssetHandle handle, std::type_index type) const noexcept;
+    Nullable<const AssetManager*> _manager{nullptr};
+    vector<Item> _items;
+    string _diagnostic;
+    Nullable<const Item*> _evaluating{nullptr};
+    bool _committing{};
 };
-
-template <typename T>
-task<detail::ErasedAsset> AssetLoader<T>::Read(AssetLoadContext& context) {
-    auto result = co_await AwaitWithStopToken(LoadAsync(context), context.GetStopToken());
-    if (!result || !*result) co_return detail::ErasedAsset{nullptr, nullptr};
-    co_return detail::OwnAsset(std::move(**result));
-}
 
 }  // namespace radray

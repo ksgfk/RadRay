@@ -1,5 +1,7 @@
 #pragma once
 
+#include <compare>
+#include <cstdint>
 #include <limits>
 #include <string_view>
 
@@ -12,7 +14,6 @@ namespace radray {
 class AssetManager;
 class ShaderAsset;
 class MaterialAsset;
-class AssetLoadContext;
 template <typename T>
 class AssetRef;
 
@@ -26,13 +27,6 @@ public:
 AssetId MakeAssetId(const Uri& uri) noexcept;
 
 AssetId MakeAssetId(std::string_view virtualPath);
-
-enum class AssetState : uint8_t {
-    Unloaded,
-    Loading,
-    Ready,
-    Failed
-};
 
 class UntypedAssetHandle {
 public:
@@ -60,7 +54,6 @@ public:
 
 private:
     friend class AssetManager;
-    friend class AssetLoadContext;
     explicit constexpr AssetHandle(UntypedAssetHandle handle) noexcept : _handle(handle) {}
 
     UntypedAssetHandle _handle{};

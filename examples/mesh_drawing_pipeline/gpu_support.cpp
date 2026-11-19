@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
+#include <cstddef>
 
 #include <radray/basic_math.h>
 #include <radray/file.h>
@@ -50,20 +50,11 @@ bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem:
         Shader = Assets->Emplace(std::move(*compiled.Value), {}, MakeAssetId(*uri));
         if (!Shader) return false;
     } else {
-        Assets->RegisterLoader<ShaderAsset, ShaderAssetLoader>(device);
-        const auto id = MakeAssetId("cube.index.json");
-        std::error_code error;
-        const auto index = std::filesystem::absolute(shaderDirectory / "cube.index.json", error);
-        const auto location = error ? std::nullopt : Uri::FromFilePath(index);
-        if (!location || !Assets->RegisterMeta<ShaderAsset>({id, *location, {}})) return false;
-        Shader = Assets->Request<ShaderAsset>(id);
-        Assets->Pump();
+        auto loaded = ShaderAsset::Load(device, shaderDirectory / "cube.index.json");
+        if (!loaded) return false;
+        Shader = Assets->Emplace(std::move(*loaded), {}, MakeAssetId("cube.index.json"));
     }
-    const auto shaderAsset = Shader.Get();
-    if (!shaderAsset) return false;
-    const auto pass = shaderAsset->FindBinding("Pass");
-    const auto push = shaderAsset->FindPushConstant("MaterialPush");
-    if (!pass || pass->Reference.GroupSlot != 0 || pass->Reference.BindingId != 0 || !push || push->PushId != 0) return false;
+    if (!Shader) return false;
     MaterialAssetDesc opaqueDesc;
     opaqueDesc.Programs = {{"Depth", Shader, 0, "VSMain", ""}, {"Color", Shader, 0, "VSMain", "PSMain"}};
     opaqueDesc.Parameters = {{"BaseColor", array<float, 4>{0.72f, 0.25f, 0.09f, 1}}, {"Brightness", 1.0f}};
@@ -129,14 +120,38 @@ bool GpuFrameResources::Initialize(const GpuResources& shared) {
     return CompletionFence.HasValue();
 }
 
-std::optional<MaterialPipelines> GpuResources::PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material, const ShaderAsset& shader) {
+namespace {
+bool MatchesCubeConstants(const ShaderAsset& shader) {
+    using shader::ShaderTypeKind;
+    const auto pass = shader.FindBinding("Pass");
+    const auto push = shader.FindPushConstant("MaterialPush");
+    if (!pass || !pass->ActiveOnDevice || pass->Reference.GroupSlot != 0 || pass->Reference.BindingId != 0 ||
+        pass->Kind != gpu::BindingKind::CBuffer || pass->Count != 1 || pass->BufferByteSize != sizeof(PassConstants) ||
+        !push || !push->ActiveOnDevice || push->PushId != 0 || push->Size != sizeof(MaterialConstants)) return false;
+    const auto member = [&](std::string_view block, std::string_view name, ShaderTypeKind kind, uint32_t rows,
+                            uint32_t columns, size_t offset, size_t size) {
+        auto field = shader.FindBufferMember(block, name);
+        return field && field->Kind == kind && field->ElementCount == 1 && field->ScalarKind == shader::ShaderScalarKind::Float &&
+               field->RowCount == rows && field->ColumnCount == columns && field->AbsoluteOffset == offset && field->Size == size &&
+               (kind != ShaderTypeKind::Matrix || (!field->RowMajor && field->MatrixStride == 16));
+    };
+    return member("Pass", "ViewProjection", ShaderTypeKind::Matrix, 4, 4, offsetof(PassConstants, ViewProjection), sizeof(PassConstants::ViewProjection)) &&
+           member("Pass", "LocalScale", ShaderTypeKind::Scalar, 1, 1, offsetof(PassConstants, LocalScale), sizeof(float)) &&
+           member("MaterialPush", "Color", ShaderTypeKind::Vector, 1, 4, offsetof(MaterialConstants, Color), sizeof(MaterialConstants));
+}
+}  // namespace
+
+std::optional<MaterialPipelines> GpuResources::PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material) {
     // 步骤 M4：材质程序 + 材质性质 + 顶点输入 + Pass 状态，形成具体 PSO。
     // 为什么：材质提供状态默认值；Depth/Outline 明确覆盖状态，Color/Transparent 沿用材质，附件格式由 Pass 补充。
     // UE5 对照：Renderer/Private/DepthRendering.cpp 的 FDepthPassMeshProcessor::Process；
     // Renderer/Public/MeshPassProcessor.inl 的 BuildMeshDrawCommands 组装 GraphicsPSOInitializer。
     // 本例简化：启动时按已知标签准备有限的 PSO；实际 Batch 是否参与仍由 Processor 判断，不提供通用 PSO 缓存。
     const auto resource = Assets->Get(material);
-    if (!resource) return std::nullopt;
+    const auto shader = Shader.Get();
+    if (!resource || !shader || !MatchesCubeConstants(*shader)) return std::nullopt;
+    const auto table = resource->GetProperties().Tags.GetTable();
+    if (table && table.Get() != &MaterialTags) return std::nullopt;
     const auto depthIndex = resource->FindProgram("Depth");
     const auto colorIndex = resource->FindProgram("Color");
     if (!depthIndex || !colorIndex) {
@@ -146,18 +161,27 @@ std::optional<MaterialPipelines> GpuResources::PreparePipelines(const VertexInpu
     const auto& depthProgram = *resource->GetProgram(*depthIndex);
     const auto& colorProgram = *resource->GetProgram(*colorIndex);
     if (depthProgram.Shader != Shader.GetHandle() || colorProgram.Shader != Shader.GetHandle()) return std::nullopt;
-    const auto vs = shader.GetStage(depthProgram.VariantIndex, gpu::ShaderStage::Vertex);
-    const auto colorVs = shader.GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Vertex);
-    const auto ps = shader.GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Pixel);
+    const auto vs = shader->GetStage(depthProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto colorVs = shader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Vertex);
+    const auto ps = shader->GetStage(colorProgram.VariantIndex, gpu::ShaderStage::Pixel);
     if (!vs || !colorVs || !ps || vs->Target != colorVs->Target || !depthProgram.PixelEntry.empty()) return std::nullopt;
-    auto layout = LayoutRegistry->Acquire(shader.GetLayoutDesc());
+    auto layout = LayoutRegistry->Acquire(shader->GetLayoutDesc());
     if (!layout) return std::nullopt;
     auto passGroup = layout->GetGroupLayout(0);
     if (!passGroup || (PassGroupLayout && PassGroupLayout.Get() != passGroup.Get())) return std::nullopt;
     auto& device = Device->GetDevice();
     ResolvedVertexInputState depthInput, colorInput;
-    if (!PrepareMaterialVertexInput(*shader.GetVariantInterface(depthProgram.VariantIndex), input, depthInput) ||
-        !PrepareMaterialVertexInput(*shader.GetVariantInterface(colorProgram.VariantIndex), input, colorInput)) return std::nullopt;
+    const auto prepareInput = [&](uint32_t variant, ResolvedVertexInputState& resolved) {
+        const auto interface = shader->GetVariantInterface(variant);
+        if (!interface) return false;
+        for (const auto binding : interface->ActiveBindings)
+            if (binding != shader::ShaderBindingReference{0, 0}) return false;
+        for (const auto id : interface->ActivePushConstants)
+            if (id != 0) return false;
+        return PrepareMaterialVertexInput(*interface, input, resolved);
+    };
+    if (!prepareInput(depthProgram.VariantIndex, depthInput) ||
+        !prepareInput(colorProgram.VariantIndex, colorInput)) return std::nullopt;
     auto primitive = gpu::PrimitiveState::Default();
     const auto& state = resource->GetProperties().RenderState;
     primitive.Cull = state.Cull;
@@ -211,45 +235,55 @@ std::optional<MaterialPipelines> GpuResources::PreparePipelines(const VertexInpu
     RADRAY_INFO_LOG("材质 PSO：Cull={}，Blend={}，DepthWrite={}，模板参考值={}；Depth={} Color={} Outline={}",
                     static_cast<int32_t>(state.Cull), state.Blend.has_value(), state.DepthWriteEnable, state.StencilReference,
                     pipelines.Depth.HasValue(), pipelines.Color.HasValue(), pipelines.Outline.HasValue());
+    pipelines.AppliedShaderRevision = pipelines.CompatibleShaderRevision = Assets->GetRevision(Shader.Untyped());
+    pipelines.AppliedMaterialRevision = pipelines.CompatibleMaterialRevision = Assets->GetRevision(material.Untyped());
     return pipelines;
 }
 
 bool GpuResources::CreatePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material) {
-    auto prepared = PreparePipelines(input, material, *Shader.Get());
+    auto prepared = PreparePipelines(input, material);
     if (!prepared) return false;
     PassGroupLayout = prepared->Layout->GetGroupLayout(0);
     Pipelines.push_back(std::move(*prepared));
     return true;
 }
 
-bool GpuResources::PublishShader(ShaderAsset&& candidate, const VertexInput& input, Scene& scene,
-                                 std::span<const MaterialProxyHandle> proxies, FrameSlot& slot) {
-    const auto diagnostic = Shader.Get()->CheckReplacement(candidate);
-    if (!diagnostic.empty()) {
-        RADRAY_ERR_LOG("{}", diagnostic);
-        return false;
+void GpuResources::SyncPipelines(const VertexInput& input, std::span<const AssetReloadEvent> events,
+                                 Scene& scene, std::span<const MaterialProxyHandle> proxies, FrameSlot& slot) {
+    const auto shaderRevision = Assets->GetRevision(Shader.Untyped());
+    for (auto& current : Pipelines) {
+        const auto materialRevision = Assets->GetRevision(current.Material.Untyped());
+        if (current.AppliedShaderRevision == shaderRevision && current.AppliedMaterialRevision == materialRevision) continue;
+        for (const auto& event : events) {
+            if (event.Kind != AssetReloadKind::Compatible) continue;
+            if (event.Handle == Shader.Untyped() && event.Revision - 1 == current.CompatibleShaderRevision)
+                current.CompatibleShaderRevision = event.Revision;
+            if (event.Handle == current.Material.Untyped() && event.Revision - 1 == current.CompatibleMaterialRevision)
+                current.CompatibleMaterialRevision = event.Revision;
+        }
+        auto next = PreparePipelines(input, current.Material);
+        if (!next && (!current.Color || (current.CompatibleShaderRevision == shaderRevision &&
+                                         current.CompatibleMaterialRevision == materialRevision))) continue;
+        // Processor 长期借用 Pipelines 的 span；只原位替换元素。空 Color 表示暂停。
+        if (current.Color) slot.Emplace<MaterialPipelines>(std::move(current));
+        if (next) current = std::move(*next);
+        for (const auto proxy : proxies) {
+            const auto snapshot = scene.GetMaterial(proxy);
+            if (snapshot && snapshot->GetMaterial() == current.Material) scene.MarkMaterialDirty(proxy);
+        }
     }
-    vector<MaterialPipelines> prepared;
-    for (const auto& current : Pipelines) {
-        auto next = PreparePipelines(input, current.Material, candidate);
-        if (!next) return false;
-        prepared.push_back(std::move(*next));
+}
+
+bool SyncMaterialProxies(const AssetManager& assets, Scene& scene, std::span<const MaterialInstance> instances,
+                         std::span<const MaterialProxyHandle> proxies, std::span<uint32_t> appliedRevisions) {
+    if (instances.size() != proxies.size() || proxies.size() != appliedRevisions.size()) return false;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        const auto revision = assets.GetRevision(instances[i].GetMaterial().Untyped());
+        if (revision && revision == appliedRevisions[i]) continue;
+        MaterialRenderProxy proxy;
+        if (!proxy.Update(assets, instances[i]) || !scene.UpdateMaterial(proxies[i], std::move(proxy))) return false;
+        appliedRevisions[i] = revision;
     }
-    struct Retired {
-        std::optional<ShaderAsset> Shader;
-        vector<MaterialPipelines> Pipelines;
-    };
-    auto* retired = slot.Emplace<Retired>();
-    auto result = Assets->ReplaceShader(Shader, std::move(candidate));
-    if (!result.Succeeded()) {
-        RADRAY_ERR_LOG("{}", result.Diagnostics);
-        return false;
-    }
-    retired->Shader = std::move(result.Value);
-    // Pass processors borrow this array for their lifetime. Keep its backing storage stable.
-    std::swap_ranges(prepared.begin(), prepared.end(), Pipelines.begin());
-    retired->Pipelines = std::move(prepared);
-    for (const auto proxy : proxies) scene.MarkMaterialDirty(proxy);
     return true;
 }
 

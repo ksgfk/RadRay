@@ -11,16 +11,48 @@ bool PrepareMaterialVertexInput(const shader::ShaderVariantTargetInterfaceDesc& 
     return interface.Stages.HasFlag(gpu::ShaderStage::Vertex) && ResolveVertexInputState(meshInput, interface.VertexInputs, output);
 }
 
-AssetRef<MaterialAsset> CreateMaterial(AssetManager& assets, const MaterialAssetDesc& desc, AssetId id) {
+namespace {
+vector<UntypedAssetHandle> FamilyDependencies(const MaterialAssetDesc& desc) {
     vector<UntypedAssetHandle> deps;
     deps.reserve(desc.Families.size());
     for (const auto& family : desc.Families) deps.push_back(family.Shader.Untyped());
-    return assets.EmplaceWithHandle<MaterialAsset>(deps, id, [&](AssetHandle<MaterialAsset> self) {
-        return MaterialAsset::Create(assets, desc, self);
+    return deps;
+}
+}  // namespace
+
+AssetRef<MaterialAsset> CreateMaterial(AssetManager& assets, const MaterialAssetDesc& desc, AssetId id) {
+    return assets.EmplaceWithHandle<MaterialAsset>(FamilyDependencies(desc), id, [&](AssetHandle<MaterialAsset> self) {
+        return MaterialAsset::Create([&](auto shader) { return assets.Get(shader); }, desc, self);
     });
 }
 
-std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self) {
+template <typename Target>
+bool MaterialAsset::Stage(AssetTransaction& tx, const Target& target, AssetHandle<MaterialAsset> self, const MaterialAssetDesc& desc) {
+    return tx.StageBuild(target, FamilyDependencies(desc), [desc, self](const AssetTransaction& view) {
+        return Create([&](auto shader) { return view.Get(shader); }, desc, self);
+    });
+}
+bool StageMaterial(AssetTransaction& tx, AssetHandle<MaterialAsset> target, const MaterialAssetDesc& desc) {
+    return MaterialAsset::Stage(tx, target, target, desc);
+}
+bool StageMaterial(AssetTransaction& tx, const AssetRef<MaterialAsset>& target, const MaterialAssetDesc& desc) {
+    return MaterialAsset::Stage(tx, target, target.GetHandle(), desc);
+}
+
+AssetReloadDecision MaterialAsset::ClassifyReload(const MaterialAsset& candidate) const {
+    if (!std::ranges::equal(_parameters, candidate._parameters, [](const auto& a, const auto& b) {
+            return a.Name == b.Name && a.DefaultValue.index() == b.DefaultValue.index();
+        })) return {AssetReloadKind::Rejected, "material parameter layout changed"};
+    const auto& tags = _properties.Tags;
+    const auto& other = candidate._properties.Tags;
+    if (tags.GetTable() != other.GetTable() || !std::ranges::is_permutation(tags.GetTags(), other.GetTags()) ||
+        _properties.RenderState != candidate._properties.RenderState || _programs != candidate._programs)
+        return {AssetReloadKind::Breaking, "material properties or programs changed"};
+    return {};
+}
+
+template <typename Resolve>
+std::optional<MaterialAsset> MaterialAsset::Create(Resolve&& resolve, const MaterialAssetDesc& desc, AssetHandle<MaterialAsset> self) {
     RADRAY_ASSERT(self.IsValid());
     unordered_set<string> names;
     for (const auto& parameter : desc.Parameters)
@@ -31,7 +63,7 @@ std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, c
     names.clear();
     vector<AssetHandle<ShaderAsset>> shaders;
     for (const auto& program : desc.Programs) {
-        const auto shader = assets.Get(program.Shader);
+        const auto shader = resolve(program.Shader);
         if (program.Name.empty() || !names.insert(program.Name).second || !shader || !shader->GetVariantInterface(program.VariantIndex)) return std::nullopt;
         const auto vs = shader->GetStage(program.VariantIndex, gpu::ShaderStage::Vertex);
         const auto ps = shader->GetStage(program.VariantIndex, gpu::ShaderStage::Pixel);
@@ -46,7 +78,7 @@ std::optional<MaterialAsset> MaterialAsset::Create(const AssetManager& assets, c
     for (const auto& family : desc.Families) {
         if (std::find(shaders.begin(), shaders.end(), family.Shader) == shaders.end() ||
             std::any_of(result._bindings.begin(), result._bindings.end(), [&](const auto& b) { return b.Shader == family.Shader; })) return std::nullopt;
-        const auto shader = assets.Get(family.Shader);
+        const auto shader = resolve(family.Shader);
         if (!shader) return std::nullopt;
         auto map = MaterialParameterBindingMap::Create(desc.Parameters, *shader, family.Parameters, family.ConstantBlockName);
         if (!map) return std::nullopt;

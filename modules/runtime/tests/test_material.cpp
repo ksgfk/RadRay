@@ -13,7 +13,9 @@ protected:
     AssetRef<ShaderAsset> Shader;
     MaterialAssetDesc Desc;
     void SetUp() override {
-        Shader = CreateTestShader(Assets, Device, MakeShaderDesc(MaterialLayout()));
+        auto shader = ShaderAsset::Create(Device, MakeShaderDesc(MaterialLayout()));
+        ASSERT_TRUE(shader);
+        Shader = Assets.Emplace(std::move(*shader), {}, MakeAssetId("material-shader"));
         ASSERT_TRUE(Shader);
         Desc = MakeMaterialDesc(Shader, {{"Roughness", 0.25f}, {"Metallic", 0.75f}, {"Tint", array<float, 4>{1, 2, 3, 4}}},
                                 {"Roughness", "Tint"}, "Constants");
@@ -44,6 +46,79 @@ TEST_F(MaterialAssetTest, PreparesSubsetWithoutCreatingNativeLayouts) {
     EXPECT_EQ(bytes[8], byte{0x5a});
     EXPECT_FALSE(map->WriteConstants(proxy, std::span{bytes}.first(16)));
 }
+TEST_F(MaterialAssetTest, StagedBindingsUseFinalShaderRegardlessOfOrderOrInterveningCommit) {
+    auto current = CreateMaterial(Assets, Desc);
+    ASSERT_TRUE(current);
+    AssetGarbageBatch retired;
+    const auto stageShader = [&](AssetTransaction& tx, bool swapped) {
+        auto layout = MaterialLayout();
+        if (swapped) std::swap(layout.Types[1].Offset, layout.Types[3].Offset);
+        // Tint occupies the first 16 bytes when Roughness moves to offset 16.
+        if (swapped) layout.Types[2].Offset = 28;
+        auto shader = ShaderAsset::Create(Device, MakeShaderDesc(layout));
+        return shader && tx.StageReplace(Shader, std::move(*shader));
+    };
+    const auto verify = [&]() {
+        MaterialRenderProxy proxy;
+        ASSERT_TRUE(proxy.Update(Assets, current.GetHandle()));
+        array<byte, 32> bytes{};
+        ASSERT_TRUE(current.Get()->GetBindingMap(Shader)->WriteConstants(proxy, bytes));
+        float value{};
+        std::memcpy(&value, bytes.data() + 16, sizeof(value));
+        EXPECT_FLOAT_EQ(value, 0.25f);
+        std::memcpy(&value, bytes.data(), sizeof(value));
+        EXPECT_FLOAT_EQ(value, 1.0f);
+    };
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        AssetTransaction tx(Assets);
+        const auto shader = Assets.Find(MakeAssetId("material-shader"));
+        ASSERT_TRUE(shader);
+        const auto dep = Assets.GetDependents(*shader);
+        ASSERT_EQ(dep.size(), 1u);
+        const auto target = Assets.AsHandle<MaterialAsset>(dep[0]);
+        ASSERT_EQ(target, current.GetHandle());
+        if (scenario == 0) ASSERT_TRUE(stageShader(tx, true));
+        ASSERT_TRUE(StageMaterial(tx, target, Desc));
+        if (scenario == 1) ASSERT_TRUE(stageShader(tx, true));
+        if (scenario == 2) {
+            AssetTransaction middle(Assets);
+            ASSERT_TRUE(stageShader(middle, true));
+            ASSERT_TRUE(StageMaterial(middle, current, Desc));
+            ASSERT_TRUE(Assets.Commit(std::move(middle), retired).Succeeded);
+        }
+        ASSERT_TRUE(Assets.Commit(std::move(tx), retired).Succeeded);
+        verify();
+        AssetTransaction restore(Assets);
+        ASSERT_TRUE(stageShader(restore, false));
+        ASSERT_TRUE(StageMaterial(restore, current, Desc));
+        ASSERT_TRUE(Assets.Commit(std::move(restore), retired).Succeeded);
+        retired.Clear();
+    }
+}
+
+TEST_F(MaterialAssetTest, BreakingShaderAndChangedParameterSignatureCannotPartiallyPublish) {
+    auto material = CreateMaterial(Assets, Desc);
+    ASSERT_TRUE(material);
+    AssetGarbageBatch retired;
+    auto candidate = ShaderAsset::Create(Device, MakeShaderDesc(ResourceLayout()));
+    ASSERT_TRUE(candidate);
+    AssetTransaction missing(Assets);
+    ASSERT_TRUE(missing.StageReplace(Shader, std::move(*candidate)));
+    EXPECT_FALSE(Assets.Commit(std::move(missing), retired).Succeeded);
+    auto changed = Desc;
+    std::swap(changed.Parameters[0], changed.Parameters[1]);
+    AssetTransaction rejected(Assets);
+    ASSERT_TRUE(StageMaterial(rejected, material, changed));
+    EXPECT_FALSE(Assets.Commit(std::move(rejected), retired).Succeeded);
+    AssetTransaction invalid(Assets);
+    changed.Families.clear();
+    ASSERT_TRUE(StageMaterial(invalid, material, changed));
+    EXPECT_FALSE(Assets.Commit(std::move(invalid), retired).Succeeded);
+    EXPECT_TRUE(retired.Empty());
+    EXPECT_EQ(Assets.GetRevision(Shader.Untyped()), 1u);
+    EXPECT_EQ(Assets.GetRevision(material.Untyped()), 1u);
+}
+
 TEST_F(MaterialAssetTest, RejectsInvalidExplicitSubsetsAndPrograms) {
     auto check = [&](auto edit) { auto desc = Desc; edit(desc); EXPECT_FALSE(CreateMaterial(Assets, desc)); };
     check([](auto& d) { d.Families.clear(); });
