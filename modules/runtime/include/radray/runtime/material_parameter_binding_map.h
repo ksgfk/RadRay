@@ -27,6 +27,8 @@ struct MaterialParameterConstantTarget {
     size_t ParameterIndex{0};
     uint32_t AbsoluteOffset{0};
     uint32_t Size{0};
+    size_t ExpectedVariantIndex{0};
+    bool TransposeMatrix4x4{false};
 };
 
 class MaterialParameterBindingMap {

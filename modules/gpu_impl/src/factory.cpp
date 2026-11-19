@@ -16,7 +16,7 @@
 
 namespace radray::gpu {
 
-Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc, const RhiValidationOptions& validation) {
+Nullable<shared_ptr<Device>> CreateDevice(const DeviceDescriptor& desc, const GpuValidationOptions& validation) {
     auto device = std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {
             using T = std::decay_t<decltype(arg)>;

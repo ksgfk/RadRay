@@ -38,7 +38,7 @@ struct ShaderPushConstantLocation {
 
 struct ShaderStageBytecode {
     uint32_t VariantIndex{0};
-    gpu::RenderBackend Backend{gpu::RenderBackend::D3D12};
+    gpu::GpuBackend Backend{gpu::GpuBackend::D3D12};
     gpu::ShaderStage Stage{gpu::ShaderStage::UNKNOWN};
     string Entry;
     vector<byte> Bytecode;
@@ -77,7 +77,7 @@ public:
 
     const shader::ShaderPipelineLayoutDesc& GetLayoutDesc() const noexcept;
     const shader::ShaderFamilyLayoutDesc& GetFamilyDesc() const noexcept;
-    gpu::RenderBackend GetBackend() const noexcept;
+    gpu::GpuBackend GetBackend() const noexcept;
     Nullable<const shader::ShaderVariantTargetInterfaceDesc*> GetVariantInterface(uint32_t variant) const noexcept;
     std::optional<gpu::ShaderEntry> GetStage(uint32_t variant, gpu::ShaderStage stage) const noexcept;
     std::optional<ShaderBindingLocation> FindBinding(std::string_view name) const noexcept;
@@ -94,7 +94,7 @@ private:
         unique_ptr<gpu::Shader> Object;
     };
     shader::ShaderFamilyLayoutDesc _family;
-    gpu::RenderBackend _backend{gpu::RenderBackend::D3D12};
+    gpu::GpuBackend _backend{gpu::GpuBackend::D3D12};
     vector<StageObject> _stages;
 };
 

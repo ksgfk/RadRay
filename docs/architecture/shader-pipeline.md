@@ -264,6 +264,11 @@ artifact 解码和布局读取共享类型树跨度、成员范围、循环引�
 类型按成员名称及结构递归比较并重写所有索引，根名称不构成 ABI 身份，未使用根不导出。
 
 配对 artifact 默认拒绝单侧资源；`AllowTargetOnlyBindings` 显式允许后保留该侧映射和活跃引用。
+`ShaderPushConstantOverride` 另支持两项策略开关：
+
+- `PromoteDxilCBufferToRootConstants`：在读取 DXIL lane 时，将同名的单元素 `CBuffer`（`Count == 1`、具备合法根结构体类型树，支持标量、向量、矩阵、嵌套结构体及一维定长数组成员；按 D3D12 根常量规范，HLSL 访问数组成员须使用静态或字面量下标）直接提升为 `ShaderPushConstantDesc` 并写入 `Pushes` / `ActivePushes`（不进入 `Bindings` / `ActiveBindings`）。大小取根类型精确有效跨度 `artifact.Types()[wire.TypeIndex].Size`（非 256B 对齐后的 `BufferByteSize`），要求 `0 < size <= 256` 且 4 字节对齐；D3D12 根常量计入 64 DWORD 根签名总预算。
+- `AllowDxilOnly`：即使 `AllowTargetOnlyBindings == false`，也允许该名称仅出现在 DXIL 侧；在纯 SPIR-V 反射（例如 Vulkan 设备的 `ShaderAsset::Compile`）中允许该名称缺席，同时仍强制检查 override 名称与 `PushId` 唯一并占位 `PushId`。同一家族内若任一 SPIR-V 变体声明该名称，共享条目保留其 Vulkan 映射；全部 SPIR-V 变体均缺席时 `Vulkan` 映射为空，各变体/后端的 `ActivePushConstants` 按自身 lane 独立记录。
+
 DXIL 静态 sampler 必须有配对 SPIR-V metadata 提供完整状态。共享布局是整个家族的资源超集，
 每变体、每后端单独保存顶点输入与活跃 Binding/PushConstant 引用；活跃信息不裁剪布局，
 也不免除 RHI 参数集完整性要求。runtime 的创建、查询和参数写入契约见 [Shader 资产、布局与缓存](runtime.md#shader-资产布局与缓存)。
@@ -329,12 +334,12 @@ client handshake 校验 RadRay extension 的 ABI、schema、工具链主次版�
   "policy": {
     "allowTargetOnlyBindings": false,
     "bindings": [{"name": "Pass", "groupSlot": 0, "bindingId": 0, "groupName": "Pass"}],
-    "pushConstants": [{"name": "MaterialPush", "pushId": 0}]
+    "pushConstants": [{"name": "MaterialPush", "pushId": 0, "promoteDxilCBufferToRootConstants": false, "allowDxilOnly": false}]
   }
 }
 ```
 
-后端字段和 policy 可省略，至少提供一个后端；hash 必须来自独立可信的编译结果，不能从待验证
+后端字段和 policy 可省略，至少提供一个后端；`"pushConstants"` 条目中的 `"promoteDxilCBufferToRootConstants"` 与 `"allowDxilOnly"` 为可选布尔字段（缺省为 `false`，非布尔类型拒绝解析）。hash 必须来自独立可信的编译结果，不能从待验证
 artifact 自抄。所有路径相对 manifest。工具先读取、解码和反射全部变体，再输出
 `.layout.json`、`.layout.bin`、`.<变体序号>.<dxil|spirv>.<stage>.bin`，最后发布 `.index.json`。
 索引记录变体、后端、入口、阶段和文件；写入前移除旧成功索引，失败返回非零且不发布成功索引。

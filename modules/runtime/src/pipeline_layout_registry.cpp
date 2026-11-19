@@ -98,7 +98,7 @@ class PipelineLayoutRegistry::Impl {
 public:
     explicit Impl(gpu::Device& device) : Device(device), Backend(device.GetBackend()) {}
     gpu::Device& Device;
-    gpu::RenderBackend Backend;
+    gpu::GpuBackend Backend;
     struct GroupEntry {
         vector<gpu::BindingDescriptor> Key;
         unique_ptr<gpu::BindingGroupLayout> Object;
@@ -117,8 +117,8 @@ Nullable<shared_ptr<GpuPipelineLayout>> PipelineLayoutRegistry::Acquire(const sh
         return nullptr;
     }
     const auto backend = _impl->Backend;
-    if (backend != gpu::RenderBackend::D3D12 && backend != gpu::RenderBackend::Vulkan) return nullptr;
-    const bool dx = backend == gpu::RenderBackend::D3D12;
+    if (backend != gpu::GpuBackend::D3D12 && backend != gpu::GpuBackend::Vulkan) return nullptr;
+    const bool dx = backend == gpu::GpuBackend::D3D12;
     GpuPipelineLayout::GroupOwners owners;
     vector<gpu::PipelineLayoutGroupDescriptor> groups;
     vector<gpu::PushConstantDescriptor> pushes;

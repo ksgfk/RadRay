@@ -1,4 +1,5 @@
 #include <radray/gpu_impl/backend/d3d12_impl.h>
+#include <radray/utility.h>
 #include <radray/gpu_impl/factory.h>
 #include <radray/gpu_impl/validation.h>
 
@@ -8,6 +9,7 @@
 #include "d3d12_diagnostics.h"
 
 #include <bit>
+#include <cstring>
 #include <algorithm>
 #include <limits>
 #include <dxgidebug.h>
@@ -58,33 +60,38 @@ D3D12MA::ALLOCATION_CALLBACKS MakeAllocationCallbacks() noexcept {
 
 }  // namespace
 
-static void _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
-    if (SUCCEEDED(hr)) return;
-    const HRESULT reason = device->_device->GetDeviceRemovedReason();
-    detail::FlushDiagnostics(device->_diagnostics);
-    RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
-                 operation, GetErrorName(hr), static_cast<uint32_t>(hr),
-                 GetErrorName(reason), static_cast<uint32_t>(reason));
+bool DeviceD3D12::IsDeviceLost() const noexcept {
+    return _deviceLost.load();
 }
 
-static void _CheckD3D12DeviceStatus(DeviceD3D12* device, std::string_view operation) noexcept {
-    const HRESULT reason = device->_device->GetDeviceRemovedReason();
-    if (SUCCEEDED(reason)) return;
-    detail::FlushDiagnostics(device->_diagnostics);
-    RADRAY_ABORT("{} failed: device removed reason: {} {:#x}",
-                 operation, GetErrorName(reason), static_cast<uint32_t>(reason));
-}
-
-static void _CheckD3D12FenceResult(const FenceD3D12* fence, HRESULT hr, std::string_view operation) noexcept {
-    ComPtr<ID3D12Device> device;
-    const HRESULT parentHr = fence->_fence->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
-    if (FAILED(parentHr)) {
-        detail::FlushDiagnostics(fence->_device->_diagnostics);
-        RADRAY_ABORT("{} failed: {} {:#x}; fence GetDevice failed: {} {:#x}",
-                     operation, GetErrorName(hr), static_cast<uint32_t>(hr),
-                     GetErrorName(parentHr), static_cast<uint32_t>(parentHr));
+bool DeviceD3D12::MarkDeviceLost(HRESULT result, std::string_view operation) noexcept {
+    if (IsDeviceLost()) return true;
+    if (SUCCEEDED(result)) return false;
+    const HRESULT reason = _device->GetDeviceRemovedReason();
+    if (reason == S_OK && result != DXGI_ERROR_DEVICE_REMOVED && result != DXGI_ERROR_DEVICE_RESET &&
+        result != DXGI_ERROR_DEVICE_HUNG && result != DXGI_ERROR_DRIVER_INTERNAL_ERROR) return false;
+    if (!_deviceLost.exchange(true)) {
+        detail::FlushDiagnostics(_diagnostics);
+        ComPtr<ID3D12DeviceRemovedExtendedData> dred;
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT breadcrumbs{};
+        D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+        if (SUCCEEDED(_device.As(&dred))) {
+            dred->GetAutoBreadcrumbsOutput(&breadcrumbs);
+            dred->GetPageFaultAllocationOutput(&fault);
+        }
+        const auto* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+        RADRAY_ERR_LOG("{}: device lost, HRESULT {:#x}, removal reason {:#x}, DRED page fault {:#x}, last breadcrumb {}/{}",
+                       operation, static_cast<uint32_t>(result), static_cast<uint32_t>(reason), fault.PageFaultVA,
+                       node && node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0u, node ? node->BreadcrumbCount : 0u);
     }
-    _CheckD3D12Result(fence->_device, hr, operation);
+    return true;
+}
+
+static bool _CheckD3D12Result(DeviceD3D12* device, HRESULT hr, std::string_view operation) noexcept {
+    if (SUCCEEDED(hr)) return true;
+    if (device->MarkDeviceLost(hr, operation)) return false;
+    detail::FlushDiagnostics(device->_diagnostics);
+    RADRAY_ABORT("{} failed: {} {:#x}", operation, GetErrorName(hr), static_cast<uint32_t>(hr));
 }
 
 // == 命令签名与验证消息 ==
@@ -146,6 +153,7 @@ static bool _IsPresentableHwnd(HWND hwnd) noexcept {
 static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
     DXGI_SWAP_CHAIN_DESC1 desc{};
     if (HRESULT hr = swapChain->_swapchain->GetDesc1(&desc); FAILED(hr)) {
+        if (swapChain->_device->MarkDeviceLost(hr, "IDXGISwapChain1::GetDesc1")) return false;
         RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
         return false;
     }
@@ -157,6 +165,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
         ComPtr<ID3D12Resource> rt;
         if (HRESULT hr = swapChain->_swapchain->GetBuffer(i, IID_PPV_ARGS(rt.GetAddressOf()));
             FAILED(hr)) {
+            if (swapChain->_device->MarkDeviceLost(hr, "IDXGISwapChain1::GetBuffer")) return false;
             RADRAY_ERR_LOG("IDXGISwapChain1::GetBuffer failed: {} {}", GetErrorName(hr), hr);
             return false;
         }
@@ -537,11 +546,26 @@ std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Alloca
         return std::nullopt;
     }
     const auto& v = allocation.value();
+#ifdef RADRAY_ENABLE_PROFILER
+    _liveDescriptors += count;
+    if (_liveDescriptors > _peakDescriptors) {
+        _peakDescriptors = _liveDescriptors;
+        if (_heap->GetHeapType() == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+            RADRAY_PROFILE_PLOT("RadRay.D3D12.SamplerHeap.PeakDescriptors", static_cast<int64_t>(_peakDescriptors));
+        } else {
+            RADRAY_PROFILE_PLOT("RadRay.D3D12.ResourceHeap.PeakDescriptors", static_cast<int64_t>(_peakDescriptors));
+        }
+    }
+#endif
     return std::make_optional(GpuDescriptorAllocator::Allocation{_heap.get(), static_cast<UINT>(v.Start), count, v});
 }
 
 void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept {
     _allocator.Destroy(allocation.ParentAllocation);
+#ifdef RADRAY_ENABLE_PROFILER
+    RADRAY_ASSERT(_liveDescriptors >= allocation.Length);
+    _liveDescriptors -= allocation.Length;
+#endif
 }
 
 // == DXGIFactory 与 DeviceD3D12 生命周期 ==
@@ -667,7 +691,7 @@ DeviceD3D12::DeviceD3D12(
     _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128, 1);
     _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128, 1);
     _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 128, 1);
-    _gpuResHeap = make_unique<GpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
+    _gpuResHeap = make_unique<GpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1);
     _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(this, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE);
     _features.Init(_device.Get());
 }
@@ -688,6 +712,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     if (!_device) return;
     for (auto& queues : _queues) queues.clear();
     _samplerCache.Clear();
+    _samplerTables.clear();
     _gpuResHeap = nullptr;
     _gpuSamplerHeap = nullptr;
     _cpuResAlloc = nullptr;
@@ -804,9 +829,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc, factoryImpl->_diagnostics, std::move(diagnosticChannel));
-    if (desc.EnableExternalResource) {
-        result->_externalExtension = make_unique<ExternalResourceD3D12>(result.get());
-    }
     DeviceDetail& detail = result->_capabilities.Detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.BufferCopyOffsetAlignment = 1;
@@ -1061,17 +1083,19 @@ TextureSupport DeviceD3D12::QueryTextureSupportWithNativeStatus(const TextureSup
 }
 
 Nullable<unique_ptr<CommandAllocator>> DeviceD3D12::CreateCommandAllocator(CommandQueue* queue_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     Nullable<CmdQueueD3D12*> queue = CastD3D12Object(queue_);
     ComPtr<ID3D12CommandAllocator> allocator;
     const HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
     if (FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateCommandAllocator")) RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     return make_unique<CommandAllocatorD3D12>(this, queue.Get(), std::move(allocator));
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllocator* allocator_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     Nullable<CommandAllocatorD3D12*> allocator = CastD3D12Object(allocator_);
     auto* queue = allocator->_queue;
     HRESULT hr;
@@ -1081,28 +1105,31 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllo
         hr = device4->CreateCommandList1(0, queue->_type, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(list.GetAddressOf()));
     } else {
         hr = _device->CreateCommandList(0, queue->_type, allocator->_native.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
-        if (SUCCEEDED(hr)) _CheckD3D12Result(this, list->Close(), "ID3D12GraphicsCommandList::Close");
+        if (SUCCEEDED(hr) && !_CheckD3D12Result(this, list->Close(), "ID3D12GraphicsCommandList::Close")) return nullptr;
     }
     if (FAILED(hr)) {
-        RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateCommandBuffer")) RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type);
 }
 
-Nullable<ExternalResourceExtension*> DeviceD3D12::GetExternalResourceExtension() noexcept {
+Nullable<unique_ptr<ExternalResourceExtension>> DeviceD3D12::CreateExternalResourceExtension() noexcept {
+    if (IsDeviceLost()) return nullptr;
 #if defined(RADRAY_PLATFORM_WINDOWS)
-    return _externalExtension.get();
+    return make_unique<ExternalResourceD3D12>(this);
 #else
     return nullptr;
 #endif
 }
 
 Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
+    if (IsDeviceLost()) return nullptr;
     return this->CreateFenceD3D12(0);
 }
 
 Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     D3D12_QUERY_HEAP_DESC heapDesc{};
     heapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     heapDesc.Count = desc.Count;
@@ -1111,7 +1138,7 @@ Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDesc
     ComPtr<ID3D12QueryHeap> heap;
     if (HRESULT hr = _device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(heap.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateQueryHeap failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateQueryPool")) RADRAY_ERR_LOG("ID3D12Device::CreateQueryHeap failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
 
@@ -1123,6 +1150,7 @@ Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDesc
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     detail::DiagnosticTopologyScope change{_diagnostics};
     // https://learn.microsoft.com/zh-cn/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_swap_chain_desc1
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
@@ -1145,22 +1173,22 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     ComPtr<IDXGISwapChain1> temp;
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
-        RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
-        RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
     }
     ComPtr<IDXGISwapChain3> swapchain;
     if (HRESULT hr = temp->QueryInterface(IID_PPV_ARGS(swapchain.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_ERR_LOG("IDXGISwapChain1::QueryInterface failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     constexpr uint32_t MaximumFrameLatency = 3;
     if (HRESULT hr = swapchain->SetMaximumFrameLatency(MaximumFrameLatency); FAILED(hr)) {
-        RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency({}) failed: {} {}", MaximumFrameLatency, GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_ERR_LOG("IDXGISwapChain3::SetMaximumFrameLatency({}) failed: {} {}", MaximumFrameLatency, GetErrorName(hr), hr);
         return nullptr;
     }
     auto result = make_unique<SwapChainD3D12>(this, swapchain, desc);
@@ -1172,6 +1200,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
 }
 
 Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     BufferDescriptor desc = desc_;
     const uint64_t logicalSize = desc.Size;
     D3D12_RESOURCE_DESC resDesc{};
@@ -1240,7 +1269,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 nullptr,
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("ID3D12Device::CreateCommittedResource failed: {} {}", GetErrorName(hr), hr);
+            if (!MarkDeviceLost(hr, "CreateBuffer")) RADRAY_ERR_LOG("ID3D12Device::CreateCommittedResource failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
     } else {
@@ -1252,7 +1281,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
                 allocRes.GetAddressOf(),
                 IID_PPV_ARGS(buffer.GetAddressOf()));
             FAILED(hr)) {
-            RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
+            if (!MarkDeviceLost(hr, "CreateBuffer")) RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
             return nullptr;
         }
     }
@@ -1267,6 +1296,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     TextureDescriptor desc = desc_;
     DXGI_FORMAT rawFormat = MapType(desc.Format);
     D3D12_RESOURCE_DESC resDesc{};
@@ -1316,7 +1346,7 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
             allocRes.GetAddressOf(),
             IID_PPV_ARGS(texture.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateTexture")) RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     auto result = make_unique<TextureD3D12>(this, std::move(texture), std::move(allocRes));
@@ -1399,6 +1429,12 @@ std::pair<bool, string> DeviceD3D12::ValidateTextureView(const TextureViewDescri
 }
 
 Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
+    return CreateTextureView(desc, UINT_MAX);
+}
+
+Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureViewDescriptor& desc, uint32_t volumeSlices) noexcept {
+    if (IsDeviceLost()) return nullptr;
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
     auto tex = CastD3D12Object(desc.Target);
@@ -1534,7 +1570,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
                 rtvDesc.Texture3D.MipSlice = desc.Range.BaseMipLevel;
                 rtvDesc.Texture3D.FirstWSlice = 0;
-                rtvDesc.Texture3D.WSize = static_cast<UINT>(-1);
+                rtvDesc.Texture3D.WSize = volumeSlices;
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
@@ -1654,6 +1690,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
 // == Device: render pass / framebuffer / shader ==
 
 Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     return make_unique<Dxil>(desc.Source.begin(), desc.Source.end(), desc.Stages);
 }
 
@@ -1752,6 +1789,7 @@ static std::optional<D3D12_SAMPLER_DESC> MakeSamplerD3D12(const SamplerDescripto
 }
 
 Nullable<unique_ptr<BindingGroupLayout>> DeviceD3D12::CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto result = make_unique<BindingGroupLayoutD3D12>();
     result->_device = this;
     result->_bindings.assign(desc.Bindings.begin(), desc.Bindings.end());
@@ -1794,6 +1832,7 @@ Nullable<unique_ptr<BindingGroupLayout>> DeviceD3D12::CreateBindingGroupLayout(c
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto result = make_unique<RootSigD3D12>();
     result->_device = this;
     result->_groups.assign(desc.Groups.begin(), desc.Groups.end());
@@ -1873,18 +1912,20 @@ Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(const Pip
     ComPtr<ID3DBlob> blob, errors;
     auto hr = D3DX12SerializeVersionedRootSignature(&native, _features.HighestRootSignatureVersion(), blob.GetAddressOf(), errors.GetAddressOf());
     if (FAILED(hr)) {
-        RADRAY_ERR_LOG("root signature serialization failed: {} {}", hr, errors ? std::string_view{static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()} : std::string_view{});
+        if (!MarkDeviceLost(hr, "CreatePipelineLayout")) RADRAY_ERR_LOG("root signature serialization failed: {} {}", hr, errors ? std::string_view{static_cast<const char*>(errors->GetBufferPointer()), errors->GetBufferSize()} : std::string_view{});
         return nullptr;
     }
+    result->_serializedHash = HashData128(blob->GetBufferPointer(), blob->GetBufferSize());
     hr = _device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(result->_rootSignature.GetAddressOf()));
     if (FAILED(hr)) {
-        RADRAY_ERR_LOG("CreateRootSignature failed: {}", hr);
+        if (!MarkDeviceLost(hr, "CreatePipelineLayout")) RADRAY_ERR_LOG("CreateRootSignature failed: {}", hr);
         return nullptr;
     }
     return result;
 }
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto* layout = CastD3D12Object(desc.Layout);
     auto result = make_unique<ShaderParameterSetD3D12>();
     result->_device = this;
@@ -1894,13 +1935,16 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(c
     for (const auto& table : layout->_tables) {
         auto& storage = result->_tables.emplace_back();
         auto* cpuAllocator = table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? _cpuSamplerAlloc.get() : _cpuResAlloc.get();
-        auto* gpuAllocator = table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER ? _gpuSamplerHeap.get() : _gpuResHeap.get();
         const auto cpu = cpuAllocator->Allocate(table.DescriptorCount);
         if (!cpu) return nullptr;
         storage.Mirror = CpuDescriptorHeapViewRAII{cpuAllocator, *cpu};
-        const auto gpu = gpuAllocator->Allocate(table.DescriptorCount);
-        if (!gpu) return nullptr;
-        storage.Descriptors = GpuDescriptorHeapViewRAII{gpuAllocator, *gpu};
+        if (table.HeapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) {
+            storage.SamplerIds.resize(table.DescriptorCount, 0);
+        } else {
+            const auto gpu = _gpuResHeap->Allocate(table.DescriptorCount);
+            if (!gpu) return nullptr;
+            storage.Descriptors = GpuDescriptorHeapViewRAII{_gpuResHeap.get(), *gpu};
+        }
         storage.InitializedSlots.resize(table.DescriptorCount, 0);
     }
     return result;
@@ -2036,13 +2080,14 @@ static void WriteShaderParameterValueD3D12(
     }
 }
 
-ShaderParameterSetD3D12::~ShaderParameterSetD3D12() noexcept = default;
+ShaderParameterSetD3D12::~ShaderParameterSetD3D12() noexcept { Destroy(); }
 
 bool ShaderParameterSetD3D12::IsValid() const noexcept {
     return _device != nullptr && _layout != nullptr;
 }
 
 void ShaderParameterSetD3D12::Destroy() noexcept {
+    for (auto& storage : _tables) ReleaseSamplerTable(storage);
     _tables.clear();
     _copySources.clear();
     _copyDestinations.clear();
@@ -2052,9 +2097,50 @@ void ShaderParameterSetD3D12::Destroy() noexcept {
     _device = nullptr;
 }
 
-void ShaderParameterSetD3D12::ResetBindingsForReuse() noexcept {}
+void ShaderParameterSetD3D12::ReleaseSamplerTable(DescriptorTableStorageD3D12& storage) noexcept {
+    if (!storage.SharedTable) return;
+    auto entry = *storage.SharedTable;
+    storage.SharedTable.reset();
+    if (--entry->second.Owners == 0) _device->_samplerTables.erase(entry);
+}
+
+bool ShaderParameterSetD3D12::FlushSamplerTable(DescriptorTableStorageD3D12& storage) noexcept {
+    if (storage.SharedTable && (*storage.SharedTable)->first == storage.SamplerIds) return true;
+    ReleaseSamplerTable(storage);
+    auto& cache = _device->_samplerTables;
+    auto entry = cache.find(storage.SamplerIds);
+    if (entry == cache.end()) {
+        auto* heap = _device->_gpuSamplerHeap.get();
+        const auto count = static_cast<uint32_t>(storage.SamplerIds.size());
+        const auto allocation = heap->Allocate(count);
+        if (!allocation) return false;
+        GpuDescriptorHeapViewRAII descriptors{heap, *allocation};
+        // Zero IDs denote unwritten elements. D3D12 forbids copying an uninitialized descriptor.
+        for (uint32_t i = 0; i < count;) {
+            const auto start = i;
+            while (i < count && storage.SamplerIds[i]) ++i;
+            if (i != start) storage.Mirror.CopyTo(start, i - start, descriptors, start);
+            if (i < count) ++i;
+        }
+        entry = cache.emplace(storage.SamplerIds, SamplerTableD3D12{std::move(descriptors)}).first;
+    }
+    ++entry->second.Owners;
+    storage.SharedTable = entry;
+    return true;
+}
+
+void ShaderParameterSetD3D12::ResetBindingsForReuse() noexcept {
+    for (auto& storage : _tables) {
+        ReleaseSamplerTable(storage);
+        std::fill(storage.SamplerIds.begin(), storage.SamplerIds.end(), 0);
+        std::fill(storage.InitializedSlots.begin(), storage.InitializedSlots.end(), 0);
+        storage.Dirty.Ranges.clear();
+    }
+    std::fill(_rootBindings.begin(), _rootBindings.end(), 0);
+}
 
 bool ShaderParameterSetD3D12::Set(uint32_t bindingId, uint32_t arrayElement, ShaderParameterValue value) noexcept {
+    if (const auto* texel = std::get_if<ShaderTexelBufferBinding>(&value); texel && !GetTextureFormatBytesPerPixel(texel->Format)) return false;
     const auto entry = std::find_if(_layout->_entries.begin(), _layout->_entries.end(), [&](const auto& e) { return e.Binding == bindingId; });
     if (entry->IsRootDescriptor()) {
         const auto& buffer = std::get<ShaderBufferBinding>(value);
@@ -2063,6 +2149,7 @@ bool ShaderParameterSetD3D12::Set(uint32_t bindingId, uint32_t arrayElement, Sha
         auto& storage = _tables[entry->TableIndex];
         const auto offset = entry->TableOffset + arrayElement;
         WriteShaderParameterValueD3D12(storage.Mirror, entry->LogicalKind, offset, value);
+        if (!storage.SamplerIds.empty()) storage.SamplerIds[offset] = CastD3D12Object(std::get<Sampler*>(value))->_samplerId;
         storage.InitializedSlots[offset] = 1;
         storage.Dirty.Add(offset);
     }
@@ -2072,6 +2159,11 @@ bool ShaderParameterSetD3D12::Set(uint32_t bindingId, uint32_t arrayElement, Sha
 bool ShaderParameterSetD3D12::FlushWrites() noexcept {
     for (auto& storage : _tables) {
         if (storage.Dirty.Ranges.empty()) {
+            continue;
+        }
+        if (!storage.SamplerIds.empty()) {
+            if (!FlushSamplerTable(storage)) return false;
+            storage.Dirty.Ranges.clear();
             continue;
         }
         const auto span = storage.Dirty.GetCopySpan(storage.InitializedSlots);
@@ -2096,7 +2188,93 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
 
 // == Device: PSO / sampler / fence ==
 
+namespace {
+// The driver blob is opaque. Check our envelope before giving it to the D3D12 debug layer.
+struct LibraryHeader {
+    uint64_t Magic{0x3142494c525244ull}, Adapter, Driver, Size, Checksum;
+};
+static_assert(sizeof(LibraryHeader) == 5 * sizeof(uint64_t));
+}
+
+PipelineCacheD3D12::PipelineCacheD3D12(uint64_t adapter, uint64_t driver) noexcept : _adapter(adapter), _driver(driver) {}
+bool PipelineCacheD3D12::IsValid() const noexcept { return _live; }
+void PipelineCacheD3D12::Destroy() noexcept {
+    _library.Reset();
+    _initialData.clear();
+    _live = false;
+}
+vector<byte> PipelineCacheD3D12::GetData() const noexcept {
+    std::lock_guard lock{_mutex};
+    if (!_library) return {};
+    const auto size = _library->GetSerializedSize();
+    if (!size || size > std::numeric_limits<size_t>::max() - sizeof(LibraryHeader)) return {};
+    vector<byte> bytes(sizeof(LibraryHeader) + size);
+    auto* blob = bytes.data() + sizeof(LibraryHeader);
+    if (FAILED(_library->Serialize(blob, size))) return {};
+    const LibraryHeader header{.Adapter = _adapter, .Driver = _driver, .Size = size, .Checksum = HashData64(blob, size)};
+    std::memcpy(bytes.data(), &header, sizeof(header));
+    return bytes;
+}
+
+Nullable<unique_ptr<PipelineCache>> DeviceD3D12::CreatePipelineCache(std::span<const byte> initialData) noexcept {
+    if (IsDeviceLost()) return nullptr;
+    DXGI_ADAPTER_DESC1 adapter{};
+    _dxgiAdapter->GetDesc1(&adapter);
+    const array identity{adapter.VendorId, adapter.DeviceId, adapter.SubSysId, adapter.Revision};
+    LARGE_INTEGER version{};
+    _dxgiAdapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &version);
+    auto cache = make_unique<PipelineCacheD3D12>(HashData64(identity.data(), sizeof(identity)), static_cast<uint64_t>(version.QuadPart));
+    ComPtr<ID3D12Device1> device;
+    D3D12_FEATURE_DATA_SHADER_CACHE support{};
+    if (FAILED(_device.As(&device)) || FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_CACHE, &support, sizeof(support))) ||
+        !(support.SupportFlags & D3D12_SHADER_CACHE_SUPPORT_LIBRARY)) {
+        return cache;
+    }
+    LibraryHeader header{};
+    if (initialData.size() > sizeof(header)) {
+        std::memcpy(&header, initialData.data(), sizeof(header));
+        auto blob = initialData.subspan(sizeof(header));
+        if (header.Magic == LibraryHeader{}.Magic && header.Adapter == cache->_adapter && header.Driver == cache->_driver &&
+            header.Size == blob.size() && header.Checksum == HashData64(blob.data(), blob.size()))
+            cache->_initialData.assign(blob.begin(), blob.end());
+    }
+    if (!cache->_initialData.empty() &&
+        SUCCEEDED(device->CreatePipelineLibrary(cache->_initialData.data(), cache->_initialData.size(), IID_PPV_ARGS(cache->_library.GetAddressOf()))))
+        return cache;
+    cache->_initialData.clear();
+    device->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(cache->_library.ReleaseAndGetAddressOf()));
+    return cache;
+}
+
+// Only content that affects the native PSO enters its library name. Never serialize
+// pointer values or struct padding: imported libraries must also hit in another process.
+static wstring GraphicsLibraryName(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& pso, const Hash128& layout) {
+    vector<uint64_t> fields;
+    const auto add = [&](auto... values) { (fields.push_back(static_cast<uint64_t>(values)), ...); };
+    add(HashData64(layout.Bytes.data(), layout.Bytes.size()), HashData64(pso.VS.pShaderBytecode, pso.VS.BytecodeLength),
+        HashData64(pso.PS.pShaderBytecode, pso.PS.BytecodeLength), pso.SampleMask, pso.IBStripCutValue, pso.PrimitiveTopologyType,
+        pso.NumRenderTargets, pso.DSVFormat, pso.SampleDesc.Count, pso.SampleDesc.Quality, pso.BlendState.AlphaToCoverageEnable, pso.BlendState.IndependentBlendEnable);
+    for (UINT i = 0; i < pso.NumRenderTargets; ++i) {
+        const auto& rt = pso.BlendState.RenderTarget[i];
+        add(pso.RTVFormats[i], rt.BlendEnable, rt.LogicOpEnable, rt.SrcBlend, rt.DestBlend, rt.BlendOp, rt.SrcBlendAlpha,
+            rt.DestBlendAlpha, rt.BlendOpAlpha, rt.LogicOp, rt.RenderTargetWriteMask);
+    }
+    const auto& rs = pso.RasterizerState;
+    add(rs.FillMode, rs.CullMode, rs.FrontCounterClockwise, rs.DepthBias, std::bit_cast<uint32_t>(rs.DepthBiasClamp),
+        std::bit_cast<uint32_t>(rs.SlopeScaledDepthBias), rs.DepthClipEnable, rs.MultisampleEnable, rs.AntialiasedLineEnable, rs.ForcedSampleCount, rs.ConservativeRaster);
+    const auto& ds = pso.DepthStencilState;
+    add(ds.DepthEnable, ds.DepthWriteMask, ds.DepthFunc, ds.StencilEnable, ds.StencilReadMask, ds.StencilWriteMask);
+    for (const auto& face : {ds.FrontFace, ds.BackFace}) add(face.StencilFailOp, face.StencilDepthFailOp, face.StencilPassOp, face.StencilFunc);
+    for (UINT i = 0; i < pso.InputLayout.NumElements; ++i) {
+        const auto& e = pso.InputLayout.pInputElementDescs[i];
+        const std::string_view semantic{e.SemanticName};
+        add(HashData64(semantic.data(), semantic.size()), e.SemanticIndex, e.Format, e.InputSlot, e.AlignedByteOffset, e.InputSlotClass, e.InstanceDataStepRate);
+    }
+    return *ToWideChar("g" + HashData128(fields.data(), fields.size() * sizeof(uint64_t)).ToHex());
+}
+
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
     inputElements.reserve(desc.VertexInput.Attributes.size());
@@ -2228,9 +2406,20 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     rawPsoDesc.CachedPSO = D3D12_CACHED_PIPELINE_STATE{};
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     ComPtr<ID3D12PipelineState> pso;
-    if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
+    auto* cache = static_cast<PipelineCacheD3D12*>(desc.Cache.Get());
+    wstring name;
+    std::unique_lock<std::mutex> cacheLock;
+    if (cache && cache->_library) {
+        name = GraphicsLibraryName(rawPsoDesc, CastD3D12Object(desc.PipelineLayout)->_serializedHash);
+        cacheLock = std::unique_lock{cache->_mutex};
+        cache->_library->LoadGraphicsPipeline(name.c_str(), &rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+    }
+    if (!pso) {
+        if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
+            if (!MarkDeviceLost(hr, "CreateGraphicsPipelineState")) RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+        if (!name.empty()) cache->_library->StorePipeline(name.c_str(), pso.Get());
     }
     auto result = make_unique<GraphicsPsoD3D12>(
         this,
@@ -2242,16 +2431,28 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
     rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
     rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
     rawPsoDesc.NodeMask = 0;
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     ComPtr<ID3D12PipelineState> pso;
-    if (HRESULT hr = _device->CreateComputePipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateComputePipelineState failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
+    auto* cache = static_cast<PipelineCacheD3D12*>(desc.Cache.Get());
+    wstring name;
+    std::unique_lock<std::mutex> cacheLock;
+    if (cache && cache->_library) {
+        const auto& layout = CastD3D12Object(desc.PipelineLayout)->_serializedHash;
+        name = *ToWideChar("c" + layout.ToHex() + HashData128(rawPsoDesc.CS.pShaderBytecode, rawPsoDesc.CS.BytecodeLength).ToHex());
+        cacheLock = std::unique_lock{cache->_mutex};
+        cache->_library->LoadComputePipeline(name.c_str(), &rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf()));
+    }
+    if (!pso) {
+        if (HRESULT hr = _device->CreateComputePipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
+            if (!MarkDeviceLost(hr, "CreateComputePipelineState")) RADRAY_ERR_LOG("ID3D12Device::CreateComputePipelineState failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
+        if (!name.empty()) cache->_library->StorePipeline(name.c_str(), pso.Get());
     }
     return make_unique<ComputePsoD3D12>(
         this,
@@ -2260,6 +2461,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineSta
 }
 
 Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     const auto raw = MakeSamplerD3D12(desc, _capabilities.Features);
     if (!raw) return nullptr;
     const auto& rawDesc = *raw;
@@ -2283,10 +2485,11 @@ Nullable<Sampler*> DeviceD3D12::GetOrCreateSampler(
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
+    if (IsDeviceLost()) return nullptr;
     ComPtr<ID3D12Fence> fence;
     if (HRESULT hr = _device->CreateFence(initValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(fence.GetAddressOf()));
         FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
+        if (!MarkDeviceLost(hr, "CreateFenceD3D12")) RADRAY_ERR_LOG("ID3D12Device::CreateFence failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     std::optional<Win32Event> e = Win32Event::Create();
@@ -2295,6 +2498,7 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
     }
     auto result = make_unique<FenceD3D12>(this, std::move(fence), std::move(e.value()));
     result->_fenceValue = initValue + 1;
+    result->_lastCompletedValue = initValue;
     return result;
 }
 
@@ -2344,13 +2548,13 @@ void CmdQueueD3D12::Destroy() noexcept {
     _queue = nullptr;
 }
 
-void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+bool CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
-    _CheckD3D12DeviceStatus(_device, "CommandQueue::Submit");
+    if (_device->IsDeviceLost() || _device->MarkDeviceLost(_device->_device->GetDeviceRemovedReason(), "CommandQueue::Submit")) return false;
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.WaitFences[i]);
         uint64_t waitValue = desc.WaitValues[i];
-        _CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait");
+        if (!_CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait")) return false;
     }
 
     vector<ID3D12CommandList*> submits;
@@ -2361,7 +2565,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
     if (!submits.empty()) {
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
-        _CheckD3D12DeviceStatus(_device, "ID3D12CommandQueue::ExecuteCommandLists");
+        if (_device->MarkDeviceLost(_device->_device->GetDeviceRemovedReason(), "ID3D12CommandQueue::ExecuteCommandLists")) return false;
 #ifdef RADRAY_ENABLE_PROFILER
         if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
 #endif
@@ -2370,19 +2574,23 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.SignalFences[i]);
         uint64_t signalValue = desc.SignalValues[i];
-        _CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal");
+        if (!_CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal")) return false;
         if (signalValue + 1 > f->_fenceValue) {
             f->_fenceValue = signalValue + 1;
         }
     }
+    return true;
 }
 
 void CmdQueueD3D12::Wait() noexcept {
-    _CheckD3D12Result(_device,
-                      _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal");
+    if (_device->IsDeviceLost() || !_CheckD3D12Result(_device, _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal")) return;
     ++_fence->_fenceValue;
     _fence->Wait();
     if (_device->_diagnostics) detail::FlushDiagnostics(_device->_diagnostics);
+}
+
+uint32_t CmdQueueD3D12::GetTimestampValidBits() const noexcept {
+    return _type == D3D12_COMMAND_LIST_TYPE_DIRECT || _type == D3D12_COMMAND_LIST_TYPE_COMPUTE ? 64u : 0u;
 }
 
 QueueType CmdQueueD3D12::GetQueueType() const noexcept {
@@ -2456,40 +2664,45 @@ void FenceD3D12::Wait() noexcept {
 }
 
 void FenceD3D12::Wait(uint64_t value) noexcept {
-    if (!WaitFor(value, 30000)) {
+    if (!WaitFor(value, 30000) && !_device->IsDeviceLost()) {
         detail::FlushDiagnostics(_device->_diagnostics);
         RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
     }
 }
 
 bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
-    if (GetCompletedValue() >= value) return true;
-    if (timeoutMs == 0) return false;
+    if (GetCompletedValue() >= value) return !_device->IsDeviceLost();
+    if (timeoutMs == 0 || _device->IsDeviceLost()) return false;
     const DWORD duration = static_cast<DWORD>(std::min<uint64_t>(timeoutMs, INFINITE - 1));
     const uint64_t start = ::GetTickCount64();
     const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
-    if (FAILED(hr)) _CheckD3D12FenceResult(this, hr, "ID3D12Fence::SetEventOnCompletion");
+    if (!_CheckD3D12Result(_device, hr, "ID3D12Fence::SetEventOnCompletion")) return false;
     while (GetCompletedValue() < value) {
+        if (_device->IsDeviceLost()) return false;
         const uint64_t elapsed = ::GetTickCount64() - start;
-        if (elapsed >= duration) return GetCompletedValue() >= value;
+        if (elapsed >= duration) return GetCompletedValue() >= value && !_device->IsDeviceLost();
         const DWORD waitResult = ::WaitForSingleObject(_event.Get(), duration - static_cast<DWORD>(elapsed));
-        if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value;
+        if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value && !_device->IsDeviceLost();
         if (waitResult != WAIT_OBJECT_0) {
             const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
-            _CheckD3D12FenceResult(this, HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
+            if (!_CheckD3D12Result(_device, HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject")) return false;
             RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
         }
         // An earlier timed-out registration or device removal can also wake it.
     }
-    return true;
+    return !_device->IsDeviceLost();
 }
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
-    const uint64_t value = _fence->GetCompletedValue();
+    auto previous = _lastCompletedValue.load();
+    if (_device->IsDeviceLost()) return previous;
+    const auto value = _fence->GetCompletedValue();
     if (value == std::numeric_limits<uint64_t>::max()) {
-        _CheckD3D12FenceResult(this, DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+        _device->MarkDeviceLost(DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+        return _lastCompletedValue.load();
     }
-    return value;
+    while (previous < value && !_lastCompletedValue.compare_exchange_weak(previous, value)) {}
+    return std::max(previous, value);
 }
 
 uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
@@ -2514,6 +2727,7 @@ void CommandAllocatorD3D12::SetDebugName(std::string_view name) noexcept {
 
 void CommandAllocatorD3D12::Reset() noexcept {
     RADRAY_PROFILE_SCOPE_N("CommandAllocatorD3D12::Reset");
+    if (_device->IsDeviceLost()) return;
     _CheckD3D12Result(_device, _native->Reset(), "ID3D12CommandAllocator::Reset");
 }
 
@@ -2566,7 +2780,7 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
-    _CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    if (_device->IsDeviceLost() || !_CheckD3D12Result(_device, _cmdList->Reset(_allocator->_native.Get(), nullptr), "ID3D12GraphicsCommandList::Reset")) return;
     if (_type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
         const float blendConstants[4]{};
         _cmdList->OMSetBlendFactor(blendConstants);
@@ -2583,6 +2797,7 @@ void CmdListD3D12::Begin() noexcept {
 }
 
 void CmdListD3D12::End() noexcept {
+    if (_device->IsDeviceLost()) return;
 #ifdef RADRAY_ENABLE_PROFILER
     // Zone end queries must be recorded before Close(); unbalanced groups are closed here.
     _profilerZones->Zones.clear();
@@ -2654,9 +2869,9 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
         } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
             D3D12_RESOURCE_BARRIER raw{};
             raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            if (uav->Target->GetTag() == RenderObjectTag::Buffer) {
+            if (uav->Target->GetTag() == GpuObjectTag::Buffer) {
                 raw.UAV.pResource = CastD3D12Object(static_cast<Buffer*>(uav->Target))->_buf.Get();
-            } else if (uav->Target->GetTag() == RenderObjectTag::Texture) {
+            } else if (uav->Target->GetTag() == GpuObjectTag::Texture) {
                 raw.UAV.pResource = CastD3D12Object(static_cast<Texture*>(uav->Target))->_tex.Get();
             } else {
                 RADRAY_ABORT("D3D12 UAV barrier requires a buffer or texture");
@@ -2720,10 +2935,13 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     vector<unique_ptr<TextureView>> layerViews;
     const auto attachmentView = [&](TextureView* view) -> Nullable<TextureViewD3D12*> {
         auto vd = view->GetDesc();
-        const auto range = ResolveSubresourceRange(vd.Target->GetDesc(), vd.Range);
-        if (range.ArrayLayerCount == desc.Layers) return CastD3D12Object(view);
-        vd.Range.ArrayLayerCount = desc.Layers;
-        auto subset = _device->CreateTextureView(vd);
+        const auto texture = vd.Target->GetDesc();
+        const auto range = ResolveSubresourceRange(texture, vd.Range);
+        const bool volume = texture.Dim == TextureDimension::Dim3D;
+        const auto layers = volume ? std::max(1u, texture.DepthOrArraySize >> range.BaseMipLevel) : range.ArrayLayerCount;
+        if (layers == desc.Layers) return CastD3D12Object(view);
+        if (!volume) vd.Range.ArrayLayerCount = desc.Layers;
+        auto subset = _device->CreateTextureView(vd, desc.Layers);
         if (!subset) return nullptr;
         layerViews.push_back(subset.Release());
         return CastD3D12Object(layerViews.back().get());
@@ -2884,12 +3102,85 @@ bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor
     from.pResource = src->_buf.Get();
     from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     from.PlacedFootprint.Offset = r.SourceOffset;
-    from.PlacedFootprint.Footprint = {dst->_rawDesc.Format, target.Width, target.Height, 1, r.RowPitch};
+    const auto block = GetTextureFormatBlockInfo(dst->GetDesc().Format);
+    const uint32_t width = block.Columns(target.Width) * block.BlockWidth;
+    const uint32_t rows = block.Rows(target.Height);
+    const uint32_t imageRows = r.RowsPerImage ? r.RowsPerImage : rows;
+    auto& footprint = from.PlacedFootprint.Footprint;
+    footprint = {dst->_rawDesc.Format, width, rows * block.BlockHeight, target.Depth, r.RowPitch};
     D3D12_TEXTURE_COPY_LOCATION to{};
     to.pResource = dst->_tex.Get();
     to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     to.SubresourceIndex = D3D12CalcSubresource(target.MipLevel, target.ArrayLayer, 0, dst->_rawDesc.MipLevels, dst->_rawDesc.DepthOrArraySize);
-    _cmdList->CopyTextureRegion(&to, target.X, target.Y, 0, &from, nullptr);
+    if (imageRows == rows || target.Depth == 1) {
+        _cmdList->CopyTextureRegion(&to, target.X, target.Y, target.Z, &from, nullptr);
+        return true;
+    }
+    const uint64_t rowBytes = uint64_t{block.Columns(target.Width)} * block.BytesPerBlock;
+    const uint64_t available = src->GetDesc().Size - r.SourceOffset;
+    const uint64_t fullLastRow = uint64_t{imageRows} * target.Depth - 1;
+    const bool fullFootprintFits = fullLastRow <= (available - rowBytes) / r.RowPitch;
+    footprint.Height = imageRows * block.BlockHeight;
+    footprint.Depth = fullFootprintFits ? target.Depth : target.Depth - 1;
+    D3D12_BOX box{0, 0, 0, width, rows * block.BlockHeight, footprint.Depth};
+    _cmdList->CopyTextureRegion(&to, target.X, target.Y, target.Z, &from, &box);
+    if (!fullFootprintFits) {
+        // D3D12 bounds-checks the whole footprint even with a source box. The last slice
+        // can end at its last copied byte. Include one preceding row if its offset is unaligned.
+        const auto lastOffset = r.SourceOffset + uint64_t{target.Depth - 1} * imageRows * r.RowPitch;
+        const uint32_t prefixRows = lastOffset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ? 1 : 0;
+        from.PlacedFootprint.Offset = lastOffset - uint64_t{prefixRows} * r.RowPitch;
+        footprint.Height = (prefixRows + rows) * block.BlockHeight;
+        footprint.Depth = 1;
+        box = {0, prefixRows * block.BlockHeight, 0, width, footprint.Height, 1};
+        _cmdList->CopyTextureRegion(&to, target.X, target.Y, target.Z + target.Depth - 1, &from, &box);
+    }
+    return true;
+}
+
+bool CmdListD3D12::CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept {
+    auto* source = CastD3D12Object(desc.Source);
+    auto* destination = CastD3D12Object(desc.Destination);
+    const auto& region = desc.Region;
+    const auto& image = region.Source;
+    const auto block = GetTextureFormatBlockInfo(source->GetDesc().Format);
+    const uint32_t width = block.Columns(image.Width) * block.BlockWidth;
+    const uint32_t rows = block.Rows(image.Height);
+    const uint32_t imageRows = region.RowsPerImage ? region.RowsPerImage : rows;
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = source->_tex.Get();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    from.SubresourceIndex = D3D12CalcSubresource(image.MipLevel, image.ArrayLayer, 0, source->_rawDesc.MipLevels, source->_rawDesc.DepthOrArraySize);
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = destination->_buf.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint.Offset = region.DestinationOffset;
+    auto& footprint = to.PlacedFootprint.Footprint;
+    footprint = {source->_rawDesc.Format, width, rows * block.BlockHeight, image.Depth, region.RowPitch};
+    // BC subresources expose a whole final block to CopyTextureRegion, including tail mips.
+    D3D12_BOX box{image.X, image.Y, image.Z, image.X + width, image.Y + rows * block.BlockHeight, image.Z + image.Depth};
+    if (image.Depth == 1 || imageRows == rows) {
+        _cmdList->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+        return true;
+    }
+    const uint64_t available = destination->GetDesc().Size - region.DestinationOffset;
+    const uint64_t rowBytes = uint64_t{block.Columns(image.Width)} * block.BytesPerBlock;
+    const bool fullFootprintFits = uint64_t{imageRows} * image.Depth - 1 <= (available - rowBytes) / region.RowPitch;
+    footprint.Height = imageRows * block.BlockHeight;
+    footprint.Depth = fullFootprintFits ? image.Depth : image.Depth - 1;
+    box.back = box.front + footprint.Depth;
+    _cmdList->CopyTextureRegion(&to, 0, 0, 0, &from, &box);
+    if (!fullFootprintFits) {
+        // The final slice may end at its last copied byte, with no trailing padding.
+        const uint64_t lastOffset = region.DestinationOffset + uint64_t{image.Depth - 1} * imageRows * region.RowPitch;
+        const uint32_t prefixRows = lastOffset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ? 1 : 0;
+        to.PlacedFootprint.Offset = lastOffset - uint64_t{prefixRows} * region.RowPitch;
+        footprint.Height = (prefixRows + rows) * block.BlockHeight;
+        footprint.Depth = 1;
+        box.front = box.back;
+        ++box.back;
+        _cmdList->CopyTextureRegion(&to, 0, prefixRows * block.BlockHeight, 0, &from, &box);
+    }
     return true;
 }
 
@@ -2975,7 +3266,10 @@ void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexc
     const bool is3D = src->_rawDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
     const uint32_t srcArraySize = is3D ? 1u : src->_rawDesc.DepthOrArraySize;
     const uint32_t dstArraySize = is3D ? 1u : dst->_rawDesc.DepthOrArraySize;
-    const bool multisampled = src->_rawDesc.SampleDesc.Count > 1;
+    const bool fullSource = !desc.SourceX && !desc.SourceY && !desc.SourceZ &&
+        desc.Width == std::max(uint64_t{1}, src->_rawDesc.Width >> desc.SourceMipLevel) &&
+        desc.Height == std::max(1u, src->_rawDesc.Height >> desc.SourceMipLevel) &&
+        desc.Depth == (is3D ? std::max(1u, uint32_t{src->_rawDesc.DepthOrArraySize} >> desc.SourceMipLevel) : 1u);
 
     D3D12_BOX sourceBox{
         desc.SourceX,
@@ -3010,7 +3304,7 @@ void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexc
             desc.DestinationY,
             desc.DestinationZ,
             &sourceLocation,
-            multisampled ? nullptr : &sourceBox);
+            fullSource ? nullptr : &sourceBox);
     }
 }
 
@@ -3158,7 +3452,9 @@ static bool BindShaderParameterSetD3D12(
     const auto destinationGroup = destinationLayout->FindParameterGroup(groupIndex);
     const auto& destination = *destinationGroup.Get();
     for (size_t i = 0; i < destination.TableRoots.size(); ++i) {
-        const auto handle = set->_tables[i].Descriptors.HandleGpu();
+        const auto& table = set->_tables[i];
+        if (!table.SamplerIds.empty() && !table.SharedTable) return false;
+        const auto handle = table.SharedTable ? (*table.SharedTable)->second.Descriptors.HandleGpu() : table.Descriptors.HandleGpu();
         if (graphics)
             cmdList->SetGraphicsRootDescriptorTable(destination.TableRoots[i], handle);
         else
@@ -3359,6 +3655,10 @@ void SwapChainD3D12::Destroy() noexcept {
 
 SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
+    if (_device->IsDeviceLost()) {
+        result.NativeStatusCode = _device->_device->GetDeviceRemovedReason();
+        return result;
+    }
     if (_requiresRecreateAfterDiscard) {
         result.Status = SwapChainStatus::RequireRecreate;
         return result;
@@ -3413,6 +3713,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
     auto diagnostics = MakeScopeGuard([&] { if (_device->_diagnostics) detail::FlushDiagnostics(_device->_diagnostics); });
     SwapChainPresentResult result{};
     InvalidateFrame(frame);
+    if (_device->IsDeviceLost()) return {.NativeStatusCode = _device->_device->GetDeviceRemovedReason(), .Status = SwapChainStatus::Error};
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
     if (!_IsPresentableHwnd(hwnd)) {
         RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
@@ -3443,7 +3744,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
         result.Status = SwapChainStatus::RetryLater;
         return result;
     }
-    _CheckD3D12Result(_device, hr, "IDXGISwapChain::Present");
+    if (!_CheckD3D12Result(_device, hr, "IDXGISwapChain::Present")) return {.NativeStatusCode = hr, .Status = SwapChainStatus::Error};
     result.NativeStatusCode = static_cast<int64_t>(hr);
     result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
     if (hr != DXGI_STATUS_OCCLUDED) _frameLatencyReady = false;
@@ -3457,9 +3758,11 @@ SwapChainPresentResult SwapChainD3D12::DiscardAcquiredFrame(SwapChainFrame frame
 }
 
 bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
+    if (_device->IsDeviceLost()) return false;
     detail::DiagnosticTopologyScope change{_device->_diagnostics};
     DXGI_SWAP_CHAIN_DESC1 desc{};
     if (HRESULT hr = _swapchain->GetDesc1(&desc); FAILED(hr)) {
+        if (_device->MarkDeviceLost(hr, "IDXGISwapChain1::GetDesc1")) return false;
         RADRAY_ERR_LOG("IDXGISwapChain1::GetDesc1 failed: {} {}", GetErrorName(hr), hr);
         return false;
     }
@@ -3467,7 +3770,7 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
     const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
-    _CheckD3D12Result(_device, hr, "IDXGISwapChain::ResizeBuffers");
+    if (!_CheckD3D12Result(_device, hr, "IDXGISwapChain::ResizeBuffers")) return false;
     _reqFormat = format;
     _mode = presentMode;
     if (!_RefreshSwapChainBackBuffers(this)) {
@@ -3727,10 +4030,15 @@ bool GraphicsPsoD3D12::IsValid() const noexcept {
 
 void GraphicsPsoD3D12::Destroy() noexcept {
     _pso = nullptr;
+    _layout = nullptr;
 }
 
 void GraphicsPsoD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _pso.Get());
+}
+
+Nullable<PipelineLayout*> GraphicsPsoD3D12::GetLayout() const noexcept {
+    return IsValid() ? _layout : nullptr;
 }
 
 ComputePsoD3D12::ComputePsoD3D12(
@@ -3747,17 +4055,24 @@ bool ComputePsoD3D12::IsValid() const noexcept {
 
 void ComputePsoD3D12::Destroy() noexcept {
     _pso = nullptr;
+    _layout = nullptr;
 }
 
 void ComputePsoD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _pso.Get());
 }
 
+Nullable<PipelineLayout*> ComputePsoD3D12::GetLayout() const noexcept {
+    return IsValid() ? _layout : nullptr;
+}
+
 SamplerD3D12::SamplerD3D12(
     DeviceD3D12* device,
     CpuDescriptorHeapViewRAII heapView) noexcept
     : _device(device),
-      _samplerView(std::move(heapView)) {}
+      _samplerView(std::move(heapView)), _samplerId(device->_nextSamplerId++) {
+    if (!_samplerId) RADRAY_ABORT("D3D12 sampler identities exhausted");
+}
 
 bool SamplerD3D12::IsValid() const noexcept {
     return _samplerView.IsValid();
@@ -3783,11 +4098,11 @@ bool DXGIFactoryImpl::IsValidationEnabled() const noexcept {
     return _validationEnabled;
 }
 
-RenderBackend DeviceD3D12::GetBackend() noexcept {
-    return RenderBackend::D3D12;
+GpuBackend DeviceD3D12::GetBackend() noexcept {
+    return GpuBackend::D3D12;
 }
 
-const RenderDeviceCapabilities& DeviceD3D12::GetCapabilities() const noexcept {
+const GpuDeviceCapabilities& DeviceD3D12::GetCapabilities() const noexcept {
     return _capabilities;
 }
 

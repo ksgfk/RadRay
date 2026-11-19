@@ -4,6 +4,8 @@
 #include <radray/runtime/gpu_device.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_graph_pipeline.h>
+#include <radray/runtime/readback_queue.h>
+#include <radray/runtime/texture_asset.h>
 
 namespace radray {
 namespace {
@@ -19,9 +21,9 @@ public:
 private:
     void ExtractFrameData(FrameSlot&) noexcept override {}
     void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override { Build(graph, slot); }
-    void SubmitFrame(FrameSlot& slot, CommandBuffer& command) noexcept override {
+    bool SubmitFrame(FrameSlot& slot, CommandBuffer& command) noexcept override {
         auto* raw = &command;
-        slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
+        return slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
     }
 };
 
@@ -29,6 +31,165 @@ struct BufferCopyData {
     RDGBufferHandle Source, Destination;
     uint64_t Size;
 };
+
+class GpuTimingTest : public gpu::test::BackendTest {};
+TEST_P(GpuTimingTest, PublishesOnlyRequestedScopesWithSubmittedUserSequence) {
+    auto& device = GetDevice();
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &gpu::test::DirectQueue(device)};
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    auto* runner = pipeline.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    runner->Build = [](RDGBuilder& graph, FrameSlot&) {
+        const TextureDescriptor desc{.Dim = TextureDimension::Dim2D, .Width = 16, .Height = 16, .DepthOrArraySize = 1,
+            .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget};
+        graph.AddClearColor(graph.CreateTexture(desc), {});
+        const auto live = graph.CreateTexture(desc);
+        graph.AddClearColor(live, {});
+        struct Load {};
+        graph.AddRasterPass("load existing color", Load{}, +[](const Load&, RDGRasterPassContext&) noexcept { return true; })
+            .WriteColor(0, live, gpu::LoadAction::Load, gpu::StoreAction::Store);
+        graph.MarkOutput(live);
+    };
+    uint64_t id = 19;
+    for (auto mode : {RDGGpuProfilingMode::FrameAndPasses, RDGGpuProfilingMode::FrameOnly, RDGGpuProfilingMode::Off}) {
+        auto& slot = scheduler->BeginFrame();
+        runner->SetGpuProfiling(slot, mode, ++id);
+        const auto frameId = slot.GetFrameId();
+        scheduler->RunFrame();
+        scheduler->WaitIdle();
+        const auto result = runner->GetCompletedGpuTiming(slot);
+        if (mode == RDGGpuProfilingMode::Off || !device.GetCapabilities().Features.TimestampQueries || !slot.GetQueue().GetTimestampValidBits()) {
+            EXPECT_FALSE(result);
+        } else {
+            ASSERT_TRUE(result);
+            EXPECT_EQ(result->UserSequence, id);
+            EXPECT_EQ(result->FrameId, frameId);
+            ASSERT_EQ(result->Passes.size(), mode == RDGGpuProfilingMode::FrameAndPasses ? 2u : 0u);
+            if (!result->Passes.empty()) {
+                EXPECT_EQ(result->Passes[0].Name, "ClearColor");
+                EXPECT_EQ(result->Passes[1].Name, "load existing color");
+            }
+        }
+    }
+}
+TEST_P(GpuTimingTest, ExternalQueryPoolSurvivesOverwriteAndIndependentCopyScheduling) {
+    auto& device = GetDevice();
+    auto& queue = gpu::test::DirectQueue(device);
+    if (!device.GetCapabilities().Features.TimestampQueries || !queue.GetTimestampValidBits()) GTEST_SKIP();
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
+    auto queries = device.CreateQueryPool({QueryType::Timestamp, 2, "external RDG timestamps"}).Unwrap();
+    auto result = gpu::test::CreateReadbackBuffer(device, 2 * sizeof(uint64_t)).Unwrap();
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto reset = graph.AddCopyPass("reset", queries.get(), +[](QueryPool* const& pool, RDGCopyPassContext& ctx) noexcept {
+            ctx.GetCommandBuffer().ResetQueryPool(pool, 0, 2);
+            return true;
+        }).NeverCull().GetHandle();
+        graph.AddOrderBarrier(reset);
+        const auto color = graph.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 8, .Height = 8, .DepthOrArraySize = 1,
+            .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget});
+        const auto stamp = graph.AddRasterPass("timestamps", queries.get(), +[](QueryPool* const& pool, RDGRasterPassContext& ctx) noexcept {
+            auto* commands = ctx.GetEncoder().GetCommandBuffer();
+            commands->WriteTimestamp({pool, QueryPipelineStage::Top, 0});
+            commands->WriteTimestamp({pool, QueryPipelineStage::Bottom, 1});
+            return true;
+        }).WriteColor(0, color, LoadAction::Clear, StoreAction::Store).NeverCull().GetHandle();
+        graph.AddOrderBarrier(stamp);
+        graph.AddClearColor(color, {});
+        graph.MarkOutput(color);
+        struct Resolve { QueryPool* Pool; RDGBufferHandle Output; };
+        const auto output = graph.ImportBuffer(result.get(), BufferState::Undefined, BufferState::HostRead);
+        const auto resolve = graph.AddCopyPass("resolve", Resolve{queries.get(), output}, +[](const Resolve& data, RDGCopyPassContext& ctx) noexcept {
+            const auto slice = ctx.ResolveBuffer(data.Output);
+            ctx.GetCommandBuffer().ResolveQueryData({data.Pool, 0, 2, slice.Buffer.Get(), slice.Offset});
+            return true;
+        }).WriteBuffer(output).NeverCull().GetHandle();
+        graph.AddOrderBarrier(resolve);
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    scheduler->RunFrame();
+    scheduler->WaitIdle();
+    const auto ticks = gpu::test::FromBytes<uint64_t>(gpu::test::MapAndRead(*result));
+    ASSERT_EQ(ticks.size(), 2u);
+    EXPECT_GT(ticks[0], 0u);
+    EXPECT_GE(ticks[1], ticks[0]);
+}
+INSTANTIATE_TEST_SUITE_P(Backends, GpuTimingTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
+
+class VolumeClearTest : public gpu::test::BackendTest {};
+TEST_P(VolumeClearTest, ClearsEverySliceOfSingleMipColorTarget) {
+    auto& device = GetDevice();
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &gpu::test::DirectQueue(device)};
+    AsyncReadbackQueue readbacks{device};
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto target = graph.CreateTexture({.Dim = TextureDimension::Dim3D, .Width = 7, .Height = 3, .DepthOrArraySize = 3,
+            .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::CopySource});
+        graph.AddClearColor(target, {{0, 0, 1, 1}});
+        EXPECT_TRUE(readbacks.EnqueueTexture(graph, 1, target));
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    scheduler->RunFrame();
+    readbacks.MarkSubmitted(1);
+    scheduler->WaitIdle();
+    vector<byte> pixels(7 * 3 * 3 * 4);
+    ReadbackResultInfo result{};
+    ASSERT_TRUE(readbacks.Poll(1, 1, result, pixels.data(), pixels.size()));
+    ASSERT_TRUE(result.Ready);
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        EXPECT_EQ(pixels[i], byte{0});
+        EXPECT_EQ(pixels[i + 1], byte{0});
+        EXPECT_EQ(pixels[i + 2], byte{255});
+        EXPECT_EQ(pixels[i + 3], byte{255});
+    }
+}
+TEST_P(VolumeClearTest, PartialClearPreservesPixelsAcrossMipsAndArrayLayers) {
+    auto& device = GetDevice();
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &gpu::test::DirectQueue(device)};
+    AsyncReadbackQueue readbacks{device};
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto target = graph.CreateTexture({.Dim = TextureDimension::Dim2DArray, .Width = 8, .Height = 4, .DepthOrArraySize = 2,
+            .MipLevels = 2, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::CopySource});
+        graph.AddClearColor(target, {{1, 0, 0, 1}}, {0, 2, 0, 1});
+        graph.AddClearColor(target, {{0, 1, 0, 1}}, {0, 2, 1, 1});
+        graph.AddClearColor(target, {{0, 0, 1, 1}}, {1, 1, 1, 1}, Rect{1, 0, 2, 1});
+        for (uint32_t mip = 0; mip < 2; ++mip)
+            for (uint32_t layer = 0; layer < 2; ++layer)
+                EXPECT_TRUE(readbacks.EnqueueTexture(graph, 1 + 2 * mip + layer, target, mip, layer));
+        EXPECT_TRUE(readbacks.ReserveTexture(5, {3, 1, TextureFormat::RGBA8_UNORM}));
+        EXPECT_FALSE(readbacks.EnqueueReserved(graph, 5, target, 1, 1));
+        EXPECT_FALSE(readbacks.EnqueueReserved(graph, 5, target, TextureRegion2D{1, 1, 2, 0, 3, 1}));
+        EXPECT_TRUE(readbacks.EnqueueReserved(graph, 5, target, TextureRegion2D{1, 1, 1, 0, 3, 1}));
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    scheduler->RunFrame();
+    readbacks.MarkSubmitted(1);
+    scheduler->WaitIdle();
+    array<byte, 12> crop{};
+    ReadbackResultInfo cropped{};
+    ASSERT_TRUE(readbacks.Poll(5, 1, cropped, crop.data(), crop.size()));
+    EXPECT_EQ(cropped.PackedRowPitch, 12u);
+    EXPECT_EQ(gpu::test::FromBytes<uint32_t>(crop), (vector<uint32_t>{0xffff0000u, 0xffff0000u, 0xff00ff00u}));
+    for (uint32_t mip = 0; mip < 2; ++mip) {
+        for (uint32_t layer = 0; layer < 2; ++layer) {
+            const uint32_t width = 8u >> mip, height = 4u >> mip;
+            vector<byte> pixels(width * height * 4);
+            ReadbackResultInfo info{};
+            ASSERT_TRUE(readbacks.Poll(1 + 2 * mip + layer, 1, info, pixels.data(), pixels.size()));
+            ASSERT_TRUE(info.Ready);
+            for (uint32_t y = 0; y < height; ++y) {
+                for (uint32_t x = 0; x < width; ++x) {
+                    const uint32_t channel = mip == 0 ? 0 : (layer == 1 && y == 0 && x >= 1 && x < 3 ? 2 : 1);
+                    for (uint32_t c = 0; c < 4; ++c)
+                        EXPECT_EQ(pixels[(y * width + x) * 4 + c], byte(c == channel || c == 3 ? 255 : 0))
+                            << "mip " << mip << ", layer " << layer << ", x " << x << ", y " << y;
+                }
+            }
+        }
+    }
+}
+INSTANTIATE_TEST_SUITE_P(Backends, VolumeClearTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
 bool RecordBufferCopy(const BufferCopyData& data, RDGCopyPassContext& context) noexcept {
     const auto source = context.ResolveBuffer(data.Source), destination = context.ResolveBuffer(data.Destination);
@@ -279,7 +440,7 @@ protected:
         auto shader = gpu::test::LoadShader(device, "texture_upload", "LoadUploadedTexture", ShaderStage::Compute).Unwrap();
         auto kernel = device.CreateComputePipelineState({.PipelineLayout = layout.get(), .CS = ShaderEntry{shader.get(), "LoadUploadedTexture"}}).Unwrap();
         auto parameters = device.CreateShaderParameterSet({group.get()}).Unwrap();
-        ASSERT_TRUE(parameters->Set(0, 0, texture->GetDefaultView()));
+        ASSERT_TRUE(parameters->Set(0, 0, texture->GetDefaultView().Unwrap()));
         ASSERT_TRUE(parameters->Set(1, 0, ShaderBufferBinding{output.get(), {0, byteSize}, 4}));
         ASSERT_TRUE(parameters->FlushWrites());
         vector<unique_ptr<Buffer>> externalSources;
@@ -393,6 +554,100 @@ protected:
 };
 
 TEST_P(TextureUploadGpuTest, MipsLayersSourcePaddingAndNextFrameTile) { VerifyTexture(Initialization::Upload); }
+
+TEST_P(TextureUploadGpuTest, GraphPacksPaddedVolumeSlicesAndCopiesCubeTailBlock) {
+    auto& device = GetDevice();
+    auto& queue = gpu::test::DirectQueue(device);
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
+    const auto usage = TextureUse::CopySource | TextureUse::CopyDestination;
+    auto cube = GpuTexture::Create(device, {.Dim = TextureDimension::Cube, .Width = 4, .Height = 4, .ArrayLayers = 6,
+                                            .MipLevels = 3, .Format = TextureFormat::BC1_UNORM, .Usage = usage}).Unwrap();
+    auto volume = GpuTexture::Create(device, {.Dim = TextureDimension::Dim3D, .Width = 2, .Height = 2, .ArrayLayers = 3,
+                                              .Format = TextureFormat::R8_UNORM, .Usage = usage}).Unwrap();
+    const uint32_t rowPitch = gpu::test::CopyRowPitch(device, 2, 1);
+    auto cubeOutput = gpu::test::CreateReadbackBuffer(device, gpu::test::CopyRowPitch(device, 1, 8)).Unwrap();
+    auto volumeOutput = gpu::test::CreateReadbackBuffer(device, 6 * rowPitch).Unwrap();
+    const array<byte, 8> block{byte{1}, byte{2}, byte{3}, byte{4}, byte{5}, byte{6}, byte{7}, byte{8}};
+    vector<byte> source(22, byte{0xec});
+    for (uint32_t z = 0; z < 2; ++z)
+        for (uint32_t y = 0; y < 2; ++y)
+            std::fill_n(source.begin() + z * 16 + y * 4, 2, byte(8 * z + y));
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        auto cubeHandle = graph.ImportPersistentOwned(cube);
+        auto volumeHandle = graph.ImportPersistentOwned(volume);
+        graph.UploadTexture(cubeHandle, {2, 5, 0, 0, 1, 1}, RDGTextureUploadSource::BorrowedBytes(block));
+        graph.UploadTexture(volumeHandle, {0, 0, 0, 0, 2, 2, 1, 2}, RDGTextureUploadSource::BorrowedBytes(source, 4, 4));
+        auto read = [&](RDGTextureHandle texture, Buffer& output, SubresourceRange range) {
+            auto result = graph.ImportBuffer(&output, BufferState::Undefined, BufferState::HostRead);
+            struct Data { RDGTextureHandle Texture; RDGBufferHandle Output; SubresourceRange Range; };
+            graph.AddCopyPass("read uploaded mip", Data{texture, result, range}, +[](const Data& data, RDGCopyPassContext& ctx) noexcept {
+                const auto slice = ctx.ResolveBuffer(data.Output);
+                ctx.GetCommandBuffer().CopyTextureToBuffer(slice.Buffer.Get(), slice.Offset, &ctx.Resolve(data.Texture), data.Range);
+                return true;
+            }).ReadTexture(texture).WriteBuffer(result);
+            graph.MarkOutput(result);
+        };
+        read(cubeHandle, *cubeOutput, {5, 1, 2, 1});
+        read(volumeHandle, *volumeOutput, {0, 1, 0, 1});
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    scheduler->RunFrame();
+    scheduler->WaitIdle();
+    auto bytes = gpu::test::MapAndRead(*cubeOutput);
+    ASSERT_GE(bytes.size(), block.size());
+    EXPECT_TRUE(std::equal(block.begin(), block.end(), bytes.begin()));
+    bytes = gpu::test::MapAndRead(*volumeOutput);
+    ASSERT_EQ(bytes.size(), 6 * rowPitch);
+    for (uint32_t z = 0; z < 2; ++z)
+        for (uint32_t y = 0; y < 2; ++y)
+            for (uint32_t x = 0; x < 2; ++x)
+                EXPECT_EQ(bytes[(2 + z * 2 + y) * rowPitch + x], byte(8 * z + y));
+}
+
+TEST_P(TextureUploadGpuTest, AttachmentOnlyImportKeepsSubmittedStateAcrossGraphs) {
+    auto& device = GetDevice();
+    auto& queue = gpu::test::DirectQueue(device);
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
+    auto texture = GpuTexture::Create(device, {.Width = 4, .Height = 4, .Format = TextureFormat::RGBA8_UNORM,
+                                               .Usage = TextureUse::RenderTarget}).Unwrap();
+    EXPECT_FALSE(texture->GetDefaultView());
+    EXPECT_FALSE(TextureAsset::Create(texture));
+    auto pipeline = make_unique<UploadPipeline>(context, 1);
+    pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        auto handle = graph.ImportPersistentOwned(texture);
+        struct Data {};
+        graph.AddRasterPass("clear", Data{}, +[](const Data&, RDGRasterPassContext&) noexcept { return true; })
+            .WriteColor(0, handle, LoadAction::Clear, StoreAction::Store, {{0, 0, 0, 1}});
+        graph.MarkOutput(handle);
+    };
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    for (uint32_t frame = 0; frame < 2; ++frame) {
+        scheduler->RunFrame();
+        EXPECT_EQ(texture->GetSubmittedState(), TextureState::RenderTarget);
+    }
+    scheduler->WaitIdle();
+}
+
+TEST_P(TextureUploadGpuTest, TextureAssetsClassifyReplacementAndReuseSamplingViews) {
+    auto& device = GetDevice();
+    const GpuTextureDescriptor desc{.Width = 8, .Height = 8, .MipLevels = 3, .Format = TextureFormat::BC3_UNORM};
+    auto texture = GpuTexture::Create(device, desc).Unwrap();
+    auto first = TextureAsset::Create(texture);
+    auto same = TextureAsset::Create(texture);
+    auto replacement = TextureAsset::Create(GpuTexture::Create(device, desc).Unwrap());
+    ASSERT_TRUE(first && same && replacement);
+    EXPECT_EQ(first->GetDefaultView(), texture->GetDefaultView().Get());
+    EXPECT_EQ(first->ClassifyReload(*same).Kind, AssetReloadKind::Compatible);
+    EXPECT_EQ(first->ClassifyReload(*replacement).Kind, AssetReloadKind::Breaking);
+    GpuTextureViewKey key{.Dim = desc.Dim, .Format = desc.Format, .Range = SubresourceRange::AllSub(), .Usage = TextureViewUsage::Resource};
+    EXPECT_EQ(texture->GetOrCreateView(device, key).Get(), first->GetDefaultView());
+    key.Range = {0, 1, 1, 1};
+    auto view = texture->GetOrCreateView(device, key);
+    ASSERT_TRUE(view);
+    EXPECT_NE(view.Get(), first->GetDefaultView());
+    EXPECT_EQ(texture->GetOrCreateView(device, key).Get(), view.Get());
+}
 TEST_P(TextureUploadGpuTest, OrdinaryCopyInitializationPublishesStateForNextFrameTileAndSampling) { VerifyTexture(Initialization::CopyPass); }
 TEST_P(TextureUploadGpuTest, ExternalSubmissionPublishesStateForTileUpdateAndSampling) { VerifyTexture(Initialization::ExternalCopy); }
 

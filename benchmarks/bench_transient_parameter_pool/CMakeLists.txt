@@ -1,0 +1,6 @@
+add_executable(bench_transient_parameter_pool bench_transient_parameter_pool.cpp)
+target_link_libraries(bench_transient_parameter_pool PRIVATE RadRay::runtime benchmark::benchmark)
+radray_default_compile_flags(bench_transient_parameter_pool)
+radray_optimize_flags_binary(bench_transient_parameter_pool)
+radray_set_build_path(bench_transient_parameter_pool)
+radray_load_mimalloc_early(bench_transient_parameter_pool)

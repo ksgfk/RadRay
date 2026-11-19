@@ -21,10 +21,10 @@ public:
 
     // 失败时记录日志并返回空所有者；不创建 GPU 设备。
     [[nodiscard]] static Nullable<unique_ptr<Environment>> Create(
-        gpu::RenderBackend backend, bool validation,
+        gpu::GpuBackend backend, bool validation,
         std::string_view appName = "RadRay") noexcept;
 
-    gpu::RenderBackend GetBackend() const noexcept;
+    gpu::GpuBackend GetBackend() const noexcept;
     bool IsValidationEnabled() const noexcept;
     bool IsOwnerThread() const noexcept;
 
@@ -36,11 +36,11 @@ private:
 
 private:
     Environment(
-        gpu::RenderBackend backend, bool validation,
+        gpu::GpuBackend backend, bool validation,
         unique_ptr<gpu::DXGIFactory> factory,
         Nullable<gpu::InstanceVulkan*> instance) noexcept;
 
-    gpu::RenderBackend _backend;
+    gpu::GpuBackend _backend;
     std::thread::id _owner;
     unique_ptr<gpu::DXGIFactory> _factory;
     Nullable<gpu::InstanceVulkan*> _instance;

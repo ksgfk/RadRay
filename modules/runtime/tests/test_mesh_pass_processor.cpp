@@ -457,18 +457,53 @@ TEST_F(MeshPassProcessorTest, FirstSelectedDrawBindsIndexBufferEvenWhenPrimaryIs
 
 TEST_F(MeshPassProcessorTest, DefaultStateKeysClusterEqualBindingsAndKeepBucketsBounded) {
     Vertices.Desc.Size = 1 << 20;
+    uint32_t expectedPipelineBits = 0u;
     for (uint32_t i = 0; i < 4100; ++i) {
         Input.Streams[0].Offset = i * 16;
         Build({.Pipeline = &Pipeline});
         const auto state = static_cast<uint32_t>(Visible.back().SortKey >> 32);
-        EXPECT_EQ(state >> 24, 1u);
-        EXPECT_EQ((state >> 12) & 4095, 0u);
-        EXPECT_NE(state & 4095, 0u);
+        if (i == 0) {
+            expectedPipelineBits = state & 0xfff80000u;
+            EXPECT_EQ(state >> 28, 0u);
+            EXPECT_NE((state >> 19) & 0x1ffu, 0u);
+        } else {
+            EXPECT_EQ(state & 0xfff80000u, expectedPipelineBits);
+        }
+        EXPECT_EQ((state >> 10) & 0x1ffu, 0u);
+        EXPECT_NE((state >> 2) & 0xffu, 0u);
+        EXPECT_EQ(state & 0x3u, 0u);
     }
     const auto key = Visible.back().SortKey;
     Build({.Pipeline = &Pipeline});
     EXPECT_EQ(Visible.back().SortKey, key);
     EXPECT_EQ(Output.Commands.back().VertexBuffersIndex, Output.Commands[4099].VertexBuffersIndex);
+}
+
+TEST_F(MeshPassProcessorTest, DynamicNonIndexedVertexOutOfBoundsIsDetected) {
+    // 顶点流仅容纳 3 个顶点（36 B，stride 12），FirstIndex=1, IndexCount=3 需要 4 个顶点。
+    Input.Streams[0].Size = 36;
+    Batch.Elements.clear();
+    Batch.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 1, .IndexCount = 3});
+    EXPECT_FALSE(ValidateMeshBatchElements(Batch, false));
+    EXPECT_FALSE(ValidateMeshBatchElements(Batch, true));
+#if RADRAY_IS_DEBUG
+    EXPECT_DEATH(Build({.Pipeline = &Pipeline}), "");
+#endif
+    // 缩小到 2 个顶点（FirstIndex=1, IndexCount=2 -> 3 <= 3）后合法。
+    Batch.Elements[0].IndexCount = 2;
+    EXPECT_TRUE(ValidateMeshBatchElements(Batch, false));
+    Build({.Pipeline = &Pipeline});
+    ASSERT_EQ(Output.Commands.size(), 1u);
+    EXPECT_EQ(Output.Commands[0].IndexBuffer.Target, nullptr);
+    EXPECT_EQ(Output.Commands[0].IndexBuffer.Offset, 0u);
+    EXPECT_EQ(Output.Commands[0].IndexBuffer.Stride, 0u);
+    Output.FinalizeVisibleCommands();
+    test::RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder, Visible));
+    EXPECT_TRUE(encoder.IndexBuffers.empty());
+    ASSERT_EQ(encoder.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(encoder.NonIndexedDraws[0].VertexCount, 2u);
+    EXPECT_EQ(encoder.NonIndexedDraws[0].FirstVertex, 1u);
 }
 
 }  // 匿名命名空间

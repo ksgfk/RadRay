@@ -84,6 +84,11 @@ TEST_P(ComputeBindingTest, ConstantBufferIsVisible) {
     auto group = device.CreateBindingGroupLayout({bindings}).Unwrap();
     const PipelineLayoutGroupDescriptor groups[]{{0, group.get()}};
     auto kernel = CreateKernel("ReadConstants", groups);
+    auto cache = device.CreatePipelineCache().Unwrap();
+    const ComputePipelineStateDescriptor cachedDesc{kernel.Layout.get(), {kernel.Code.get(), "ReadConstants"}, cache.get()};
+    kernel.Pipeline = device.CreateComputePipelineState(cachedDesc).Unwrap();
+    auto imported = device.CreatePipelineCache(cache->GetData()).Unwrap();
+    kernel.Pipeline = device.CreateComputePipelineState({kernel.Layout.get(), cachedDesc.CS, imported.get()}).Unwrap();
     auto output = CreateOutput();
     vector<uint32_t> constants(64, 0);
     constants[0] = 42;
@@ -293,6 +298,30 @@ TEST_P(ComputeBindingTest, DynamicOffsetSelectsConstantBufferSlice) {
     const auto result = ReadOutput(*output);
     EXPECT_EQ(result[0], 10u);
     EXPECT_EQ(result[1], 20u);
+}
+
+TEST_P(ComputeBindingTest, D3D12RootSignatureOver64DwordsIsRejected) {
+    if (GetParam() != GpuBackend::D3D12) GTEST_SKIP() << "D3D12 64-DWORD root signature budget test";
+    auto& device = GetDevice();
+    const BindingDescriptor binding = MakeBinding(OutputId, BindingKind::RWStructuredBuffer, OutputSlot);
+    auto group = device.CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
+    const PipelineLayoutGroupDescriptor groups[]{{0, group.get()}};
+    // 1 DWORD for descriptor table + 64 DWORDs for root constants = 65 DWORDs > 64.
+    const PushConstantDescriptor overBudget{
+        .PushId = 0,
+        .Size = 64 * 4,
+        .Stages = ShaderStage::Compute,
+        .D3D12 = PushConstantDescriptor::D3D12Location{0, 1},
+        .Vulkan = std::nullopt};
+    EXPECT_FALSE(device.CreatePipelineLayout({groups, std::span{&overBudget, 1}}));
+
+    const PushConstantDescriptor exactBudget{
+        .PushId = 0,
+        .Size = 63 * 4,
+        .Stages = ShaderStage::Compute,
+        .D3D12 = PushConstantDescriptor::D3D12Location{0, 1},
+        .Vulkan = std::nullopt};
+    EXPECT_TRUE(device.CreatePipelineLayout({groups, std::span{&exactBudget, 1}}));
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, ComputeBindingTest, testing::ValuesIn(test::AllBackends), test::BackendParamName);

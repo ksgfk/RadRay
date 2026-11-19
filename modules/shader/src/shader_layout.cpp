@@ -21,8 +21,8 @@ bool LayoutError(Nullable<string*> diagnostic, std::string_view message) {
 }
 
 template <typename T>
-bool Active(const T& value, gpu::RenderBackend backend) noexcept {
-    return backend == gpu::RenderBackend::D3D12 ? value.D3D12.has_value() : backend == gpu::RenderBackend::Vulkan && value.Vulkan.has_value();
+bool Active(const T& value, gpu::GpuBackend backend) noexcept {
+    return backend == gpu::GpuBackend::D3D12 ? value.D3D12.has_value() : backend == gpu::GpuBackend::Vulkan && value.Vulkan.has_value();
 }
 
 }  // namespace
@@ -140,10 +140,10 @@ bool ValidateShaderPipelineLayoutDesc(const ShaderPipelineLayoutDesc& desc, Null
             const auto& b = entry.Binding;
             if (entry.Name.empty() || !names.insert(entry.Name).second || !ids.insert(b.BindingId).second || (!b.D3D12 && !b.Vulkan))
                 return LayoutError(diagnostic, "invalid or duplicate binding");
-            if (b.D3D12 && !gpu::IsValidBindingMapping(b, gpu::RenderBackend::D3D12))
+            if (b.D3D12 && !gpu::IsValidBindingMapping(b, gpu::GpuBackend::D3D12))
                 return LayoutError(diagnostic, "invalid D3D12 binding mapping");
             if (b.Vulkan) {
-                if (!gpu::IsValidBindingMapping(b, gpu::RenderBackend::Vulkan) || (set && *set != b.Vulkan->Set))
+                if (!gpu::IsValidBindingMapping(b, gpu::GpuBackend::Vulkan) || (set && *set != b.Vulkan->Set))
                     return LayoutError(diagnostic, "invalid Vulkan set or binding placement");
                 set = b.Vulkan->Set;
             }
@@ -156,9 +156,9 @@ bool ValidateShaderPipelineLayoutDesc(const ShaderPipelineLayoutDesc& desc, Null
                 return LayoutError(diagnostic, "non-constant binding cannot own a constant block");
             }
             for (const auto* old : bindings) {
-                if (gpu::BindingMappingsOverlap(*old, b, gpu::RenderBackend::D3D12))
+                if (gpu::BindingMappingsOverlap(*old, b, gpu::GpuBackend::D3D12))
                     return LayoutError(diagnostic, "overlapping D3D12 registers");
-                if (gpu::BindingMappingsOverlap(*old, b, gpu::RenderBackend::Vulkan))
+                if (gpu::BindingMappingsOverlap(*old, b, gpu::GpuBackend::Vulkan))
                     return LayoutError(diagnostic, "duplicate Vulkan binding");
             }
             bindings.push_back(&b);
@@ -170,8 +170,8 @@ bool ValidateShaderPipelineLayoutDesc(const ShaderPipelineLayoutDesc& desc, Null
     for (size_t i = 0; i < desc.PushConstants.size(); ++i) {
         const auto& entry = desc.PushConstants[i];
         const auto& p = entry.Push;
-        if (entry.Name.empty() || !names.insert(entry.Name).second || !pushIds.insert(p.PushId).second || (p.D3D12 && !gpu::IsValidPushConstantRange(p, gpu::RenderBackend::D3D12)) ||
-            (p.Vulkan && !gpu::IsValidPushConstantRange(p, gpu::RenderBackend::Vulkan)) || (!p.D3D12 && !p.Vulkan) || (entry.TypeIndex && (!IsRoot(desc.Types, entry.TypeIndex) || desc.Types[*entry.TypeIndex].Size > p.Size)))
+        if (entry.Name.empty() || !names.insert(entry.Name).second || !pushIds.insert(p.PushId).second || (p.D3D12 && !gpu::IsValidPushConstantRange(p, gpu::GpuBackend::D3D12)) ||
+            (p.Vulkan && !gpu::IsValidPushConstantRange(p, gpu::GpuBackend::Vulkan)) || (!p.D3D12 && !p.Vulkan) || (entry.TypeIndex && (!IsRoot(desc.Types, entry.TypeIndex) || desc.Types[*entry.TypeIndex].Size > p.Size)))
             return LayoutError(diagnostic, "invalid push constant");
         if (p.Vulkan) {
             if (hasVkPush)
@@ -191,16 +191,16 @@ bool ValidateShaderPipelineLayoutDesc(const ShaderPipelineLayoutDesc& desc, Null
     return true;
 }
 
-Nullable<const ShaderVariantTargetInterfaceDesc*> GetShaderTargetInterface(const ShaderVariantInterfaceDesc& desc, gpu::RenderBackend backend) noexcept {
-    if (backend == gpu::RenderBackend::D3D12 && desc.DXIL) return &*desc.DXIL;
-    if (backend == gpu::RenderBackend::Vulkan && desc.SPIRV) return &*desc.SPIRV;
+Nullable<const ShaderVariantTargetInterfaceDesc*> GetShaderTargetInterface(const ShaderVariantInterfaceDesc& desc, gpu::GpuBackend backend) noexcept {
+    if (backend == gpu::GpuBackend::D3D12 && desc.DXIL) return &*desc.DXIL;
+    if (backend == gpu::GpuBackend::Vulkan && desc.SPIRV) return &*desc.SPIRV;
     return nullptr;
 }
 
 bool ValidateShaderVariantInterfaceDesc(const ShaderVariantInterfaceDesc& desc, Nullable<const ShaderPipelineLayoutDesc*> layout, Nullable<string*> diagnostic) {
     if (diagnostic) diagnostic.Get()->clear();
     if (desc.Name.empty() || (!desc.DXIL && !desc.SPIRV)) return LayoutError(diagnostic, "program needs a name and target interface");
-    for (auto backend : {gpu::RenderBackend::D3D12, gpu::RenderBackend::Vulkan}) {
+    for (auto backend : {gpu::GpuBackend::D3D12, gpu::GpuBackend::Vulkan}) {
         const auto target = GetShaderTargetInterface(desc, backend);
         if (!target) continue;
         const auto& t = *target.Get();

@@ -30,12 +30,15 @@ public:
 
     gpu::Device& GetDevice() noexcept;
     gpu::CommandQueue& GetQueue() noexcept;
+    Nullable<gpu::PipelineCache*> GetPipelineCache() const noexcept;
+    vector<byte> GetPipelineCacheData() const noexcept;
     bool SupportsIndirect() const noexcept;
     RDGDeviceConstraints GetRDGConstraints() const noexcept;
 
 private:
     shared_ptr<gpu::Device> _device;
     gpu::CommandQueue* _directQueue;
+    unique_ptr<gpu::PipelineCache> _pipelineCache;
 };
 
 }  // namespace radray

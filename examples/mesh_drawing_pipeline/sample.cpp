@@ -17,7 +17,7 @@
 // 构建和运行入口见 docs/guide/build-test.md 的 Mesh Drawing Pipeline 教学样例。
 
 namespace radray::examples::mesh_drawing {
-int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory,
+int RunSample(gpu::GpuBackend backend, const std::filesystem::path& shaderDirectory,
               const std::filesystem::path& output, uint32_t slotCount, uint32_t frameCount, bool hotReload) {
     if (slotCount == 0 || frameCount < (hotReload ? 3u : 2u)) return 2;
     if (!PrepareOutputDirectory(output)) return 2;
@@ -143,7 +143,7 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
     PassContext pass{projection * view,
                      {0, 0, float(gpu.Width), float(gpu.Height), 0, 1},
                      {0, 0, gpu.Width, gpu.Height}};
-    if (backend == gpu::RenderBackend::Vulkan) {
+    if (backend == gpu::GpuBackend::Vulkan) {
         pass.ViewportRect.Y = float(gpu.Height);
         pass.ViewportRect.Height = -float(gpu.Height);
     }
@@ -289,9 +289,9 @@ int RunSample(gpu::RenderBackend backend, const std::filesystem::path& shaderDir
 
 int SampleMain(int argc, char** argv) {
 #if defined(_WIN32)
-    auto backend = gpu::RenderBackend::D3D12;
+    auto backend = gpu::GpuBackend::D3D12;
 #else
-    auto backend = gpu::RenderBackend::Vulkan;
+    auto backend = gpu::GpuBackend::Vulkan;
 #endif
     const std::filesystem::path root{RADRAY_SAMPLE_ROOT};
     auto shaderDirectory = root / "build/mesh_drawing_pipeline/shaders";
@@ -322,9 +322,9 @@ int SampleMain(int argc, char** argv) {
         const std::string_view value{argv[i]};
         if (option == "--backend") {
             if (value == "d3d12")
-                backend = gpu::RenderBackend::D3D12;
+                backend = gpu::GpuBackend::D3D12;
             else if (value == "vulkan")
-                backend = gpu::RenderBackend::Vulkan;
+                backend = gpu::GpuBackend::Vulkan;
             else {
                 RADRAY_ERR_LOG("不支持的 backend={}，可选 d3d12 或 vulkan", value);
                 return 2;
@@ -347,7 +347,7 @@ int SampleMain(int argc, char** argv) {
     }
     if (output.empty()) {
         output = root / "build/mesh_drawing_pipeline" /
-                 (backend == gpu::RenderBackend::Vulkan ? "vulkan.png" : "d3d12.png");
+                 (backend == gpu::GpuBackend::Vulkan ? "vulkan.png" : "d3d12.png");
     }
     return RunSample(backend, shaderDirectory, output, slotCount, frameCount, hotReload);
 }

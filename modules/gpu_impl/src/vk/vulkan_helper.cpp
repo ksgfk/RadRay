@@ -103,6 +103,7 @@ FeatureRequestsVulkan GetRhiFeatureRequestsVulkan() noexcept {
     return {
         .FullDrawIndexUint32 = Requirement::Optional,
         .ImageCubeArray = Requirement::Optional,
+        .TextureCompressionBC = Requirement::Optional,
         .DepthClamp = Requirement::Optional,
         .DepthBiasClamp = Requirement::Optional,
         .FillModeNonSolid = Requirement::Optional,
@@ -136,6 +137,7 @@ FeatureSelectionVulkan SelectDeviceFeaturesVulkan(const DeviceFeaturesVulkan& su
     auto& vulkan12 = result.Enabled.Vulkan12;
     select("fullDrawIndexUint32", requested.FullDrawIndexUint32, supported.Core.fullDrawIndexUint32, core.fullDrawIndexUint32);
     select("imageCubeArray", requested.ImageCubeArray, supported.Core.imageCubeArray, core.imageCubeArray);
+    select("textureCompressionBC", requested.TextureCompressionBC, supported.Core.textureCompressionBC, core.textureCompressionBC);
     select("depthClamp", requested.DepthClamp, supported.Core.depthClamp, core.depthClamp);
     select("depthBiasClamp", requested.DepthBiasClamp, supported.Core.depthBiasClamp, core.depthBiasClamp);
     select("fillModeNonSolid", requested.FillModeNonSolid, supported.Core.fillModeNonSolid, core.fillModeNonSolid);
@@ -198,6 +200,7 @@ std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const Graphics
         return factor == BlendFactor::Src1 || factor == BlendFactor::OneMinusSrc1 || factor == BlendFactor::Src1Alpha || factor == BlendFactor::OneMinusSrc1Alpha;
     };
     for (const auto& target : desc.ColorTargets) {
+        if (target.WriteMask.value() & ~uint32_t(ColorWrite::All)) return "invalid color write mask";
         if (!features.Core.independentBlend) {
             const auto& first = desc.ColorTargets.front();
             if (target.Blend != first.Blend || target.WriteMask != first.WriteMask) return "independent blend is unsupported";
@@ -211,12 +214,32 @@ std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const Graphics
 }
 
 uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept {
+    const auto block = GetTextureCopyBlockInfoVulkan(format, aspects);
+    return block.BlockWidth == 1 ? block.BytesPerBlock : 0;
+}
+
+bool IsBufferImageTransferSupported(const TextureDescriptor& texture, const TextureRegion2D& image, uint64_t bufferOffset,
+                                    VkQueueFlags flags, VkExtent3D granularity) noexcept {
+    if (!(flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) && bufferOffset % 4) return false;
+    const auto block = GetTextureFormatBlockInfo(texture.Format);
+    const auto fits = [](uint32_t offset, uint32_t extent, uint32_t full, uint64_t step) {
+        return step ? offset % step == 0 && (extent % step == 0 || uint64_t{offset} + extent == full)
+                    : offset == 0 && extent == full;
+    };
+    const auto mip = image.MipLevel;
+    return mip < 32 &&
+        fits(image.X, image.Width, std::max(1u, texture.Width >> mip), uint64_t{granularity.width} * block.BlockWidth) &&
+        fits(image.Y, image.Height, std::max(1u, texture.Height >> mip), uint64_t{granularity.height} * block.BlockHeight) &&
+        fits(image.Z, image.Depth, texture.Dim == TextureDimension::Dim3D ? std::max(1u, texture.DepthOrArraySize >> mip) : 1u, granularity.depth);
+}
+
+TextureFormatBlockInfo GetTextureCopyBlockInfoVulkan(TextureFormat format, TextureAspects aspects) noexcept {
     const auto available = GetTextureFormatAspects(format);
     if (!aspects) aspects = available;
-    if (!std::has_single_bit(aspects.value()) || (aspects.value() & ~available.value())) return 0;
-    if (aspects == TextureAspect::Stencil) return 1;
-    if (aspects == TextureAspect::Depth) return format == TextureFormat::D16_UNORM ? 2 : 4;
-    return GetTextureFormatBytesPerPixel(format);
+    if (!std::has_single_bit(aspects.value()) || (aspects.value() & ~available.value())) return {1, 1, 0};
+    if (aspects == TextureAspect::Stencil) return {1, 1, 1};
+    if (aspects == TextureAspect::Depth) return {1, 1, format == TextureFormat::D16_UNORM ? 2u : 4u};
+    return GetTextureFormatBlockInfo(format);
 }
 
 VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept {
@@ -302,6 +325,20 @@ static uint32_t _ImageFormatCompatibilityClass(TextureFormat format) noexcept {
         case TextureFormat::D32_FLOAT: return 1002;
         case TextureFormat::D24_UNORM_S8_UINT: return 1003;
         case TextureFormat::D32_FLOAT_S8_UINT: return 1004;
+        case TextureFormat::BC1_UNORM:
+        case TextureFormat::BC1_UNORM_SRGB: return 2001;
+        case TextureFormat::BC2_UNORM:
+        case TextureFormat::BC2_UNORM_SRGB: return 2002;
+        case TextureFormat::BC3_UNORM:
+        case TextureFormat::BC3_UNORM_SRGB: return 2003;
+        case TextureFormat::BC4_UNORM:
+        case TextureFormat::BC4_SNORM: return 2004;
+        case TextureFormat::BC5_UNORM:
+        case TextureFormat::BC5_SNORM: return 2005;
+        case TextureFormat::BC6H_UFLOAT:
+        case TextureFormat::BC6H_SFLOAT: return 2006;
+        case TextureFormat::BC7_UNORM:
+        case TextureFormat::BC7_UNORM_SRGB: return 2007;
         case TextureFormat::UNKNOWN: return 0;
     }
     return 0;
@@ -658,6 +695,20 @@ VkFormat MapType(TextureFormat v) noexcept {
         case TextureFormat::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
         case TextureFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
         case TextureFormat::D32_FLOAT_S8_UINT: return VK_FORMAT_D32_SFLOAT_S8_UINT;
+        case TextureFormat::BC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        case TextureFormat::BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case TextureFormat::BC2_UNORM: return VK_FORMAT_BC2_UNORM_BLOCK;
+        case TextureFormat::BC2_UNORM_SRGB: return VK_FORMAT_BC2_SRGB_BLOCK;
+        case TextureFormat::BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
+        case TextureFormat::BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
+        case TextureFormat::BC4_UNORM: return VK_FORMAT_BC4_UNORM_BLOCK;
+        case TextureFormat::BC4_SNORM: return VK_FORMAT_BC4_SNORM_BLOCK;
+        case TextureFormat::BC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
+        case TextureFormat::BC5_SNORM: return VK_FORMAT_BC5_SNORM_BLOCK;
+        case TextureFormat::BC6H_UFLOAT: return VK_FORMAT_BC6H_UFLOAT_BLOCK;
+        case TextureFormat::BC6H_SFLOAT: return VK_FORMAT_BC6H_SFLOAT_BLOCK;
+        case TextureFormat::BC7_UNORM: return VK_FORMAT_BC7_UNORM_BLOCK;
+        case TextureFormat::BC7_UNORM_SRGB: return VK_FORMAT_BC7_SRGB_BLOCK;
         case TextureFormat::RGBA8_UINT: return VK_FORMAT_R8G8B8A8_UINT;
         case TextureFormat::UNKNOWN: return VK_FORMAT_UNDEFINED;
     }
@@ -903,15 +954,11 @@ VkBlendFactor MapType(BlendFactor v) noexcept {
 }
 
 VkColorComponentFlags MapType(ColorWrites v) noexcept {
-    switch (v) {
-        case ColorWrite::Red: return VK_COLOR_COMPONENT_R_BIT;
-        case ColorWrite::Green: return VK_COLOR_COMPONENT_G_BIT;
-        case ColorWrite::Blue: return VK_COLOR_COMPONENT_B_BIT;
-        case ColorWrite::Alpha: return VK_COLOR_COMPONENT_A_BIT;
-        case ColorWrite::Color: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
-        case ColorWrite::All: return VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    }
-    Unreachable();
+    static_assert(uint32_t(ColorWrite::Red) == VK_COLOR_COMPONENT_R_BIT);
+    static_assert(uint32_t(ColorWrite::Green) == VK_COLOR_COMPONENT_G_BIT);
+    static_assert(uint32_t(ColorWrite::Blue) == VK_COLOR_COMPONENT_B_BIT);
+    static_assert(uint32_t(ColorWrite::Alpha) == VK_COLOR_COMPONENT_A_BIT);
+    return static_cast<VkColorComponentFlags>(v.value());
 }
 
 VkIndexType MapIndexType(uint32_t v) noexcept {

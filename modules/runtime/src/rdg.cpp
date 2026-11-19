@@ -1,17 +1,20 @@
 #include <radray/runtime/rdg.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <numeric>
 #include <map>
 #include <memory_resource>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/gpu_device.h>
+#include <radray/gpu_impl/validation.h>
 
 #include <radray/logger.h>
 #include <radray/profiler.h>
@@ -41,6 +44,7 @@ struct RDGColorAttachment {
     gpu::StoreAction Store;
     gpu::ColorClearValue Clear;
     Nullable<gpu::TextureView*> View;
+    gpu::SubresourceRange Range{0, gpu::SubresourceRange::All, 0, 1};
 };
 
 struct RDGDepthAttachment {
@@ -52,20 +56,22 @@ struct RDGDepthAttachment {
     gpu::StoreAction StencilStore;
     gpu::DepthStencilClearValue Clear;
     Nullable<gpu::TextureView*> View;
+    gpu::SubresourceRange Range{0, gpu::SubresourceRange::All, 0, 1};
 };
 
 struct RDGUserPass {
-    string Name;
+    std::pmr::string Name;
     std::pmr::vector<RDGAccess> Accesses;
     std::pmr::vector<MeshPassId> MeshPasses;
     std::pmr::vector<RDGColorAttachment> Colors;
     std::optional<RDGDepthAttachment> Depth{};
-    shared_ptr<void> Callback{};
+    ErasedPassCallback Callback{};
     Nullable<bool (*)(const void*, RDGRasterPassContext&) noexcept> RasterExecute{nullptr};
     Nullable<bool (*)(const void*, RDGComputePassContext&) noexcept> ComputeExecute{nullptr};
     Nullable<bool (*)(const void*, RDGCopyPassContext&) noexcept> CopyExecute{nullptr};
     Nullable<bool (*)(void*, RDGPrepareContext&) noexcept> Prepare{nullptr};
     uint32_t Width{1}, Height{1}, Layers{1};
+    std::optional<Rect> RenderArea{};
 };
 
 struct RDGUpload {
@@ -74,6 +80,7 @@ struct RDGUpload {
     uint64_t UploadOffset{0};
     uint64_t SourceRowPitch{0};
     gpu::TextureRegion2D Region{};
+    uint32_t SourceRowsPerImage{0};
 };
 
 struct RDGPass {
@@ -84,6 +91,7 @@ struct RDGPass {
     uint32_t PreparedUpload{std::numeric_limits<uint32_t>::max()};
     bool NeverCull{false};
     bool Alive{false};
+    bool OrderBarrier{false};
 };
 
 struct RDGPreparedUpload {
@@ -133,6 +141,9 @@ struct RDGExecutionGroup {
 };
 
 struct RDGData {
+    RDGData(std::pmr::memory_resource& memory, std::pmr::memory_resource& scratch) noexcept
+        : MemoryResource(memory), ScratchResource(scratch) {}
+    ~RDGData() noexcept;
     std::pmr::memory_resource& MemoryResource;
     std::pmr::memory_resource& ScratchResource;
     RDGDeviceConstraints Constraints;
@@ -188,7 +199,7 @@ private:
 struct RDGExecution {
     struct FrameView {
         RDGTextureHandle Texture;
-        gpu::TextureViewUsage Usage;
+        gpu::TextureViewDescriptor Descriptor;
         gpu::TextureView* View;
     };
     RDGData& Data;
@@ -240,10 +251,6 @@ void Fail(RDGData& data, std::string_view message) noexcept {
 bool SameDescriptor(const gpu::TextureDescriptor& a, const gpu::TextureDescriptor& b) noexcept {
     return a.Dim == b.Dim && a.Width == b.Width && a.Height == b.Height && a.DepthOrArraySize == b.DepthOrArraySize &&
            a.MipLevels == b.MipLevels && a.SampleCount == b.SampleCount && a.Format == b.Format && a.Memory == b.Memory && a.Usage == b.Usage && a.Hints == b.Hints;
-}
-
-bool SameDescriptor(const gpu::BufferDescriptor& a, const gpu::BufferDescriptor& b) noexcept {
-    return a.Size == b.Size && a.Memory == b.Memory && a.Usage == b.Usage && a.Hints == b.Hints;
 }
 
 bool SameDescriptor(const gpu::TextureViewDescriptor& a, const gpu::TextureViewDescriptor& b) noexcept {
@@ -376,7 +383,8 @@ uint32_t AddPass(RDGData& data, std::string_view name, RDGPassKind kind) {
     if (data.Passes.size() >= std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("RDG: too many passes");
     const auto index = static_cast<uint32_t>(data.Passes.size());
     const auto payload = static_cast<uint32_t>(data.UserPasses.size());
-    data.UserPasses.push_back(RDGUserPass{.Name = string{name},
+    std::pmr::string passName{name, &data.MemoryResource};
+    data.UserPasses.push_back(RDGUserPass{.Name = std::move(passName),
                                           .Accesses = std::pmr::vector<RDGAccess>{&data.MemoryResource},
                                           .MeshPasses = std::pmr::vector<MeshPassId>{&data.MemoryResource},
                                           .Colors = std::pmr::vector<RDGColorAttachment>{&data.MemoryResource}});
@@ -396,10 +404,10 @@ void ValidateAttachments(RDGData& data, RDGPass& pass) {
     if (pass.Kind != RDGPassKind::Raster) return;
     if (User(data, pass).Colors.empty() && !User(data, pass).Depth) Fail(data, "raster pass requires an attachment");
     std::optional<array<uint32_t, 4>> shape;
-    const auto validate = [&](RDGTextureHandle handle, Nullable<gpu::TextureView*> view, gpu::TextureViewUsage usage) {
+    auto& raster = User(data, pass);
+    const auto validate = [&](RDGTextureHandle handle, Nullable<gpu::TextureView*> view, gpu::SubresourceRange& range, gpu::TextureViewUsage usage) {
         const auto& resource = data.Textures[handle.Index];
         const auto& desc = resource.Desc;
-        gpu::SubresourceRange range{0, desc.DepthOrArraySize, 0, 1};
         if (view) {
             const auto v = view->GetDesc();
             if (!resource.Imported || v.Target != resource.Imported.Get() || !view->IsValid() || v.Usage != usage ||
@@ -410,28 +418,44 @@ void ValidateAttachments(RDGData& data, RDGPass& pass) {
             range = v.Range;
         }
         const auto normalized = gpu::NormalizeSubresourceRange(desc, range);
-        if (!normalized || normalized->MipLevelCount != 1 || normalized->BaseMipLevel >= 32) {
+        if (!normalized || normalized->MipLevelCount != 1 || normalized->BaseMipLevel >= 32 ||
+            normalized->Aspects != gpu::GetTextureFormatAspects(desc.Format)) {
             Fail(data, "invalid attachment subresource range");
             return;
         }
-        const array current{std::max(1u, desc.Width >> normalized->BaseMipLevel), std::max(1u, desc.Height >> normalized->BaseMipLevel), normalized->ArrayLayerCount, desc.SampleCount};
+        const auto layers = desc.Dim == gpu::TextureDimension::Dim3D ? std::max(1u, desc.DepthOrArraySize >> normalized->BaseMipLevel) : normalized->ArrayLayerCount;
+        const array current{std::max(1u, desc.Width >> normalized->BaseMipLevel), std::max(1u, desc.Height >> normalized->BaseMipLevel), layers, desc.SampleCount};
         if (shape && *shape != current) Fail(data, "attachment dimensions, layers and samples must match");
         shape = current;
+        range = *normalized;
+        const auto area = raster.RenderArea.value_or(Rect{0, 0, current[0], current[1]});
+        if (area.X < 0 || area.Y < 0 || !area.Width || !area.Height ||
+            uint64_t(area.X) + area.Width > current[0] || uint64_t(area.Y) + area.Height > current[1]) {
+            Fail(data, "render area exceeds attachment subresource");
+            return;
+        }
+        const auto totalLayers = desc.Dim == gpu::TextureDimension::Dim3D ? 1u : desc.DepthOrArraySize;
+        if (area.Width != current[0] || area.Height != current[1] || range.MipLevelCount != desc.MipLevels ||
+            range.BaseArrayLayer || range.ArrayLayerCount != totalLayers) {
+            for (auto& access : raster.Accesses) {
+                if (access.Texture && access.Index == handle.Index) access.Preserve = true;
+            }
+        }
     };
     for (uint32_t slot = 0; slot < User(data, pass).Colors.size(); ++slot) {
-        const auto& color = User(data, pass).Colors[slot];
+        auto& color = raster.Colors[slot];
         if (color.Slot != slot) Fail(data, "color attachment slots must be contiguous from zero");
         if (!ValidLoad(color.Load) || !ValidStore(color.Store)) Fail(data, "invalid color attachment load/store");
-        validate(color.Texture, color.View, gpu::TextureViewUsage::RenderTarget);
+        validate(color.Texture, color.View, color.Range, gpu::TextureViewUsage::RenderTarget);
     }
     if (User(data, pass).Depth) {
-        const auto& depth = *User(data, pass).Depth;
+        auto& depth = *raster.Depth;
         const auto usage = DepthUsage(depth.State);
         const bool stencil = gpu::GetTextureFormatAspects(data.Textures[depth.Texture.Index].Desc.Format).HasFlag(gpu::TextureAspect::Stencil);
         if (!ValidLoad(depth.DepthLoad) || !ValidStore(depth.DepthStore) || !ValidLoad(depth.StencilLoad) || !ValidStore(depth.StencilStore)) Fail(data, "invalid depth/stencil load/store");
         if ((gpu::IsDepthReadOnly(usage) && (depth.DepthLoad != gpu::LoadAction::Load || depth.DepthStore != gpu::StoreAction::Store)) ||
             (stencil && gpu::IsStencilReadOnly(usage) && (depth.StencilLoad != gpu::LoadAction::Load || depth.StencilStore != gpu::StoreAction::Store))) Fail(data, "read-only depth/stencil aspects require Load and Store");
-        validate(depth.Texture, depth.View, usage);
+        validate(depth.Texture, depth.View, depth.Range, usage);
     }
     if (shape) {
         User(data, pass).Width = (*shape)[0];
@@ -471,10 +495,9 @@ bool ValidAccess(const RDGData& data, const RDGPass& pass, const RDGAccess& acce
     return state == gpu::BufferState::CopySource;
 }
 
-gpu::TextureViewDescriptor ViewDescriptor(gpu::Texture& texture, gpu::TextureViewUsage usage) noexcept {
-    const auto desc = texture.GetDesc();
-    const uint32_t layers = desc.Dim == gpu::TextureDimension::Dim3D ? 1 : desc.DepthOrArraySize;
-    return {&texture, desc.Dim, desc.Format, {0, layers, 0, 1}, usage};
+RDGTextureViewDescriptor DefaultViewRequest(gpu::TextureViewUsage usage) noexcept {
+    const uint32_t mipCount = usage == gpu::TextureViewUsage::Resource ? gpu::SubresourceRange::All : 1u;
+    return {.Range = {0, gpu::SubresourceRange::All, 0, mipCount}, .Usage = usage};
 }
 
 gpu::Texture& ResolveTexture(const RDGExecution& execution, RDGTextureHandle handle) noexcept {
@@ -487,7 +510,9 @@ RDGBufferSlice ResolveBuffer(const RDGExecution& execution, RDGBufferHandle hand
     return execution.Slices[handle.Index];
 }
 
-Nullable<gpu::TextureView*> ResolveTextureView(const RDGExecution& execution, RDGTextureHandle handle, gpu::TextureViewUsage usage) noexcept {
+Nullable<gpu::TextureView*> ResolveTextureView(RDGExecution& execution, RDGTextureHandle handle, const RDGTextureViewDescriptor& request, bool create) noexcept {
+    const auto usage = request.Usage;
+    if (handle.Index >= execution.Data.Textures.size() || !execution.States.GetTexture(handle.Index).Resource) return nullptr;
     if (execution.Pass) {
         const auto found = std::find_if(Accesses(execution.Data, *execution.Pass).begin(), Accesses(execution.Data, *execution.Pass).end(), [&](const auto& access) {
             if (!access.Texture || access.Index != handle.Index) return false;
@@ -499,27 +524,45 @@ Nullable<gpu::TextureView*> ResolveTextureView(const RDGExecution& execution, RD
         });
         if (found == Accesses(execution.Data, *execution.Pass).end()) return nullptr;
     }
+    auto& texture = ResolveTexture(execution, handle);
+    const auto desc = texture.GetDesc();
+    auto dim = request.Dim == gpu::TextureDimension::UNKNOWN ? desc.Dim : request.Dim;
+    if (request.Dim == gpu::TextureDimension::UNKNOWN && usage != gpu::TextureViewUsage::Resource &&
+        (dim == gpu::TextureDimension::Cube || dim == gpu::TextureDimension::CubeArray)) dim = gpu::TextureDimension::Dim2DArray;
+    auto range = request.Range;
+    if (!range.Aspects && usage == gpu::TextureViewUsage::Resource && gpu::IsDepthStencilFormat(desc.Format)) range.Aspects = gpu::TextureAspect::Depth;
+    if (range.ArrayLayerCount == gpu::SubresourceRange::All && (dim == gpu::TextureDimension::Dim1D || dim == gpu::TextureDimension::Dim2D || dim == gpu::TextureDimension::Dim3D)) range.ArrayLayerCount = 1;
+    const auto normalized = gpu::NormalizeSubresourceRange(desc, range);
+    if (!normalized) return nullptr;
+    const gpu::TextureViewDescriptor descriptor{&texture, dim, request.Format == gpu::TextureFormat::UNKNOWN ? desc.Format : request.Format, *normalized, usage};
     for (const auto& entry : execution.Views) {
-        if (entry.Texture == handle && entry.Usage == usage) return entry.View;
+        if (entry.Texture == handle && SameDescriptor(entry.Descriptor, descriptor)) return entry.View;
     }
-    return nullptr;
-}
-
-bool PrepareView(RDGExecution& execution, RDGTextureHandle handle, gpu::TextureViewUsage usage) {
-    if (ResolveTextureView(execution, handle, usage)) return true;
-    const auto descriptor = ViewDescriptor(*execution.States.GetTexture(handle.Index).Resource, usage);
+    if (!create) return nullptr;
+    const auto& resource = execution.Data.Textures[handle.Index];
     Nullable<gpu::TextureView*> view;
-    if (execution.Data.Textures[handle.Index].Imported) {
+    if (resource.Persistent) {
+        view = resource.Persistent->GetOrCreateView(execution.Slot.GetDevice(), {dim, descriptor.Format, *normalized, usage});
+    } else if (resource.Imported) {
         auto owner = execution.Slot.GetDevice().CreateTextureView(descriptor);
-        if (!owner) return false;
+        if (!owner) return nullptr;
         view = owner.Get();
         execution.ViewOwners.push_back(owner.Release());
     } else {
         view = execution.Pool.AcquireTextureView(descriptor);
     }
-    if (!view) return false;
-    execution.Views.push_back({handle, usage, view.Get()});
-    return true;
+    if (view) execution.Views.push_back({handle, descriptor, view.Get()});
+    return view;
+}
+
+Nullable<gpu::TextureView*> ResolveTextureView(RDGExecution& execution, RDGTextureHandle handle, gpu::TextureViewUsage usage) noexcept {
+    return ResolveTextureView(execution, handle, DefaultViewRequest(usage), false);
+}
+
+template <class Attachment>
+Nullable<gpu::TextureView*> ResolveAttachmentView(RDGExecution& execution, const Attachment& attachment, gpu::TextureViewUsage usage, bool create) noexcept {
+    if (attachment.View) return attachment.View;
+    return ResolveTextureView(execution, attachment.Texture, {.Range = attachment.Range, .Usage = usage}, create);
 }
 
 struct GroupAccess {
@@ -539,16 +582,21 @@ bool CanMerge(const RDGData& data, const RDGPass& candidate, std::span<const Gro
     if (group.Kind != RDGPassKind::Raster && group.Kind != RDGPassKind::Compute) return false;
     const auto& previous = data.Passes[group.Passes.back()];
     if (group.Kind == RDGPassKind::Raster) {
+        const auto& left = User(data, previous);
+        const auto& right = User(data, candidate);
+        const auto aRect = left.RenderArea.value_or(Rect{0, 0, left.Width, left.Height});
+        const auto bRect = right.RenderArea.value_or(Rect{0, 0, right.Width, right.Height});
+        if (aRect.X != bRect.X || aRect.Y != bRect.Y || aRect.Width != bRect.Width || aRect.Height != bRect.Height) return false;
         if (User(data, previous).Colors.size() != User(data, candidate).Colors.size() || bool(User(data, previous).Depth) != bool(User(data, candidate).Depth)) return false;
         for (size_t i = 0; i < User(data, previous).Colors.size(); ++i) {
             const auto& a = User(data, previous).Colors[i];
             const auto& b = User(data, candidate).Colors[i];
-            if (a.Slot != b.Slot || a.Texture != b.Texture || a.View != b.View || a.Store != gpu::StoreAction::Store || b.Load != gpu::LoadAction::Load) return false;
+            if (a.Slot != b.Slot || a.Texture != b.Texture || a.View != b.View || a.Range != b.Range || a.Store != gpu::StoreAction::Store || b.Load != gpu::LoadAction::Load) return false;
         }
         if (User(data, previous).Depth) {
             const auto& a = *User(data, previous).Depth;
             const auto& b = *User(data, candidate).Depth;
-            if (a.Texture != b.Texture || a.View != b.View || a.State != b.State || a.DepthStore != gpu::StoreAction::Store || b.DepthLoad != gpu::LoadAction::Load) return false;
+            if (a.Texture != b.Texture || a.View != b.View || a.Range != b.Range || a.State != b.State || a.DepthStore != gpu::StoreAction::Store || b.DepthLoad != gpu::LoadAction::Load) return false;
             const bool stencil = gpu::GetTextureFormatAspects(data.Textures[a.Texture.Index].Desc.Format).HasFlag(gpu::TextureAspect::Stencil);
             if (stencil && (a.StencilStore != gpu::StoreAction::Store || b.StencilLoad != gpu::LoadAction::Load)) return false;
         }
@@ -683,6 +731,7 @@ std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDevi
     };
     if (!merge(c.BufferCopyAlignment)) return std::nullopt;
     if (usage.HasFlag(gpu::BufferUse::Index) && !merge(4)) return std::nullopt;
+    if (usage.HasFlag(gpu::BufferUse::Indirect) && !merge(4)) return std::nullopt;
     if (usage.HasFlag(gpu::BufferUse::CBuffer) && !merge(c.CBufferOffsetAlignment)) return std::nullopt;
     if (usage.HasFlag(gpu::BufferUse::Resource) && (!merge(c.StorageOffsetAlignment) || !merge(c.TexelOffsetAlignment))) return std::nullopt;
     if ((c.MaxBufferSize && size > c.MaxBufferSize) ||
@@ -696,6 +745,44 @@ std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDevi
 }  // namespace
 
 namespace detail {
+
+ErasedPassCallback::ErasedPassCallback(void* instance, void (*destroy)(void*) noexcept) noexcept
+    : _instance(instance), _destroy(destroy) {}
+
+ErasedPassCallback::ErasedPassCallback(ErasedPassCallback&& other) noexcept
+    : _instance(std::exchange(other._instance, nullptr)), _destroy(std::exchange(other._destroy, nullptr)) {}
+
+ErasedPassCallback& ErasedPassCallback::operator=(ErasedPassCallback&& other) noexcept {
+    if (this != &other) {
+        Reset();
+        _instance = std::exchange(other._instance, nullptr);
+        _destroy = std::exchange(other._destroy, nullptr);
+    }
+    return *this;
+}
+
+ErasedPassCallback::~ErasedPassCallback() noexcept { Reset(); }
+
+void* ErasedPassCallback::Get() const noexcept { return _instance; }
+
+void ErasedPassCallback::Reset() noexcept {
+    if (_instance && _destroy) _destroy(_instance);
+    _instance = nullptr;
+    _destroy = nullptr;
+}
+
+RDGData::~RDGData() noexcept {
+    for (auto& pass : UserPasses) pass.Callback.Reset();
+}
+
+RDGDeviceConstraints QueryRDGDeviceConstraints(const gpu::Device& device) noexcept {
+    const auto& capabilities = device.GetCapabilities();
+    const auto& detail = capabilities.Detail;
+    const auto& limits = capabilities.Limits;
+    return {detail.BufferCopyOffsetAlignment, detail.TextureDataPlacementAlignment, detail.TextureDataPitchAlignment,
+            detail.CBufferAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment,
+            limits.TexelBufferOffsetAlignment, limits.MaxBufferSize, limits.MaxUniformBufferRange, limits.MaxStorageBufferRange};
+}
 
 void RDGStateTracker::Initialize() {
     _textures.resize(_data.Textures.size());
@@ -838,12 +925,14 @@ public:
         unique_ptr<gpu::Texture> Resource;
         gpu::TextureState State{gpu::TextureState::Undefined};
         bool Used{true};
+        uint32_t UnusedFrames{0};
     };
     struct BufferEntry {
         gpu::BufferDescriptor Desc;
         unique_ptr<gpu::Buffer> Resource;
         gpu::BufferStates State;
         bool Used{true};
+        uint32_t UnusedFrames{0};
     };
     struct ViewEntry {
         gpu::TextureViewDescriptor Desc;
@@ -864,8 +953,34 @@ void RDGTransientResourcePool::BeginFrame() noexcept {
     RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Textures", static_cast<int64_t>(_impl->Textures.size()));
     RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Buffers", static_cast<int64_t>(_impl->Buffers.size()));
     RADRAY_PROFILE_PLOT("RadRay.RDG.Pool.Views", static_cast<int64_t>(_impl->Views.size()));
-    for (auto& entry : _impl->Textures) entry.Used = false;
-    for (auto& entry : _impl->Buffers) entry.Used = false;
+    for (size_t i = 0; i < _impl->Textures.size();) {
+        auto& entry = _impl->Textures[i];
+        if (entry.Used) {
+            entry.Used = false;
+            entry.UnusedFrames = 0;
+            ++i;
+        } else if (++entry.UnusedFrames >= 8) {
+            gpu::Texture* target = entry.Resource.get();
+            std::erase_if(_impl->Views, [target](const Impl::ViewEntry& view) {
+                return view.Desc.Target == target;
+            });
+            _impl->Textures.erase(_impl->Textures.begin() + static_cast<ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+    for (size_t i = 0; i < _impl->Buffers.size();) {
+        auto& entry = _impl->Buffers[i];
+        if (entry.Used) {
+            entry.Used = false;
+            entry.UnusedFrames = 0;
+            ++i;
+        } else if (++entry.UnusedFrames >= 8) {
+            _impl->Buffers.erase(_impl->Buffers.begin() + static_cast<ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
 }
 
 void RDGTransientResourcePool::Clear() noexcept {
@@ -880,6 +995,7 @@ RDGTransientTextureAllocation RDGTransientResourcePool::AcquireTexture(const gpu
     for (auto& entry : _impl->Textures) {
         if (!entry.Used && SameDescriptor(entry.Desc, desc)) {
             entry.Used = true;
+            entry.UnusedFrames = 0;
             return {entry.Resource.get(), entry.State};
         }
     }
@@ -894,18 +1010,42 @@ RDGTransientTextureAllocation RDGTransientResourcePool::AcquireTexture(const gpu
 
 RDGTransientBufferAllocation RDGTransientResourcePool::AcquireBuffer(const gpu::BufferDescriptor& desc) {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.AcquireBuffer");
-    for (auto& entry : _impl->Buffers) {
-        if (!entry.Used && SameDescriptor(entry.Desc, desc)) {
-            entry.Used = true;
-            return {entry.Resource.get(), entry.State};
+    uint64_t bucketSize = desc.Size;
+    if (desc.Size > 0) {
+        if (desc.Size <= 4096) {
+            bucketSize = ((desc.Size + 255) / 256) * 256;
+        } else if (desc.Size <= (uint64_t{1} << 63)) {
+            bucketSize = std::bit_ceil(desc.Size);
+        } else {
+            bucketSize = desc.Size;
         }
+        const uint64_t maxBufferSize = _impl->Device.GetCapabilities().Limits.MaxBufferSize;
+        if (maxBufferSize != 0 && bucketSize > maxBufferSize) bucketSize = desc.Size;
+    }
+    Nullable<Impl::BufferEntry*> best{nullptr};
+    for (auto& entry : _impl->Buffers) {
+        if (!entry.Used && entry.Desc.Memory == desc.Memory && entry.Desc.Usage == desc.Usage &&
+            entry.Desc.Hints == desc.Hints && entry.Desc.Size >= desc.Size && entry.Desc.Size <= bucketSize) {
+            if (!best || entry.Desc.Size < best->Desc.Size) best = &entry;
+        }
+    }
+    if (best) {
+        best->Used = true;
+        best->UnusedFrames = 0;
+        return {best->Resource.get(), best->State};
     }
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.CreateBuffer");
-        auto resource = _impl->Device.CreateBuffer(desc);
+        auto actualDesc = desc;
+        actualDesc.Size = bucketSize;
+        auto resource = _impl->Device.CreateBuffer(actualDesc);
+        if (!resource && bucketSize > desc.Size) {
+            actualDesc.Size = desc.Size;
+            resource = _impl->Device.CreateBuffer(actualDesc);
+        }
         if (!resource) return {};
-        const auto state = desc.Memory == gpu::MemoryType::Upload ? gpu::BufferState::HostWrite : gpu::BufferState::Undefined;
-        auto& entry = _impl->Buffers.emplace_back(Impl::BufferEntry{desc, resource.Release(), state});
+        const auto state = actualDesc.Memory == gpu::MemoryType::Upload ? gpu::BufferState::HostWrite : gpu::BufferState::Undefined;
+        auto& entry = _impl->Buffers.emplace_back(Impl::BufferEntry{actualDesc, resource.Release(), state});
         return {entry.Resource.get(), entry.State};
     }
 }
@@ -943,10 +1083,86 @@ Nullable<gpu::TextureView*> RDGTransientResourcePool::AcquireTextureView(const g
     }
 }
 
+RDGBlackboard::RDGBlackboard(FrameSlot& slot) : _slot(slot), _entries(&slot.GetMemoryResource()) {}
+
+RDGBuilder::RDGBuilder(FrameSlot& slot, RDGCompileOptions options) noexcept
+    : RDGBuilder(slot, detail::QueryRDGDeviceConstraints(slot.GetDevice()), options) {}
+
 RDGBuilder::RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints, RDGCompileOptions options) noexcept
-    : _slot(slot), _data(*slot.Emplace<detail::RDGData>(slot.GetMemoryResource(), slot.GetScratchMemoryResource())) {
+    : _slot(slot), _data(*slot.Emplace<detail::RDGData>(slot.GetMemoryResource(), slot.GetScratchMemoryResource())), _blackboard(*slot.Emplace<RDGBlackboard>(slot)) {
     _data.Constraints = constraints;
     _data.Options = options;
+}
+
+RDGBlackboard& RDGBuilder::GetBlackboard() noexcept { return _blackboard; }
+std::optional<gpu::TextureDescriptor> RDGBuilder::GetTextureDescriptor(RDGTextureHandle texture) const noexcept {
+    if (texture.Index >= _data.Textures.size()) return std::nullopt;
+    return _data.Textures[texture.Index].Desc;
+}
+
+RDGPassHandle RDGBuilder::AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value) {
+    RequireOpen(_data);
+    const auto desc = GetTextureDescriptor(texture);
+    if (!desc || desc->MipLevels != 1) {
+        Fail(_data, "color clear requires a single-mip color attachment");
+        return {};
+    }
+    return AddClearColor(texture, value, {0, gpu::SubresourceRange::All, 0, 1});
+}
+
+RDGPassHandle RDGBuilder::AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value, gpu::SubresourceRange range, std::optional<Rect> renderArea) {
+    RequireOpen(_data);
+    const auto desc = GetTextureDescriptor(texture);
+    if (!desc || range.MipLevelCount != 1 || !desc->Usage.HasFlag(gpu::TextureUse::RenderTarget) || gpu::IsDepthStencilFormat(desc->Format)) {
+        Fail(_data, "color clear requires one mip of a color attachment");
+        return {};
+    }
+    struct Clear {};
+    auto pass = AddRasterPass("ClearColor", Clear{}, +[](const Clear&, RDGRasterPassContext&) noexcept { return true; });
+    pass.WriteColor(0, texture, gpu::LoadAction::Clear, gpu::StoreAction::Store, value, range);
+    if (renderArea) pass.SetRenderArea(*renderArea);
+    return pass.GetHandle();
+}
+
+RDGPassHandle RDGBuilder::AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value, RDGAttachmentSlice slice, std::optional<Rect> renderArea) {
+    return AddClearColor(texture, value, slice.ToSubresourceRange(), renderArea);
+}
+
+RDGPassHandle RDGBuilder::AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, bool clearDepth, bool clearStencil) {
+    RequireOpen(_data);
+    const auto desc = GetTextureDescriptor(texture);
+    if (!desc || desc->MipLevels != 1) {
+        Fail(_data, "depth/stencil clear requires a single-mip depth/stencil attachment");
+        return {};
+    }
+    return AddClearDepthStencil(texture, value, {0, gpu::SubresourceRange::All, 0, 1}, clearDepth, clearStencil);
+}
+
+RDGPassHandle RDGBuilder::AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, gpu::SubresourceRange range,
+                                               bool clearDepth, bool clearStencil, std::optional<Rect> renderArea) {
+    RequireOpen(_data);
+    const auto desc = GetTextureDescriptor(texture);
+    if (!desc || range.MipLevelCount != 1 || !desc->Usage.HasFlag(gpu::TextureUse::DepthStencilWrite) || !gpu::IsDepthStencilFormat(desc->Format)) {
+        Fail(_data, "depth/stencil clear requires one mip of a depth/stencil attachment");
+        return {};
+    }
+    const bool stencil = gpu::GetTextureFormatAspects(desc->Format).HasFlag(gpu::TextureAspect::Stencil);
+    if (!clearDepth && !(clearStencil && stencil)) {
+        Fail(_data, "no selected depth/stencil aspect exists on the attachment");
+        return {};
+    }
+    struct Clear {};
+    auto pass = AddRasterPass("ClearDepthStencil", Clear{}, +[](const Clear&, RDGRasterPassContext&) noexcept { return true; });
+    pass.SetDepthStencil(texture, gpu::TextureState::DepthWrite, clearDepth ? gpu::LoadAction::Clear : gpu::LoadAction::Load, gpu::StoreAction::Store,
+                         !stencil ? gpu::LoadAction::DontCare : clearStencil ? gpu::LoadAction::Clear : gpu::LoadAction::Load,
+                         stencil ? gpu::StoreAction::Store : gpu::StoreAction::Discard, value, range);
+    if (renderArea) pass.SetRenderArea(*renderArea);
+    return pass.GetHandle();
+}
+
+RDGPassHandle RDGBuilder::AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, RDGAttachmentSlice slice,
+                                               bool clearDepth, bool clearStencil, std::optional<Rect> renderArea) {
+    return AddClearDepthStencil(texture, value, slice.ToSubresourceRange(), clearDepth, clearStencil, renderArea);
 }
 
 RDGTextureHandle RDGBuilder::ImportTexture(gpu::Texture* texture, gpu::TextureState initialState, std::optional<gpu::TextureState> finalState, RDGExternalOwnership ownership) {
@@ -989,7 +1205,8 @@ RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuBuffer& buffer) {
     return handle;
 }
 RDGTextureHandle RDGBuilder::ImportPersistentBorrowed(GpuTexture& texture) {
-    const auto handle = ImportTexture(texture.GetTexture(), texture.GetSubmittedState(), gpu::TextureState::ShaderRead);
+    const auto finalState = texture.GetDesc().Usage.HasFlag(gpu::TextureUse::Resource) ? std::optional{gpu::TextureState::ShaderRead} : std::nullopt;
+    const auto handle = ImportTexture(texture.GetTexture(), texture.GetSubmittedState(), finalState);
     auto& resource = _data.Textures[handle.Index];
     if (resource.Persistent && resource.Persistent.Get() != &texture) Fail(_data, "duplicate texture wrapper");
     resource.Persistent = &texture;
@@ -1014,6 +1231,40 @@ MeshPassFrameDrawList& RDGUploadPrepareContext::GetPassDrawList(MeshPassId pass)
 uint64_t RDGUploadPrepareContext::GetFrameId() const noexcept { return _slot.GetFrameId(); }
 uint32_t RDGUploadPrepareContext::GetSlotIndex() const noexcept { return _slot.GetIndex(); }
 
+RDGUploadSource::GeneratedSource::GeneratedSource(GeneratedSource&& other) noexcept {
+    if (other.Move) {
+        other.Move(Storage, other.Storage);
+        Layout = std::exchange(other.Layout, nullptr);
+        Write = std::exchange(other.Write, nullptr);
+        Move = std::exchange(other.Move, nullptr);
+        Destroy = std::exchange(other.Destroy, nullptr);
+    }
+}
+
+RDGUploadSource::GeneratedSource& RDGUploadSource::GeneratedSource::operator=(GeneratedSource&& other) noexcept {
+    if (this != &other) {
+        Reset();
+        if (other.Move) {
+            other.Move(Storage, other.Storage);
+            Layout = std::exchange(other.Layout, nullptr);
+            Write = std::exchange(other.Write, nullptr);
+            Move = std::exchange(other.Move, nullptr);
+            Destroy = std::exchange(other.Destroy, nullptr);
+        }
+    }
+    return *this;
+}
+
+RDGUploadSource::GeneratedSource::~GeneratedSource() noexcept { Reset(); }
+
+void RDGUploadSource::GeneratedSource::Reset() noexcept {
+    if (Destroy) Destroy(Storage);
+    Layout = nullptr;
+    Write = nullptr;
+    Move = nullptr;
+    Destroy = nullptr;
+}
+
 RDGUploadSource RDGUploadSource::BorrowedBytes(std::span<const byte> bytes) noexcept {
     RDGUploadSource result;
     result._storage = bytes;
@@ -1029,20 +1280,24 @@ RDGUploadSource RDGUploadSource::OwnedBytes(vector<byte>&& bytes) noexcept {
 RDGUploadSource RDGUploadSource::SnapshotBytes(std::span<const byte> bytes) { return OwnedBytes(vector<byte>{bytes.begin(), bytes.end()}); }
 uint64_t RDGUploadSource::GetMaxSize() const noexcept { return _maxSize; }
 uint64_t RDGUploadSource::PrepareLayout(RDGUploadPrepareContext& context) noexcept {
-    const auto* generated = std::get_if<GeneratedSource>(&_storage);
-    return generated && generated->Layout ? generated->Layout.Get()(generated->Context.get(), context, _maxSize) : _maxSize;
+    auto* generated = std::get_if<GeneratedSource>(&_storage);
+    return generated && generated->Layout ? generated->Layout.Get()(generated->Storage, context, _maxSize) : _maxSize;
 }
-bool RDGUploadSource::Write(RDGUploadWriteContext& context, uint64_t sourceRowPitch) const noexcept {
-    if (const auto* generated = std::get_if<GeneratedSource>(&_storage)) return generated->Write.Get()(generated->Context.get(), context);
+bool RDGUploadSource::Write(RDGUploadWriteContext& context, uint64_t sourceRowPitch, uint32_t sourceRowsPerImage) const noexcept {
+    if (const auto* generated = std::get_if<GeneratedSource>(&_storage)) return generated->Write.Get()(generated->Storage, context);
     const auto* owned = std::get_if<vector<byte>>(&_storage);
     const auto bytes = owned ? std::span<const byte>{*owned} : std::get<std::span<const byte>>(_storage);
     if (context.RowBytes) {
         const auto pitch = sourceRowPitch ? sourceRowPitch : context.RowBytes;
-        for (uint32_t row = 0; row < context.Rows; ++row) {
-            const auto sourceOffset = row * pitch, targetOffset = row * context.RowPitch;
-            if (sourceOffset > bytes.size() || context.RowBytes > bytes.size() - sourceOffset ||
-                targetOffset > context.Bytes.size() || context.RowBytes > context.Bytes.size() - targetOffset) return false;
-            std::memcpy(context.Bytes.data() + targetOffset, bytes.data() + sourceOffset, static_cast<size_t>(context.RowBytes));
+        const auto sourceRows = sourceRowsPerImage ? sourceRowsPerImage : context.Rows;
+        if (!context.RowPitch || context.RowBytes > bytes.size() || context.RowBytes > context.Bytes.size()) return false;
+        for (uint32_t slice = 0; slice < context.Depth; ++slice) {
+            for (uint32_t row = 0; row < context.Rows; ++row) {
+                const uint64_t sourceRow = uint64_t{slice} * sourceRows + row;
+                const uint64_t targetRow = uint64_t{slice} * context.Rows + row;
+                if (sourceRow > (bytes.size() - context.RowBytes) / pitch || targetRow > (context.Bytes.size() - context.RowBytes) / context.RowPitch) return false;
+                std::memcpy(context.Bytes.data() + targetRow * context.RowPitch, bytes.data() + sourceRow * pitch, static_cast<size_t>(context.RowBytes));
+            }
         }
     } else {
         if (context.Size > bytes.size() || context.Size > context.Bytes.size()) return false;
@@ -1053,9 +1308,9 @@ bool RDGUploadSource::Write(RDGUploadWriteContext& context, uint64_t sourceRowPi
 void RDGUploadSource::ReleaseSource() noexcept {
     _storage.emplace<std::span<const byte>>();
 }
-RDGTextureUploadSource RDGTextureUploadSource::BorrowedBytes(std::span<const byte> bytes, uint64_t pitch) noexcept { return {RDGUploadSource::BorrowedBytes(bytes), pitch}; }
-RDGTextureUploadSource RDGTextureUploadSource::OwnedBytes(vector<byte>&& bytes, uint64_t pitch) noexcept { return {RDGUploadSource::OwnedBytes(std::move(bytes)), pitch}; }
-RDGTextureUploadSource RDGTextureUploadSource::SnapshotBytes(std::span<const byte> bytes, uint64_t pitch) { return {RDGUploadSource::SnapshotBytes(bytes), pitch}; }
+RDGTextureUploadSource RDGTextureUploadSource::BorrowedBytes(std::span<const byte> bytes, uint64_t pitch, uint32_t rowsPerImage) noexcept { return {RDGUploadSource::BorrowedBytes(bytes), pitch, rowsPerImage}; }
+RDGTextureUploadSource RDGTextureUploadSource::OwnedBytes(vector<byte>&& bytes, uint64_t pitch, uint32_t rowsPerImage) noexcept { return {RDGUploadSource::OwnedBytes(std::move(bytes)), pitch, rowsPerImage}; }
+RDGTextureUploadSource RDGTextureUploadSource::SnapshotBytes(std::span<const byte> bytes, uint64_t pitch, uint32_t rowsPerImage) { return {RDGUploadSource::SnapshotBytes(bytes), pitch, rowsPerImage}; }
 
 RDGTextureHandle RDGBuilder::CreateTexture(const gpu::TextureDescriptor& desc) {
     RequireOpen(_data);
@@ -1080,11 +1335,11 @@ RDGBufferHandle RDGBuilder::CreateBuffer(const RDGDynamicBufferDescriptor& desc,
     return handle;
 }
 
-void RDGBuilder::UploadBuffer(RDGBufferHandle dst, uint64_t offset, RDGUploadSource source) {
+RDGPassHandle RDGBuilder::UploadBuffer(RDGBufferHandle dst, uint64_t offset, RDGUploadSource source) {
     RequireOpen(_data);
     if (dst.Index >= _data.Buffers.size()) {
         Fail(_data, "invalid upload destination");
-        return;
+        return {};
     }
     const auto& resource = _data.Buffers[dst.Index];
     const auto& desc = resource.Desc;
@@ -1092,42 +1347,40 @@ void RDGBuilder::UploadBuffer(RDGBufferHandle dst, uint64_t offset, RDGUploadSou
         (desc.Memory == gpu::MemoryType::Device && (!desc.Usage.HasFlag(gpu::BufferUse::CopyDestination) || offset % std::max(uint64_t{1}, _data.Constraints.BufferCopyAlignment))) ||
         (desc.Memory == gpu::MemoryType::Upload && !desc.Usage.HasFlag(gpu::BufferUse::MapWrite))) {
         Fail(_data, "invalid upload range, memory or usage");
-        return;
+        return {};
     }
-    if (!source.GetMaxSize() && !resource.Dynamic) return;
+    if (!source.GetMaxSize() && !resource.Dynamic) return {};
     const bool host = desc.Memory == gpu::MemoryType::Upload;
     const auto payload = static_cast<uint32_t>(_data.Uploads.size());
     _data.Uploads.push_back({std::move(source), {false, dst.Index, static_cast<uint32_t>(host ? gpu::BufferState::HostWrite : gpu::BufferState::CopyDestination), false, true, true}, offset});
-    AddNode(_data, host ? RDGPassKind::HostWrite : RDGPassKind::Upload, payload);
+    return {AddNode(_data, host ? RDGPassKind::HostWrite : RDGPassKind::Upload, payload)};
 }
 
-void RDGBuilder::UploadTexture(RDGTextureHandle dst, const gpu::TextureRegion2D& region, RDGTextureUploadSource source) {
+RDGPassHandle RDGBuilder::UploadTexture(RDGTextureHandle dst, const gpu::TextureRegion2D& region, RDGTextureUploadSource source) {
     RequireOpen(_data);
     if (dst.Index >= _data.Textures.size()) {
         Fail(_data, "invalid texture upload destination");
-        return;
+        return {};
     }
     const auto& desc = _data.Textures[dst.Index].Desc;
-    const auto pixel = gpu::GetTextureFormatBytesPerPixel(desc.Format);
-    if (!pixel || gpu::IsDepthStencilFormat(desc.Format) || desc.SampleCount != 1 ||
-        (desc.Dim != gpu::TextureDimension::Dim2D && desc.Dim != gpu::TextureDimension::Dim2DArray) ||
-        region.MipLevel >= desc.MipLevels || region.MipLevel >= 32 || region.ArrayLayer >= desc.DepthOrArraySize || !region.Width || !region.Height ||
-        !desc.Usage.HasFlag(gpu::TextureUse::CopyDestination)) {
+    if (!gpu::ValidateTextureUploadRegion(desc, region).first) {
         Fail(_data, "invalid texture upload region or format");
-        return;
+        return {};
     }
-    const auto width = std::max(1u, desc.Width >> region.MipLevel), height = std::max(1u, desc.Height >> region.MipLevel);
-    const uint64_t rowBytes = uint64_t{region.Width} * pixel;
+    const auto block = gpu::GetTextureFormatBlockInfo(desc.Format);
+    const uint64_t rowBytes = uint64_t{block.Columns(region.Width)} * block.BytesPerBlock;
+    const auto rows = block.Rows(region.Height);
+    const auto imageRows = source.RowsPerImage ? source.RowsPerImage : rows;
+    const uint64_t lastRow = uint64_t{region.Depth - 1} * imageRows + rows - 1;
     const auto pitch = source.SourceRowPitch ? source.SourceRowPitch : rowBytes;
-    if (region.X > width || region.Width > width - region.X || region.Y > height || region.Height > height - region.Y ||
-        pitch < rowBytes || (region.Height > 1 && pitch > (std::numeric_limits<uint64_t>::max() - rowBytes) / (region.Height - 1)) ||
-        source.Source.GetMaxSize() < pitch * (region.Height - 1) + rowBytes) {
+    if (imageRows < rows || pitch < rowBytes || source.Source.GetMaxSize() < rowBytes ||
+        lastRow > (source.Source.GetMaxSize() - rowBytes) / pitch) {
         Fail(_data, "texture source does not cover the region");
-        return;
+        return {};
     }
     const auto payload = static_cast<uint32_t>(_data.Uploads.size());
-    _data.Uploads.push_back({std::move(source.Source), {true, dst.Index, static_cast<uint32_t>(gpu::TextureState::CopyDestination), false, true, true}, 0, pitch, region});
-    AddNode(_data, RDGPassKind::Upload, payload);
+    _data.Uploads.push_back({std::move(source.Source), {true, dst.Index, static_cast<uint32_t>(gpu::TextureState::CopyDestination), false, true, true}, 0, pitch, region, imageRows});
+    return {AddNode(_data, RDGPassKind::Upload, payload)};
 }
 
 void RDGBuilder::MarkOutput(RDGTextureHandle texture) {
@@ -1146,7 +1399,7 @@ void RDGBuilder::MarkOutput(RDGBufferHandle buffer) {
         _data.Buffers[buffer.Index].Output = true;
 }
 
-uint32_t RDGBuilder::AddRasterPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGRasterPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
+uint32_t RDGBuilder::AddRasterPassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGRasterPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
     const auto index = AddPass(_data, name, RDGPassKind::Raster);
     User(_data, _data.Passes[index]).Callback = std::move(callback);
     User(_data, _data.Passes[index]).RasterExecute = execute;
@@ -1154,7 +1407,7 @@ uint32_t RDGBuilder::AddRasterPassImpl(std::string_view name, shared_ptr<void> c
     return index;
 }
 
-uint32_t RDGBuilder::AddComputePassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGComputePassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
+uint32_t RDGBuilder::AddComputePassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGComputePassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
     const auto index = AddPass(_data, name, RDGPassKind::Compute);
     User(_data, _data.Passes[index]).Callback = std::move(callback);
     User(_data, _data.Passes[index]).ComputeExecute = execute;
@@ -1162,7 +1415,7 @@ uint32_t RDGBuilder::AddComputePassImpl(std::string_view name, shared_ptr<void> 
     return index;
 }
 
-uint32_t RDGBuilder::AddCopyPassImpl(std::string_view name, shared_ptr<void> callback, bool (*execute)(const void*, RDGCopyPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
+uint32_t RDGBuilder::AddCopyPassImpl(std::string_view name, detail::ErasedPassCallback callback, bool (*execute)(const void*, RDGCopyPassContext&) noexcept, bool (*prepare)(void*, RDGPrepareContext&) noexcept) {
     const auto index = AddPass(_data, name, RDGPassKind::Copy);
     User(_data, _data.Passes[index]).Callback = std::move(callback);
     User(_data, _data.Passes[index]).CopyExecute = execute;
@@ -1174,6 +1427,16 @@ RDGRasterPassBuilder::RDGRasterPassBuilder(detail::RDGData& data, uint32_t pass)
 RDGComputePassBuilder::RDGComputePassBuilder(detail::RDGData& data, uint32_t pass) noexcept : _data(data), _pass(pass) {}
 RDGCopyPassBuilder::RDGCopyPassBuilder(detail::RDGData& data, uint32_t pass) noexcept : _data(data), _pass(pass) {}
 
+RDGPassHandle RDGRasterPassBuilder::GetHandle() const noexcept { return {_pass}; }
+RDGPassHandle RDGComputePassBuilder::GetHandle() const noexcept { return {_pass}; }
+RDGPassHandle RDGCopyPassBuilder::GetHandle() const noexcept { return {_pass}; }
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::SetRenderArea(Rect area) {
+    RequireOpen(_data);
+    User(_data, _data.Passes[_pass]).RenderArea = area;
+    return *this;
+}
+
 RDGRasterPassBuilder& RDGRasterPassBuilder::UseMeshPass(MeshPassId pass) {
     RequireOpen(_data);
     if (pass.Value == std::numeric_limits<uint32_t>::max()) {
@@ -1184,36 +1447,98 @@ RDGRasterPassBuilder& RDGRasterPassBuilder::UseMeshPass(MeshPassId pass) {
     return *this;
 }
 
-RDGRasterPassBuilder& RDGRasterPassBuilder::WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
-                                                       gpu::ColorClearValue clear, Nullable<gpu::TextureView*> explicitView) {
-    RequireOpen(_data);
-    auto& colors = User(_data, _data.Passes[_pass]).Colors;
+namespace {
+
+void AddColorAttachment(RDGData& data, uint32_t pass, const RDGColorAttachment& attachment) {
+    RequireOpen(data);
+    auto& colors = User(data, data.Passes[pass]).Colors;
     for (const auto& color : colors) {
-        if (color.Slot == slot || color.Texture == texture) {
-            Fail(_data, "duplicate color attachment");
-            return *this;
+        if (color.Slot == attachment.Slot || color.Texture == attachment.Texture) {
+            Fail(data, "duplicate color attachment");
+            return;
         }
     }
-    colors.push_back({slot, texture, load, store, clear, explicitView});
-    AddAccess(_data, _pass, {true, texture.Index, static_cast<uint32_t>(gpu::TextureState::RenderTarget), load == gpu::LoadAction::Load, true, load == gpu::LoadAction::Load});
+    colors.push_back(attachment);
+    const bool load = attachment.Load == gpu::LoadAction::Load;
+    AddAccess(data, pass, {true, attachment.Texture.Index, static_cast<uint32_t>(gpu::TextureState::RenderTarget), load, true, load});
+}
+
+void AddDepthAttachment(RDGData& data, uint32_t pass, const RDGDepthAttachment& attachment) {
+    RequireOpen(data);
+    auto& raster = User(data, data.Passes[pass]);
+    if (raster.Depth || DepthUsage(attachment.State) == gpu::TextureViewUsage::UNKNOWN) {
+        Fail(data, "invalid or duplicate depth/stencil attachment");
+        return;
+    }
+    raster.Depth = attachment;
+    const bool load = attachment.DepthLoad == gpu::LoadAction::Load || attachment.StencilLoad == gpu::LoadAction::Load;
+    const bool write = attachment.State != gpu::TextureState::DepthRead;
+    AddAccess(data, pass, {true, attachment.Texture.Index, static_cast<uint32_t>(attachment.State), load || !write, write, load});
+}
+
+}  // namespace
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                                       gpu::ColorClearValue clear, Nullable<gpu::TextureView*> explicitView) {
+    AddColorAttachment(_data, _pass, {slot, texture, load, store, clear, explicitView});
     return *this;
+}
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                                       gpu::ColorClearValue clear, gpu::SubresourceRange range) {
+    AddColorAttachment(_data, _pass, {slot, texture, load, store, clear, nullptr, range});
+    return *this;
+}
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::WriteColor(uint32_t slot, RDGTextureHandle texture, gpu::LoadAction load, gpu::StoreAction store,
+                                                       gpu::ColorClearValue clear, RDGAttachmentSlice slice) {
+    return WriteColor(slot, texture, load, store, clear, slice.ToSubresourceRange());
 }
 
 RDGRasterPassBuilder& RDGRasterPassBuilder::SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
                                                             gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
                                                             gpu::LoadAction stencilLoad, gpu::StoreAction stencilStore,
                                                             gpu::DepthStencilClearValue clear, Nullable<gpu::TextureView*> explicitView) {
-    RequireOpen(_data);
-    auto& pass = _data.Passes[_pass];
-    if (User(_data, pass).Depth || DepthUsage(state) == gpu::TextureViewUsage::UNKNOWN) {
-        Fail(_data, "invalid or duplicate depth/stencil attachment");
-        return *this;
-    }
-    User(_data, pass).Depth = {texture, state, depthLoad, depthStore, stencilLoad, stencilStore, clear, explicitView};
-    const bool load = depthLoad == gpu::LoadAction::Load || stencilLoad == gpu::LoadAction::Load;
-    const bool write = state != gpu::TextureState::DepthRead;
-    AddAccess(_data, _pass, {true, texture.Index, static_cast<uint32_t>(state), load || !write, write, load});
+    AddDepthAttachment(_data, _pass, {texture, state, depthLoad, depthStore, stencilLoad, stencilStore, clear, explicitView});
     return *this;
+}
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
+                                                            gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
+                                                            gpu::LoadAction stencilLoad, gpu::StoreAction stencilStore,
+                                                            gpu::DepthStencilClearValue clear, gpu::SubresourceRange range) {
+    AddDepthAttachment(_data, _pass, {texture, state, depthLoad, depthStore, stencilLoad, stencilStore, clear, nullptr, range});
+    return *this;
+}
+
+RDGRasterPassBuilder& RDGRasterPassBuilder::SetDepthStencil(RDGTextureHandle texture, gpu::TextureState state,
+                                                            gpu::LoadAction depthLoad, gpu::StoreAction depthStore,
+                                                            gpu::LoadAction stencilLoad, gpu::StoreAction stencilStore,
+                                                            gpu::DepthStencilClearValue clear, RDGAttachmentSlice slice) {
+    return SetDepthStencil(texture, state, depthLoad, depthStore, stencilLoad, stencilStore, clear, slice.ToSubresourceRange());
+}
+
+void RDGBuilder::AddOrderDependency(RDGPassHandle before, RDGPassHandle after) {
+    RequireOpen(_data);
+    if (before.Index >= after.Index || after.Index >= _data.Passes.size()) {
+        Fail(_data, "order dependency must connect two declared passes in forward order");
+        return;
+    }
+    auto& deps = _data.Passes[after.Index].OrderDependencies;
+    if (std::find(deps.begin(), deps.end(), before.Index) == deps.end()) deps.push_back(before.Index);
+}
+
+void RDGBuilder::AddOrderBarrier(RDGPassHandle barrier) {
+    RequireOpen(_data);
+    if (!barrier.IsValid() || barrier.Index >= _data.Passes.size() || barrier.Index != _data.Passes.size() - 1) {
+        Fail(_data, "order barrier must be the latest declared pass");
+        return;
+    }
+    if (_data.Passes[barrier.Index].OrderBarrier) {
+        Fail(_data, "duplicate order barrier");
+        return;
+    }
+    _data.Passes[barrier.Index].OrderBarrier = true;
 }
 
 Nullable<CompiledRDG*> RDGBuilder::Compile() {
@@ -1327,6 +1652,21 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
             }
         }
     }
+    std::optional<uint32_t> lastBarrier;
+    std::pmr::vector<uint32_t> interval{&_data.ScratchResource};
+    for (uint32_t i = 0; i < _data.Passes.size(); ++i) {
+        auto& pass = _data.Passes[i];
+        if (!pass.Alive) continue;
+        if (pass.OrderBarrier) {
+            if (interval.empty() && lastBarrier) pass.OrderDependencies.push_back(*lastBarrier);
+            pass.OrderDependencies.insert(pass.OrderDependencies.end(), interval.begin(), interval.end());
+            interval.clear();
+            lastBarrier = i;
+        } else {
+            if (lastBarrier) pass.OrderDependencies.push_back(*lastBarrier);
+            interval.push_back(i);
+        }
+    }
     if (!SchedulePasses(_data)) return nullptr;
     RADRAY_PROFILE_PLOT("RadRay.RDG.AlivePasses", static_cast<int64_t>(_data.ScheduledPasses.size()));
     RADRAY_PROFILE_PLOT("RadRay.RDG.ExecutionGroups", static_cast<int64_t>(_data.Groups.size()));
@@ -1340,7 +1680,7 @@ void CompiledRDG::ExecutionDeleter::operator()(detail::RDGExecution* execution) 
 }
 CompiledRDG::~CompiledRDG() noexcept {
     // 参数组先于帧内视图解除引用；底层 owner 由 RDGData 最后释放。
-    for (auto& pass : _data.UserPasses) pass.Callback.reset();
+    for (auto& pass : _data.UserPasses) pass.Callback.Reset();
 }
 std::span<const MeshPassId> CompiledRDG::GetAliveMeshPasses() const noexcept { return _data.AliveMeshPasses; }
 
@@ -1351,11 +1691,7 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
     if (&slot.GetMemoryResource() != &_data.MemoryResource) return false;
     _execution.reset(std::pmr::polymorphic_allocator<>{&_data.MemoryResource}.new_object<RDGExecution>(RDGExecution{_data, slot, pool, uploads}));
     auto& execution = *_execution;
-    const auto detail = slot.GetDevice().GetDetail();
-    const auto& limits = slot.GetDevice().GetCapabilities().Limits;
-    const RDGDeviceConstraints constraints{detail.BufferCopyOffsetAlignment, detail.TextureDataPlacementAlignment, detail.TextureDataPitchAlignment,
-                                           detail.CBufferAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment, limits.TexelBufferOffsetAlignment,
-                                           limits.MaxBufferSize, limits.MaxUniformBufferRange, limits.MaxStorageBufferRange};
+    const auto constraints = detail::QueryRDGDeviceConstraints(slot.GetDevice());
     RDGUploadPrepareContext layout{slot, _data.AliveMeshPasses};
     size_t aliveUploads = 0;
     for (const auto index : _data.ScheduledPasses) aliveUploads += IsUpload(_data.Passes[index]);
@@ -1376,7 +1712,9 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
             if (access.Texture) {
                 if (Prepared(execution, pass).ActualSize != Upload(_data, pass).Source.GetMaxSize()) return false;
                 // 来源覆盖量包含行 padding；实际有效量只计算像素。
-                Prepared(execution, pass).ActualSize = uint64_t{Upload(_data, pass).Region.Width} * Upload(_data, pass).Region.Height * gpu::GetTextureFormatBytesPerPixel(_data.Textures[access.Index].Desc.Format);
+                const auto& region = Upload(_data, pass).Region;
+                const auto block = gpu::GetTextureFormatBlockInfo(_data.Textures[access.Index].Desc.Format);
+                Prepared(execution, pass).ActualSize = uint64_t{block.Columns(region.Width)} * block.Rows(region.Height) * region.Depth * block.BytesPerBlock;
             }
             if (!access.Texture) {
                 const auto& resource = _data.Buffers[access.Index];
@@ -1433,13 +1771,16 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
         for (const auto& access : Accesses(_data, pass)) {
             if (!access.Texture) continue;
             const auto state = static_cast<gpu::TextureState>(access.State);
-            auto usage = state == gpu::TextureState::ShaderRead ? gpu::TextureViewUsage::Resource : state == gpu::TextureState::UnorderedAccess ? gpu::TextureViewUsage::UnorderedAccess
-                                                                                                      : state == gpu::TextureState::RenderTarget      ? gpu::TextureViewUsage::RenderTarget
-                                                                                                                                                         : DepthUsage(state);
-            if (usage == gpu::TextureViewUsage::UNKNOWN) continue;
-            const bool explicitView = pass.Kind == RDGPassKind::Raster && (std::any_of(User(_data, pass).Colors.begin(), User(_data, pass).Colors.end(), [&](const auto& a) { return a.Texture.Index == access.Index && bool(a.View); }) ||
-                                                                           (User(_data, pass).Depth && User(_data, pass).Depth->Texture.Index == access.Index && User(_data, pass).Depth->View));
-            if (!explicitView && !PrepareView(execution, {access.Index}, usage)) return false;
+            if (state != gpu::TextureState::ShaderRead && state != gpu::TextureState::UnorderedAccess) continue;
+            const auto usage = state == gpu::TextureState::ShaderRead ? gpu::TextureViewUsage::Resource : gpu::TextureViewUsage::UnorderedAccess;
+            if (!ResolveTextureView(execution, {access.Index}, DefaultViewRequest(usage), true)) return false;
+        }
+        if (pass.Kind == RDGPassKind::Raster) {
+            const auto& raster = User(_data, pass);
+            for (const auto& color : raster.Colors) {
+                if (!ResolveAttachmentView(execution, color, gpu::TextureViewUsage::RenderTarget, true)) return false;
+            }
+            if (raster.Depth && !ResolveAttachmentView(execution, *raster.Depth, DepthUsage(raster.Depth->State), true)) return false;
         }
     }
     {
@@ -1454,18 +1795,21 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 continue;
             }
             uint64_t mappedSize = Prepared(execution, pass).ActualSize, rowBytes = 0;
-            uint32_t rows = 1;
+            uint32_t rows = 1, depth = 1;
             if (access.Texture) {
-                rowBytes = uint64_t{Upload(_data, pass).Region.Width} * gpu::GetTextureFormatBytesPerPixel(_data.Textures[access.Index].Desc.Format);
-                rows = Upload(_data, pass).Region.Height;
-                const auto pixel = gpu::GetTextureFormatBytesPerPixel(_data.Textures[access.Index].Desc.Format);
-                const auto pitchAlignment = MergeAlignment(constraints.TexturePitchAlignment, pixel);
-                const auto placement = MergeAlignment(constraints.TexturePlacementAlignment, pixel);
+                const auto block = gpu::GetTextureFormatBlockInfo(_data.Textures[access.Index].Desc.Format);
+                const auto& region = Upload(_data, pass).Region;
+                rowBytes = uint64_t{block.Columns(region.Width)} * block.BytesPerBlock;
+                rows = block.Rows(region.Height);
+                depth = region.Depth;
+                const auto pitchAlignment = MergeAlignment(constraints.TexturePitchAlignment, block.BytesPerBlock);
+                const auto placement = MergeAlignment(constraints.TexturePlacementAlignment, block.BytesPerBlock);
                 if (!pitchAlignment || !placement) return false;
                 const auto pitch = AlignBytes(rowBytes, *pitchAlignment);
-                if (!pitch || *pitch > std::numeric_limits<uint32_t>::max() || (rows > 1 && *pitch > (std::numeric_limits<uint64_t>::max() - rowBytes) / (rows - 1))) return false;
+                const uint64_t lastRow = uint64_t{rows} * depth - 1;
+                if (!pitch || *pitch > std::numeric_limits<uint32_t>::max() || lastRow > (std::numeric_limits<uint64_t>::max() - rowBytes) / *pitch) return false;
                 Prepared(execution, pass).StagingPitch = static_cast<uint32_t>(*pitch);
-                mappedSize = *pitch * (rows - 1) + rowBytes;
+                mappedSize = *pitch * lastRow + rowBytes;
                 const auto allocation = uploads.Allocate(mappedSize, *placement, mappedSize, gpu::BufferState::CopySource);
                 if (!allocation) return false;
                 Prepared(execution, pass).Staging = *allocation;
@@ -1484,8 +1828,8 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 if (!mapped) return false;
                 Prepared(execution, pass).Staging = {physical.Resource, mapped, Upload(_data, pass).UploadOffset, mappedSize, mappedSize};
             }
-            RDGUploadWriteContext write{{Prepared(execution, pass).Staging.Data.Get(), static_cast<size_t>(mappedSize)}, Prepared(execution, pass).ActualSize, Prepared(execution, pass).StagingPitch, rowBytes, rows};
-            const bool written = Upload(_data, pass).Source.Write(write, Upload(_data, pass).SourceRowPitch);
+            RDGUploadWriteContext write{{Prepared(execution, pass).Staging.Data.Get(), static_cast<size_t>(mappedSize)}, Prepared(execution, pass).ActualSize, Prepared(execution, pass).StagingPitch, rowBytes, rows, depth};
+            const bool written = Upload(_data, pass).Source.Write(write, Upload(_data, pass).SourceRowPitch, Upload(_data, pass).SourceRowsPerImage);
             if (pass.Kind == RDGPassKind::HostWrite && _data.Buffers[access.Index].Imported) {
                 auto& physical = execution.States.GetBuffer(access.Index);
                 if (written) physical.Resource->FlushMappedRange({Upload(_data, pass).UploadOffset, mappedSize});
@@ -1503,7 +1847,7 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
         if (!IsUpload(pass) && User(_data, pass).Prepare) {
             RADRAY_PROFILE_SCOPE_N("RadRay.RDG.PrepareBindings");
             RDGPrepareContext context{execution};
-            if (!User(_data, pass).Prepare.Get()(User(_data, pass).Callback.get(), context)) return false;
+            if (!User(_data, pass).Prepare.Get()(User(_data, pass).Callback.Get(), context)) return false;
         }
     }
     if (!uploads.Flush()) return false;
@@ -1515,13 +1859,13 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
             const auto& last = _data.Passes[group.Passes.back()];
             for (size_t i = 0; i < User(_data, first).Colors.size(); ++i) {
                 const auto& a = User(_data, first).Colors[i];
-                const auto view = a.View ? a.View : ResolveTextureView(execution, a.Texture, gpu::TextureViewUsage::RenderTarget);
+                const auto view = ResolveAttachmentView(execution, a, gpu::TextureViewUsage::RenderTarget, false);
                 if (!view) return false;
                 group.Colors.push_back({view.Get(), a.Load, User(_data, last).Colors[i].Store, a.Clear});
             }
             if (User(_data, first).Depth) {
                 const auto& a = *User(_data, first).Depth;
-                const auto view = a.View ? a.View : ResolveTextureView(execution, a.Texture, DepthUsage(a.State));
+                const auto view = ResolveAttachmentView(execution, a, DepthUsage(a.State), false);
                 if (!view) return false;
                 group.Depth = {view.Get(), a.DepthLoad, User(_data, last).Depth->DepthStore, a.StencilLoad, User(_data, last).Depth->StencilStore, a.Clear};
             }
@@ -1532,16 +1876,39 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
     return true;
 }
 
-bool CompiledRDG::Record(gpu::CommandBuffer& command) noexcept {
+vector<string> CompiledRDG::GetRecordedPassNames() const {
+    vector<string> result;
+    for (const auto& group : _data.Groups)
+        for (const auto index : group.Passes) result.emplace_back(PassName(_data, _data.Passes[index]));
+    return result;
+}
+
+bool CompiledRDG::Record(gpu::CommandBuffer& command, Nullable<gpu::QueryPool*> passTimestamps) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Record");
     if (!_prepared || _recordAttempted) return false;
+    if (passTimestamps) {
+        uint64_t required = 2;
+        for (const auto& group : _data.Groups) required += 2ull * group.Passes.size();
+        if (required > passTimestamps->GetCount()) return false;
+    }
     _recordAttempted = true;
     auto& execution = *_execution;
     execution.Command = &command;
+    uint32_t nextQuery = 2;
+    const auto timestamp = [&](gpu::QueryPipelineStage stage) {
+        if (passTimestamps) command.WriteTimestamp({passTimestamps.Get(), stage, nextQuery++});
+    };
     if (!execution.States.GetBeginBarriers().empty()) command.ResourceBarrier(execution.States.GetBeginBarriers());
     for (const auto& group : _data.Groups) {
         RADRAY_PROFILE_SCOPE_N("RadRay.RDG.RecordGroup");
         RADRAY_PROFILE_PLOT("RadRay.RDG.GroupBarriers", static_cast<int64_t>(group.Barriers.size()));
+        timestamp(gpu::QueryPipelineStage::Top);
+        const auto beginPass = [&](uint32_t index) {
+            if (index != group.Passes.front()) timestamp(gpu::QueryPipelineStage::Top);
+        };
+        const auto endPass = [&](uint32_t index) {
+            if (index != group.Passes.back()) timestamp(gpu::QueryPipelineStage::Bottom);
+        };
         if (!group.Barriers.empty()) command.ResourceBarrier(group.Barriers);
         const auto& first = _data.Passes[group.Passes.front()];
         bool result = true;
@@ -1551,9 +1918,10 @@ bool CompiledRDG::Record(gpu::CommandBuffer& command) noexcept {
                 const auto& pass = _data.Passes[index];
                 execution.Pass = &pass;
                 RADRAY_PROFILE_SCOPE_DYN(PassName(_data, pass));
+                beginPass(index);
                 if (group.Kind == RDGPassKind::Copy) {
                     RDGCopyPassContext context{execution};
-                    result = User(_data, pass).CopyExecute.Get()(User(_data, pass).Callback.get(), context);
+                    result = User(_data, pass).CopyExecute.Get()(User(_data, pass).Callback.Get(), context);
                 } else if (Prepared(execution, pass).ActualSize) {
                     if (!Prepared(execution, pass).Barriers.empty()) command.ResourceBarrier(Prepared(execution, pass).Barriers);
                     const auto& access = Accesses(_data, pass).front();
@@ -1565,6 +1933,7 @@ bool CompiledRDG::Record(gpu::CommandBuffer& command) noexcept {
                         command.CopyBufferToBuffer(target.Buffer.Get(), target.Offset + Upload(_data, pass).UploadOffset, Prepared(execution, pass).Staging.Buffer.Get(), Prepared(execution, pass).Staging.Offset, Prepared(execution, pass).ActualSize);
                     }
                 }
+                endPass(index);
                 if (!result) break;
             }
             command.PopDebugGroup();
@@ -1577,13 +1946,17 @@ bool CompiledRDG::Record(gpu::CommandBuffer& command) noexcept {
                 execution.Pass = &pass;
                 RADRAY_PROFILE_SCOPE_DYN(PassName(_data, pass));
                 command.PushDebugGroup(PassName(_data, pass));
-                result = User(_data, pass).ComputeExecute.Get()(User(_data, pass).Callback.get(), context);
+                beginPass(index);
+                result = User(_data, pass).ComputeExecute.Get()(User(_data, pass).Callback.Get(), context);
+                endPass(index);
                 command.PopDebugGroup();
                 if (!result) break;
             }
             command.EndComputePass(encoder.Release());
         } else {
-            auto encoder = command.BeginRenderPass({.Colors = group.Colors, .DepthStencil = group.Depth, .Width = User(_data, first).Width, .Height = User(_data, first).Height, .Layers = User(_data, first).Layers, .Name = PassName(_data, first), .AllowUavWrites = group.Uav});
+            const auto& raster = User(_data, first);
+            auto encoder = command.BeginRenderPass({.Colors = group.Colors, .DepthStencil = group.Depth, .Width = raster.Width, .Height = raster.Height, .Layers = raster.Layers,
+                                                    .RenderArea = raster.RenderArea, .Name = PassName(_data, first), .AllowUavWrites = group.Uav});
             if (!encoder) return false;
             RDGRasterPassContext context{execution, *encoder};
             for (const auto index : group.Passes) {
@@ -1591,13 +1964,16 @@ bool CompiledRDG::Record(gpu::CommandBuffer& command) noexcept {
                 execution.Pass = &pass;
                 RADRAY_PROFILE_SCOPE_DYN(PassName(_data, pass));
                 command.PushDebugGroup(PassName(_data, pass));
+                beginPass(index);
                 encoder->SetStencilReference(0);
-                result = User(_data, pass).RasterExecute.Get()(User(_data, pass).Callback.get(), context);
+                result = User(_data, pass).RasterExecute.Get()(User(_data, pass).Callback.Get(), context);
+                endPass(index);
                 command.PopDebugGroup();
                 if (!result) break;
             }
             command.EndRenderPass(encoder.Release());
         }
+        timestamp(gpu::QueryPipelineStage::Bottom);
         if (!result) return false;
     }
     RADRAY_PROFILE_PLOT("RadRay.RDG.FinalBarriers", static_cast<int64_t>(execution.States.GetFinalBarriers().size() + execution.States.GetReleaseBarriers().size()));
@@ -1634,6 +2010,7 @@ FrameSlot& RDGPrepareContext::GetSlot() noexcept { return _execution.Slot; }
 RDGBufferSlice RDGPrepareContext::ResolveBuffer(RDGBufferHandle handle) const noexcept { return radray::ResolveBuffer(_execution, handle); }
 gpu::Texture& RDGPrepareContext::Resolve(RDGTextureHandle handle) const noexcept { return ResolveTexture(_execution, handle); }
 Nullable<gpu::TextureView*> RDGPrepareContext::ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept { return ResolveTextureView(_execution, handle, usage); }
+Nullable<gpu::TextureView*> RDGPrepareContext::ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept { return ResolveTextureView(_execution, handle, view, true); }
 
 RDGRasterPassContext::RDGRasterPassContext(detail::RDGExecution& execution, gpu::GraphicsCommandEncoder& encoder) noexcept : _execution(execution), _encoder(encoder) {}
 gpu::GraphicsCommandEncoder& RDGRasterPassContext::GetEncoder() noexcept { return _encoder; }
@@ -1647,12 +2024,14 @@ std::span<const VisibleMeshDrawCommand> RDGRasterPassContext::GetVisibleCommands
 gpu::Texture& RDGRasterPassContext::Resolve(RDGTextureHandle handle) const noexcept { return ResolveTexture(_execution, handle); }
 RDGBufferSlice RDGRasterPassContext::ResolveBuffer(RDGBufferHandle handle) const noexcept { return radray::ResolveBuffer(_execution, handle); }
 Nullable<gpu::TextureView*> RDGRasterPassContext::ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept { return ResolveTextureView(_execution, handle, usage); }
+Nullable<gpu::TextureView*> RDGRasterPassContext::ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept { return ResolveTextureView(_execution, handle, view, false); }
 uint64_t RDGComputePassContext::GetFrameId() const noexcept { return _execution.Slot.GetFrameId(); }
 uint32_t RDGComputePassContext::GetSlotIndex() const noexcept { return _execution.Slot.GetIndex(); }
 std::span<const VisibleMeshDrawCommand> RDGComputePassContext::GetVisibleCommands(MeshPassId pass) const noexcept { return std::as_const(_execution.Slot).GetPassDrawList(pass).VisibleCommands; }
 gpu::Texture& RDGComputePassContext::Resolve(RDGTextureHandle handle) const noexcept { return ResolveTexture(_execution, handle); }
 RDGBufferSlice RDGComputePassContext::ResolveBuffer(RDGBufferHandle handle) const noexcept { return radray::ResolveBuffer(_execution, handle); }
 Nullable<gpu::TextureView*> RDGComputePassContext::ResolveView(RDGTextureHandle handle, gpu::TextureViewUsage usage) const noexcept { return ResolveTextureView(_execution, handle, usage); }
+Nullable<gpu::TextureView*> RDGComputePassContext::ResolveView(RDGTextureHandle handle, const RDGTextureViewDescriptor& view) const noexcept { return ResolveTextureView(_execution, handle, view, false); }
 uint64_t RDGCopyPassContext::GetFrameId() const noexcept { return _execution.Slot.GetFrameId(); }
 uint32_t RDGCopyPassContext::GetSlotIndex() const noexcept { return _execution.Slot.GetIndex(); }
 std::span<const VisibleMeshDrawCommand> RDGCopyPassContext::GetVisibleCommands(MeshPassId pass) const noexcept { return std::as_const(_execution.Slot).GetPassDrawList(pass).VisibleCommands; }

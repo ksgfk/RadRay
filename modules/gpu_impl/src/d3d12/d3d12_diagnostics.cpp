@@ -25,7 +25,7 @@ struct DiagnosticReceiver {
     bool Enabled{true};
     size_t Sessions{0};
     shared_ptr<DiagnosticObserver> Observer;
-    Nullable<RenderLogCallback> Callback;
+    Nullable<GpuLogCallback> Callback;
     Nullable<void*> UserData;
 };
 

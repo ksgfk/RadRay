@@ -1,4 +1,5 @@
 #include <radray/gpu_impl/backend/vulkan_impl.h>
+#include <radray/utility.h>
 #include <radray/gpu_impl/validation.h>
 #include "external_resource_vulkan.h"
 #include <radray/profiler.h>
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -1220,6 +1222,7 @@ AttachmentResolveSupport DeviceVulkan::QueryAttachmentResolveSupport(TextureForm
 
 TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
     if (!IsValidTextureSupportQuery(query)) return {};
+    if (IsBlockCompressedFormat(query.Format) && !_enabledFeatures.Core.textureCompressionBC) return {};
     VkPhysicalDeviceImageFormatInfo2 info{};
     info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
     info.format = MapType(query.Format);
@@ -1227,6 +1230,7 @@ TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& quer
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = _TextureUsageFlags(query.Usage);
     info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    if (query.Dimension == TextureDimension::Dim3D && query.Usage.HasFlag(TextureUse::RenderTarget)) info.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     if (query.Dimension == TextureDimension::Cube || query.Dimension == TextureDimension::CubeArray) info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     VkImageFormatProperties2 properties{};
     properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
@@ -1269,6 +1273,7 @@ Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t s
 }
 
 Nullable<unique_ptr<CommandAllocator>> DeviceVulkan::CreateCommandAllocator(CommandQueue* queue_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     Nullable<QueueVulkan*> queue = static_cast<QueueVulkan*>(queue_);
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1278,13 +1283,14 @@ Nullable<unique_ptr<CommandAllocator>> DeviceVulkan::CreateCommandAllocator(Comm
     VkCommandPool pool{VK_NULL_HANDLE};
     if (auto vr = _ftb.vkCreateCommandPool(_device, &poolInfo, this->GetAllocationCallbacks(), &pool);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateCommandAllocator")) RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
         return nullptr;
     }
     return make_unique<CommandAllocatorVulkan>(this, queue.Get(), pool);
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAllocator* allocator) noexcept {
+    if (IsDeviceLost()) return nullptr;
     Nullable<CommandAllocatorVulkan*> cmdPool = static_cast<CommandAllocatorVulkan*>(allocator);
     VkCommandBufferAllocateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1295,21 +1301,23 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAll
     VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
     if (auto vr = _ftb.vkAllocateCommandBuffers(_device, &bufferInfo, &cmdBuf);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateCommandBuffer")) RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
         return nullptr;
     }
     return make_unique<CommandBufferVulkan>(this, cmdPool->_queue, cmdPool.Get(), cmdBuf);
 }
 
-Nullable<ExternalResourceExtension*> DeviceVulkan::GetExternalResourceExtension() noexcept {
+Nullable<unique_ptr<ExternalResourceExtension>> DeviceVulkan::CreateExternalResourceExtension() noexcept {
+    if (IsDeviceLost()) return nullptr;
 #if defined(RADRAY_PLATFORM_WINDOWS)
-    return _externalExtension.get();
+    return make_unique<ExternalResourceVulkan>(this);
 #else
     return nullptr;
 #endif
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
+    if (IsDeviceLost()) return nullptr;
     unique_ptr<FenceVulkan> result;
     if (_enabledFeatures.Vulkan12.timelineSemaphore) {
         auto timeline = this->CreateTimelineSemaphore(0);
@@ -1323,6 +1331,7 @@ Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
 }
 
 Nullable<unique_ptr<QueryPool>> DeviceVulkan::CreateQueryPool(const QueryPoolDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     VkQueryPoolCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1334,7 +1343,7 @@ Nullable<unique_ptr<QueryPool>> DeviceVulkan::CreateQueryPool(const QueryPoolDes
     VkQueryPool pool{VK_NULL_HANDLE};
     if (auto vr = _ftb.vkCreateQueryPool(_device, &createInfo, this->GetAllocationCallbacks(), &pool);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateQueryPool failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateQueryPool")) RADRAY_ERR_LOG("vkCreateQueryPool failed: {}", vr);
         return nullptr;
     }
 
@@ -1346,6 +1355,7 @@ Nullable<unique_ptr<QueryPool>> DeviceVulkan::CreateQueryPool(const QueryPoolDes
 }
 
 Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDescriptor& desc_) noexcept {
+    if (IsDeviceLost()) return nullptr;
     SwapChainDescriptor desc = desc_;
     unique_ptr<SurfaceVulkan> surface;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
@@ -1369,7 +1379,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
         VkSurfaceKHR vkSurface;
         if (auto vr = vkCreateWin32SurfaceKHR(_instance->_instance, &win32SurfaceInfo, this->GetAllocationCallbacks(), &vkSurface);
             vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("vkCreateWin32SurfaceKHR failed: {}", vr);
+            if (!MarkDeviceLost(vr, "CreateSwapChain")) RADRAY_ERR_LOG("vkCreateWin32SurfaceKHR failed: {}", vr);
             return nullptr;
         }
         surface = make_unique<SurfaceVulkan>(this, vkSurface);
@@ -1409,6 +1419,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
 // == Device: buffer / texture / texture view ==
 
 Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     const bool wantsPersistentMap = desc.Hints.HasFlag(ResourceHint::PersistentMap);
     const uint64_t logicalSize = desc.Size;
     VkBufferCreateInfo bufInfo{};
@@ -1475,7 +1486,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     VmaAllocationInfo vmaAllocInfo{};
     if (auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &vmaInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vmaCreateBuffer failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateBuffer")) RADRAY_ERR_LOG("vmaCreateBuffer failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
@@ -1491,6 +1502,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -1503,6 +1515,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     // 其 extent.depth 必须为 1，层数只通过 arrayLayers 表达（否则触发 VUID-VkImageCreateInfo-extent-02254）。
     if (desc.Dim == TextureDimension::Dim3D) {
         imgInfo.extent.depth = static_cast<uint32_t>(desc.DepthOrArraySize);
+        if (desc.Usage.HasFlag(TextureUse::RenderTarget)) imgInfo.flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     } else {
         imgInfo.extent.depth = 1;
     }
@@ -1539,7 +1552,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     VmaAllocationInfo vmaAllocInfo{};
     if (auto vr = vmaCreateImage(_vma->_vma, &imgInfo, &vmaInfo, &vkImg, &vmaAlloc, &vmaAllocInfo);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vmaCreateImage failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateTexture")) RADRAY_ERR_LOG("vmaCreateImage failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<ImageVulkan>(this, vkImg, vmaAlloc, vmaAllocInfo);
@@ -1595,6 +1608,7 @@ std::pair<bool, string> DeviceVulkan::ValidateTextureView(const TextureViewDescr
 }
 
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto image = CastVkObject(desc.Target);
     auto requestedRange = desc.Range;
     if ((desc.Dim == TextureDimension::Dim1D || desc.Dim == TextureDimension::Dim2D || desc.Dim == TextureDimension::Dim3D) && requestedRange.ArrayLayerCount == SubresourceRange::All) requestedRange.ArrayLayerCount = 1;
@@ -1619,15 +1633,20 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         desc.Range.MipLevelCount == SubresourceRange::All ? VK_REMAINING_MIP_LEVELS : desc.Range.MipLevelCount,
         range.BaseArrayLayer,
         range.ArrayLayerCount};
+    if (desc.Dim == TextureDimension::Dim3D && desc.Usage == TextureViewUsage::RenderTarget) {
+        createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        createInfo.subresourceRange.layerCount = std::max(1u, image->_depthOrArraySize >> range.BaseMipLevel);
+    }
     VkImageView imageView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateImageView failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateTextureView")) RADRAY_ERR_LOG("vkCreateImageView failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<ImageViewVulkan>(this, image, imageView);
     result->_mdesc = desc;
     result->_nativeRange = range;
+    result->_nativeRange.ArrayLayerCount = createInfo.subresourceRange.layerCount;
     result->_rawFormat = createInfo.format;
     result->_nativeUsage = usage.usage;
     return result;
@@ -1636,6 +1655,7 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
 // == Device: shader 与布局映射校验 ==
 
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
     size_t realSize = desc.Source.size();
     vector<uint32_t> alignedCode;
@@ -1654,7 +1674,7 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateShaderModule(_device, &createInfo, this->GetAllocationCallbacks(), &shaderModule);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateShaderModule failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateShader")) RADRAY_ERR_LOG("vkCreateShaderModule failed: {}", vr);
         return nullptr;
     }
     return make_unique<ShaderModuleVulkan>(this, shaderModule, desc.Stages);
@@ -1710,6 +1730,7 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
 // == Device: pipeline layout and parameter set ==
 
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const SamplerDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     const auto& limits = _properties.limits;
     if (desc.MipLodBias < _capabilities.Limits.MinSamplerLodBias || desc.MipLodBias > _capabilities.Limits.MaxSamplerLodBias ||
         (desc.AnisotropyClamp > 1 && (!_enabledFeatures.Core.samplerAnisotropy || desc.AnisotropyClamp > limits.maxSamplerAnisotropy)) ||
@@ -1742,13 +1763,14 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(const Sa
     VkSampler sampler = VK_NULL_HANDLE;
     const auto vr = _ftb.vkCreateSampler(_device, &info, GetAllocationCallbacks(), &sampler);
     if (vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateSamplerInternal")) RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
         return nullptr;
     }
     return make_unique<SamplerVulkan>(this, sampler);
 }
 
 Nullable<unique_ptr<BindingGroupLayout>> DeviceVulkan::CreateBindingGroupLayout(const BindingGroupLayoutDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto result = make_unique<BindingGroupLayoutVulkan>();
     result->_device = this;
     result->_bindings.assign(desc.Bindings.begin(), desc.Bindings.end());
@@ -1802,13 +1824,14 @@ Nullable<unique_ptr<BindingGroupLayout>> DeviceVulkan::CreateBindingGroupLayout(
     }
     const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
     if (vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateBindingGroupLayout")) RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
         return nullptr;
     }
     return result;
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto result = make_unique<PipelineLayoutVulkan>(this);
     result->_groups.assign(desc.Groups.begin(), desc.Groups.end());
     result->_pushes.assign(desc.PushConstants.begin(), desc.PushConstants.end());
@@ -1835,7 +1858,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const Pi
         empty.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         const auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &empty, GetAllocationCallbacks(), &result->_emptySetLayout);
         if (vr != VK_SUCCESS) {
-            RADRAY_ERR_LOG("vkCreateDescriptorSetLayout (hole) failed: {}", vr);
+            if (!MarkDeviceLost(vr, "CreatePipelineLayout")) RADRAY_ERR_LOG("vkCreateDescriptorSetLayout (hole) failed: {}", vr);
             return nullptr;
         }
         for (auto& handle : handles)
@@ -1856,7 +1879,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const Pi
     info.pPushConstantRanges = pushes.data();
     const auto vr = _ftb.vkCreatePipelineLayout(_device, &info, GetAllocationCallbacks(), &result->_layout);
     if (vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreatePipelineLayout")) RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
     return result;
@@ -1864,6 +1887,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const Pi
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto* layout = CastVkObject(desc.Layout);
 
     const auto& entries = layout->_entries;
@@ -1954,6 +1978,7 @@ bool ShaderParameterSetVulkan::Set(
         case BindingKind::TypedBuffer:
         case BindingKind::RWTypedBuffer: {
             const auto& buffer = std::get<ShaderTexelBufferBinding>(value);
+            if (!GetTextureFormatBytesPerPixel(buffer.Format)) return false;
             const auto* native = CastVkObject(buffer.Target);
             VkBufferViewCreateInfo viewInfo{};
             viewInfo.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
@@ -2003,7 +2028,49 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
 
 // == Device: PSO / sampler / 同步原语 ==
 
+PipelineCacheVulkan::PipelineCacheVulkan(DeviceVulkan& device, VkPipelineCache cache) noexcept : _device(device), _cache(cache) {}
+PipelineCacheVulkan::~PipelineCacheVulkan() noexcept { Destroy(); }
+bool PipelineCacheVulkan::IsValid() const noexcept { return _cache != VK_NULL_HANDLE; }
+void PipelineCacheVulkan::Destroy() noexcept {
+    if (_cache) _device._ftb.vkDestroyPipelineCache(_device._device, _cache, _device.GetAllocationCallbacks());
+    _cache = VK_NULL_HANDLE;
+}
+vector<byte> PipelineCacheVulkan::GetData() const noexcept {
+    std::lock_guard lock{_mutex};
+    size_t size{};
+    if (!_cache || _device._ftb.vkGetPipelineCacheData(_device._device, _cache, &size, nullptr) != VK_SUCCESS) return {};
+    vector<byte> bytes(size);
+    if (_device._ftb.vkGetPipelineCacheData(_device._device, _cache, &size, bytes.data()) != VK_SUCCESS) return {};
+    bytes.resize(size);
+    return bytes;
+}
+
+Nullable<unique_ptr<PipelineCache>> DeviceVulkan::CreatePipelineCache(std::span<const byte> initialData) noexcept {
+    if (IsDeviceLost()) return nullptr;
+    VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    VkPipelineCacheHeaderVersionOne header{};
+    if (initialData.size() >= sizeof(header)) {
+        std::memcpy(&header, initialData.data(), sizeof(header));
+        if (header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE && header.headerSize == sizeof(header) &&
+            header.vendorID == _properties.vendorID && header.deviceID == _properties.deviceID &&
+            std::memcmp(header.pipelineCacheUUID, _properties.pipelineCacheUUID, VK_UUID_SIZE) == 0) {
+            info.initialDataSize = initialData.size();
+            info.pInitialData = initialData.data();
+        }
+    }
+    VkPipelineCache cache{};
+    auto result = _ftb.vkCreatePipelineCache(_device, &info, GetAllocationCallbacks(), &cache);
+    if (result != VK_SUCCESS && info.initialDataSize) {
+        info.initialDataSize = 0;
+        info.pInitialData = nullptr;
+        result = _ftb.vkCreatePipelineCache(_device, &info, GetAllocationCallbacks(), &cache);
+    }
+    if (result != VK_SUCCESS) return nullptr;
+    return make_unique<PipelineCacheVulkan>(*this, cache);
+}
+
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     if (const auto unsupported = GetUnsupportedGraphicsStateVulkan(desc, _enabledFeatures, _extProperties.conservativeRasterization.has_value())) {
         RADRAY_ERR_LOG("Cannot create Vulkan graphics pipeline: {}", *unsupported);
         return nullptr;
@@ -2208,9 +2275,12 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.basePipelineHandle = VK_NULL_HANDLE;
     createInfo.basePipelineIndex = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, nullptr, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+    auto* cache = static_cast<PipelineCacheVulkan*>(desc.Cache.Get());
+    std::unique_lock<std::mutex> lock;
+    if (cache) lock = std::unique_lock{cache->_mutex};
+    if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, cache ? cache->_cache : VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateGraphicsPipelineState")) RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<GraphicsPipelineVulkan>(this, rs, pipeline);
@@ -2218,6 +2288,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto rs = CastVkObject(desc.PipelineLayout);
     auto cs = CastVkObject(desc.CS.Target);
     VkPipelineShaderStageCreateInfo stageInfo{};
@@ -2231,9 +2302,12 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     createInfo.stage = stageInfo;
     createInfo.layout = rs->GetNative();
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+    auto* cache = static_cast<PipelineCacheVulkan*>(desc.Cache.Get());
+    std::unique_lock<std::mutex> lock;
+    if (cache) lock = std::unique_lock{cache->_mutex};
+    if (auto vr = _ftb.vkCreateComputePipelines(_device, cache ? cache->_cache : VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateComputePipelines failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateComputePipelineState")) RADRAY_ERR_LOG("vkCreateComputePipelines failed: {}", vr);
         return nullptr;
     }
     return make_unique<ComputePipelineVulkan>(this, rs, pipeline);
@@ -2255,6 +2329,7 @@ Nullable<SamplerVulkan*> DeviceVulkan::GetOrCreateSamplerInternal(
 
 Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
     const SamplerDescriptor& desc) noexcept {
+    if (IsDeviceLost()) return nullptr;
     auto sampler = CreateSamplerInternal(desc);
     if (!sampler.HasValue()) {
         return nullptr;
@@ -2268,6 +2343,7 @@ Nullable<Sampler*> DeviceVulkan::GetOrCreateSampler(
 }
 
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
+    if (IsDeviceLost()) return nullptr;
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.pNext = nullptr;
@@ -2275,13 +2351,14 @@ Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceC
     VkFence fence = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateFence(_device, &fenceInfo, this->GetAllocationCallbacks(), &fence);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateFence failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateLegacyFence")) RADRAY_ERR_LOG("vkCreateFence failed: {}", vr);
         return nullptr;
     }
     return make_unique<LegacyFenceVulkan>(this, fence);
 }
 
 Nullable<unique_ptr<LegacySemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(VkSemaphoreCreateFlags flags) noexcept {
+    if (IsDeviceLost()) return nullptr;
     VkSemaphoreCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     info.pNext = nullptr;
@@ -2289,13 +2366,14 @@ Nullable<unique_ptr<LegacySemaphoreVulkan>> DeviceVulkan::CreateLegacySemaphore(
     VkSemaphore semaphore = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSemaphore(_device, &info, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateLegacySemaphore")) RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
         return nullptr;
     }
     return make_unique<LegacySemaphoreVulkan>(this, semaphore);
 }
 
 Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaphore(uint64_t initValue) noexcept {
+    if (IsDeviceLost()) return nullptr;
     if (!_enabledFeatures.Vulkan12.timelineSemaphore) {
         RADRAY_ERR_LOG("vk feature timeline semaphore not supported");
         return nullptr;
@@ -2312,17 +2390,20 @@ Nullable<unique_ptr<TimelineSemaphoreVulkan>> DeviceVulkan::CreateTimelineSemaph
     VkSemaphore semaphore = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateSemaphore(_device, &createInfo, this->GetAllocationCallbacks(), &semaphore);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateTimelineSemaphore")) RADRAY_ERR_LOG("vkCreateSemaphore failed: {}", vr);
         return nullptr;
     }
-    return make_unique<TimelineSemaphoreVulkan>(this, semaphore);
+    auto timeline = make_unique<TimelineSemaphoreVulkan>(this, semaphore);
+    timeline->_lastCompletedValue = initValue;
+    return timeline;
 }
 
 Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBufferViewCreateInfo& info) noexcept {
+    if (IsDeviceLost()) return nullptr;
     VkBufferView bufferView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateBufferView(_device, &info, this->GetAllocationCallbacks(), &bufferView);
         vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateBufferView failed: {}", vr);
+        if (!MarkDeviceLost(vr, "CreateBufferView")) RADRAY_ERR_LOG("vkCreateBufferView failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<BufferViewVulkan>(this, bufferView);
@@ -2788,8 +2869,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
     vector<const char*> deviceExts{};
 #if defined(RADRAY_PLATFORM_WINDOWS)
-    const bool externalMemoryWin32 = desc.EnableExternalResource && IsValidateExtensions(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, deviceExtsAvailable);
-    const bool externalSemaphoreWin32 = desc.EnableExternalResource && IsValidateExtensions(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, deviceExtsAvailable);
+    const bool externalMemoryWin32 = IsValidateExtensions(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, deviceExtsAvailable);
+    const bool externalSemaphoreWin32 = IsValidateExtensions(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME, deviceExtsAvailable);
     if (externalMemoryWin32) needExts.emplace(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
     if (externalSemaphoreWin32) needExts.emplace(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
 #endif
@@ -2843,9 +2924,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 #if defined(RADRAY_PLATFORM_WINDOWS)
     deviceR->_externalMemoryWin32 = externalMemoryWin32 && deviceR->_ftb.vkGetMemoryWin32HandleKHR && deviceR->_ftb.vkGetMemoryWin32HandlePropertiesKHR;
     deviceR->_externalSemaphoreWin32 = externalSemaphoreWin32 && deviceR->_ftb.vkGetSemaphoreWin32HandleKHR && deviceR->_ftb.vkImportSemaphoreWin32HandleKHR;
-    if (desc.EnableExternalResource) {
-        deviceR->_externalExtension = make_unique<ExternalResourceVulkan>(deviceR.get());
-    }
 #endif
     if (const auto missing = GetMissingDeviceFunctionVulkan(deviceR->_ftb); !missing.empty()) {
         RADRAY_ERR_LOG("Vulkan required core device entry point is missing: {}", missing);
@@ -2888,6 +2966,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
                 j,
                 i.rawType,
                 queueFamilyProps[j.Family].queueFlags,
+                queueFamilyProps[j.Family].minImageTransferGranularity,
                 queueFamilyProps[j.Family].timestampValidBits);
             deviceR->_queues[(size_t)i.rawType].emplace_back(std::move(queue));
         }
@@ -3015,12 +3094,14 @@ QueueVulkan::QueueVulkan(
     QueueIndexInFamily family,
     QueueType type,
     VkQueueFlags queueFlags,
+    VkExtent3D minImageTransferGranularity,
     uint32_t timestampValidBits) noexcept
     : _device(device),
       _queue(queue),
       _family(family),
       _type(type),
       _queueFlags(queueFlags),
+      _minImageTransferGranularity(minImageTransferGranularity),
       _timestampValidBits(timestampValidBits) {
 #ifdef RADRAY_ENABLE_PROFILER
     // Context creation records a calibration command buffer several times (implicit resets) and waits for
@@ -3062,8 +3143,9 @@ void QueueVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+bool QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     RADRAY_PROFILE_SCOPE_N("QueueVulkan::Submit");
+    if (_device->IsDeviceLost()) return false;
     vector<VkCommandBuffer> cmdBufs;
     cmdBufs.reserve(desc.CmdBuffers.size());
     for (auto i : desc.CmdBuffers) {
@@ -3108,9 +3190,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         useTimelineSubmit = true;
         signalSemaphores.emplace_back(fenceObj->_fence->_semaphore);
         signalValues.emplace_back(signalValue);
-        if (signalValue + 1 > fenceObj->_fenceValue) {
-            fenceObj->_fenceValue = signalValue + 1;
-        }
     }
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -3136,19 +3215,31 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 
     if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, submitFence);
         vr != VK_SUCCESS) {
+        if (_device->MarkDeviceLost(vr, "vkQueueSubmit")) return false;
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
+    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
+        auto* fence = CastVkObject(desc.SignalFences[i]);
+        fence->_fenceValue = std::max(fence->_fenceValue, desc.SignalValues[i] + 1);
+    }
+    return true;
 }
 
 void QueueVulkan::Wait() noexcept {
+    if (_device->IsDeviceLost()) return;
     if (auto vr = _device->_ftb.vkQueueWaitIdle(_queue);
         vr != VK_SUCCESS) {
+        if (_device->MarkDeviceLost(vr, "vkQueueWaitIdle")) return;
         RADRAY_ABORT("vkQueueWaitIdle failed: {}", vr);
     }
 }
 
 QueueType QueueVulkan::GetQueueType() const noexcept {
     return _type;
+}
+
+uint32_t QueueVulkan::GetTimestampValidBits() const noexcept {
+    return _timestampValidBits;
 }
 
 TimestampClockCalibrationResult QueueVulkan::GetTimestampClockCalibration() const noexcept {
@@ -3190,8 +3281,8 @@ void CommandAllocatorVulkan::SetDebugName(std::string_view name) noexcept {
 
 void CommandAllocatorVulkan::Reset() noexcept {
     RADRAY_PROFILE_SCOPE_N("CommandAllocatorVulkan::Reset");
-    if (_used) {
-        if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0); vr != VK_SUCCESS)
+    if (_used && !_device->IsDeviceLost()) {
+        if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0); vr != VK_SUCCESS && !_device->MarkDeviceLost(vr, "vkResetCommandPool"))
             RADRAY_ABORT("vkResetCommandPool failed: {}", vr);
     }
     _used = false;
@@ -3268,6 +3359,7 @@ void CommandBufferVulkan::ReleaseRenderScopeReferences() noexcept {
 }
 
 void CommandBufferVulkan::Begin() noexcept {
+    if (_device->IsDeviceLost()) return;
     _cmdPool->_used = true;
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -3276,6 +3368,7 @@ void CommandBufferVulkan::Begin() noexcept {
     beginInfo.pInheritanceInfo = nullptr;
     if (auto vr = _device->_ftb.vkBeginCommandBuffer(_cmdBuffer, &beginInfo);
         vr != VK_SUCCESS) {
+        if (_device->MarkDeviceLost(vr, "vkBeginCommandBuffer")) return;
         RADRAY_ABORT("vkBeginCommandBuffer failed: {}", vr);
     }
 #ifdef RADRAY_ENABLE_PROFILER
@@ -3285,12 +3378,14 @@ void CommandBufferVulkan::Begin() noexcept {
 }
 
 void CommandBufferVulkan::End() noexcept {
+    if (_device->IsDeviceLost()) return;
 #ifdef RADRAY_ENABLE_PROFILER
     // Zone end timestamps must be recorded before vkEndCommandBuffer; unbalanced groups are closed here.
     _profilerZones->Zones.clear();
 #endif
     if (auto vr = _device->_ftb.vkEndCommandBuffer(_cmdBuffer);
         vr != VK_SUCCESS) {
+        if (_device->MarkDeviceLost(vr, "vkEndCommandBuffer")) return;
         RADRAY_ABORT("vkEndCommandBuffer failed: {}", vr);
     }
 }
@@ -3559,12 +3654,30 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
     const auto& target = r.Destination;
     VkBufferImageCopy copy{};
     copy.bufferOffset = r.SourceOffset;
-    copy.bufferRowLength = r.RowPitch / GetTextureFormatBytesPerPixel(dst->_format);
-    copy.bufferImageHeight = target.Height;
+    const auto block = GetTextureFormatBlockInfo(dst->_format);
+    copy.bufferRowLength = r.RowPitch / block.BytesPerBlock * block.BlockWidth;
+    copy.bufferImageHeight = r.RowsPerImage * block.BlockHeight;
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, target.MipLevel, target.ArrayLayer, 1};
-    copy.imageOffset = {static_cast<int32_t>(target.X), static_cast<int32_t>(target.Y), 0};
-    copy.imageExtent = {target.Width, target.Height, 1};
+    copy.imageOffset = {static_cast<int32_t>(target.X), static_cast<int32_t>(target.Y), static_cast<int32_t>(target.Z)};
+    copy.imageExtent = {target.Width, target.Height, target.Depth};
     _device->_ftb.vkCmdCopyBufferToImage(_cmdBuffer, src->_buffer, dst->_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    return true;
+}
+
+bool CommandBufferVulkan::CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept {
+    auto* source = CastVkObject(desc.Source);
+    auto* destination = CastVkObject(desc.Destination);
+    const auto& region = desc.Region;
+    const auto& image = region.Source;
+    const auto block = GetTextureFormatBlockInfo(source->_format);
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = region.DestinationOffset;
+    copy.bufferRowLength = region.RowPitch / block.BytesPerBlock * block.BlockWidth;
+    copy.bufferImageHeight = region.RowsPerImage * block.BlockHeight;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, image.MipLevel, image.ArrayLayer, 1};
+    copy.imageOffset = {static_cast<int32_t>(image.X), static_cast<int32_t>(image.Y), static_cast<int32_t>(image.Z)};
+    copy.imageExtent = {image.Width, image.Height, image.Depth};
+    _device->_ftb.vkCmdCopyImageToBuffer(_cmdBuffer, source->_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, destination->_buffer, 1, &copy);
     return true;
 }
 
@@ -3572,7 +3685,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     dstRange = ResolveSubresourceRange(dst->GetDesc(), dstRange);
-    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(dst->_format, dstRange.Aspects);
+    const auto block = GetTextureCopyBlockInfoVulkan(dst->_format, dstRange.Aspects);
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
     bool is3D = dst->_dim == TextureDimension::Dim3D;
@@ -3584,16 +3697,16 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
         uint32_t mipWidth = std::max(dst->_width >> mipLevel, 1u);
         uint32_t mipHeight = std::max(dst->_height >> mipLevel, 1u);
         uint32_t mipDepth = is3D ? std::max(dst->_depthOrArraySize >> mipLevel, 1u) : 1u;
-        uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
+        uint64_t tightBytesPerRow = static_cast<uint64_t>(block.Columns(mipWidth)) * block.BytesPerBlock;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
-        uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / bpp);
-        uint64_t bytesPerImage = alignedBytesPerRow * mipHeight;
+        uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / block.BytesPerBlock * block.BlockWidth);
+        uint64_t bytesPerImage = alignedBytesPerRow * block.Rows(mipHeight);
         for (uint32_t layer = 0; layer < layerCount; layer++) {
             uint32_t arrayLayer = dstRange.BaseArrayLayer + layer;
             VkBufferImageCopy copyInfo{};
             copyInfo.bufferOffset = bufferOffset;
             copyInfo.bufferRowLength = bufferRowLength;
-            copyInfo.bufferImageHeight = mipHeight;
+            copyInfo.bufferImageHeight = 0;
             copyInfo.imageSubresource.aspectMask = aspectMask;
             copyInfo.imageSubresource.mipLevel = mipLevel;
             copyInfo.imageSubresource.baseArrayLayer = arrayLayer;
@@ -3610,7 +3723,7 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     srcRange = ResolveSubresourceRange(src->GetDesc(), srcRange);
-    const uint32_t bpp = GetTextureCopyBytesPerPixelVulkan(src->_format, srcRange.Aspects);
+    const auto block = GetTextureCopyBlockInfoVulkan(src->_format, srcRange.Aspects);
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
     bool is3D = src->_dim == TextureDimension::Dim3D;
@@ -3622,16 +3735,16 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
         uint32_t mipWidth = std::max(src->_width >> mipLevel, 1u);
         uint32_t mipHeight = std::max(src->_height >> mipLevel, 1u);
         uint32_t mipDepth = is3D ? std::max(src->_depthOrArraySize >> mipLevel, 1u) : 1u;
-        uint64_t tightBytesPerRow = static_cast<uint64_t>(mipWidth) * bpp;
+        uint64_t tightBytesPerRow = static_cast<uint64_t>(block.Columns(mipWidth)) * block.BytesPerBlock;
         uint64_t alignedBytesPerRow = Align(tightBytesPerRow, rowPitchAlignment);
-        uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / bpp);
-        uint64_t bytesPerImage = alignedBytesPerRow * mipHeight;
+        uint32_t bufferRowLength = static_cast<uint32_t>(alignedBytesPerRow / block.BytesPerBlock * block.BlockWidth);
+        uint64_t bytesPerImage = alignedBytesPerRow * block.Rows(mipHeight);
         for (uint32_t layer = 0; layer < layerCount; layer++) {
             uint32_t arrayLayer = srcRange.BaseArrayLayer + layer;
             VkBufferImageCopy copyInfo{};
             copyInfo.bufferOffset = bufferOffset;
             copyInfo.bufferRowLength = bufferRowLength;
-            copyInfo.bufferImageHeight = mipHeight;
+            copyInfo.bufferImageHeight = 0;
             copyInfo.imageSubresource.aspectMask = aspectMask;
             copyInfo.imageSubresource.mipLevel = mipLevel;
             copyInfo.imageSubresource.baseArrayLayer = arrayLayer;
@@ -3650,7 +3763,7 @@ void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc
     const bool is3D = src->_dim == TextureDimension::Dim3D;
 
     VkImageCopy region{};
-    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.aspectMask = IsDepthStencilFormat(src->_format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
     region.srcSubresource.mipLevel = desc.SourceMipLevel;
     region.srcSubresource.baseArrayLayer = desc.SourceArrayLayer;
     region.srcSubresource.layerCount = is3D ? 1u : desc.ArrayLayerCount;
@@ -3658,7 +3771,7 @@ void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc
         static_cast<int32_t>(desc.SourceX),
         static_cast<int32_t>(desc.SourceY),
         static_cast<int32_t>(desc.SourceZ)};
-    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.dstSubresource.aspectMask = region.srcSubresource.aspectMask;
     region.dstSubresource.mipLevel = desc.DestinationMipLevel;
     region.dstSubresource.baseArrayLayer = desc.DestinationArrayLayer;
     region.dstSubresource.layerCount = is3D ? 1u : desc.ArrayLayerCount;
@@ -4125,26 +4238,24 @@ void FenceVulkan::Wait() noexcept {
 }
 
 void FenceVulkan::Wait(uint64_t value) noexcept {
-    if (!WaitFor(value, 30000)) RADRAY_ABORT("Vulkan fence value {} did not complete within 30 seconds", value);
+    if (!WaitFor(value, 30000) && !_device->IsDeviceLost()) RADRAY_ABORT("Vulkan fence value {} did not complete within 30 seconds", value);
 }
 
 bool FenceVulkan::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
-    if (_fence->GetCompletedValue() < value) {
-        VkSemaphore waitSemaphore = _fence->_semaphore;
-        VkSemaphoreWaitInfo waitInfo{};
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        waitInfo.pNext = nullptr;
-        waitInfo.flags = 0;
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &waitSemaphore;
-        waitInfo.pValues = &value;
-        const uint64_t duration = std::min(timeoutMs, (std::numeric_limits<uint64_t>::max() - 1) / 1000000) * 1000000;
-        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, duration); vr != VK_SUCCESS) {
-            if (vr == VK_TIMEOUT) return _fence->GetCompletedValue() >= value;
-            RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
-        }
+    if (_fence->GetCompletedValue() >= value) return !_device->IsDeviceLost();
+    if (timeoutMs == 0 || _device->IsDeviceLost()) return false;
+
+    VkSemaphoreWaitInfo waitInfo{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+    waitInfo.semaphoreCount = 1;
+    waitInfo.pSemaphores = &_fence->_semaphore;
+    waitInfo.pValues = &value;
+    const uint64_t duration = std::min(timeoutMs, (std::numeric_limits<uint64_t>::max() - 1) / 1000000) * 1000000;
+    const auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, duration);
+    if (vr != VK_SUCCESS && vr != VK_TIMEOUT) {
+        if (_device->MarkDeviceLost(vr, "vkWaitSemaphores")) return false;
+        RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
     }
-    return _fence->GetCompletedValue() >= value;
+    return _fence->GetCompletedValue() >= value && !_device->IsDeviceLost();
 }
 
 TimelineSemaphoreVulkan::TimelineSemaphoreVulkan(
@@ -4173,12 +4284,16 @@ void TimelineSemaphoreVulkan::DestroyImpl() noexcept {
 }
 
 uint64_t TimelineSemaphoreVulkan::GetCompletedValue() const noexcept {
+    auto previous = _lastCompletedValue.load();
+    if (_device->IsDeviceLost()) return previous;
     uint64_t result;
     if (auto vr = _device->_ftb.vkGetSemaphoreCounterValue(_device->_device, _semaphore, &result);
         vr != VK_SUCCESS) {
+        if (_device->MarkDeviceLost(vr, "vkGetSemaphoreCounterValue")) return _lastCompletedValue.load();
         RADRAY_ABORT("vkGetSemaphoreCounterValue failed: {}", vr);
     }
-    return result;
+    while (previous < result && !_lastCompletedValue.compare_exchange_weak(previous, result)) {}
+    return std::max(previous, result);
 }
 
 SurfaceVulkan::SurfaceVulkan(
@@ -4333,7 +4448,8 @@ Nullable<unique_ptr<LegacyFenceVulkan>> SwapChainVulkan::AcquireFenceFromPool() 
     return _device->CreateLegacyFence(0);
 }
 
-void SwapChainVulkan::RecordFailure(VkResult result) noexcept {
+void SwapChainVulkan::RecordFailure(VkResult result, bool deviceIdleAlreadyCalled) noexcept {
+    _device->MarkDeviceLost(result, "Vulkan swapchain", deviceIdleAlreadyCalled);
     if (result == VK_ERROR_DEVICE_LOST ||
         (result == VK_ERROR_SURFACE_LOST_KHR && _terminalResult != VK_ERROR_DEVICE_LOST)) {
         _terminalResult = result;
@@ -4342,7 +4458,7 @@ void SwapChainVulkan::RecordFailure(VkResult result) noexcept {
 }
 
 void SwapChainVulkan::CollectRetired() noexcept {
-    if (_terminalResult == VK_ERROR_DEVICE_LOST) return;
+    if (_device->IsDeviceLost() || _terminalResult == VK_ERROR_DEVICE_LOST) return;
     for (auto it = _pendingAcquires.begin(); it != _pendingAcquires.end();) {
         const VkResult status = _device->_ftb.vkGetFenceStatus(_device->_device, it->Fence->_fence);
         if (status == VK_NOT_READY) {
@@ -4376,9 +4492,9 @@ void SwapChainVulkan::CollectRetired() noexcept {
 
 void SwapChainVulkan::DrainAndClear() noexcept {
     const bool hasResources = _swapchain != VK_NULL_HANDLE || !_retiredGenerations.empty() || !_pendingAcquires.empty();
-    if (hasResources && _terminalResult != VK_ERROR_DEVICE_LOST) {
+    if (hasResources && !_device->IsDeviceLost() && _terminalResult != VK_ERROR_DEVICE_LOST) {
         const VkResult idle = _device->_ftb.vkDeviceWaitIdle(_device->_device);
-        this->RecordFailure(idle);
+        this->RecordFailure(idle, true);
         if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkDeviceWaitIdle failed: {}", idle);
         if (_terminalResult != VK_ERROR_DEVICE_LOST) {
             for (const auto& acquire : _pendingAcquires) {
@@ -4415,6 +4531,10 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 
 SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
+    if (_device->IsDeviceLost()) {
+        result.NativeStatusCode = VK_ERROR_DEVICE_LOST;
+        return result;
+    }
     this->CollectRetired();
     if (_terminalResult != VK_SUCCESS) {
         result.Status = SwapChainStatus::Error;
@@ -4505,6 +4625,7 @@ SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept
 
 SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
     SwapChainPresentResult result{};
+    if (_device->IsDeviceLost()) return DiscardAcquiredFrame(std::move(frame));
     this->CollectRetired();
 
     auto* readyToPresentSync = CastVkObject(static_cast<SwapChainSyncObject*>(_outstandingAcquire.readyToPresent));
@@ -4545,14 +4666,15 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame frame) noexcept {
 }
 
 SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame frame) noexcept {
-    RADRAY_UNUSED(frame);
-    RADRAY_ABORT("Vulkan does not support DiscardAcquiredFrame");
-    return {.NativeStatusCode = -1, .Status = SwapChainStatus::Error};
+    if (!_device->IsDeviceLost() && _terminalResult != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("Vulkan does not support discarding an acquired frame on a healthy device");
+    _outstandingAcquire.Reset();
+    InvalidateFrame(frame);
+    return {.NativeStatusCode = VK_ERROR_DEVICE_LOST, .Status = SwapChainStatus::Error};
 }
 
 bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
     this->CollectRetired();
-    if (!_surface || _terminalResult != VK_SUCCESS) return false;
+    if (!_surface || _device->IsDeviceLost() || _terminalResult != VK_SUCCESS) return false;
     SwapChainDescriptor desc = this->GetDesc();
     desc.BackBufferCount = _backBufferCount;
     desc.Width = width;
@@ -4953,11 +5075,16 @@ void GraphicsPipelineVulkan::SetDebugName(std::string_view name) noexcept {
     _device->SetObjectName(name, _pipeline);
 }
 
+Nullable<PipelineLayout*> GraphicsPipelineVulkan::GetLayout() const noexcept {
+    return IsValid() ? _layout : nullptr;
+}
+
 void GraphicsPipelineVulkan::DestroyImpl() noexcept {
     if (_pipeline != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;
     }
+    _layout = nullptr;
 }
 
 ComputePipelineVulkan::ComputePipelineVulkan(
@@ -4984,11 +5111,16 @@ void ComputePipelineVulkan::SetDebugName(std::string_view name) noexcept {
     _device->SetObjectName(name, _pipeline);
 }
 
+Nullable<PipelineLayout*> ComputePipelineVulkan::GetLayout() const noexcept {
+    return IsValid() ? _layout : nullptr;
+}
+
 void ComputePipelineVulkan::DestroyImpl() noexcept {
     if (_pipeline != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;
     }
+    _layout = nullptr;
 }
 
 ShaderModuleVulkan::ShaderModuleVulkan(
@@ -5048,36 +5180,52 @@ void SamplerVulkan::DestroyImpl() noexcept {
     }
 }
 
-RenderObjectTags VMA::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags VMA::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
 bool VulkanRenderPassCache::IsImageless() const noexcept {
     return _mode == FramebufferModeVulkan::Imageless;
 }
 
-RenderBackend DeviceVulkan::GetBackend() noexcept {
-    return RenderBackend::Vulkan;
+bool DeviceVulkan::IsDeviceLost() const noexcept {
+    return _deviceLost.load();
 }
 
-const RenderDeviceCapabilities& DeviceVulkan::GetCapabilities() const noexcept {
+bool DeviceVulkan::MarkDeviceLost(VkResult result, std::string_view operation, bool deviceIdleAlreadyCalled) noexcept {
+    if (result != VK_ERROR_DEVICE_LOST) return false;
+    if (!_deviceLost.exchange(true)) {
+        if (!deviceIdleAlreadyCalled) {
+            const auto idle = _ftb.vkDeviceWaitIdle(_device);
+            if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) RADRAY_ABORT("vkDeviceWaitIdle after device loss failed: {}", idle);
+        }
+        RADRAY_ERR_LOG("{}: device lost ({})", operation, result);
+    }
+    return true;
+}
+
+GpuBackend DeviceVulkan::GetBackend() noexcept {
+    return GpuBackend::Vulkan;
+}
+
+const GpuDeviceCapabilities& DeviceVulkan::GetCapabilities() const noexcept {
     return _capabilities;
 }
 
-RenderObjectTags LegacyFenceVulkan::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags LegacyFenceVulkan::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
-RenderObjectTags LegacySemaphoreVulkan::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags LegacySemaphoreVulkan::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
-RenderObjectTags TimelineSemaphoreVulkan::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags TimelineSemaphoreVulkan::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
-RenderObjectTags SurfaceVulkan::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags SurfaceVulkan::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
 bool SwapChainVulkan::OutstandingAcquire::IsValid() const noexcept {
@@ -5096,8 +5244,8 @@ Device* BufferVulkan::GetDevice() const noexcept {
     return _device;
 }
 
-RenderObjectTags BufferViewVulkan::GetTag() const noexcept {
-    return RenderObjectTag::UNKNOWN;
+GpuObjectTags BufferViewVulkan::GetTag() const noexcept {
+    return GpuObjectTag::UNKNOWN;
 }
 
 Device* ImageVulkan::GetDevice() const noexcept {

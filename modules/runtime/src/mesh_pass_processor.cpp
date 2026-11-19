@@ -95,6 +95,7 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
     if (firstElement == batch.Elements.end()) return;
 #if RADRAY_IS_DEBUG
     if (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, sharedState.AllowDeferredInstanceStream)) RADRAY_ABORT("MeshPassProcessor: invalid vertex input");
+    if (!output.HasValidatedElements(batch) && !ValidateMeshBatchElements(batch, sharedState.AllowDeferredInstanceStream)) RADRAY_ABORT("MeshPassProcessor: invalid mesh batch elements");
     if (sharedState.PushConstants && (sharedState.PushConstants->Data.empty() || !sharedState.PushConstants->Data.data())) RADRAY_ABORT("MeshPassProcessor: push constants require nonempty data");
 #endif
     MeshDrawCommand initializer;
@@ -112,7 +113,13 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
         bindings.VertexBuffers.push_back({stream.Binding, {stream.Buffer.Get(), stream.Offset, stream.Size}});
     }
     std::sort(bindings.VertexBuffers.begin(), bindings.VertexBuffers.end(), [](const auto& a, const auto& b) { return a.Binding < b.Binding; });
-    initializer.IndexBuffer = {firstElement->IndexBuffer.Get(), firstElement->IndexBufferOffset, firstElement->IndexStride};
+    for (const auto& layout : batch.VertexInput->Layouts) {
+        bindings.VertexStreamLayouts.push_back({layout.Binding, layout.ArrayStride, layout.StepMode});
+    }
+    std::sort(bindings.VertexStreamLayouts.begin(), bindings.VertexStreamLayouts.end(), [](const auto& a, const auto& b) { return a.Binding < b.Binding; });
+    const bool indexed = firstElement->IndexBuffer != nullptr;
+    initializer.IndexBuffer = indexed ? gpu::IndexBufferView{firstElement->IndexBuffer.Get(), firstElement->IndexBufferOffset, firstElement->IndexStride}
+                                      : gpu::IndexBufferView{nullptr, 0, 0};
     initializer.IndexCount = firstElement->IndexCount;
     initializer.FirstIndex = firstElement->FirstIndex;
     initializer.VertexOffset = firstElement->VertexOffset;
@@ -122,7 +129,11 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
         const auto& element = batch.Elements[index];
         if (element.IndexCount == 0 || element.InstanceCount == 0) continue;
         initializer.ValidElementMask |= uint32_t{1} << index;
-        if (&element != &*firstElement) bindings.ExtraElements.push_back({{element.IndexBuffer.Get(), element.IndexBufferOffset, element.IndexStride}, element.IndexCount, element.FirstIndex, element.VertexOffset, static_cast<uint32_t>(index)});
+        if (&element != &*firstElement) {
+            const gpu::IndexBufferView indexView = indexed ? gpu::IndexBufferView{element.IndexBuffer.Get(), element.IndexBufferOffset, element.IndexStride}
+                                                           : gpu::IndexBufferView{nullptr, 0, 0};
+            bindings.ExtraElements.push_back({indexView, element.IndexCount, element.FirstIndex, element.VertexOffset, static_cast<uint32_t>(index)});
+        }
         bindings.ElementInstances.push_back({element.FirstInstance, element.InstanceCount});
         hasDifferentInstances |= element.FirstInstance != firstElement->FirstInstance || element.InstanceCount != firstElement->InstanceCount;
     }
@@ -138,9 +149,10 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
         for (size_t index = 0; index + 1 < batch.Elements.size(); ++index) {
             const auto& a = batch.Elements[index];
             const auto& b = batch.Elements[index + 1];
+            const bool sameIndexBuffer = !indexed || (a.IndexBuffer == b.IndexBuffer && a.IndexBufferOffset == b.IndexBufferOffset && a.IndexStride == b.IndexStride);
             const bool merge = a.IndexCount != 0 && b.IndexCount != 0 && a.IndexCount % primitiveSize == 0 && b.IndexCount % primitiveSize == 0 &&
                                a.InstanceCount == 1 && b.InstanceCount == 1 && a.FirstInstance == b.FirstInstance &&
-                               a.IndexBuffer == b.IndexBuffer && a.IndexBufferOffset == b.IndexBufferOffset && a.IndexStride == b.IndexStride &&
+                               sameIndexBuffer &&
                                a.VertexOffset == b.VertexOffset && uint64_t{a.FirstIndex} + a.IndexCount == b.FirstIndex &&
                                runCount + b.IndexCount <= std::numeric_limits<uint32_t>::max();
             if (merge) {
@@ -150,10 +162,6 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
                 runCount = b.IndexCount;
         }
     }
-#if RADRAY_IS_DEBUG
-    const VisibleMeshDrawCommand visibleDefaults{.FirstInstance = firstElement->FirstInstance, .InstanceCount = firstElement->InstanceCount, .UseElementFirstInstance = true, .UseElementInstanceCount = true};
-    if (!MeshDrawCommandBindingStorage::ValidateConstruction(initializer, bindings, visibleDefaults, !output.HasValidatedElements(batch))) RADRAY_ABORT("MeshPassProcessor: invalid mesh draw command construction");
-#endif
     if (sharedState.AllowDeferredInstanceStream) {
         size_t instanceLayouts = 0;
         for (const auto& layout : batch.VertexInput->Layouts) {
@@ -163,6 +171,10 @@ void MeshPassProcessor::BuildMeshDrawCommands(const MeshBatchContext& context, c
         }
         if (instanceLayouts != 1) bindings.InstanceStreamBinding.reset();
     }
+#if RADRAY_IS_DEBUG
+    const VisibleMeshDrawCommand visibleDefaults{.FirstInstance = firstElement->FirstInstance, .InstanceCount = firstElement->InstanceCount, .UseElementFirstInstance = true, .UseElementInstanceCount = true};
+    if (!MeshDrawCommandBindingStorage::ValidateConstruction(initializer, bindings, visibleDefaults, !output.HasValidatedElements(batch), sharedState.AllowDeferredInstanceStream)) RADRAY_ABORT("MeshPassProcessor: invalid mesh draw command construction");
+#endif
     auto& storage = output.GetBindingStorage();
     storage.Store(initializer, bindings);
     const auto stateSortKey = sharedState.CustomStateSortKey ? *sharedState.CustomStateSortKey : storage.GetStateSortKey(initializer);

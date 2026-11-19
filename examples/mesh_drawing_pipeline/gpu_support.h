@@ -71,7 +71,7 @@ struct GpuResources {
     GpuResources(const GpuResources&) = delete;
     GpuResources& operator=(const GpuResources&) = delete;
 
-    bool Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory, Nullable<const shader::Client*> compiler = nullptr);
+    bool Initialize(gpu::GpuBackend backend, const std::filesystem::path& shaderDirectory, Nullable<const shader::Client*> compiler = nullptr);
     shader::DiagnosticResult<ShaderAsset> CompileCube(const shader::Client& compiler, const Uri& uri, bool swapColors);
     std::optional<MaterialPipelines> PreparePipelines(const VertexInput& input, AssetHandle<MaterialAsset> material);
     void SyncPipelines(const VertexInput& input, std::span<const AssetReloadEvent> events,

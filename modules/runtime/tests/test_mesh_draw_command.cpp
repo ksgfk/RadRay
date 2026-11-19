@@ -279,7 +279,7 @@ TEST_F(SubmitMeshDrawCommandsTest, BindsUnchangedStateOncePerCall) {
     EXPECT_EQ(Encoder.IndexBuffers.size(), 1u);
     EXPECT_EQ(Encoder.Stencils.size(), 1u);
     EXPECT_EQ(Encoder.ParameterBinds.size(), 1u);
-    EXPECT_EQ(Encoder.Pushes.size(), 2u);
+    EXPECT_EQ(Encoder.Pushes.size(), 1u);
     EXPECT_EQ(Encoder.Draws.size(), 2u);
 }
 
@@ -589,25 +589,477 @@ TEST_F(MeshDrawCommandTest, InterningDistinguishesFullViewsOffsetsAndPushConstan
 
 TEST_F(MeshDrawCommandTest, PipelineAndPayloadBucketOverflowDoesNotContaminateAdjacentFields) {
     MeshDrawCommandBindingStorage storage;
-    vector<FakePipeline> pipelines(260);
-    for (auto& pipeline : pipelines) {
-        MeshDrawCommand command;
-        command.Pipeline = &pipeline;
-        const auto key = storage.GetStateSortKey(command);
-        EXPECT_NE(key >> 24, 0u);
-        EXPECT_EQ(key & 0x00ffffff, 0u);
+    vector<test::FakePipelineLayout> layouts(20);
+    vector<FakePipeline> pipelines(520);
+    for (size_t i = 0; i < layouts.size(); ++i) {
+        pipelines[i].Layout = &layouts[i];
     }
-    for (uint32_t i = 0; i < 4100; ++i) {
+    for (size_t i = 0; i < pipelines.size(); ++i) {
+        MeshDrawCommand command;
+        command.Pipeline = &pipelines[i];
+        const auto key = storage.GetStateSortKey(command);
+        if (i < layouts.size()) {
+            EXPECT_NE(key >> 28, 0u);
+        } else {
+            EXPECT_EQ(key >> 28, 0u);
+        }
+        EXPECT_NE((key >> 19) & 0x1ffu, 0u);
+        EXPECT_EQ(key & 0x7ffffu, 0u);
+    }
+    const auto basePipelineBits = storage.GetStateSortKey(MeshDrawCommand{.Pipeline = &pipelines[0]}) & 0xfff80000u;
+    for (uint32_t i = 0; i < 600; ++i) {
         MeshDrawCommand command;
         command.Pipeline = &pipelines[0];
         MeshDrawCommandBindings bindings;
         bindings.ParameterSets.push_back({i, &Parameters, {}});
         storage.Store(command, bindings);
         const auto key = storage.GetStateSortKey(command);
-        EXPECT_EQ(key >> 24, 1u);
-        EXPECT_NE((key >> 12) & 4095, 0u);
-        EXPECT_EQ(key & 4095, 0u);
+        EXPECT_EQ(key & 0xfff80000u, basePipelineBits);
+        EXPECT_NE((key >> 10) & 0x1ffu, 0u);
+        EXPECT_EQ(key & 0x3ffu, 0u);
     }
+    for (uint32_t i = 0; i < 300; ++i) {
+        MeshDrawCommand command;
+        command.Pipeline = &pipelines[0];
+        command.IndexBuffer = {&Indices, i * 4u, 4u};
+        command.StencilReference = static_cast<uint8_t>(i & 0xffu);
+        const auto key = storage.GetStateSortKey(command);
+        EXPECT_EQ(key & 0xfffffc00u, basePipelineBits);
+        EXPECT_NE((key >> 2) & 0xffu, 0u);
+        if (command.StencilReference == 0) {
+            EXPECT_EQ(key & 0x3u, 0u);
+        } else {
+            EXPECT_NE(key & 0x3u, 0u);
+        }
+    }
+}
+
+TEST_F(MeshDrawCommandTest, StateSortKeyIsConsistentAcrossPoolsAndClustersLayoutIbStencil) {
+    test::FakePipelineLayout layoutA;
+    FakePipeline psoA1{&layoutA};
+    FakePipeline psoA2{&layoutA};
+    FakeBuffer indicesB{128, gpu::BufferUse::Index};
+
+    MeshDrawCommandBindingStorage cachedStorage;
+    MeshDrawCommandBindingStorage dynamicStorage;
+    // 在两个池里先插入不同数量的干扰项，使相同内容的局部索引不同。
+    {
+        auto noise = MakeCommand();
+        noise.Bindings.ParameterSets.push_back({3, &Parameters, {}});
+        MeshDrawCommand noiseCmd = noise;
+        dynamicStorage.Store(noiseCmd, noise.Bindings);
+    }
+
+    auto makeShared = [&](gpu::GraphicsPipelineState* pso, gpu::IndexBufferView ib, uint8_t stencil) {
+        auto cmd = MakeCommand();
+        cmd.Pipeline = pso;
+        cmd.IndexBuffer = ib;
+        cmd.StencilReference = stencil;
+        cmd.Bindings.ParameterSets.push_back({1, &Parameters, {{0, 0, 16}}});
+        cmd.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{1}, byte{2}, byte{3}, byte{4}}};
+        return cmd;
+    };
+
+    auto srcCached = makeShared(&psoA1, {&Indices, 0, 4}, 2);
+    auto srcDynamic = makeShared(&psoA1, {&Indices, 0, 4}, 2);
+    MeshDrawCommand cachedCmd = srcCached;
+    MeshDrawCommand dynamicCmd = srcDynamic;
+    cachedStorage.Store(cachedCmd, srcCached.Bindings);
+    dynamicStorage.Store(dynamicCmd, srcDynamic.Bindings);
+    ASSERT_NE(cachedCmd.PayloadIndex, dynamicCmd.PayloadIndex);
+    EXPECT_EQ(cachedStorage.GetStateSortKey(cachedCmd), dynamicStorage.GetStateSortKey(dynamicCmd));
+
+    // 同 Layout 的不同 PSO 共享高 4 位 Layout 桶。
+    auto srcA2 = makeShared(&psoA2, {&Indices, 0, 4}, 2);
+    MeshDrawCommand cmdA2 = srcA2;
+    cachedStorage.Store(cmdA2, srcA2.Bindings);
+    const auto keyA1 = cachedStorage.GetStateSortKey(cachedCmd);
+    const auto keyA2 = cachedStorage.GetStateSortKey(cmdA2);
+    EXPECT_EQ(keyA1 >> 28, keyA2 >> 28);
+    EXPECT_NE(keyA1 >> 28, 0u);
+
+    // 仅 IB 变化时只影响 Geometry 位域（bits 2..9），不影响 Layout/Pipeline/Payload/Stencil。
+    auto srcOtherIb = makeShared(&psoA1, {&indicesB, 0, 4}, 2);
+    MeshDrawCommand cmdOtherIb = srcOtherIb;
+    cachedStorage.Store(cmdOtherIb, srcOtherIb.Bindings);
+    auto srcNoIb = makeShared(&psoA1, {nullptr, 0, 0}, 2);
+    MeshDrawCommand cmdNoIb = srcNoIb;
+    cachedStorage.Store(cmdNoIb, srcNoIb.Bindings);
+    const auto keyOtherIb = cachedStorage.GetStateSortKey(cmdOtherIb);
+    const auto keyNoIb = cachedStorage.GetStateSortKey(cmdNoIb);
+    EXPECT_EQ(keyA1 & 0xfffffc03u, keyOtherIb & 0xfffffc03u);
+    EXPECT_EQ(keyA1 & 0xfffffc03u, keyNoIb & 0xfffffc03u);
+    EXPECT_NE((keyA1 >> 2) & 0xffu, (keyNoIb >> 2) & 0xffu);
+
+    // 仅 StencilReference 变化（0..3）精确落在低 2 位且不污染高位。
+    for (uint8_t s = 0; s < 4; ++s) {
+        auto srcS = makeShared(&psoA1, {&Indices, 0, 4}, s);
+        MeshDrawCommand cmdS = srcS;
+        cachedStorage.Store(cmdS, srcS.Bindings);
+        const auto keyS = cachedStorage.GetStateSortKey(cmdS);
+        EXPECT_EQ(keyS & 0xfffffffcu, keyA1 & 0xfffffffcu);
+        EXPECT_EQ(keyS & 0x3u, s);
+    }
+}
+
+TEST_F(MeshDrawCommandTest, NonIndexedSharedBufferWithDifferentStridesInternsSeparatelyAndValidatesInstanceBounds) {
+    MeshDrawCommandBindingStorage storage;
+    TestCommand source16;
+    source16.Pipeline = &Pipeline;
+    source16.IndexBuffer = {nullptr, 0, 0};
+    source16.IndexCount = 3;
+    source16.Bindings.VertexBuffers = {{0, {&Vertices, 0, 48}}, {1, {&Instances, 0, 64}}};
+    source16.Bindings.VertexStreamLayouts = {
+        {0, 12, gpu::VertexStepMode::Vertex},
+        {1, 16, gpu::VertexStepMode::Instance}};
+    source16.Bindings.InstanceStreamBinding = 1;
+
+    TestCommand source32 = source16;
+    source32.Bindings.VertexStreamLayouts[1].ArrayStride = 32;
+
+    MeshDrawCommand cmd16 = source16;
+    MeshDrawCommand cmd32 = source32;
+    storage.Store(cmd16, source16.Bindings);
+    storage.Store(cmd32, source32.Bindings);
+
+    EXPECT_NE(cmd16.VertexBuffersIndex, cmd32.VertexBuffersIndex);
+
+    // 64 B 实例流：绘制第 3 个实例（FirstInstance=2, InstanceCount=1 或 InstanceCount=3）：
+    // stride 16 需要 48 B <= 64 B（放行），stride 32 需要 96 B > 64 B（拒绝）。
+    const VisibleMeshDrawCommand thirdInstance{.CachedCommand = &cmd16, .FirstInstance = 2, .InstanceCount = 1};
+    const VisibleMeshDrawCommand thirdInstance32{.CachedCommand = &cmd32, .FirstInstance = 2, .InstanceCount = 1};
+    EXPECT_TRUE(ValidateMeshDrawCommand(cmd16, storage, thirdInstance));
+    EXPECT_FALSE(ValidateMeshDrawCommand(cmd32, storage, thirdInstance32));
+
+    const VisibleMeshDrawCommand threeInstances16{.CachedCommand = &cmd16, .FirstInstance = 0, .InstanceCount = 3};
+    const VisibleMeshDrawCommand threeInstances32{.CachedCommand = &cmd32, .FirstInstance = 0, .InstanceCount = 3};
+    EXPECT_TRUE(ValidateMeshDrawCommand(cmd16, storage, threeInstances16));
+    EXPECT_FALSE(ValidateMeshDrawCommand(cmd32, storage, threeInstances32));
+
+    RecordingEncoder encoder16;
+    ASSERT_TRUE(SubmitMeshDrawCommands(encoder16, std::span{&thirdInstance, 1}));
+    ASSERT_EQ(encoder16.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(encoder16.NonIndexedDraws[0].VertexCount, 3u);
+    EXPECT_EQ(encoder16.NonIndexedDraws[0].FirstInstance, 2u);
+    EXPECT_TRUE(encoder16.IndexBuffers.empty());
+
+#if RADRAY_IS_DEBUG
+    RecordingEncoder encoder32;
+    EXPECT_FALSE(SubmitMeshDrawCommands(encoder32, std::span{&thirdInstance32, 1}));
+    EXPECT_TRUE(encoder32.Order.empty());
+#endif
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, NonIndexedInstanceStreamOobRejectedBeforeRecording) {
+    TestCommand source;
+    source.Pipeline = &Pipeline;
+    source.IndexBuffer = {nullptr, 0, 0};
+    source.IndexCount = 3;
+    source.Bindings.VertexBuffers = {{0, {&Vertices, 0, 48}}};
+    source.Bindings.VertexStreamLayouts = {
+        {0, 12, gpu::VertexStepMode::Vertex},
+        {1, 16, gpu::VertexStepMode::Instance}};
+    source.Bindings.InstanceStreamBinding = 1;
+
+    auto visible = Dynamic(source);
+    visible.FirstInstance = 1;
+    visible.InstanceCount = 1;
+    // 实例流仅容纳 1 条 16 B 记录，FirstInstance=1, InstanceCount=1 越界。
+    const MeshPassSubmitArgs smallInstanceArgs{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 16}}};
+    EXPECT_FALSE(ValidateMeshDrawCommand(*visible.CachedCommand, Storage, visible, smallInstanceArgs));
+#if RADRAY_IS_DEBUG
+    EXPECT_FALSE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, smallInstanceArgs));
+    EXPECT_TRUE(Encoder.Order.empty());
+#endif
+    const MeshPassSubmitArgs sufficientInstanceArgs{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 32}}};
+    EXPECT_TRUE(ValidateMeshDrawCommand(*visible.CachedCommand, Storage, visible, sufficientInstanceArgs));
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, std::span{&visible, 1}, sufficientInstanceArgs));
+    ASSERT_EQ(Encoder.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(Encoder.NonIndexedDraws[0].FirstInstance, 1u);
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, NonIndexedDrawLeavesIndexBufferStateCacheIntact) {
+    auto indexed = MakeCommand();
+    TestCommand nonIndexed;
+    nonIndexed.Pipeline = &Pipeline;
+    nonIndexed.IndexBuffer = {nullptr, 0, 0};
+    nonIndexed.IndexCount = 3;
+    nonIndexed.FirstIndex = 1;
+    nonIndexed.Bindings.VertexBuffers = {{0, {&Vertices, 0, 48}}};
+    nonIndexed.Bindings.VertexStreamLayouts = {{0, 12, gpu::VertexStepMode::Vertex}};
+
+    const auto v0 = Dynamic(indexed);
+    const auto v1 = Dynamic(nonIndexed);
+    const auto v2 = Dynamic(indexed);
+    const array visible{v0, v1, v2};
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible));
+    EXPECT_EQ(Encoder.IndexBuffers.size(), 1u);
+    EXPECT_EQ(Encoder.Draws.size(), 2u);
+    ASSERT_EQ(Encoder.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(Encoder.NonIndexedDraws[0].VertexCount, 3u);
+    EXPECT_EQ(Encoder.NonIndexedDraws[0].FirstVertex, 1u);
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, IndirectCountAndBuildMatchContiguousMergeAndInstanceCountOverride) {
+    TestCommand source = MakeCommand();
+    source.ValidElementMask = 7;
+    source.Bindings.ExtraElements = {
+        {{&Indices, 0, 4}, 3, 3, 0, 1},
+        {{&Indices, 0, 4}, 3, 6, 0, 2}};
+    source.Bindings.ContiguousMergeMask = 3;
+    source.Bindings.AllElementsSharePrimaryIndexBuffer = true;
+
+    auto visible = Dynamic(source);
+    visible.InstanceCount = 1;
+    visible.UseElementInstanceCount = false;
+
+    MeshPassIndirectDrawCounts counts{};
+    PreparedMeshPassIndirectDraws prepared;
+    ASSERT_TRUE(CountMeshPassIndirectDraws(std::span{&visible, 1}, counts));
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(std::span{&visible, 1}, prepared));
+    EXPECT_EQ(counts.IndexedArgumentCount, 1u);
+    EXPECT_EQ(counts.NonIndexedArgumentCount, 0u);
+    ASSERT_EQ(prepared.Batches.size(), 1u);
+    ASSERT_EQ(prepared.IndexedArguments.size(), 1u);
+    EXPECT_EQ(prepared.IndexedArguments[0].IndexCount, 9u);
+    EXPECT_EQ(prepared.IndexedArguments[0].InstanceCount, 1u);
+
+    visible.InstanceCount = 2;
+    ASSERT_TRUE(CountMeshPassIndirectDraws(std::span{&visible, 1}, counts));
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(std::span{&visible, 1}, prepared));
+    EXPECT_EQ(counts.IndexedArgumentCount, 3u);
+    EXPECT_EQ(counts.NonIndexedArgumentCount, 0u);
+    ASSERT_EQ(prepared.Batches.size(), 1u);
+    EXPECT_EQ(prepared.Batches[0].ArgumentCount, 3u);
+    ASSERT_EQ(prepared.IndexedArguments.size(), 3u);
+    for (uint32_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(prepared.IndexedArguments[i].IndexCount, 3u);
+        EXPECT_EQ(prepared.IndexedArguments[i].FirstIndex, i * 3);
+        EXPECT_EQ(prepared.IndexedArguments[i].InstanceCount, 2u);
+    }
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, IndirectCountAndBuildRejectNullAndMalformedElementsAndAcceptZeroDraws) {
+    MeshPassIndirectDrawCounts counts{99, 99};
+    PreparedMeshPassIndirectDraws prepared;
+    EXPECT_TRUE(CountMeshPassIndirectDraws({}, counts));
+    EXPECT_EQ(counts.IndexedArgumentCount, 0u);
+    EXPECT_EQ(counts.NonIndexedArgumentCount, 0u);
+    EXPECT_TRUE(BuildMeshPassIndirectDraws({}, prepared));
+    EXPECT_TRUE(prepared.Batches.empty());
+
+    auto zeroInst = Dynamic(MakeCommand());
+    zeroInst.InstanceCount = 0;
+    EXPECT_TRUE(CountMeshPassIndirectDraws(std::span{&zeroInst, 1}, counts));
+    EXPECT_EQ(counts.IndexedArgumentCount, 0u);
+    EXPECT_TRUE(BuildMeshPassIndirectDraws(std::span{&zeroInst, 1}, prepared));
+    EXPECT_TRUE(prepared.Batches.empty());
+
+    // 默认构造（InstanceCount=1, CachedCommand=nullptr）须返回 false。
+    const VisibleMeshDrawCommand nullVisible{};
+    EXPECT_FALSE(CountMeshPassIndirectDraws(std::span{&nullVisible, 1}, counts));
+    EXPECT_FALSE(BuildMeshPassIndirectDraws(std::span{&nullVisible, 1}, prepared));
+
+    // ValidElementMask = 0b0101 但缺失 ExtraElements 须在展开前拒绝。
+    auto badMask = MakeCommand();
+    badMask.ValidElementMask = 5;
+    const auto badVisible = Dynamic(badMask);
+    EXPECT_FALSE(CountMeshPassIndirectDraws(std::span{&badVisible, 1}, counts));
+    EXPECT_FALSE(BuildMeshPassIndirectDraws(std::span{&badVisible, 1}, prepared));
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, IndirectBuildIsolatesCrossPoolCommandsInOrder) {
+    auto source = MakeCommand();
+    source.Bindings.ParameterSets.push_back({1, &Parameters, {{0, 0, 16}}});
+    const auto poolA = Dynamic(source);
+
+    source.Bindings.VertexBuffers[0].View.Offset = 16;
+    source.Bindings.ParameterSets[0].DynamicOffsets[0].Offset = 32;
+    MeshDrawCommandBindingStorage otherStorage;
+    MeshDrawCommand poolBCommand = source;
+    otherStorage.Store(poolBCommand, source.Bindings);
+    ASSERT_EQ(poolA.CachedCommand->VertexBuffersIndex, poolBCommand.VertexBuffersIndex);
+    ASSERT_EQ(poolA.CachedCommand->PayloadIndex, poolBCommand.PayloadIndex);
+
+    const array visible{poolA, VisibleMeshDrawCommand{.CachedCommand = &poolBCommand}, poolA};
+    PreparedMeshPassIndirectDraws prepared;
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(visible, prepared));
+    ASSERT_EQ(prepared.Batches.size(), 3u);
+    EXPECT_EQ(prepared.Batches[0].CommandIndex, 0u);
+    EXPECT_EQ(prepared.Batches[1].CommandIndex, 1u);
+    EXPECT_EQ(prepared.Batches[2].CommandIndex, 2u);
+    EXPECT_EQ(prepared.IndexedArguments.size(), 3u);
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, IndirectSubmitPreflightRejectsBeforeRecordingAndReportsMidRecordPushFailure) {
+    auto indexed = MakeCommand();
+    indexed.Bindings.InstanceStreamBinding = 1;
+    indexed.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{1}, byte{2}, byte{3}, byte{4}}};
+
+    TestCommand nonIndexed;
+    nonIndexed.Pipeline = &Pipeline;
+    nonIndexed.IndexBuffer = {nullptr, 0, 0};
+    nonIndexed.IndexCount = 3;
+    nonIndexed.Bindings.VertexBuffers = {{0, {&Vertices, 0, 48}}};
+    nonIndexed.Bindings.VertexStreamLayouts = {
+        {0, 12, gpu::VertexStepMode::Vertex},
+        {1, 16, gpu::VertexStepMode::Instance}};
+    nonIndexed.Bindings.InstanceStreamBinding = 1;
+    nonIndexed.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{5}, byte{6}, byte{7}, byte{8}}};
+
+    const auto v0 = Dynamic(indexed);
+    auto v1 = Dynamic(nonIndexed);
+    const array visible{v0, v1};
+    PreparedMeshPassIndirectDraws prepared;
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(visible, prepared));
+    ASSERT_EQ(prepared.Batches.size(), 2u);
+
+    FakeBuffer indirectBuf{256, gpu::BufferUse::Indirect};
+    FakeBuffer wrongUsageBuf{256, gpu::BufferUse::Vertex};
+    const RDGBufferSlice validIndexed{&indirectBuf, 0, sizeof(gpu::DrawIndexedIndirectArguments)};
+    const RDGBufferSlice validNonIndexed{&indirectBuf, 64, sizeof(gpu::DrawIndirectArguments)};
+    const MeshPassSubmitArgs validArgs{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 32}}};
+
+    gpu::GpuDeviceCapabilities caps{};
+    caps.Features.IndirectDraw = true;
+    caps.Features.IndirectFirstInstance = true;
+    caps.Limits.MaxDrawIndirectCount = 16;
+
+    // 1. 截断的 visibleCommands span -> 0 绑定 0 绘制。
+    {
+        RecordingEncoder enc;
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(enc, std::span{visible}.first(1), prepared, validIndexed, validNonIndexed, caps, validArgs));
+        EXPECT_TRUE(enc.Order.empty());
+    }
+    // 2. 回退批次 CPU 参数数组少 1 条 -> 0 绑定 0 绘制。
+    {
+        auto shortCpu = prepared;
+        shortCpu.NonIndexedArguments.clear();
+        auto fallbackCaps = caps;
+        fallbackCaps.Features.IndirectDraw = false;
+        RecordingEncoder enc;
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(enc, visible, shortCpu, {}, {}, fallbackCaps, validArgs));
+        EXPECT_TRUE(enc.Order.empty());
+    }
+    // 3. 第 1 批有效而第 2 批无索引切片少 1 条或缺少 Indirect 用途 -> 0 绑定 0 绘制。
+    {
+        RecordingEncoder encShort;
+        const RDGBufferSlice shortNonIndexed{&indirectBuf, 64, sizeof(gpu::DrawIndirectArguments) - 1};
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(encShort, visible, prepared, validIndexed, shortNonIndexed, caps, validArgs));
+        EXPECT_TRUE(encShort.Order.empty());
+
+        RecordingEncoder encWrongUsage;
+        const RDGBufferSlice badUsageNonIndexed{&wrongUsageBuf, 0, sizeof(gpu::DrawIndirectArguments)};
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(encWrongUsage, visible, prepared, validIndexed, badUsageNonIndexed, caps, validArgs));
+        EXPECT_TRUE(encWrongUsage.Order.empty());
+    }
+    // 4. 无索引实例流越界（仅容纳 1 条记录，FirstInstance=1, InstanceCount=1）在 MDI 路径被前置拒绝。
+#if RADRAY_IS_DEBUG
+    {
+        auto oobVisible = visible;
+        oobVisible[1].FirstInstance = 1;
+        oobVisible[1].InstanceCount = 1;
+        PreparedMeshPassIndirectDraws oobPrepared;
+        ASSERT_TRUE(BuildMeshPassIndirectDraws(oobVisible, oobPrepared));
+        const MeshPassSubmitArgs smallInstArgs{.InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 16}}};
+        RecordingEncoder encOob;
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(encOob, oobVisible, oobPrepared, validIndexed, validNonIndexed, caps, smallInstArgs));
+        EXPECT_TRUE(encOob.Order.empty());
+    }
+#endif
+    // 5. 预检全部通过，第 2 批 SetPushConstants 失败 -> 立即返回 false。
+    {
+        RecordingEncoder encPushFail;
+        encPushFail.FailPushConstantsOnCall = 2;
+        EXPECT_FALSE(SubmitMeshPassIndirectDraws(encPushFail, visible, prepared, validIndexed, validNonIndexed, caps, validArgs));
+        EXPECT_EQ(encPushFail.IndexedIndirectDraws.size(), 1u);
+        EXPECT_TRUE(encPushFail.IndirectDraws.empty());
+    }
+    // 6. MaxDrawIndirectCount == 0 时允许空切片并走直接绘制回退返回 true。
+    {
+        auto zeroMaxCaps = caps;
+        zeroMaxCaps.Limits.MaxDrawIndirectCount = 0;
+        RecordingEncoder encZeroMax;
+        ASSERT_TRUE(SubmitMeshPassIndirectDraws(encZeroMax, visible, prepared, {}, {}, zeroMaxCaps, validArgs));
+        EXPECT_EQ(encZeroMax.Draws.size(), 1u);
+        EXPECT_EQ(encZeroMax.NonIndexedDraws.size(), 1u);
+        EXPECT_TRUE(encZeroMax.IndexedIndirectDraws.empty());
+        EXPECT_TRUE(encZeroMax.IndirectDraws.empty());
+    }
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, PushConstantsDeduplicateAcrossIdenticalInterleavedAndCrossPoolCommands) {
+    auto cmdA = MakeCommand();
+    cmdA.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{1}, byte{2}, byte{3}, byte{4}}};
+    auto cmdNone = MakeCommand();
+    auto cmdB = MakeCommand();
+    cmdB.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {byte{9}, byte{8}, byte{7}, byte{6}}};
+
+    const auto vA = Dynamic(cmdA);
+    const auto vNone = Dynamic(cmdNone);
+    const auto vB = Dynamic(cmdB);
+
+    MeshDrawCommandBindingStorage otherStorage;
+    MeshDrawCommand crossPoolA = cmdA;
+    otherStorage.Store(crossPoolA, cmdA.Bindings);
+    const VisibleMeshDrawCommand vCrossPoolA{.CachedCommand = &crossPoolA};
+
+    // 序列：A -> A（跳过）-> None（保留 A）-> A（跳过）-> 跨池同字节 A（跳过）-> B（写入）-> A（写入）。
+    const array visible{vA, vA, vNone, vA, vCrossPoolA, vB, vA};
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible));
+    EXPECT_EQ(Encoder.Draws.size(), 7u);
+    ASSERT_EQ(Encoder.Pushes.size(), 3u);
+    EXPECT_EQ(Encoder.Pushes[0][0], byte{1});
+    EXPECT_EQ(Encoder.Pushes[1][0], byte{9});
+    EXPECT_EQ(Encoder.Pushes[2][0], byte{1});
+}
+
+TEST_F(SubmitMeshDrawCommandsTest, SameLayoutPipelineChangePreservesParametersAndPushConstants) {
+    test::FakePipelineLayout layoutA;
+    test::FakePipelineLayout layoutB;
+    FakePipeline psoA1{&layoutA};
+    FakePipeline psoA2{&layoutA};
+    FakePipeline psoB{&layoutB};
+    FakeParameterSet passSet;
+    FakeParameterSet matSet1;
+    FakeParameterSet matSet2;
+
+    auto makeCmd = [&](gpu::GraphicsPipelineState* pso, gpu::ShaderParameterSet* matSet, byte pushTag) {
+        auto cmd = MakeInstancedCommand();
+        cmd.Pipeline = pso;
+        cmd.Bindings.ParameterSets.push_back({1, matSet, {}});
+        cmd.Bindings.PushConstants = MeshPushConstantCommandBinding{0, 0, {pushTag, byte{0}, byte{0}, byte{0}}};
+        return Dynamic(cmd);
+    };
+
+    const auto v0 = makeCmd(&psoA1, &matSet1, byte{1});
+    const auto v1 = makeCmd(&psoA2, &matSet1, byte{1});  // 同 Layout、同参数集、同 Push：仅切 PSO + 重绑 VB/实例流
+    const auto v2 = makeCmd(&psoA2, &matSet2, byte{2});  // 同 PSO、换参数集、换 Push
+    const auto v3 = makeCmd(&psoB, &matSet2, byte{2});   // 换 Layout：重绑 Pass 参数集、命令参数集与 Push
+
+    const MeshShaderParameterBinding passBinding{0, &passSet, {}};
+    const MeshPassSubmitArgs args{
+        .ParameterSets = std::span{&passBinding, 1},
+        .InstanceStream = gpu::VertexBufferBinding{1, {&Instances, 0, 64}}};
+
+    const array visible{v0, v1, v2, v3};
+    ASSERT_TRUE(SubmitMeshDrawCommands(Encoder, visible, args));
+    EXPECT_EQ(Encoder.Pipelines, (vector<gpu::GraphicsPipelineState*>{&psoA1, &psoA2, &psoB}));
+    // 3 次 PSO 切换，每次都重绑实例流 + 主顶点流 = 6 次 BindVertexBuffers。
+    EXPECT_EQ(Encoder.VertexCalls.size(), 6u);
+    // ParameterBinds：v0(Pass+matSet1) + v1(0) + v2(matSet2) + v3(Pass+matSet2) = 5。
+    ASSERT_EQ(Encoder.ParameterBinds.size(), 5u);
+    EXPECT_EQ(Encoder.ParameterBinds[0].Set, &passSet);
+    EXPECT_EQ(Encoder.ParameterBinds[1].Set, &matSet1);
+    EXPECT_EQ(Encoder.ParameterBinds[2].Set, &matSet2);
+    EXPECT_EQ(Encoder.ParameterBinds[3].Set, &passSet);
+    EXPECT_EQ(Encoder.ParameterBinds[4].Set, &matSet2);
+    // Pushes：v0(1) + v1(跳过) + v2(2) + v3(换 Layout 重写 2) = 3。
+    ASSERT_EQ(Encoder.Pushes.size(), 3u);
+    EXPECT_EQ(Encoder.Pushes[0][0], byte{1});
+    EXPECT_EQ(Encoder.Pushes[1][0], byte{2});
+    EXPECT_EQ(Encoder.Pushes[2][0], byte{2});
+    EXPECT_EQ(Encoder.Draws.size(), 4u);
 }
 
 }  // 匿名命名空间

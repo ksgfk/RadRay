@@ -1,6 +1,6 @@
 > - 适用: 选择当前基准、比较改动或解读历史性能报告
 > - 权威: 基础模块当前测量入口；历史数值只属于各报告基线
-> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_rdg_upload/`, `tools/measure_rdg_upload_gpu.py`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`
+> - 锚点: `benchmarks/CMakeLists.txt`, `benchmarks/bench_read_obj/`, `benchmarks/bench_sparse_set/`, `benchmarks/bench_rdg_upload/`, `benchmarks/bench_transient_parameter_pool/`, `tools/measure_rdg_upload_gpu.py`, `modules/runtime/src/frame_scheduler.cpp`, `modules/runtime/src/frame_slot.cpp`, `modules/runtime/src/render_graph_pipeline.cpp`, `modules/runtime/src/scene.cpp`, `modules/runtime/src/mesh_draw_command.cpp`, `modules/runtime/src/rdg.cpp`, `modules/runtime/src/transient_parameter_pool.cpp`
 
 # 性能测量
 
@@ -15,8 +15,11 @@
 | `bench_sparse_set` | SparseSet 的扩容、访问、删除、复用与历史高水位压力；无需外部资产 |
 | `bench_rdg_upload` | runtime 的声明、编译、准备、录制及上传页复用；fake 只记录 GPU Copy 命令 |
 | `bench_rdg_upload_gpu` | 真实 D3D12/Vulkan 上传与中间消费者；独立外围 timestamp 及 CPU Prepare/Record |
+| `bench_transient_parameter_pool` | `TransientParameterSetPool` 在 65,536 峰值后的稀疏帧按条目清桶与全表清零对照，以及持续 65,536 键高负载 `BeginFrame()` 耗时 |
 
 ## RDG 上传
+
+启用 profiler 时，D3D12 分别记录每个设备的 shader-visible 资源堆和采样器堆的同时在用描述符峰值。Tracy 的 `RadRay.D3D12.ResourceHeap.PeakDescriptors` 与 `RadRay.D3D12.SamplerHeap.PeakDescriptors` 在刷新峰值时采样，单位为描述符槽位。
 
 `bench_rdg_upload` 随 runtime 与 benchmarks 开关启用，无需 shader 或真实 GPU。
 `RDGUpload/<负载>/<阶段>` 分别测 Build、Compile、Prepare、Record、Frame（Build 至状态发布）和 Recycle。

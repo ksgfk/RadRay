@@ -11,6 +11,90 @@ namespace {
 
 using vulkan::SwapChainRetirementVulkan;
 
+TEST(VulkanDeviceLoss, FrozenTimelineAndSingleIdleBeforeNativeDestruction) {
+    struct Probe {
+        bool LoseCounter{};
+        int Idles{}, Signals{}, Semaphores{}, Swapchains{}, Devices{};
+        int CounterReads{}, Waits{};
+    };
+    enum class LossAt { Submit, Drain, Counter };
+    for (const LossAt lossAt : {LossAt::Submit, LossAt::Drain, LossAt::Counter}) {
+        SCOPED_TRACE(static_cast<int>(lossAt));
+        Probe probe{};
+        vulkan::InstanceVulkanImpl instance{VK_NULL_HANDLE, std::nullopt, {}, {}};
+        {
+            vulkan::DeviceVulkan device{&instance, VK_NULL_HANDLE, reinterpret_cast<VkDevice>(&probe)};
+            device._ftb.vkDeviceWaitIdle = +[](VkDevice d) -> VkResult {
+                ++reinterpret_cast<Probe*>(d)->Idles;
+                return VK_ERROR_DEVICE_LOST;
+            };
+            device._ftb.vkGetSemaphoreCounterValue = +[](VkDevice d, VkSemaphore, uint64_t* value) -> VkResult {
+                auto& trace = *reinterpret_cast<Probe*>(d);
+                ++trace.CounterReads;
+                if (trace.LoseCounter) return VK_ERROR_DEVICE_LOST;
+                *value = 7;
+                return VK_SUCCESS;
+            };
+            device._ftb.vkWaitSemaphores = +[](VkDevice d, const VkSemaphoreWaitInfo*, uint64_t) -> VkResult {
+                ++reinterpret_cast<Probe*>(d)->Waits;
+                return VK_TIMEOUT;
+            };
+            device._ftb.vkQueueSubmit = +[](VkQueue q, uint32_t, const VkSubmitInfo*, VkFence) -> VkResult {
+                ++reinterpret_cast<Probe*>(q)->Signals;
+                return VK_ERROR_DEVICE_LOST;
+            };
+            device._ftb.vkDestroySemaphore = +[](VkDevice d, VkSemaphore, const VkAllocationCallbacks*) {
+                auto& trace = *reinterpret_cast<Probe*>(d);
+                EXPECT_EQ(trace.Idles, 1);
+                ++trace.Semaphores;
+            };
+            device._ftb.vkDestroySwapchainKHR = +[](VkDevice d, VkSwapchainKHR, const VkAllocationCallbacks*) {
+                auto& trace = *reinterpret_cast<Probe*>(d);
+                EXPECT_EQ(trace.Idles, 1);
+                ++trace.Swapchains;
+            };
+            device._ftb.vkDestroyDevice = +[](VkDevice d, const VkAllocationCallbacks*) {
+                auto& trace = *reinterpret_cast<Probe*>(d);
+                EXPECT_EQ(trace.Idles, 1);
+                ++trace.Devices;
+            };
+            vulkan::QueueVulkan queue{&device, reinterpret_cast<VkQueue>(&probe), {}, QueueType::Direct, VK_QUEUE_GRAPHICS_BIT, {1, 1, 1}, 0};
+            vulkan::FenceVulkan fence{&device, make_unique<vulkan::TimelineSemaphoreVulkan>(&device, reinterpret_cast<VkSemaphore>(&probe))};
+            vulkan::SwapChainVulkan chain{&device, &queue, nullptr, reinterpret_cast<VkSwapchainKHR>(&probe), {}};
+            EXPECT_TRUE(fence.WaitFor(7, 0));
+            EXPECT_EQ(probe.CounterReads, 1);
+            EXPECT_FALSE(fence.WaitFor(8, 0));
+            EXPECT_EQ(probe.Waits, 0);
+            if (lossAt == LossAt::Counter) {
+                probe.LoseCounter = true;
+                EXPECT_FALSE(device.IsDeviceLost());
+                EXPECT_FALSE(fence.WaitFor(7, 0));
+            } else if (lossAt == LossAt::Drain) {
+                chain.Destroy();
+            } else {
+                Fence* signal = &fence;
+                uint64_t value = 8;
+                EXPECT_FALSE(queue.Submit({.SignalFences = {&signal, 1}, .SignalValues = {&value, 1}}));
+                EXPECT_LT(fence.GetLastSignaledValue(), value);
+            }
+            EXPECT_TRUE(device.IsDeviceLost());
+            EXPECT_EQ(probe.Idles, 1);
+            EXPECT_FALSE(fence.WaitFor(7, 0));
+            probe.LoseCounter = true;
+            EXPECT_EQ(fence.GetCompletedValue(), 7u);
+            EXPECT_FALSE(fence.WaitFor(8, 30000));
+            fence.Wait(8);
+            EXPECT_FALSE(queue.Submit({}));
+            queue.Wait();
+            EXPECT_EQ(probe.Waits, 0);
+        }
+        EXPECT_EQ(probe.Signals, lossAt == LossAt::Submit ? 1 : 0);
+        EXPECT_EQ(probe.Semaphores, 1);
+        EXPECT_EQ(probe.Swapchains, 1);
+        EXPECT_EQ(probe.Devices, 1);
+    }
+}
+
 TEST(VulkanSwapChainRetirement, RetiredGenerationWaitsForSuccessorPresentAndOwnAcquires) {
     SwapChainRetirementVulkan tracker;
     const auto old = tracker.BeginGeneration();
@@ -90,7 +174,7 @@ TEST(VulkanSwapChainRetirement, TrackersDoNotShareProof) {
 class VulkanSwapChainWindowTest : public test::GpuTest {
 protected:
     void SetUp() override {
-        _device = OpenDevice(RenderBackend::Vulkan).Get();
+        _device = OpenDevice(GpuBackend::Vulkan).Get();
         if (!_device) return;
         _window = ::CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"RadRay swapchain test", WS_OVERLAPPEDWINDOW,
                                     0, 0, 160, 120, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);

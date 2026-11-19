@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <optional>
-#include <string_view>
 #include <variant>
 #include <limits>
 
@@ -105,7 +104,7 @@ struct ExternalAllocationInfo {
 struct ExternalBufferInfo {
     ExternalMemoryHandleType HandleType{ExternalMemoryHandleType::D3D12Resource};
     ExternalDeviceIdentity Device;
-    RenderBackend SourceBackend{RenderBackend::D3D12};
+    GpuBackend SourceBackend{GpuBackend::D3D12};
     BufferDescriptor Descriptor;
     uint64_t NativeSize{0};
     uint32_t NativeFlags{0};
@@ -118,7 +117,7 @@ struct ExternalBufferInfo {
 struct ExternalTextureInfo {
     ExternalMemoryHandleType HandleType{ExternalMemoryHandleType::D3D12Resource};
     ExternalDeviceIdentity Device;
-    RenderBackend SourceBackend{RenderBackend::D3D12};
+    GpuBackend SourceBackend{GpuBackend::D3D12};
     TextureDescriptor Descriptor;
     uint32_t NativeFormat{0};
     uint32_t NativeFlags{0};
@@ -152,7 +151,7 @@ struct ExternalFenceExport {
     OwnedExternalHandle Handle;
 };
 
-/// Borrowed from Device; all resources and GPU uses must finish before Device destruction.
+/// Destroy this extension before its device. Resources may outlive the extension.
 /// Import borrows the handle on both success and failure and never submits or waits.
 /// Caller guarantees valid descriptors, matching metadata and live objects from this device.
 /// Export requires a CreateExportable object. These preconditions are not validated.
@@ -175,9 +174,4 @@ public:
     virtual ExternalResult<unique_ptr<Fence>> ImportFence(BorrowedExternalHandle handle, const ExternalFenceInfo& info) noexcept = 0;
 };
 
-namespace detail {
-std::string_view ExternalHandleName(ExternalMemoryHandleType type) noexcept;
-std::string_view ExternalHandleName(ExternalFenceHandleType type) noexcept;
-ExternalError LogExternalError(std::string_view operation, RenderBackend backend, ExternalError error, std::string_view parameters) noexcept;
-}  // namespace detail
 }  // namespace radray::gpu

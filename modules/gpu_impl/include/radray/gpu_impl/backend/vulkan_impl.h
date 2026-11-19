@@ -2,6 +2,7 @@
 
 #ifdef RADRAY_ENABLE_VULKAN
 
+#include <atomic>
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -20,7 +21,7 @@
 #include <radray/gpu_impl/backend/vulkan_helper.h>
 #include <radray/gpu_impl/sampler_cache.h>
 #include <radray/gpu/types.h>
-#include <radray/gpu_impl/external_resource.h>
+#include <radray/gpu/external_resource.h>
 
 namespace radray::gpu::vulkan {
 
@@ -83,18 +84,18 @@ public:
     vector<string> _exts;
     vector<string> _layers;
 
-    RenderLogCallback _logCallback{nullptr};
+    GpuLogCallback _logCallback{nullptr};
     void* _logUserData{nullptr};
     VkDebugUtilsMessengerEXT _debugMessenger{VK_NULL_HANDLE};
 };
 
-class VMA final : public RenderBase {
+class VMA final : public GpuObject {
 public:
     explicit VMA(VmaAllocator alloc) noexcept;
 
     ~VMA() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept override;
+    GpuObjectTags GetTag() const noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -293,13 +294,16 @@ public:
 
     void Destroy() noexcept override;
 
-    RenderBackend GetBackend() noexcept override;
+    bool IsDeviceLost() const noexcept override;
+    bool MarkDeviceLost(VkResult result, std::string_view operation, bool deviceIdleAlreadyCalled = false) noexcept;
+    std::atomic<bool> _deviceLost{false};
+    GpuBackend GetBackend() noexcept override;
 
-    Nullable<ExternalResourceExtension*> GetExternalResourceExtension() noexcept override;
+    Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override;
 
     DeviceDetail GetDetail() const noexcept override;
 
-    const RenderDeviceCapabilities& GetCapabilities() const noexcept override;
+    const GpuDeviceCapabilities& GetCapabilities() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
@@ -333,6 +337,7 @@ public:
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<PipelineCache>> CreatePipelineCache(std::span<const byte> initialData) noexcept override;
 
     Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
 
@@ -376,8 +381,7 @@ public:
     DeviceFeaturesVulkan _enabledFeatures;
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
-    RenderDeviceCapabilities _capabilities;
-    unique_ptr<ExternalResourceExtension> _externalExtension;
+    GpuDeviceCapabilities _capabilities;
     bool _externalMemoryWin32{false};
     bool _externalSemaphoreWin32{false};
 };
@@ -390,6 +394,7 @@ public:
         QueueIndexInFamily family,
         QueueType type,
         VkQueueFlags queueFlags,
+        VkExtent3D minImageTransferGranularity,
         uint32_t timestampValidBits = 0) noexcept;
 
     ~QueueVulkan() noexcept override;
@@ -398,11 +403,12 @@ public:
 
     void Destroy() noexcept override;
 
-    void Submit(const CommandQueueSubmitDescriptor& desc) noexcept override;
+    bool Submit(const CommandQueueSubmitDescriptor& desc) noexcept override;
 
     void Wait() noexcept override;
 
     QueueType GetQueueType() const noexcept override;
+    uint32_t GetTimestampValidBits() const noexcept override;
 
     TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override;
 
@@ -414,6 +420,7 @@ public:
     QueueIndexInFamily _family;
     QueueType _type;
     VkQueueFlags _queueFlags{0};
+    VkExtent3D _minImageTransferGranularity{};
     uint32_t _timestampValidBits{0};
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU timestamp context for this queue; null when unavailable.
@@ -487,6 +494,7 @@ public:
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
 
+    bool CopyTextureToBufferRegion(const TextureToBufferCopyDescriptor& desc) noexcept override;
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
@@ -610,7 +618,7 @@ public:
     PipelineLayoutVulkan* _boundLayout{nullptr};
 };
 
-class LegacyFenceVulkan final : public RenderBase {
+class LegacyFenceVulkan final : public GpuObject {
 public:
     LegacyFenceVulkan(
         DeviceVulkan* device,
@@ -618,7 +626,7 @@ public:
 
     ~LegacyFenceVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final;
+    GpuObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -633,7 +641,7 @@ public:
     VkFence _fence;
 };
 
-class LegacySemaphoreVulkan final : public RenderBase {
+class LegacySemaphoreVulkan final : public GpuObject {
 public:
     LegacySemaphoreVulkan(
         DeviceVulkan* device,
@@ -641,7 +649,7 @@ public:
 
     ~LegacySemaphoreVulkan() noexcept;
 
-    RenderObjectTags GetTag() const noexcept final;
+    GpuObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -688,7 +696,7 @@ public:
     OwnedExternalHandle _externalHandle;
 };
 
-class TimelineSemaphoreVulkan final : public RenderBase {
+class TimelineSemaphoreVulkan final : public GpuObject {
 public:
     TimelineSemaphoreVulkan(
         DeviceVulkan* device,
@@ -696,13 +704,14 @@ public:
 
     ~TimelineSemaphoreVulkan() noexcept;
 
-    RenderObjectTags GetTag() const noexcept final;
+    GpuObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
     uint64_t GetCompletedValue() const noexcept;
+    mutable std::atomic<uint64_t> _lastCompletedValue{0};
 
 public:
     void DestroyImpl() noexcept;
@@ -711,7 +720,7 @@ public:
     VkSemaphore _semaphore;
 };
 
-class SurfaceVulkan final : public RenderBase {
+class SurfaceVulkan final : public GpuObject {
 public:
     SurfaceVulkan(
         DeviceVulkan* device,
@@ -719,7 +728,7 @@ public:
 
     ~SurfaceVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final;
+    GpuObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -807,7 +816,7 @@ public:
     Nullable<unique_ptr<LegacyFenceVulkan>> AcquireFenceFromPool() noexcept;
     void CollectRetired() noexcept;
     void DrainAndClear() noexcept;
-    void RecordFailure(VkResult result) noexcept;
+    void RecordFailure(VkResult result, bool deviceIdleAlreadyCalled = false) noexcept;
 
     class Frame {
     public:
@@ -940,7 +949,7 @@ public:
     OwnedExternalHandle _externalHandle;
 };
 
-class BufferViewVulkan final : public RenderBase {
+class BufferViewVulkan final : public GpuObject {
 public:
     BufferViewVulkan(
         DeviceVulkan* device,
@@ -948,7 +957,7 @@ public:
 
     ~BufferViewVulkan() noexcept override;
 
-    RenderObjectTags GetTag() const noexcept final;
+    GpuObjectTags GetTag() const noexcept final;
 
     bool IsValid() const noexcept override;
 
@@ -1106,6 +1115,19 @@ public:
     vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
 };
 
+class PipelineCacheVulkan final : public PipelineCache {
+public:
+    PipelineCacheVulkan(DeviceVulkan& device, VkPipelineCache cache) noexcept;
+    ~PipelineCacheVulkan() noexcept override;
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    vector<byte> GetData() const noexcept override;
+
+    DeviceVulkan& _device;
+    VkPipelineCache _cache;
+    mutable std::mutex _mutex;
+};
+
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
 public:
     GraphicsPipelineVulkan(
@@ -1120,6 +1142,8 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+
+    Nullable<PipelineLayout*> GetLayout() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1143,6 +1167,8 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+
+    Nullable<PipelineLayout*> GetLayout() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;

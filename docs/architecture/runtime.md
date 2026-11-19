@@ -31,16 +31,17 @@
 | `asset_handle.h` | `AssetId`、类型化和擦除类型的弱句柄 | 无 |
 | `asset_manager.h` | `AssetManager`、`AssetRef<T>`、`AssetTransaction`、`AssetGarbageBatch` | 有 |
 | `material_parameter_binding_map.h` | `MaterialParameterBindingMap`、常量写入与资源绑定 | 有 |
-| `mesh_draw_command.h` | `MeshPassId`、命令绑定、`MeshDrawCommand`、`PassBatchCacheSlot`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`；`ValidateVertexInput`、`ValidateMeshDrawCommand`、`SubmitMeshDrawCommands` | 有 |
+| `mesh_draw_command.h` | `MeshPassId`、`MeshVertexStreamLayout`、命令绑定、`MeshDrawCommand`、`PassBatchCacheSlot`、`CachedPassMeshDrawList`、`VisibleMeshDrawCommand`、`MeshPassSubmitArgs`、`RDGBufferSlice`、`MeshPassIndirectDrawCounts`、`MeshPassIndirectBatch`、`PreparedMeshPassIndirectDraws`；`ValidateVertexInput`、`ValidateMeshBatchElements`、`ValidateMeshDrawCommand`、`SubmitMeshDrawCommands`、`CountMeshPassIndirectDraws`、`BuildMeshPassIndirectDraws`、`SubmitMeshPassIndirectDraws` | 有 |
 | `mesh_batch.h` | `MeshSection`、`MeshBatchElement`、`MeshBatch`、`PrimitiveSceneInfo` | 无 |
 | `mesh_pass_processor.h` | `MeshBatchContext`、`MeshDrawCommandSharedState`、`MeshPassDrawListContext` 及缓存/动态两个实现、`MeshPassProcessor`、`MeshPassRegistration` | 有 |
 | `scene.h` | `VisibleMeshBatch`、`Scene` | 有 |
 | `frame_slot.h` | `MeshPassFrameDrawList`、`FrameSlot` | 有 |
 | `frame_pipeline.h` | `FramePipeline` | 有 |
-| `rdg.h` | `RDGBuilder`、`CompiledRDG`、`RDGTransientResourcePool`、Texture/Buffer 句柄、Raster/Compute/Copy Builder 与 Context | 有 |
+| `rdg.h` | `RDGAttachmentSlice`、`RDGBuilder`、`CompiledRDG`、`RDGTransientResourcePool`、Texture/Buffer 句柄、Raster/Compute/Copy Builder 与 Context | 有 |
 | `render_graph_pipeline.h` | `RenderGraphFramePipeline` | 有 |
 | `frame_scheduler.h` | `FrameScheduler` | 有 |
 | `gpu_resource.h` | `GpuBuffer`、`GpuTexture`、资源描述与 `ImportPersistent` 重载 | 有 |
+| `texture_asset.h` | 持有可采样纹理并分类底层对象替换 | 有 |
 | `upload_arena.h` | `UploadArena`、按槽分页映射、对齐分配和聚合 Flush | 有 |
 | `geometry_buffer_pool.h` | `VertexBufferPool` / `IndexBufferPool`、descriptor 与只移动子分配句柄 | 有 |
 
@@ -68,7 +69,7 @@ Scheduler 在 BeginFrame 中等待槽的旧帧完成并写入新编号，因此�
 每次 Submit 正常返回后递增编号，空帧也会递增；帧执行错误带诊断终止程序，不提供回滚或重试。
 WaitIdle 不重置计数，槽清理后仍保留最后分配的编号。计数到达 `uint64_t` 最大值时带诊断终止，不回绕。
 DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`GetQueue()` 返回所属设备和队列的借用引用。
-`BeginFrame() -> FrameSlot&` 开启下一槽，在场景更新和上传准备之前完成等待、allocator Reset、帧数据清理和退役清理。
+`BeginFrame() -> FrameSlot&` 开启下一槽，在场景更新和上传准备之前完成等待、allocator Reset、参数集解绑、帧数据清理和退役清理。
 开启后重复调用直接返回同一槽，不重复等待、析构帧对象或释放准备期登记的退役对象。
 `GetCurrentSlot()` 仅在 BeginFrame 至 Submit 返回之间返回该槽，其他时间为空。
 准备过程未调用 RunFrame 时，下一次 BeginFrame 保留本轮准备；WaitIdle 则清理并取消准备，保留下一槽索引与帧编号。
@@ -89,7 +90,7 @@ RunFrame：复用已开启槽（或先自动 BeginFrame）
     → RunFrame 返回，结束外部输入借用
 ```
 
-`RunFrame` 返回 `void`，正常返回只表示 Pipeline 已完成本帧录制与提交，不保证异步工作已完成。新槽和已回收的槽不调用 Wait；
+`RunFrame` 在成功提交后返回 true，GPU 的异步完成由围栏报告。设备丢失时返回 false，关闭当前槽的 `Emplace` 登记窗口，保留槽、帧号与本帧已登记的对象，供 `WaitIdle()` 回收。健康设备的内部提交被拒绝时立即终止。只有成功提交的图发布持久资源终态。调度器在等待中检出设备丢失时跳过完成回调及 GPU 计时读取。新槽和已回收的槽不调用 Wait；
 在途标记表示存在尚未由 Scheduler 回收的 Submit；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
 `WaitIdle()` 先等待所有在途槽，再对**全部槽**调用 `ResetCommandStorage()`，
 解除 command allocator 所有 epoch 引用。随后关闭准备窗口，按帧从旧到新对各槽调用 `ResetFrameData()`，
@@ -128,7 +129,10 @@ auto* borrowedBuffer = owner->get();
 shared_ptr 可同样保活共享资源；自定义清理通过 Emplace 移入 MakeScopeGuard 的结果。
 有依赖的资源应先登记被依赖者、后登记引用者，或归入同一个 RAII 对象。
 
-回收先 Reset command allocator，解除全部旧录制引用，再清空各 Pass 的可见/动态命令并统一析构登记对象。
+回收先 Reset command allocator，紧接着重置槽内 `TransientParameterSetPool`，再清空各 Pass 的可见/动态命令并统一析构登记对象。
+从 BeginFrame 至提交前可用 `FrameSlot::AcquireParameterSet` 获取当帧已填充的参数集。相同布局和相同绑定内容共享只读结果，绑定写入顺序可互换。自定义写入使用 `AcquireUninitializedParameterSet`。
+`TransientParameterSetPool` 按布局维护开放寻址平坦去重表（`KeyBindings`、`Entries` 与 2 的幂长度 `Buckets`，装载率至多 1/2），跨帧保留数组容量；`BeginFrame()` 仅清理上一帧实际占用的桶位，容量预热后的稳态帧零堆分配/释放。
+每个布局按最近八次槽回收的使用峰值保留参数集，持续闲置会释放布局。`AllocateDynamicUniform` 将常量数据复制到对齐的 UploadArena 切片，返回有效大小与物理保留范围。
 清理回调执行时，当前槽的 CPU 可见/动态命令记录均已清空，Pipeline 和 DeviceContext 仍有效。
 
 【槽回收与 WaitIdle 先析构对象，再重置线性存储。】重置在原位置重建标准 monotonic resource，
@@ -206,8 +210,8 @@ Wait、槽清理以及 槽内对象的析构/清理回调不得解引用留下�
 底层 GPU 资源寿命独立于 CPU 命令：外部资源必须保持有效至最后一次引用它的 command allocator 重置，或将 owner 移入 `FrameSlot::Emplace` 保活。
 
 `slot.GetPassDrawList(pass)` 按紧凑 `MeshPassId::Value` 取得槽内列表；不能跨后续列表扩容保存其引用。
-`MeshPassFrameDrawList` 包含 `VisibleCommands` 和自动绑定到该列表的 `DynamicContext`，不拥有缓存命令副本。
-列表搬移时会重新绑定 DynamicContext，避免 vector 扩容后继续向旧列表写入。
+`MeshPassFrameDrawList` 包含 `VisibleCommands`、自动绑定到该列表的 `DynamicContext` 以及当前帧本 Pass 的 `PreparedMeshPassIndirectDraws IndirectDraws`，不拥有缓存命令副本。
+列表搬移时会同步移动 `IndirectDraws` 并重新绑定 DynamicContext，避免 vector 扩容后继续向旧列表写入或错配间接批次。
 Extract 按本帧激活的 Pass 调用 `Scene::GatherVisibleMeshDrawCommands(..., drawList)` 或 `GatherVisiblePrimitives(..., drawList)`，
 保存命中缓存命令的只读指针；也可调用 `processor.AddMeshBatch(context, drawList.DynamicContext)` 生成当帧命令。
 未请求的 Pass 不进行当帧提取；持久缓存同步仍独立处理全部登记 Pass 的脏 Batch。
@@ -259,13 +263,14 @@ Usage 默认 Resource，原生用途自动增加 CopyDestination；支持 vertex
 
 ### 纹理与持久状态
 
-`GpuTexture::Create(device, descriptor)` 借用设备，验证格式和设备能力，再依次创建纹理与覆盖全部 mip／数组层的默认采样 view。
-描述包含 Dim、Width、Height、ArrayLayers、MipLevels、Format；仅支持 RHI 区域上传允许的非压缩 color 2D／2DArray。
-内存固定 Device、单采样、用途固定 CopyDestination | Resource，不提供通用 RT／UAV 纹理。
-全部创建成功后才交付对象；销毁时 view 先于 texture，设备须晚于纹理销毁。`GetTexture`、`GetDefaultView`、`GetDesc` 提供只读访问入口。
+`GpuTexture::Create(device, descriptor)` 创建设备支持的单采样 Device 纹理，`ArrayLayers` 对 3D 表示深度，对 Cube 表示面数。
+省略 Usage 时，颜色格式使用 CopyDestination | Resource，深度模板格式使用 DepthStencilRead | DepthStencilWrite。显式 Usage 按传入值创建，`GetDesc()` 返回生效的用途。
+具备 Resource 用途的纹理持有覆盖全部 mip／数组层的默认采样视图；纯附件的 `GetDefaultView()` 返回空值。
+`GetOrCreateView` 复用同一纹理上维度、格式、规范化子资源范围和用途相同的视图。纹理所有者先释放视图，再释放原生纹理。
+`TextureAsset::Create` 接收具备默认采样视图的纹理强引用。重载时保留同一纹理对象属于 Compatible，更换底层对象属于 Breaking。
 
 `ImportPersistentBorrowed` 与 `ImportPersistentOwned` 对纹理采用相同的状态关联与所有权规则。
-初态来自 `GetSubmittedState()`（新纹理为 Undefined），图末恢复 ShaderRead。
+初态来自 `GetSubmittedState()`（新纹理为 Undefined）。具备 Resource 用途的纹理在图末进入 ShaderRead，其他纹理保持最后使用状态。
 普通 CopyPass、自动上传和其他存活 Pass 都由 `CommitSubmittedStates()` 在实际提交后统一发布终态；
 Build、Prepare、Record 不修改已提交状态。状态不表示全部区域已初始化，读取区域仍由调用方保证有效。
 原生 RHI Import 只借用，不关联 wrapper 状态。拥有式导入在登记时保活，以物理对象去重；
@@ -285,10 +290,10 @@ Build、Prepare、Record 不修改已提交状态。状态不表示全部区域�
 被裁剪来源不计算布局、不写映射、不产生 Copy。CPU 消费结束、命令提交、GPU 完成是三个独立时间点。
 
 `UploadBuffer(handle, offset, source)` 声明 Device 目标的 GPU Copy 或 Upload 目标的 HostWrite。
-`UploadTexture(handle, region, RDGTextureUploadSource)` 支持非压缩颜色 2D/2DArray 的 mip、array layer 和局部区域。
+`UploadTexture(handle, region, RDGTextureUploadSource)` 支持单采样颜色纹理的 mip、数组层、立方体面、体纹理深度切片和 BCn 格式块。
 region 直接使用 `gpu::TextureRegion2D`；Prepare 确定 staging offset/pitch 后，Record 将它与目标区域组合成 RHI 复制描述。
-CPU 源 pitch 与 staging pitch 独立；Borrow/Owned 逐行只复制有效像素，Generated 的 WriteContext 提供最终 RowPitch、RowBytes、Rows。
-源 pitch 不需要满足设备对齐，staging 的 pitch/placement 按设备约束与像素大小的公倍数对齐。
+CPU 源的行距以字节计，RowsPerImage 以块行计。Borrow/Owned 跳过行与切片间填充，Generated 的 WriteContext 提供最终 RowPitch、RowBytes、每片 Rows 和 Depth。
+staging 将每片的有效块行连续排列，按设备约束与格式块字节数的公倍数对齐行距与偏移。
 上传默认不是图根；必须完成的初始化显式 MarkOutput。裁剪不会将请求自动排回下一帧。
 
 `CreateBuffer(RDGDynamicBufferDescriptor{MaxSize, Usage, Alignment}, source)` 声明动态 Upload 切片。
@@ -303,7 +308,7 @@ Pipeline 每槽独占 UploadArena，页首次存活分配时才创建并持久 M
 页直接持有 `gpu::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
 Reset 保留映射；Clear 和析构先 Unmap 再释放页。新增页创建或映射失败时，已有页及返回的切片保持有效。
 一次分配不跨页，空间不足追加页，本帧已使用的 buffer、offset、写指针不搬移，不复制旧页。
-页同时考虑 copy、CBuffer、storage/texel、index 对齐；CBuffer 的物理保留范围覆盖后端描述符 padding。
+页同时考虑 copy、CBuffer、storage/texel、index 与 indirect（4 字节）对齐；CBuffer 的物理保留范围覆盖后端描述符 padding。
 GPU 只读共享页，Prepare 汇总实际读取用途并集，集中 Flush 后按物理页生成同步，不逐逻辑切片反复转换。
 页不支持 UAV 或 CopyDestination。已提交页状态同样只在 Submit 后发布。
 
@@ -357,12 +362,12 @@ Record 只 Begin、编码已准备命令和 End。Submit 调用派生的 SubmitF
 
 ### 构图、访问与裁剪
 
-`RDGBuilder(slot, constraints, options)` 借用已 BeginFrame 的槽保存图；constraints 可由 DeviceContext::GetRDGConstraints() 提供，
-只包含不可变设备约束，不持有设备 owner。Compile 单次冻结声明并返回 CompiledRDG；失败返回空值。
+`RDGBuilder(slot, options)` 默认以所属设备的 `DeviceContext::GetRDGConstraints()` 同源设备约束初始化（亦保留显式传入自定义 `RDGDeviceConstraints` 的 `RDGBuilder(slot, constraints, options)` 重载供约束覆盖和测试注入）；constraints 只包含不可变设备约束，不持有设备 owner。Compile 单次冻结声明并返回 CompiledRDG；失败返回空值。
 FullValidation 控制访问用途/Pass 兼容性完整诊断，句柄、依赖、范围、溢出及调度必需的结构检查始终保留；RHI validation 独立配置。
 
 RDGData 与 CompiledRDG 通过 slot.Emplace 创建并登记清理；声明表、嵌套访问/依赖列表、导入表、
-调度结果、物理状态表、切片及屏障计划使用 std::pmr 容器，显式传入 slot.GetMemoryResource() 的线性 resource。
+调度结果、物理状态表、切片、屏障计划、`RDGUserPass::Name`（`std::pmr::string`）与 Pass 回调包装对象均使用 slot.GetMemoryResource() 的线性 resource。
+`AddRasterPass` / `AddComputePass` / `AddCopyPass` 在槽线性内存中直接构造移动独占的 RAII 类型擦除回调对象（`ErasedPassCallback`），构造完成即托管析构责任，若后续登记分配失败也会立即析构捕获的 `PassData`；稳态构图零全局堆分配与零原子引用计数开销。
 RDGExecution 同样从该 resource 分配，由 CompiledRDG 的独占 owner 持有。
 Compile 的局部索引数组、ready 集合，以及 Prepare 的尺寸/用途数组和上传区间 map 使用独立 scratch pool，
 作用域结束即归还单元；其内容不被 Record 借用。嵌在图记录中的 Readers、依赖列表与导入表仍随图回收。
@@ -375,7 +380,7 @@ PMR 容器的普通复制构造会选择默认资源，跨域复制必须显式�
 
 自动 Upload/HostWrite 使用独立的连续声明表，每条记录内嵌一个目标访问；图节点通过索引关联声明，保持独立裁剪和时序。
 用户 Pass 的附件、回调和访问列表放在另一张表中。来源以 Borrow、Owned、Generated 互斥存储，不为 Borrow 额外分配 owner。
-Generated 的 Context 使用带类型擦除 deleter 的独占 owner，保留具体上下文的析构方式；上下文仍单独堆分配，消费后释放，裁剪后的来源随帧清理释放。
+`RDGUploadSource::Generated` 内置 64 字节对齐至 `alignof(std::max_align_t)` 的小对象缓冲（SBO）：当生成器对象满足 `sizeof <= 64 && alignof <= alignof(std::max_align_t) && is_nothrow_move_constructible` 时原位内联构造与移动，不产生堆分配；不满足条件时自动回退至堆分配以保持 `RDGUploadSource` 的 `noexcept` 移动契约；消费后释放，裁剪后的来源随帧清理释放。
 实际大小、staging 和上传屏障记录仅在 Prepare 为存活上传分配，不参与 Build 的节点初始化与搬移。
 
 `AddRasterPass(name, data, record, prepare)` 返回声明 Builder，Compute/Copy 同形。
@@ -387,12 +392,14 @@ frame/slot id 和只读可见命令，不提供可变 GetSlot。
 资源分为导入的 `gpu::Texture*` / `Buffer*` 与按完整描述符声明的瞬态资源。导入需要真实 `initialState`，可选 `finalState`；
 同一物理对象重复导入会合并句柄，初态和显式终态冲突时编译失败。GPU 对象的 owner 仍由调用方持有，必须活到引用它的命令存储重置；
 外部附件 View 可通过 `WriteColor` / `SetDepthStencil` 的 `explicitView` 传入，目标必须与导入资源一致。
-状态与依赖按整个资源追踪，Texture barrier 使用 `SubresourceRange::AllSub()`，Pass 访问接口不接受子资源范围。
+状态与依赖按整个资源追踪，Texture barrier 使用 `SubresourceRange::AllSub()`。光栅附件的子资源范围决定视图及写入覆盖范围。
 
 `AddRasterPass`、`AddComputePass`、`AddCopyPass` 分别提供 Encoder 或 CommandBuffer Context。
 调用方只可查询当前 Pass 已声明的资源；`ResolveView` 在状态与 View 用途不匹配时返回空。
 Raster 通过 `WriteColor` / `SetDepthStencil` 声明附件，颜色槽从 0 连续排列，至少有一个附件，各附件有效尺寸、层数和采样数一致。
-自动 View 使用首个 mip；显式 View 可选择附件子资源，但状态仍按整个资源同步。
+自动附件视图默认选择首个 mip 和全部数组层。调用方可通过 `RDGAttachmentSlice`（固定单 mip 与数组层范围）或 `gpu::SubresourceRange` 重载指定单个 mip 与连续数组层，或传入导入纹理的显式视图。`SetRenderArea` 的矩形相对于所选 mip，省略时覆盖附件全幅。Prepare 回调可用 `RDGTextureViewDescriptor` 获取子视图，Record 使用同一描述符查找已准备的视图。
+Prepare 为所有存活 `ShaderRead` 与 `UnorderedAccess` 访问预建默认视图：默认 `TextureViewUsage::Resource` 使用 `SubresourceRange::All` 全 mip 范围以 O(1) 命中持久 `GpuTexture::GetDefaultView()`；`UnorderedAccess` 与各类附件（`RenderTarget`、`Depth*`）默认视图严格保持单 mip `1u`。
+`AddClearColor` 和 `AddClearDepthStencil` 的整纹理重载要求单 mip。显式范围（`RDGAttachmentSlice` 或 `gpu::SubresourceRange`）重载可清除一个 mip 的选定数组层与矩形。局部写入保留先前生产者；首次局部 Clear 可从 Undefined 开始。混合深度模板格式只清一个 aspect 时，另一个采用 Load 和 Store 并保留上一次写入。每张图的 `GetBlackboard()` 使用帧槽内存，`Emplace<T>` 每种类型只可成功一次，`Get<T>` 可查询已登记的数据。
 只读深度/模板 aspect 必须 Load / Store；丢弃 Store 使用 `StoreAction::Discard`。
 Buffer 的导入边界、读取状态与瞬态池 LastState 使用 `gpu::BufferStates`。只读状态组合逐位要求相应 Usage：
 Raster 允许 `Vertex | Index | CBuffer | ShaderRead | Indirect` 的非空子集，Compute 允许 `CBuffer | ShaderRead | Indirect` 的非空子集；Copy 读取使用 CopySource。
@@ -413,11 +420,11 @@ Texture 的状态冲突、Buffer 不兼容的读写/混合状态、无效句柄�
 
 Compile 对存活子图执行 Kahn 拓扑调度，同时遵守数据依赖与顺序依赖。就绪候选优先延续当前 Raster / Compute 合并组；
 无法延续时关闭该组，优先选 Upload / Copy，再选其他 Pass；同优先级始终取原始声明下标最小者。
-因此无依赖 Pass 的 GPU 执行顺序可能变化，`NeverCull` 仅保活，不建立顺序；需要先后关系时必须声明资源依赖。
+无依赖 Pass 的 GPU 执行顺序可能变化。通过 `GetHandle()` 或上传、清屏的返回值得到当前图的 Pass 句柄。空上传返回无效句柄。`AddOrderDependency(before, after)` 约束两个存活节点按声明先后执行。`AddOrderBarrier` 只可对最新节点登记一次，裁剪后该屏障位于更早与更晚的全部存活节点之间。对带外部副作用的节点使用 `NeverCull()` 保活。例如，可用首尾两个带屏障的 CopyPass 重置、解析外部查询池，并对中间打时间戳的 Pass 同时声明保活与屏障。
 HostWrite 保留逻辑依赖但不产生 GPU 组。连续就绪 Upload 合批，用户 CopyPass 保持独立。
 就绪上传使用有序集合，不逐上传遍历全图；Raster / Compute 按以下规则合并：
 
-- Raster 的颜色槽、附件句柄、显式 View 指针和深度状态必须相同；上一子 Pass 的附件 Store 必须为 Store，下一子 Pass 的 Load 必须为 Load。深度/模板只检查纹理实际具有的 aspect。
+- Raster 的颜色槽、附件句柄、归一化子资源范围、显式 View 指针、有效渲染矩形和深度状态必须相同。上一子 Pass 的附件 Store 必须为 Store，下一子 Pass 的 Load 必须为 Load。深度/模板只检查纹理实际具有的 aspect。
 - 组内共享附件的同状态访问按绘制顺序保序，省略中间附件屏障。其他资源若已被组内任一前序子 Pass 访问，两次访问必须都是相同状态的只读，否则切组。
 - Compute 使用相同的非附件规则：共享只读可以合并，写后读、读后写、连续写或状态变化必须切组；检查覆盖整组，不能只比较最后一个子 Pass。
 - 后续子 Pass 首次使用的资源可以把转换屏障前移到组入口；其生产者已在组外完成，组内前序子 Pass 不访问它。每组全部首次访问的屏障批量下发一次，然后开启 Encoder，Encoder 内不下发屏障。
@@ -444,7 +451,7 @@ Upload 目标的 HostWrite 必须全部位于 GPU 使用前，且声明区间不
 不提供丢弃基址的 Buffer 引用解析重载。未初始化固定资源不能用零字节写入冒充初始化。
 
 CompiledRDG::Prepare(slot, pool, uploads)、Record(command)、CommitSubmittedStates 各执行一次。
-Prepare 和 Record 返回 false 时不可继续录制或提交，提交状态保持不变；Record 要求命令缓冲已 Begin，调用者负责 End。
+Prepare 和 Record 返回 false 时不可继续录制或提交，提交状态保持不变。Record 要求命令缓冲已 Begin，调用者负责 End。`RenderGraphFramePipeline` 在 Begin 返回时若设备已丢失，直接退出。Begin 成功后，若图录制返回时设备已丢失，管线跳过帧尾时间戳、查询解析和读回屏障，并在返回前调用一次命令缓冲的 End。
 Prepare 中的内部 `detail::RDGStateTracker` 借用物理资源，按初态/池 LastState 推导并冻结屏障和预期终态；Record 只编码。
 tracker 是 RDGExecution 的成员，物理状态表使用稠密资源索引和图的 PMR resource，不接管资源 owner，也不维护全局注册表。
 它集中组织 HostWrite / 上传页的开始屏障、组入口与上传成员间屏障、结束转换和外部 release；
@@ -464,11 +471,12 @@ tracker 是 RDGExecution 的成员，物理状态表使用稠密资源索引和�
 
 ### 每槽瞬态资源池
 
-`RDGTransientResourcePool` 独占 Texture、Buffer 及其 View owner。进入槽前必须已完成 Wait 和 allocator Reset，随后 `BeginFrame()` 仅重置借出标记，
-按描述符全部字段匹配复用，保留真实 `LastState`；同一执行内相同描述符的多次资源申请仍获得不同物理对象，不做别名复用。
+`RDGTransientResourcePool` 独占 Texture、Buffer 及其 View owner。进入槽前必须已完成 Wait 和 allocator Reset，随后 `BeginFrame()` 重置上一轮借出标记，并按 8 帧滑动窗口淘汰连续 8 帧未借用的瞬态资源（销毁资源前先从缓存中擦除并释放关联视图）。
+Texture 按描述符全部字段匹配复用，保留真实 `LastState`；Buffer 复用支持容量向上分桶（`<= 4096 B` 按 256 B 向上取整，`> 4096 B` 按 `std::bit_ceil` 向上取整，非零 `MaxBufferSize` 时受其上限约束），查找同用途/内存/提示下位于 `[desc.Size, bucketSize]` 内的最小空闲缓冲；未命中时先按分桶容量创建，若分桶分配失败则回退精确请求尺寸 `desc.Size` 重试，同时 RDG 逻辑切片 `RDGBufferSlice::Size` 始终保留请求大小。
+同一执行内相同描述符的多次资源申请仍获得不同物理对象，不做别名复用。
 新 Texture / Device Buffer 初态为 Undefined，新 Upload Buffer 为 HostWrite。实际 Submit 后记录真实终态，不能在 Fence 完成后假定纹理自动回到 Undefined。
-池保留历史峰值对象，`Clear()` / 析构前所有引用它们的命令存储必须重置，View 先于资源销毁。
-瞬态 View 缓存在池内；导入资源的自动 View 由本帧编译图准备结果持有，避免池把外部资源借用延长到后续帧。
+`Clear()` / 析构前所有引用它们的命令存储必须重置，View 先于资源销毁。
+瞬态纹理的 View 缓存在池内，持久 `GpuTexture` 的 View 保存在纹理的自有缓存中。裸导入纹理的自动 View 由本帧编译图持有，槽回收或 `WaitIdle()` 后即可销毁或重建交换链。
 直接使用池的 `AcquireTextureView` 时，目标资源必须活到该缓存 View 释放。
 
 当前不提供子资源状态拆分、异步队列、资源内存别名、跨槽共享池、显式资源版本节点或自动 PSO/参数组构建。
@@ -480,6 +488,16 @@ Write 每个可见实例只计算一次矩阵；持久 MeshDrawCommand 不变。
 空实例不分配和 draw，已存活附件 Clear 和 readback 保留。颜色/深度附件由每槽池持有；几何、shader、布局与 PSO 由外部共享。
 Wait 只等待该槽的 fence；主循环不逐帧等待整个队列，结束时 `WaitIdle()` 等待并重置全部槽，再保存最后一帧的图片。
 Frame 0 后更新绿色材质，调用方以当前 registrations 显式同步增量命令，设置管线输入后调用 Frame 1 的 `RunFrame()`；已有在途帧的参数与附件保持独立。
+
+### 异步读回与 GPU 计时
+
+`AsyncReadbackQueue` 将一个提交队列的 fence 值与读回请求关联。构图前用 `ReserveTexture` 预留 ReadBack 缓冲，构图时以 `EnqueueReserved` 声明源纹理、mip 与数组层。`EnqueueTexture` 可在构图时一次完成这两步。一条队列同时至多服务一张待提交图，默认最多有 4096 个活跃请求，活跃 ID 唯一。放弃图时调用 `CancelUnsubmitted()` 回收已预留和已入图的请求，提交成功后用 `MarkSubmitted` 关联已入图请求。
+
+两个入图方法也接受 `gpu::TextureRegion2D`，可选择单采样颜色纹理的局部矩形或体纹理切片。预留计划须与该区域的宽高深和格式匹配。只指定 mip 和数组层时，预留计划须匹配整个子资源。`Poll` 按块行去掉设备行距填充，返回紧凑字节。
+
+`Poll` 通过已完成的 fence 值判断 Ready。空目标指针可重复查询格式与紧密字节数，非空目标容量不足返回失败。成功读取会映射缓冲、刷新主机缓存并逐块行去除行填充，随后回收请求。带深度的体纹理读回所选 mip 的所有切片。
+
+`RenderGraphFramePipeline::SetGpuProfiling` 在 BeginFrame 后为该次提交设置外部序号与采样档位。默认 Off，FrameOnly 在图命令首尾各记录一次，FrameAndPasses 额外记录实际 GPU 执行的各个 Pass。查询值在同一命令缓冲中解析至 ReadBack 缓冲并转换至 HostRead。调度器等待该槽完成后，依据提交队列的有效位数和 tick 周期换算纳秒，发布 `OnGpuTimingCompleted` 回调。宿主也可在槽的下一次 Prepare 前用 `GetCompletedGpuTiming` 读取快照中的 FrameId、UserSequence、整帧耗时和 Pass 明细。
 
 ## Scene 绘制输入
 
@@ -552,10 +570,10 @@ Scene 公共接口与关联数据使用 `scene_handle.h` 中的强类型句柄�
 再将 `FirstIndex`、`IndexCount`、`VertexOffset` 填入 Element。Scene 不要求保留原始 Section。
 普通双材质网格可生成两个各含一个 Element 的 Batch；Section 与 Batch 不建立强制一一对应关系。
 
-当前表达直接索引实例绘制：`IndexCount` 是索引数量，三角形列表的一个三角形对应三个索引。
-`IndexBufferOffset` 是字节偏移，`IndexStride` 为 2 或 4；`FirstIndex` 相对此偏移，单位是索引。
-`VertexOffset` 是有符号的基础顶点偏移。每个 Batch 最多包含 32 个 Element 条目（包含空条目）；超过上限的输入被拒绝。Element 与可见命令的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；
-可见命令可覆盖该实例范围。逐实例数据由应用通过实例流提供；非索引绘制、间接绘制和 LOD 选择尚未实现。
+支持有索引实例绘制与无索引实例绘制（`MeshBatchElement::IndexBuffer == nullptr`）：
+- 有索引绘制：`IndexCount` 是索引数量，三角形列表的一个三角形对应三个索引；`IndexBufferOffset` 是字节偏移，`IndexStride` 为 2 或 4；`FirstIndex` 相对此偏移，单位是索引；`VertexOffset` 是有符号的基础顶点偏移。
+- 无索引绘制：`IndexBuffer` 为空指针，`IndexBufferOffset` 与 `VertexOffset` 必须为 0，`IndexCount` / `FirstIndex` 分别表示 `VertexCount` / `FirstVertex`；同一 `MeshBatch` / `MeshDrawCommand` 内禁止混用有索引与无索引元素。`ValidateMeshBatchElements`（由 `Scene::ValidateBatch` 与 Debug 下的动态 `BuildMeshDrawCommands` 共用）按 `VertexInput` 校验所有 `Vertex` 流容量以及未延迟覆盖的 `Instance` 流容量；最终提交与校验另根据驻留的 `StreamLayouts` 校验生效顶点流与实例流（含 `MeshPassSubmitArgs::InstanceStream` 和可见实例区间）不越界。
+每个 Batch 最多包含 32 个 Element 条目（包含空条目）；超过上限的输入被拒绝。Element 与可见命令的 `FirstInstance` 默认为 0、`InstanceCount` 默认为 1；可见命令可覆盖该实例范围。逐实例数据由应用通过实例流提供；CPU 自动合批间接绘制（MDI）见下文[校验与录制](#校验与录制)，LOD 选择与 GPU 计数的 `DrawIndirectCount` 尚未实现。
 
 `VertexInput` 表达普通顶点与实例缓冲输入，不实现 shader permutation、蒙皮或自定义取数机制。
 `Layouts` 使用 RHI 的 `VertexBufferLayout`，通过 Binding 对应 `Streams`；
@@ -649,6 +667,11 @@ ShaderAsset 不引用布局注册表，也不保存原生 PipelineLayout/Binding
 共享布局、反射类型或成员、变体数量或顺序、名称、后端可用性、活跃绑定、阶段或入口变化时返回 `Breaking`。
 持有 PSO 的渲染方按当前 Shader 和材质版本重新准备管线。样例校验所选变体的活跃绑定、顶点输入和 Pass 常量 ABI，包括 ViewProjection、LocalScale 和 Color 的类型、大小及字节偏移。
 
+### PsoCache
+
+`PsoCache` 在构造时借用固定的 AssetManager、设备、布局注册表与可选原生缓存。图形和计算键包含 shader handle、变体与可选共享布局，图形键还保存顶点布局和渲染状态。
+一次资产修订内相同键返回同一个 PSO。新修订可立即创建新 PSO，旧版本由 `RetireInvalidated(slot)` 交给帧槽，在最后一次 GPU 使用完成后先释放 PSO，再释放配套布局。
+
 ### PipelineLayoutRegistry
 
 `PipelineLayoutRegistry` 显式借用一台 Device，单线程串行调用，无全局状态。
@@ -734,7 +757,8 @@ VertexInput 保存几何 layout、semantic、格式、步长与偏移，不保�
 子集允许为空；未知/重复参数、额外或缺失 family、与 shader 类型不兼容的映射拒绝创建。
 不同 family 可使用不同子集，未参与某个 family 的参数可以继续用于 CPU 逻辑。
 
-`MaterialParameterValue` 保留 `float`、`array<float, 4>`、可空 `TextureView*` 和可空 `Sampler*`。
+`MaterialParameterValue` 支持纯值类型常量（`float`、`int32_t`、`uint32_t`、`array<float, 2>`、`array<float, 3>`、`array<float, 4>`、`array<int32_t, 4>`、`array<uint32_t, 4>`、`array<float, 16>`）以及资源快照（可空 `TextureView*` 和可空 `Sampler*`）。
+其中 `array<float, 16>` 在 CPU 侧统一约定按列主序（Column-Major，`m[column * 4 + row]`，与 `Eigen::Matrix4f::data()` 及 HLSL 默认 `column_major` 一致；历史计划稿中曾拟定的行主序约定已统一调整为列主序）存储。
 参数名称区分大小写；索引属于该资产声明顺序。资源参数只复制指针，不增加引用计数；
 外部 owner 必须覆盖相关 CPU/GPU 使用期间。
 
@@ -753,10 +777,11 @@ Proxy 不保留实例地址，其参数引用不能跨 Update、对象移动或 
 
 ### 材质参数映射
 
-`MaterialParameterBindingMap` 在创建资产时预解析，只保存数值位置和材质句柄身份，不借用 ShaderAsset、
+`MaterialParameterBindingMap` 在创建资产时预解析，只保存数值位置、期望 variant 索引、矩阵转置标记和材质句柄身份，不借用 ShaderAsset、
 布局注册表或原生布局。通过 `MaterialAsset::GetBindingMap(shaderHandle)` 查询。
 常量子集只映射到指定 CBuffer/PushConstant；参数名作为成员路径，可定位单个数组元素。
-float 只接受 4 字节 float 标量，array<float,4> 只接受 16 字节 float4；不转换类型或复制带空隙的矩阵。
+标量与向量要求种类（`Scalar` / `Vector`）、基础类型（`Float` / `SignedInteger` / `UnsignedInteger`）、行列维度与字节大小精确匹配且无内部 padding；`array<float, 16>` 要求 `Matrix`、`Float`、`4x4`、`MatrixStride == 16`、`Size == 64` 且无内部 padding，并按 `member->RowMajor` 记录 `TransposeMatrix4x4`。
+写入 `array<float, 16>` 时，目标着色器为默认 `column_major` 则直接拷贝 64 字节，目标为显式 `row_major` 则按 `(column, row) -> row * 16 + column * 4` 自动转置写入，使同一 `MaterialInstance` / `MaterialRenderProxy` 可供不同矩阵主序的 Shader family 消费。
 TextureView 只映射 Texture/RWTexture，Sampler 只映射动态 Sampler，数量必须为 1；资源数组和 immutable sampler 拒绝。
 资源目标在当前后端不存在时标记 inactive 并跳过；包含常量参数但常量块在当前后端不可用时创建失败。
 
@@ -896,7 +921,7 @@ Release 不执行元素数量、指针、VertexInput 或 `ValidateConstruction` 
 
 | 内容 | 存储与生命周期 |
 |---|---|
-| `MeshVertexBufferBindings` | 全部 VB 按 Binding 升序正规化，连同可选 InstanceStreamBinding 按内容驻留 |
+| `MeshVertexBufferBindings` | 全部 VB 与 `StreamLayouts`（`Binding`、`ArrayStride`、`StepMode`）均按 Binding 升序正规化，连同可选 InstanceStreamBinding 按内容驻留 |
 | `MeshDrawCommandPayload` | 参数组、完整动态 offset 与自持有 PushConstants 按内容驻留 |
 | `MeshDrawCommandElements` | ExtraElements、ElementInstances 及预计算合并信息；逐命令独占 |
 
@@ -915,9 +940,10 @@ PSO、Buffer、ShaderParameterSet 仍由外部 owner 保活，载荷不再借用
 | StateFirst（默认） | 状态键 | 可见性键 |
 | DepthFirst | 可见性键 | 状态键 |
 
-默认状态键是 Pipeline 8 位、Payload 12 位、VB 12 位的桶组合；Pipeline 编号在所属绑定存储中按首次出现登记，
-其他两项使用驻留池索引。空索引映射 0，范围内索引映射 index + 1，超出范围时混合哈希后折叠至非零桶，
-不污染邻接位域。桶碰撞只影响聚类，不影响正确性。`CustomStateSortKey` 可显式替换默认状态键，包括指定 0。
+默认状态键按 32 位位域组合：`PipelineLayout` 4 位（高 4 位，空为 0）、`Pipeline` 9 位（空为 0）、`Payload` 9 位（空为 0）、
+`Geometry`（`VertexBuffers` 与 `IndexBuffer` 组合哈希）8 位（均空为 0）与 `StencilReference` 2 位（0 映射 0，非零折叠至 1～3）。
+各字段均由对象指针或驻留内容哈希直接派生，不依赖所属 `MeshDrawCommandBindingStorage` 的局部编号，因此缓存与动态命令混排时相同状态产出一致的 `StateSortKey`，
+同 `PipelineLayout` 的 PSO 优先聚簇，且桶折叠不污染邻接位域。桶碰撞只影响聚类，不影响正确性。`CustomStateSortKey` 可显式替换默认状态键，包括指定 0。
 
 缓存路径通过 `VisibleMeshBatch::VisibilitySortKey` 提供当帧键；动态路径使用 `MeshBatchContext::VisibilitySortKey`。
 两者使用相同合成函数。深度键由调用方编码，按无符号升序排序；DepthFirst 不自动计算距离或反转深度。
@@ -936,12 +962,11 @@ Gather 的脏项检查不能检测所有漏同步：缺失 pass cache 会缺少�
 缓存指针只在帧内 Scene 借用期间有效；Scene 变化后必须重新 Gather。
 同键保持输入顺序，Batch 内按源下标递增绘制；需要独立材质或排序位置的 Element 应拆成不同 Batch。
 
-`MeshPassFrameDrawList::SortVisibleCommands` 对不超过 64 项使用原地稳定插入排序；更大数组复用常驻 scratch
-执行八位一轮的稳定 LSD 基数排序，跳过全数组无差异的字节。容量足够时排序不分配临时堆缓冲。
+`MeshPassFrameDrawList::SortVisibleCommands` 对不超过 64 项使用原地稳定插入排序；更大数组先单趟同时计算 `differing` 差异字节掩码与非递减有序性，若已有序则直接返回（零 `_scratchCommands` 扩容与零基数搬运）；否则复用常驻 scratch 执行八位一轮的稳定 LSD 基数排序，跳过全数组无差异的字节。容量足够时排序不分配临时堆缓冲。
 Sort 和 Submit 都先完成动态指针发布。动态 Context 在 AddCommand 时追加元数据，
 `FinalizeVisibleCommands` 在全部生成后填入稳定命令指针并冻结列表；之后不能增删或改变命令存储。
-下一帧清空 VisibleCommands 并 Clear Context，保留容量。动态池由 unique_ptr 保持移动时身份稳定；
-列表移动后 Context 重新绑定可见数组，已发布指针仍有效。
+下一帧清空 VisibleCommands、`IndirectDraws` 并 Clear Context，保留容量。动态池由 unique_ptr 保持移动时身份稳定；
+列表移动后同步移动 `IndirectDraws` 并重新绑定 Context 的可见数组，已发布指针与间接批次均保持有效。
 
 ### 连续元素合并
 
@@ -964,17 +989,24 @@ Submit 解析当前实际实例范围；只有实际 InstanceCount 为 1 时，�
 索引宽度/对齐、重复槽位/参数组/动态 offset、实例整数范围、延迟实例槽位、PushConstants 对齐/范围，
 以及顶点组顺序、掩码与扩展元素对应关系。Pass 与命令参数组不能使用同一 GroupIndex。
 
-局部状态缓存在每次 Submit 内去重 PSO、VB、IB、StencilReference 与参数组。
+局部状态缓存在每次 Submit 内去重 PSO、VB、IB、StencilReference、参数组与 PushConstants。
 VB 先比较池地址和 VertexBuffersIndex，相同则跳过组解析；变化后按槽位 0～31 定长表比较完整 View，
 更高槽位直接绑定。连续脏槽位使用原数组 subspan 下发，遇到未变槽位、间隙或被 Pass 实例流覆盖时截断。
-Payload 同样比较池地址和 PayloadIndex；相等时跳过解析与参数组比较，有 PushConstants 时仍每条命令写入。
-PSO 切换会清空 VB/Payload 身份及参数组缓存，重绑 Pass 参数组与实例流；IB 和模板参考值保留。
-零实例 Draw 跳过；零掩码项不绑定状态。空命令指针或 SetPushConstants 失败返回 false，调用方须放弃录制。
+Payload 同样比较池地址和 PayloadIndex，相等时跳过解析、参数组比较与 PushConstants 写入；变化后仅下发变更的参数组，且 PushConstants 按 `(PushConstantId, Offset, Data)` 去重（无 PushConstants 的命令不清空已写入缓存）。
+PSO 切换会清空 VB 缓存并重绑实例流与命令 VB；若新旧 PSO 的 `PipelineState::GetLayout()` 返回相同非空 `PipelineLayout`，则保留 Pass/命令参数组与 PushConstants 缓存，否则清空并重绑；IB 和模板参考值始终保留。
+零实例 Draw 跳过；零掩码项不绑定状态。无索引元素（`IndexBuffer.Target == nullptr`）不调用 `BindIndexBuffer`（保留当前 IB 缓存状态），在完成连续单实例合并后调用 `encoder.Draw`。空命令指针或 SetPushConstants 失败返回 false，调用方须放弃录制。
+
+CPU 自动合批间接绘制（MDI）提供 `CountMeshPassIndirectDraws`、`BuildMeshPassIndirectDraws` 与 `SubmitMeshPassIndirectDraws`，配合 `MeshPassFrameDrawList::IndirectDraws`（`PreparedMeshPassIndirectDraws`）与两路 `BufferUse::Indirect` 动态缓冲使用：
+
+- `CountMeshPassIndirectDraws` 与 `BuildMeshPassIndirectDraws` 共用与 `SubmitMeshDrawCommands` 一致的元素展开、实例数覆盖与连续单实例合并内核；解引用前校验非空命令指针及 `ValidElementMask` / `ExtraElements` / `ElementInstances` 结构一致性，失败返回 false（合法 0 条绘制返回 true 且计数为 0）。
+- `BuildMeshPassIndirectDraws` 入口无条件清空输出，仅合并相邻且 `Pipeline`、`StencilReference`、`(BindingStorage, VertexBuffersIndex)`、`(BindingStorage, PayloadIndex)` 及绘制类型/实际 `IndexBufferView` 完全一致的展开元素为同一 `MeshPassIndirectBatch`，并累加 `HasNonZeroFirstInstance`；跨池（不同 `BindingStorage`）命令即使局部句柄索引相同也不会误合批。
+- `SubmitMeshPassIndirectDraws` 在发出任何编码器绑定或绘制前一次性完成全部预检：校验 `encoder.IsValid()`、Debug 下全部可见命令与 `submitArgs`（含无索引顶点流/实例流容量）、所有批次的 `CommandIndex < visibleCommands.size()` / `ArgumentCount > 0` / CPU 参数数组范围，以及拟走间接绘制批次的 GPU 切片有效性（非空、含 `BufferUse::Indirect`、4 字节对齐、缓冲范围与记录容量充足）。任一预检失败返回 false 且编码器收到 0 条绑定与 0 条绘制；录制中途 `SetPushConstants` 失败立即返回 false，调用方须放弃录制。
+- 设备不支持间接绘制或 `MaxDrawIndirectCount == 0` 时，构图阶段可省略两路间接参数缓冲而直接调用 `SubmitMeshDrawCommands`；直接调用 `SubmitMeshPassIndirectDraws` 时按 `deviceCanDrawIndirect && (!batch.HasNonZeroFirstInstance || capabilities.Features.IndirectFirstInstance)` 逐批决策：满足条件时按 `MaxDrawIndirectCount` 分块并累加 `slice.Offset + (FirstArgument + consumed) * stride` 调用 `DrawIndexedIndirect` / `DrawIndirect`，否则该批次逐条回退直接调用 `DrawIndexed` / `Draw`。
 
 RHI 公共接口不暴露 PSO 布局和已写参数资源，runtime 无法检查布局兼容、必需参数、动态 offset 设备对齐或读取索引内容。
 这些条件由应用与 RHI 校验层保证；Pass 开闭、viewport/scissor、附件、barrier、提交和等待由调用方组织。
 测试位于 `test_mesh_draw_command.cpp`、`test_mesh_pass_processor.cpp`、`test_frame_slot.cpp`、`test_scene.cpp`、
-`test_frame_scheduler.cpp` 和 `test_rdg.cpp`，观测状态仅由 fixture/fake 持有。
+`test_frame_scheduler.cpp`、`test_rdg.cpp`、`test_mdi_gpu.cpp` 与 `test_runtime_allocations.cpp`（关闭 mimalloc 时独立 exe），观测状态仅由 fixture/fake 持有。
 
 ## 环境
 
@@ -995,12 +1027,13 @@ Environment 拥有 D3D12 factory，或负责 Vulkan environment 的初始化与�
 DeviceContext 也提供接收 `shared_ptr<gpu::Device>` 与非空 Direct 队列指针的构造函数。
 调用方须保证队列属于传入设备，且底层环境寿命满足设备要求。
 DeviceContext 持有共享 Device owner，队列指针从设备借用；`GetDevice` / `GetQueue` 返回借用引用。
+构造函数统一尝试通过 `_device->CreatePipelineCache()` 创建可选的设备级 `gpu::PipelineCache`（后端返回空则保持空值），并通过 `GetPipelineCache()` 与 `GetPipelineCacheData()` 暴露供轻量管线复用与持久化。
 `SupportsIndirect` 实时读取 RHI 的 `IndirectDraw` 和 `IndirectFirstInstance` 能力，不依赖后端内部头。
 
 ## 生命周期与失败
 
 Environment 必须晚于 DeviceContext 及所有依赖它的 GPU 资源销毁。应用应先完成 GPU 工作、释放资源，
-再销毁 DeviceContext，最后销毁 Environment。DeviceContext 析构会等待其 Direct 队列，然后释放 Device owner。
+再销毁 DeviceContext，最后销毁 Environment。DeviceContext 析构先等待其 Direct 队列，随后显式释放内部 `_pipelineCache`，最后释放 Device owner（避免独占最后一个 Device 引用时管线缓存析构访问已销毁设备）。
 如果外部仍持有同一 Device 的共享引用，Environment 也必须继续存活。
 
 调用方在环境的创建线程串行组织生命周期，RHI 的 CPU 调用遵守其串行化契约。

@@ -285,5 +285,89 @@ TEST(MeshPassFrameDrawListTest, RadixSortMatchesStableOrderAcrossAllKeyBytesAndR
     }
 }
 
+TEST(MeshPassFrameDrawListTest, SortAlreadySortedLargeListPreservesStableOrderAndFinalizesDynamicCommands) {
+    MeshPassFrameDrawList list;
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.emplace_back();
+    const MeshDrawCommand cached{};
+    for (uint32_t i = 0; i < 80; ++i) {
+        if (i % 4 == 0) {
+            MeshDrawCommand initializer;
+            list.DynamicContext.AddCommand({primitive, batch}, 0, initializer, i / 8);
+            list.VisibleCommands.back().FirstInstance = i;
+        } else {
+            list.VisibleCommands.push_back({.SortKey = uint64_t{i / 8} << 32, .CachedCommand = &cached, .FirstInstance = i});
+        }
+    }
+    list.SortVisibleCommands();
+    ASSERT_EQ(list.VisibleCommands.size(), 80u);
+    uint32_t dynamicIndex = 0;
+    for (uint32_t i = 0; i < 80; ++i) {
+        EXPECT_EQ(list.VisibleCommands[i].FirstInstance, i);
+        if (i % 4 == 0) {
+            EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &list.DynamicContext.Commands[dynamicIndex++]);
+        } else {
+            EXPECT_EQ(list.VisibleCommands[i].CachedCommand.Get(), &cached);
+        }
+    }
+}
+
+TEST(MeshPassFrameDrawListTest, IndirectDrawsSurviveSlotGrowthListMovesAndClear) {
+    test::FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+
+    FakePipeline pipeline;
+    FakeBuffer indices{128, gpu::BufferUse::Index};
+    const PrimitiveSceneInfo primitive;
+    MeshBatch batch;
+    batch.Elements.push_back({.IndexBuffer = &indices, .IndexCount = 3});
+
+    auto& list0 = slot.GetPassDrawList({0});
+    MeshDrawCommand initializer;
+    initializer.Pipeline = &pipeline;
+    initializer.IndexBuffer = {&indices, 0, 4};
+    initializer.IndexCount = 3;
+    list0.DynamicContext.AddCommand({primitive, batch}, 0, initializer);
+    list0.SortVisibleCommands();
+    ASSERT_TRUE(BuildMeshPassIndirectDraws(list0.VisibleCommands, list0.IndirectDraws));
+    ASSERT_EQ(list0.IndirectDraws.Batches.size(), 1u);
+    ASSERT_EQ(list0.IndirectDraws.IndexedArguments.size(), 1u);
+
+    // 触发 FrameSlot::_passDrawLists 扩容搬移。
+    (void)slot.GetPassDrawList({16});
+    auto& afterGrowth = slot.GetPassDrawList({0});
+    ASSERT_EQ(afterGrowth.IndirectDraws.Batches.size(), 1u);
+    ASSERT_EQ(afterGrowth.IndirectDraws.IndexedArguments.size(), 1u);
+    EXPECT_EQ(afterGrowth.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    // 移动构造与移动赋值均完整迁移 IndirectDraws。
+    MeshPassFrameDrawList moveConstructed{std::move(afterGrowth)};
+    ASSERT_EQ(moveConstructed.IndirectDraws.Batches.size(), 1u);
+    EXPECT_EQ(moveConstructed.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    MeshPassFrameDrawList moveAssigned;
+    moveAssigned = std::move(moveConstructed);
+    ASSERT_EQ(moveAssigned.IndirectDraws.Batches.size(), 1u);
+    EXPECT_EQ(moveAssigned.IndirectDraws.IndexedArguments[0].IndexCount, 3u);
+
+    FakeBuffer indirectBuf{64, gpu::BufferUse::Indirect};
+    gpu::GpuDeviceCapabilities caps{};
+    caps.Features.IndirectDraw = true;
+    caps.Limits.MaxDrawIndirectCount = 4;
+    RecordingEncoder encoder;
+    ASSERT_TRUE(SubmitMeshPassIndirectDraws(encoder, moveAssigned.VisibleCommands, moveAssigned.IndirectDraws, {&indirectBuf, 0, 64}, {}, caps));
+    ASSERT_EQ(encoder.IndexedIndirectDraws.size(), 1u);
+    EXPECT_EQ(encoder.IndexedIndirectDraws[0].Count, 1u);
+
+    const auto batchCap = moveAssigned.IndirectDraws.Batches.capacity();
+    moveAssigned.Clear();
+    EXPECT_TRUE(moveAssigned.IndirectDraws.Batches.empty());
+    EXPECT_TRUE(moveAssigned.IndirectDraws.IndexedArguments.empty());
+    EXPECT_EQ(moveAssigned.IndirectDraws.Batches.capacity(), batchCap);
+    scheduler->WaitIdle();
+}
+
 }  // namespace
 }  // namespace radray

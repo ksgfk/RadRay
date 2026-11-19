@@ -2,7 +2,7 @@
 
 #include <radray/gpu/types.h>
 #include <radray/types.h>
-#include <radray/gpu_impl/external_resource.h>
+#include <radray/gpu/external_resource.h>
 
 namespace radray::gpu::d3d12 {
 class DeviceD3D12;

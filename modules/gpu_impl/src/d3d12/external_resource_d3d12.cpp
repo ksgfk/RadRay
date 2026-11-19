@@ -1,4 +1,5 @@
 #include "external_resource_d3d12.h"
+#include "../external_resource.h"
 
 #include <radray/logger.h>
 
@@ -10,7 +11,7 @@
 namespace radray::gpu::d3d12 {
 namespace {
 ExternalError Fail(std::string_view op, ExternalError e, std::string_view parameters = {}) noexcept {
-    return radray::gpu::detail::LogExternalError(op, RenderBackend::D3D12, e, parameters);
+    return radray::gpu::detail::LogExternalError(op, GpuBackend::D3D12, e, parameters);
 }
 ExternalError NativeError(HRESULT hr, std::string_view operation) noexcept { return {radray::format("{} failed: {} ({:#x})", operation, GetErrorName(hr), uint32_t(hr)), ExternalNativeApi::D3D12, hr}; }
 ExternalResult<OwnedExternalHandle> Share(DeviceD3D12* device, ID3D12DeviceChild* object) noexcept {
@@ -135,7 +136,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::CreateExportableBuffer
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints | ResourceHint::Dedicated;
-    result->_externalInfo = ExternalBufferInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), RenderBackend::D3D12, result->GetDesc(), nativeSize, uint32_t(d.Flags), 0, {allocation.SizeInBytes, 0, true}, std::nullopt};
+    result->_externalInfo = ExternalBufferInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), GpuBackend::D3D12, result->GetDesc(), nativeSize, uint32_t(d.Flags), 0, {allocation.SizeInBytes, 0, true}, std::nullopt};
     result->_externalHandle = std::get<OwnedExternalHandle>(std::move(handle));
     return unique_ptr<Buffer>{std::move(result)};
 }
@@ -162,7 +163,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::CreateExportableTextu
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints | ResourceHint::Dedicated;
-    result->_externalInfo = ExternalTextureInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), RenderBackend::D3D12, result->GetDesc(), uint32_t(d.Format), uint32_t(d.Flags), 0, uint32_t(d.Layout), {allocation.SizeInBytes, 0, true}, std::nullopt};
+    result->_externalInfo = ExternalTextureInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), GpuBackend::D3D12, result->GetDesc(), uint32_t(d.Format), uint32_t(d.Flags), 0, uint32_t(d.Layout), {allocation.SizeInBytes, 0, true}, std::nullopt};
     result->_externalInfo->AllowFormatReinterpretation = external.AllowFormatReinterpretation;
     result->_externalHandle = std::get<OwnedExternalHandle>(std::move(handle));
     return unique_ptr<Texture>{std::move(result)};
@@ -206,7 +207,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::ImportBuffer(BorrowedE
     if (FAILED(hr)) return Fail("ImportBuffer", NativeError(hr, "ID3D12Device::OpenSharedHandle"), params);
     const auto d = native->GetDesc();
     if (!Matches(d, BufferDesc(info.Descriptor, info.NativeSize)) || !SharedDefaultResource(native.Get())) return Fail("ImportBuffer", {"Exported buffer metadata or native resource parameters do not match"}, params);
-    if (info.SourceBackend == RenderBackend::D3D12 && (info.NativeFlags != uint32_t(d.Flags) || info.Allocation.Size != _device->_device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes))
+    if (info.SourceBackend == GpuBackend::D3D12 && (info.NativeFlags != uint32_t(d.Flags) || info.Allocation.Size != _device->_device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes))
         return Fail("ImportBuffer", {"Exported buffer metadata or native resource parameters do not match"}, params);
     auto result = make_unique<BufferD3D12>(_device, std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_reqSize = info.Descriptor.Size;
@@ -230,7 +231,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::ImportTexture(Borrowe
     if (FAILED(hr)) return Fail("ImportTexture", NativeError(hr, "ID3D12Device::OpenSharedHandle"), params);
     const auto d = native->GetDesc();
     if (!Matches(d, MakeTextureResourceDesc(desc, info.AllowFormatReinterpretation), desc.Usage.HasFlag(TextureUse::Resource)) || !SharedDefaultResource(native.Get())) return Fail("ImportTexture", {"Exported texture metadata or native resource parameters do not match"}, params);
-    if (info.SourceBackend == RenderBackend::D3D12 && (info.NativeFormat != uint32_t(d.Format) || info.NativeFlags != uint32_t(d.Flags) || info.NativeTiling != uint32_t(d.Layout) || info.Allocation.Size != _device->_device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes))
+    if (info.SourceBackend == GpuBackend::D3D12 && (info.NativeFormat != uint32_t(d.Format) || info.NativeFlags != uint32_t(d.Flags) || info.NativeTiling != uint32_t(d.Layout) || info.Allocation.Size != _device->_device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes))
         return Fail("ImportTexture", {"Exported texture metadata or native resource parameters do not match"}, params);
     auto result = make_unique<TextureD3D12>(_device, std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_dimension = desc.Dim;

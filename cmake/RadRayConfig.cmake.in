@@ -40,7 +40,7 @@ function(_radray_load_component component)
 @RADRAY_FIND_gpu_impl@
     endif()
     include("${_radray_package_dir}/RadRay-${component}-targets.cmake")
-    if (NOT component MATCHES "^(gpu|tools|reflector_tools)$")
+    if (NOT component MATCHES "^(tools|reflector_tools)$")
         get_target_property(installed RadRay::${component} IMPORTED_CONFIGURATIONS)
         foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES CMAKE_BUILD_TYPE)
             string(TOUPPER "${config}" upper)

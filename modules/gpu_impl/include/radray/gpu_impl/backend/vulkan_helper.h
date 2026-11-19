@@ -64,6 +64,7 @@ enum class FeatureRequirementVulkan {
 struct FeatureRequestsVulkan {
     FeatureRequirementVulkan FullDrawIndexUint32{};
     FeatureRequirementVulkan ImageCubeArray{};
+    FeatureRequirementVulkan TextureCompressionBC{};
     FeatureRequirementVulkan DepthClamp{};
     FeatureRequirementVulkan DepthBiasClamp{};
     FeatureRequirementVulkan FillModeNonSolid{};
@@ -117,6 +118,9 @@ uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilit
 std::optional<VkExtent2D> ResolveSwapChainExtent(VkExtent2D requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
 std::optional<std::string_view> GetUnsupportedGraphicsStateVulkan(const GraphicsPipelineStateDescriptor& desc, const DeviceFeaturesVulkan& features, bool conservativeRasterization) noexcept;
 uint32_t GetTextureCopyBytesPerPixelVulkan(TextureFormat format, TextureAspects aspects) noexcept;
+bool IsBufferImageTransferSupported(const TextureDescriptor& texture, const TextureRegion2D& image, uint64_t bufferOffset,
+                                    VkQueueFlags flags, VkExtent3D granularity) noexcept;
+TextureFormatBlockInfo GetTextureCopyBlockInfoVulkan(TextureFormat format, TextureAspects aspects) noexcept;
 VkPipelineStageFlags ResolveShaderPipelineStagesVulkan(VkPipelineStageFlags stages, ShaderStages shaders, VkQueueFlags queueFlags) noexcept;
 bool ArePipelineStagesSupportedVulkan(VkPipelineStageFlags stages, VkQueueFlags queueFlags) noexcept;
 VkPipelineStageFlagBits MapType(QueryPipelineStage stage) noexcept;

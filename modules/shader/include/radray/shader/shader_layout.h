@@ -122,7 +122,7 @@ bool ValidateShaderPipelineLayoutDesc(const ShaderPipelineLayoutDesc& desc, Null
 bool ValidateShaderVariantInterfaceDesc(const ShaderVariantInterfaceDesc& desc, Nullable<const ShaderPipelineLayoutDesc*> layout = nullptr, Nullable<string*> diagnostic = nullptr);
 bool ValidateShaderFamilyLayoutDesc(const ShaderFamilyLayoutDesc& desc, Nullable<string*> diagnostic = nullptr);
 
-Nullable<const ShaderVariantTargetInterfaceDesc*> GetShaderTargetInterface(const ShaderVariantInterfaceDesc& desc, gpu::RenderBackend backend) noexcept;
+Nullable<const ShaderVariantTargetInterfaceDesc*> GetShaderTargetInterface(const ShaderVariantInterfaceDesc& desc, gpu::GpuBackend backend) noexcept;
 
 // 文件格式版本独立于编译器 metadata。读取失败保留 output；写入无效描述返回空。
 std::optional<vector<byte>> WriteShaderPipelineLayoutBinary(const ShaderPipelineLayoutDesc& desc);

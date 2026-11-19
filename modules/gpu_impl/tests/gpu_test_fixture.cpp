@@ -19,8 +19,8 @@ std::string_view EnvironmentValue(const char* name) noexcept {
     return value ? std::string_view{value} : std::string_view{};
 }
 
-bool IsRequired(RenderBackend backend) noexcept {
-    const std::string_view expected = backend == RenderBackend::D3D12 ? "d3d12" : "vulkan";
+bool IsRequired(GpuBackend backend) noexcept {
+    const std::string_view expected = backend == GpuBackend::D3D12 ? "d3d12" : "vulkan";
     std::string_view list = EnvironmentValue("RADRAY_TEST_REQUIRED_BACKENDS");
     while (!list.empty()) {
         const size_t comma = list.find(',');
@@ -62,8 +62,8 @@ void FailTest(std::string_view reason) {
 
 }  // namespace
 
-const char* BackendParamName(const testing::TestParamInfo<RenderBackend>& info) {
-    return info.param == RenderBackend::D3D12 ? "D3D12" : "Vulkan";
+const char* BackendParamName(const testing::TestParamInfo<GpuBackend>& info) {
+    return info.param == GpuBackend::D3D12 ? "D3D12" : "Vulkan";
 }
 
 void GpuTest::TearDown() {
@@ -79,18 +79,18 @@ void GpuTest::TearDown() {
     EXPECT_EQ(_rhiErrors.load(), 0u) << "RHI validation reported diagnostics the test did not expect";
 }
 
-Nullable<Device*> GpuTest::OpenDevice(RenderBackend backend, bool externalResource) {
+Nullable<Device*> GpuTest::OpenDevice(GpuBackend backend) {
     string reason;
     OpenStatus status = OpenStatus::Unavailable;
-    if (backend == RenderBackend::D3D12) {
+    if (backend == GpuBackend::D3D12) {
 #if defined(RADRAY_ENABLE_D3D12)
-        status = CreateD3D12Device(externalResource, reason);
+        status = CreateD3D12Device(reason);
 #else
         reason = "D3D12 backend is not built";
 #endif
     } else {
 #if defined(RADRAY_ENABLE_VULKAN)
-        status = CreateVulkanDevice(externalResource, reason);
+        status = CreateVulkanDevice(reason);
 #else
         reason = "Vulkan backend is not built";
 #endif
@@ -103,7 +103,7 @@ Nullable<Device*> GpuTest::OpenDevice(RenderBackend backend, bool externalResour
     return nullptr;
 }
 
-GpuTest::OpenStatus GpuTest::CreateD3D12Device([[maybe_unused]] bool externalResource, string& reason) {
+GpuTest::OpenStatus GpuTest::CreateD3D12Device(string& reason) {
 #if defined(RADRAY_ENABLE_D3D12)
     if (!_dxgiFactory) {
         auto context = CreateDXGIDiagnosticContext();
@@ -138,7 +138,7 @@ GpuTest::OpenStatus GpuTest::CreateD3D12Device([[maybe_unused]] bool externalRes
         reason = "no D3D12 adapter is available";
         return OpenStatus::Unavailable;
     }
-    const D3D12DeviceDescriptor desc{.Factory = _dxgiFactory.get(), .AdapterIndex = adapter, .EnableExternalResource = externalResource};
+    const D3D12DeviceDescriptor desc{.Factory = _dxgiFactory.get(), .AdapterIndex = adapter};
     return AddDevice(CreateDevice(desc, {.IsEnabled = true, .LogCallback = OnRhiMessage, .LogUserData = this}), reason);
 #else
     reason = "D3D12 backend is not built";
@@ -146,7 +146,7 @@ GpuTest::OpenStatus GpuTest::CreateD3D12Device([[maybe_unused]] bool externalRes
 #endif
 }
 
-GpuTest::OpenStatus GpuTest::CreateVulkanDevice([[maybe_unused]] bool externalResource, string& reason) {
+GpuTest::OpenStatus GpuTest::CreateVulkanDevice(string& reason) {
 #if defined(RADRAY_ENABLE_VULKAN)
     if (!_vulkanInstance) {
         _vulkanInstance = InitVulkanEnv({.AppName = "radray_render_test",
@@ -181,7 +181,7 @@ GpuTest::OpenStatus GpuTest::CreateVulkanDevice([[maybe_unused]] bool externalRe
         return OpenStatus::Unavailable;
     }
     const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
-    const VulkanDeviceDescriptor desc{.PhysicalDeviceIndex = adapter, .Queues = queues, .EnableExternalResource = externalResource};
+    const VulkanDeviceDescriptor desc{.PhysicalDeviceIndex = adapter, .Queues = queues};
     return AddDevice(CreateDevice(desc, {.IsEnabled = true, .LogCallback = OnRhiMessage, .LogUserData = this}), reason);
 #else
     reason = "Vulkan backend is not built";
@@ -223,7 +223,7 @@ CommandQueue& DirectQueue(Device& device) {
 }
 
 Nullable<unique_ptr<Shader>> LoadShader(Device& device, std::string_view source, std::string_view entry, ShaderStages stages) {
-    const bool dxil = device.GetBackend() == RenderBackend::D3D12;
+    const bool dxil = device.GetBackend() == GpuBackend::D3D12;
     const auto path = std::filesystem::path{RADRAY_TEST_SHADER_DIR} / "shader_bytecode" /
                       radray::format("{}.{}.{}.bin", source, entry, dxil ? "dxil" : "spirv");
     const auto bytes = ReadBinaryFile(path);

@@ -9,19 +9,8 @@
 namespace radray {
 
 bool Scene::ValidateBatch(const MeshBatch& batch) const noexcept {
-    if (!_materials.IsAlive(batch.Material._handle) || batch.Elements.size() > 32) return false;
-    const bool draws = std::any_of(batch.Elements.begin(), batch.Elements.end(), [](const MeshBatchElement& element) { return element.IndexCount != 0 && element.InstanceCount != 0; });
-    if (draws && (!batch.VertexInput || !ValidateVertexInput(*batch.VertexInput, true))) return false;
-    for (const auto& element : batch.Elements) {
-        if (element.IndexCount == 0 || element.InstanceCount == 0) continue;
-        if (!element.IndexBuffer || !element.IndexBuffer->IsValid() || (element.IndexStride != 2 && element.IndexStride != 4) ||
-            element.IndexBufferOffset % element.IndexStride != 0 ||
-            uint64_t{element.FirstInstance} + element.InstanceCount - 1 > std::numeric_limits<uint32_t>::max()) return false;
-        const auto desc = element.IndexBuffer->GetDesc();
-        if (!desc.Usage.HasFlag(gpu::BufferUse::Index) ||
-            uint64_t{element.IndexBufferOffset} + (uint64_t{element.FirstIndex} + element.IndexCount) * element.IndexStride > desc.Size) return false;
-    }
-    return true;
+    if (!_materials.IsAlive(batch.Material._handle)) return false;
+    return ValidateMeshBatchElements(batch, true);
 }
 
 void Scene::Reserve(uint32_t primitives, uint32_t batches, uint32_t materials) {

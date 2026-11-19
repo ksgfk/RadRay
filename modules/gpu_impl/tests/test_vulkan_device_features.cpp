@@ -23,6 +23,19 @@ DeviceFeaturesVulkan SupportEverything() {
     return features;
 }
 
+TEST(VulkanColorWriteMask, PreservesAllSixteenChannelSubsets) {
+    auto target = ColorTargetState::Default(TextureFormat::RGBA8_UNORM);
+    const GraphicsPipelineStateDescriptor desc{.ColorTargets = {&target, 1}};
+    const auto features = SupportEverything();
+    for (uint32_t bits = 0; bits <= uint32_t(ColorWrite::All); ++bits) {
+        target.WriteMask = static_cast<ColorWrite>(bits);
+        EXPECT_EQ(MapType(target.WriteMask), bits);
+        EXPECT_FALSE(GetUnsupportedGraphicsStateVulkan(desc, features, false));
+    }
+    target.WriteMask = static_cast<ColorWrite>(16);
+    EXPECT_TRUE(GetUnsupportedGraphicsStateVulkan(desc, features, false));
+}
+
 TEST(VulkanDeviceFeaturePolicy, EnablesRequestedFeaturesOnly) {
     const auto selection = SelectDeviceFeaturesVulkan(SupportEverything(), GetRhiFeatureRequestsVulkan());
 

@@ -19,7 +19,7 @@ struct MeshSection {
 };
 
 struct MeshBatchElement {
-    // 借用索引缓冲；IndexCount 非零时必须提供；偏移单位为字节，步长只能为 2 或 4。
+    // 借用索引缓冲；为 nullptr 时表示无索引绘制（IndexBufferOffset 与 VertexOffset 须为 0，IndexCount/FirstIndex 表示 VertexCount/FirstVertex）；有索引时偏移单位为字节，步长只能为 2 或 4。
     Nullable<gpu::Buffer*> IndexBuffer{nullptr};
     uint32_t IndexBufferOffset{0};
     uint32_t IndexStride{4};

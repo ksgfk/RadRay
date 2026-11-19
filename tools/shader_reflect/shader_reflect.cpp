@@ -79,8 +79,11 @@ bool ReadPolicy(JsonValue value, ShaderReflectionPolicy& policy) {
         const auto list = value["pushConstants"];
         if (!list.IsArray()) return false;
         for (size_t i = 0; i < list.Size(); ++i) {
+            const auto item = list.At(i);
             ShaderPushConstantOverride rule;
-            if (!DeserializeJsonValue(list.At(i)["name"], rule.Name) || !DeserializeJsonValue(list.At(i)["pushId"], rule.PushId)) return false;
+            if (!item.IsObject() || !DeserializeJsonValue(item["name"], rule.Name) || !DeserializeJsonValue(item["pushId"], rule.PushId)) return false;
+            if (item.Has("promoteDxilCBufferToRootConstants") && !DeserializeJsonValue(item["promoteDxilCBufferToRootConstants"], rule.PromoteDxilCBufferToRootConstants)) return false;
+            if (item.Has("allowDxilOnly") && !DeserializeJsonValue(item["allowDxilOnly"], rule.AllowDxilOnly)) return false;
             policy.PushConstants.push_back(std::move(rule));
         }
     }

@@ -23,7 +23,7 @@ shader::DiagnosticResult<ShaderAsset> GpuResources::CompileCube(const shader::Cl
     return ShaderAsset::Compile(Device->GetDevice(), compiler, desc);
 }
 
-bool GpuResources::Initialize(gpu::RenderBackend backend, const std::filesystem::path& shaderDirectory,
+bool GpuResources::Initialize(gpu::GpuBackend backend, const std::filesystem::path& shaderDirectory,
                               Nullable<const shader::Client*> compiler) {
     RADRAY_INFO_LOG("准备 GPU：backend={}，请求开启后端验证", backend);
     Env = Environment::Create(backend, true, "RadRay Mesh Drawing tutorial");

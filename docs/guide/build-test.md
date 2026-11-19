@@ -315,7 +315,7 @@ mimalloc、图像支持与 window/render/backend 维持功能默认。使用已�
 examples 默认仍开启，上面的宿主示例显式关闭它；关闭 gpu_impl/runtime/libpng 时也必须关闭 examples。
 
 宿主的 `BUILD_SHARED_LIBS`、安装和包发现配置不会被 RadRay 强制覆盖；RadRay 自有库保持
-静态库，gpu 为 INTERFACE 头文件库。其产物默认在自己的 binary subtree，`RADRAY_BUILD_PATH` 可改写，宿主产物目录
+静态库。其产物默认在自己的 binary subtree，`RADRAY_BUILD_PATH` 可改写，宿主产物目录
 保持原设置。包含路径、公共宏和依赖通过 target 传递；最低 C++20，不强制降低更高标准。
 
 启用 compiler 的消费者链接模块，并在启动时提供 DXC 运行库搜索路径：
@@ -357,7 +357,7 @@ target_link_libraries(my_app PRIVATE RadRay::gpu_impl)
 公开 targets 为 `RadRay::core`、`RadRay::gpu`、`RadRay::gpu_impl`、`RadRay::shader`、`RadRay::window`、
 `RadRay::runtime`，以及 CLI 的 `RadRay::shader_compile`、`RadRay::shader_reflect`。不保留旧模块入口。
 组件为 `core`、`gpu`、`gpu_impl`、`shader`、`window`、`runtime`、`tools`、`reflector_tools`。
-依赖自动加载，不指定组件时加载全部已安装组件。gpu 是 INTERFACE 库，其 core 依赖仍要求匹配构建配置。
+依赖自动加载，不指定组件时加载全部已安装组件。gpu 与其 core 依赖均提供按构建配置安装的静态库。
 shader 只加载 gpu/core，不查找 DXC SDK 或 GPU 后端包；gpu_impl 加载 gpu/core 及启用后端的外部包。
 runtime 加载 gpu_impl/shader。两个 CLI 组件均加载 shader，实际编译时才需要 DXC 运行库。
 支持重复/追加组件及标准 `OPTIONAL_COMPONENTS`；必需但未安装的组件失败。
@@ -398,7 +398,8 @@ ctest --preset win-x64-debug-clangcl
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader`（同一程序内的编译能力用例） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_gpu_impl` | 见下文 [gpu_impl 测试](#gpu_impl-测试) |
-| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`ShaderPublish`（开启样例）、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
+| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`ShaderPublish`（开启样例）、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`TransientParameterPoolFakeTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`、`Backends/TransientParameterPoolTest`、`Backends/DeviceContextGpuTest`、`DeviceContextFactoryGpuTest`、`Backends/MdiGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
+| `test_radray_runtime_allocations`（`RADRAY_ENABLE_MIMALLOC=OFF`） | `RuntimeAllocationsTest`（独立进程替换全局 `operator new/delete`，验证 RDG 构图、瞬态参数池与稳态有序列表排序零全局堆分配） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
 core 测试使用内联数据或临时目录，不依赖 `assets/`。
@@ -413,7 +414,7 @@ GPU suite 以后端参数化，测试名为 `Backends/<Suite>.<Case>/D3D12` 或 
 |---|---|
 | `DeviceTest` | 设备与 direct queue 可用，报告实际 adapter |
 | `BufferTest` | Upload→ReadBack 复制、persistent map 下的 flush/invalidate、未映射时 cache 操作被 RHI validation 拒绝 |
-| `ComputeBindingTest` | 显式布局下的 cbuffer、push constant、SRV/UAV buffer、纹理与 sampler、只重绑一个 group 时其他 group 仍有效、dynamic offset；均以读回内容断言 |
+| `ComputeBindingTest` | 显式布局下的 cbuffer、push constant、SRV/UAV buffer、纹理与 sampler、只重绑一个 group 时其他 group 仍有效、dynamic offset、D3D12 超出 64 DWORD 根签名总预算拒绝创建；均以读回内容或创建结果断言 |
 | `RenderPassTest` | clear 读回、全屏三角形、深度测试保留最近片元、模板参考值动态设置且每个 Pass 重置为 0 |
 | `TextureViewTest` | 不兼容格式、纹理未声明的用途、越界 mip/layer、缺 stencil aspect 的 depth/stencil view 被拒绝；sRGB view 编码写入 UNORM 纹理；layer view 只写所属层 |
 

@@ -1,4 +1,5 @@
 #include "external_resource_vulkan.h"
+#include "../external_resource.h"
 
 #include <radray/logger.h>
 
@@ -10,7 +11,7 @@
 namespace radray::gpu::vulkan {
 namespace {
 ExternalError Fail(std::string_view op, ExternalError error, std::string_view parameters = {}) noexcept {
-    return detail::LogExternalError(op, RenderBackend::Vulkan, error, parameters);
+    return detail::LogExternalError(op, GpuBackend::Vulkan, error, parameters);
 }
 ExternalError NativeError(VkResult r, std::string_view operation) noexcept { return {radray::format("{} failed: {}", operation, r), ExternalNativeApi::Vulkan, r}; }
 VkExternalMemoryHandleTypeFlagBits MemoryHandleType(ExternalMemoryHandleType type) noexcept {
@@ -125,7 +126,7 @@ ExternalResult<unique_ptr<ImageVulkan>> MakeImage(DeviceVulkan* device, const Te
     const VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO, nullptr, VkExternalMemoryHandleTypeFlags(MemoryHandleType(options.HandleType))};
     auto create = MakeTextureImageCreateInfo(desc, options.AllowFormatReinterpretation);
     create.pNext = &external;
-    if (imported && imported->SourceBackend == RenderBackend::Vulkan) {
+    if (imported && imported->SourceBackend == GpuBackend::Vulkan) {
         create.format = static_cast<VkFormat>(imported->NativeFormat);
         create.flags = imported->NativeFlags;
         create.usage = imported->NativeUsage;
@@ -280,7 +281,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::CreateExportableBuffe
     auto result = std::get<unique_ptr<BufferVulkan>>(std::move(created));
     auto handle = ExportMemory(_device, result->_allocInfo.deviceMemory, external.HandleType);
     if (auto* error = std::get_if<ExternalError>(&handle)) return Fail("CreateExportableBuffer", *error, params);
-    result->_externalInfo = ExternalBufferInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), RenderBackend::Vulkan, result->GetDesc(), size, 0, BufferUsage(desc.Usage), {result->_allocInfo.size, 0, true}, std::nullopt};
+    result->_externalInfo = ExternalBufferInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), GpuBackend::Vulkan, result->GetDesc(), size, 0, BufferUsage(desc.Usage), {result->_allocInfo.size, 0, true}, std::nullopt};
     if (external.HandleType == ExternalMemoryHandleType::OpaqueWin32)
         result->_externalInfo->VulkanMemory = ExternalVulkanMemoryInfo{VulkanIdentity(_device), result->_allocInfo.memoryType};
     result->_externalHandle = std::get<OwnedExternalHandle>(std::move(handle));
@@ -298,7 +299,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceVulkan::CreateExportableText
     auto result = std::get<unique_ptr<ImageVulkan>>(std::move(created));
     auto handle = ExportMemory(_device, result->_allocInfo.deviceMemory, external.HandleType);
     if (auto* error = std::get_if<ExternalError>(&handle)) return Fail("CreateExportableTexture", *error, params);
-    result->_externalInfo = ExternalTextureInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), RenderBackend::Vulkan, result->GetDesc(), uint32_t(result->_rawFormat), result->_createFlags, result->_nativeUsage, uint32_t(VK_IMAGE_TILING_OPTIMAL), {result->_allocInfo.size, 0, true}, std::nullopt};
+    result->_externalInfo = ExternalTextureInfo{external.HandleType, std::get<ExternalDeviceIdentity>(identity), GpuBackend::Vulkan, result->GetDesc(), uint32_t(result->_rawFormat), result->_createFlags, result->_nativeUsage, uint32_t(VK_IMAGE_TILING_OPTIMAL), {result->_allocInfo.size, 0, true}, std::nullopt};
     if (external.HandleType == ExternalMemoryHandleType::OpaqueWin32)
         result->_externalInfo->VulkanMemory = ExternalVulkanMemoryInfo{VulkanIdentity(_device), result->_allocInfo.memoryType};
     result->_externalInfo->AllowFormatReinterpretation = external.AllowFormatReinterpretation;

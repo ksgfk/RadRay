@@ -713,5 +713,115 @@ TEST_F(SceneTest, RemovedDepthPassDoesNotChangeExistingFrameSortMode) {
     EXPECT_EQ(list.GetSortMode(), MeshPassSortMode::StateFirst);
 }
 
+TEST_F(SceneTest, NonIndexedBatchFullPipelineMergingAndValidationBoundaries) {
+    class MergingProcessor final : public MeshPassProcessor {
+    public:
+        explicit MergingProcessor(gpu::GraphicsPipelineState& pipeline) noexcept : _pipeline(&pipeline) {}
+        void AddMeshBatch(const MeshBatchContext& context, MeshPassDrawListContext& output) override {
+            BuildMeshDrawCommands(context, {.Pipeline = _pipeline, .AllowElementMerging = true}, output);
+        }
+
+    private:
+        gpu::GraphicsPipelineState* _pipeline;
+    };
+
+    // 1. 拒绝混用有索引与无索引元素、非零 IndexBufferOffset/VertexOffset 以及顶点越界。
+    {
+        MeshBatch mixed;
+        mixed.Material = Material;
+        mixed.VertexInput = &Input;
+        mixed.Elements.push_back({.IndexBuffer = &Indices, .FirstIndex = 0, .IndexCount = 3});
+        mixed.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(mixed)).IsValid());
+
+        MeshBatch badOffset;
+        badOffset.Material = Material;
+        badOffset.VertexInput = &Input;
+        badOffset.Elements.push_back({.IndexBuffer = nullptr, .IndexBufferOffset = 4, .FirstIndex = 0, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(badOffset)).IsValid());
+
+        MeshBatch badVertexOffset;
+        badVertexOffset.Material = Material;
+        badVertexOffset.VertexInput = &Input;
+        badVertexOffset.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3, .VertexOffset = 1});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(badVertexOffset)).IsValid());
+
+        // Input.Streams[0] = 48 B, stride 12 => 4 vertices max; FirstIndex=2, IndexCount=3 needs 5 vertices.
+        MeshBatch oobVertices;
+        oobVertices.Material = Material;
+        oobVertices.VertexInput = &Input;
+        oobVertices.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 2, .IndexCount = 3});
+        EXPECT_FALSE(World.AddMeshBatch(Primitive, std::move(oobVertices)).IsValid());
+    }
+
+    // 2. 全链路无索引 TriangleList 连续单实例合并。
+    Vertices.Desc.Size = 256;
+    Input.Streams[0].Size = 144;  // 12 vertices at stride 12
+    MeshBatch mergedBatch;
+    mergedBatch.Material = Material;
+    mergedBatch.VertexInput = &Input;
+    mergedBatch.Topology = gpu::PrimitiveTopology::TriangleList;
+    mergedBatch.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 0, .IndexCount = 3});
+    mergedBatch.Elements.push_back({.IndexBuffer = nullptr, .FirstIndex = 3, .IndexCount = 3});
+    const auto mergedHandle = World.AddMeshBatch(Primitive, mergedBatch);
+    ASSERT_TRUE(mergedHandle.IsValid());
+
+    // 3. TriangleStrip、非完整图元、不同 FirstInstance 均不合并。
+    MeshBatch stripBatch = mergedBatch;
+    stripBatch.Topology = gpu::PrimitiveTopology::TriangleStrip;
+    const auto stripHandle = World.AddMeshBatch(Primitive, stripBatch);
+    ASSERT_TRUE(stripHandle.IsValid());
+
+    MeshBatch incompleteBatch = mergedBatch;
+    incompleteBatch.Elements[0].IndexCount = 2;
+    incompleteBatch.Elements[1].FirstIndex = 2;
+    incompleteBatch.Elements[1].IndexCount = 3;
+    const auto incompleteHandle = World.AddMeshBatch(Primitive, incompleteBatch);
+    ASSERT_TRUE(incompleteHandle.IsValid());
+
+    MeshBatch diffInstanceBatch = mergedBatch;
+    diffInstanceBatch.Elements[1].FirstInstance = 1;
+    const auto diffInstanceHandle = World.AddMeshBatch(Primitive, diffInstanceBatch);
+    ASSERT_TRUE(diffInstanceHandle.IsValid());
+
+    MergingProcessor mergingProcessor{Pipeline};
+    const MeshPassRegistration pass{Pass, &mergingProcessor};
+    World.SyncCachedMeshDrawCommands(std::span{&pass, 1});
+
+    const auto submitSingle = [&](MeshBatchHandle handle, test::RecordingEncoder& encoder) {
+        vector<VisibleMeshDrawCommand> visible;
+        const VisibleMeshBatch req{.Batch = handle};
+        EXPECT_TRUE(Gather(std::span{&req, 1}, visible));
+        EXPECT_TRUE(SubmitMeshDrawCommands(encoder, visible));
+    };
+
+    test::RecordingEncoder mergedEnc;
+    submitSingle(mergedHandle, mergedEnc);
+    EXPECT_TRUE(mergedEnc.IndexBuffers.empty());
+    EXPECT_TRUE(mergedEnc.Draws.empty());
+    ASSERT_EQ(mergedEnc.NonIndexedDraws.size(), 1u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].VertexCount, 6u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].InstanceCount, 1u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].FirstVertex, 0u);
+    EXPECT_EQ(mergedEnc.NonIndexedDraws[0].FirstInstance, 0u);
+
+    test::RecordingEncoder stripEnc;
+    submitSingle(stripHandle, stripEnc);
+    EXPECT_TRUE(stripEnc.IndexBuffers.empty());
+    ASSERT_EQ(stripEnc.NonIndexedDraws.size(), 2u);
+
+    test::RecordingEncoder incompleteEnc;
+    submitSingle(incompleteHandle, incompleteEnc);
+    EXPECT_TRUE(incompleteEnc.IndexBuffers.empty());
+    ASSERT_EQ(incompleteEnc.NonIndexedDraws.size(), 2u);
+
+    test::RecordingEncoder diffInstEnc;
+    submitSingle(diffInstanceHandle, diffInstEnc);
+    EXPECT_TRUE(diffInstEnc.IndexBuffers.empty());
+    ASSERT_EQ(diffInstEnc.NonIndexedDraws.size(), 2u);
+    EXPECT_EQ(diffInstEnc.NonIndexedDraws[0].FirstInstance, 0u);
+    EXPECT_EQ(diffInstEnc.NonIndexedDraws[1].FirstInstance, 1u);
+}
+
 }  // namespace
 }  // namespace radray

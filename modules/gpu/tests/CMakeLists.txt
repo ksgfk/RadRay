@@ -1,4 +1,5 @@
 add_executable(test_radray_gpu
+    test_external_resource.cpp
     test_enums.cpp
     test_descriptors.cpp
     test_rhi.cpp)

@@ -32,13 +32,13 @@ public:
     // 在内容更新和上传准备之前，等待并回收下一槽。
     // 重复调用保留全部准备结果，直到 RunFrame 或 WaitIdle。
     FrameSlot& BeginFrame() noexcept;
-    // BeginFrame 至 Submit 返回的窗口之外返回空值。
+    // 返回已开始的槽。提交成功后清空；设备丢失时保留到 WaitIdle。
     Nullable<FrameSlot*> GetCurrentSlot() noexcept;
 
     // 仅允许串行调用；返回表示 Submit 完成，不保证 GPU 完成；帧错误不可恢复。
     // RunFrame 期间管线的外部输入必须存活且只读；返回时结束借用。
     // 被引用的 GPU 资源须存活到命令分配器重置，其生命周期独立于 CPU 命令数据。
-    void RunFrame() noexcept;
+    bool RunFrame() noexcept;
 
     // 等待所有已接收帧完成，再清空命令录制、CPU 数据与槽内对象。
     // 全部命令存储先重置，再按帧从旧到新清理槽；未提交的当前槽最后清理。
