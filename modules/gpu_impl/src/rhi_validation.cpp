@@ -1887,7 +1887,8 @@ public:
     }
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override {
         if (!Ready("CreateBuffer")) return nullptr;
-        if ((desc.Hints.value() & ~ResourceHints{ResourceHint::Dedicated | ResourceHint::PersistentMap}.value()) || !desc.Size || !ValidEnum(desc.Memory) || !desc.Usage || (desc.Usage.value() & ~((uint32_t(BufferUse::Indirect) << 1) - 1)) || (GetCapabilities().Limits.MaxBufferSize && desc.Size > GetCapabilities().Limits.MaxBufferSize) || (desc.Memory == MemoryType::Device && (desc.Usage.HasFlag(BufferUse::MapRead) || desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Hints.HasFlag(ResourceHint::PersistentMap))) || (desc.Hints.HasFlag(ResourceHint::PersistentMap) && !desc.Usage.HasFlag(BufferUse::MapRead) && !desc.Usage.HasFlag(BufferUse::MapWrite))) {
+        constexpr auto bufferHints = ResourceHint::Dedicated | ResourceHint::PersistentMap;
+        if ((desc.Hints.value() & ~bufferHints.value()) || !desc.Size || !ValidEnum(desc.Memory) || !desc.Usage || (desc.Usage.value() & ~((uint32_t(BufferUse::Indirect) << 1) - 1)) || (GetCapabilities().Limits.MaxBufferSize && desc.Size > GetCapabilities().Limits.MaxBufferSize) || (desc.Memory == MemoryType::Device && (desc.Usage.HasFlag(BufferUse::MapRead) || desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Hints.HasFlag(ResourceHint::PersistentMap))) || (desc.Hints.HasFlag(ResourceHint::PersistentMap) && !desc.Usage.HasFlag(BufferUse::MapRead) && !desc.Usage.HasFlag(BufferUse::MapWrite))) {
             _context->Reject("CreateBuffer", "buffer size, usage, memory, or persistent mapping descriptor is invalid");
             return nullptr;
         }

@@ -54,6 +54,13 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 未映射的调用由 RHI 校验拒绝。`PersistentMap` allocation 在创建时已映射，允许在显式 `Map` 之前或
 `Unmap` 之后执行缓存操作；usage 与范围校验仍然适用。Vulkan 非 coherent 范围的 atom 对齐由 VMA 处理。
 
+Vulkan 创建 Device 缓冲和纹理时使用 VMA 的 `VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE`，优先设备本地内存。
+Upload 和 ReadBack 缓冲使用 `VMA_MEMORY_USAGE_AUTO`。`MemoryType::Upload` 要求主机可见、顺序写入。
+VMA 根据 Vulkan buffer usage 选型。独显上，纯传输用途优先非 `DEVICE_LOCAL` 主机内存，包含顶点、索引、常量、
+着色器资源或间接参数用途时优先可映射的 `DEVICE_LOCAL` 内存。两者均倾向非缓存写入。
+`MemoryType::ReadBack` 声明随机主机访问，优先主机可见的缓存内存。实际类型取决于设备内存拓扑和可用容量，
+首选类型分配失败时由 VMA 尝试其他兼容类型。
+
 D3D12 普通 Upload / ReadBack buffer 分别固定在 GENERIC_READ / COPY_DEST，RHI buffer barrier 不为它们
 录制 transition；Upload 不允许 CopyDestination，ReadBack 只允许 MapRead / CopyDestination。
 带 UnorderedAccess 的可映射 buffer 使用 CUSTOM heap，不受这项固定状态限制；其 Upload 初始状态与
@@ -666,6 +673,7 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 | Vulkan | 每个 debug group 一个 zone | `vkCmdWriteTimestamp` 在 gpu_impl pass 内合法；`Begin()` 时回收查询槽 |
 | D3D12 | gpu_impl pass 外的 group 一个 zone；gpu_impl pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
 
+D3D12 在原生光栅 pass 前后用其描述符名称记录一个 GPU zone，合并执行的 RDG pass 共用首个 pass 的名称。
 因此 D3D12 同一原生 gpu_impl pass 内的嵌套 group 不产生独立 GPU zone；`Submit()` 后收集已完成的时间戳。
 Tracy on-demand 未连接时不发出 zone timestamp；连接时每个 zone 发出两个 timestamp，D3D12 另有一次
 `ResolveQueryData`。Vulkan 通过 `vkGetQueryPoolResults` 批量收集，并重置已回收的 query 区间，不逐 zone 录制 resolve。

@@ -65,6 +65,8 @@ struct Probe {
     unordered_map<Texture*, size_t> LiveViews;
     uint32_t Maps{0}, Flushes{0};
     uint32_t Copies{0};
+    RDGBufferSlice LastBufferCopySource{};
+    BufferToTextureCopyDescriptor LastTextureCopy{};
     vector<TextureRegion2D> TextureCopies;
     int32_t TextureCopiesUntilFailure{-1};
     uint32_t OpenEncoders{0};
@@ -155,6 +157,7 @@ public:
     void EndComputePass(unique_ptr<ComputeCommandEncoder>) noexcept override { --_probe.OpenEncoders; }
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override {
         ++_probe.Copies;
+        _probe.LastBufferCopySource = {src, srcOffset, size};
         std::memcpy(static_cast<ByteBuffer*>(dst)->Bytes.data() + dstOffset, static_cast<ByteBuffer*>(src)->Bytes.data() + srcOffset, size);
     }
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override {
@@ -163,6 +166,7 @@ public:
         if (_probe.TextureCopiesUntilFailure == 0) return false;
         if (_probe.TextureCopiesUntilFailure > 0) --_probe.TextureCopiesUntilFailure;
         _probe.TextureCopies.push_back(desc.Region.Destination);
+        _probe.LastTextureCopy = desc;
         return true;
     }
 
@@ -2540,6 +2544,91 @@ TEST_F(RDGExecutionTest, ActualDynamicSizeReservesPaddingAndSharesPhysicalReadSt
     EXPECT_EQ(Trace.Copies, 0u);
     for (const auto& allocation : Trace.BufferAllocations) EXPECT_LT(allocation.Size, 1024u * 1024u);
     if (constants.Buffer == vertices.Buffer) EXPECT_GE(vertices.Offset, constants.Offset + 256);
+}
+
+TEST_F(RDGExecutionTest, UploadCommandsAndCopyOnlySlicesShareStagingPage) {
+    auto& slot = Scheduler->BeginFrame();
+    Device->Capabilities.Detail.BufferCopyOffsetAlignment = 4;
+    auto constraints = Context.GetRDGConstraints();
+    constraints.BufferCopyAlignment = 6;
+    constraints.TexturePlacementAlignment = 16;
+    RDGBuilder graph{slot, constraints};
+    const array<byte, 4> bytes{byte{42}};
+    const auto dynamic = [&](BufferUses usage, uint64_t alignment = 1) {
+        return graph.CreateBuffer(RDGDynamicBufferDescriptor{bytes.size(), usage, alignment}, RDGUploadSource::BorrowedBytes(bytes));
+    };
+    graph.MarkOutput(dynamic(BufferUse::CopySource));
+    const auto copy = dynamic(BufferUse::CopySource, 8);
+    const auto vertex = dynamic(BufferUse::Vertex | BufferUse::CopySource);
+    const auto constants = dynamic(BufferUse::CBuffer | BufferUse::CopySource);
+    array<RDGBufferSlice, 3> slices{};
+    struct Sources {
+        array<RDGBufferHandle, 3> Handles;
+        array<RDGBufferSlice, 3>* Slices;
+    };
+    graph.AddCopyPass("read slices", Sources{{copy, vertex, constants}, &slices}, +[](const Sources& data, RDGCopyPassContext& ctx) noexcept {
+        for (size_t i = 0; i < data.Handles.size(); ++i) (*data.Slices)[i] = ctx.ResolveBuffer(data.Handles[i]);
+        return true;
+    }).ReadBuffer(copy).ReadBuffer(vertex).ReadBuffer(constants).NeverCull();
+
+    ByteBuffer target{{.Size = bytes.size(), .Usage = BufferUse::CopyDestination}, Trace};
+    const auto dst = graph.ImportBuffer(&target, BufferState::Common);
+    graph.UploadBuffer(dst, 0, RDGUploadSource::BorrowedBytes(bytes));
+    graph.MarkOutput(dst);
+    auto desc = ColorDescriptor();
+    desc.Usage |= TextureUse::CopyDestination;
+    const auto image = graph.CreateTexture(desc);
+    graph.UploadTexture(image, {.Width = 1, .Height = 1}, RDGTextureUploadSource::BorrowedBytes(bytes, 4));
+    graph.MarkOutput(image);
+
+    auto compiled = graph.Compile();
+    ASSERT_TRUE(compiled);
+    ASSERT_TRUE(compiled->Prepare(slot, Pool, Uploads));
+    auto* command = slot.AcquireCommandBuffer().Unwrap();
+    command->Begin();
+    ASSERT_TRUE(compiled->Record(*command));
+    command->End();
+
+    ASSERT_TRUE(slices[0].Buffer && slices[1].Buffer && slices[2].Buffer);
+    EXPECT_EQ(slices[0].Buffer->GetDesc().Usage, BufferUse::MapWrite | BufferUse::CopySource);
+    EXPECT_GT(slices[0].Offset, 0u);
+    EXPECT_EQ(slices[0].Offset % 24, 0u);
+    EXPECT_EQ(Trace.LastBufferCopySource.Buffer, slices[0].Buffer);
+    EXPECT_EQ(Trace.LastBufferCopySource.Offset % 12, 0u);
+    EXPECT_EQ(Trace.LastTextureCopy.Source, slices[0].Buffer.Get());
+    EXPECT_EQ(Trace.LastTextureCopy.Region.SourceOffset % 16, 0u);
+    EXPECT_EQ(slices[1].Buffer, slices[2].Buffer);
+    EXPECT_NE(slices[0].Buffer, slices[1].Buffer);
+    EXPECT_TRUE(slices[1].Buffer->GetDesc().Usage.HasFlag(BufferUse::CBuffer | BufferUse::Vertex));
+    Scheduler->WaitIdle();
+}
+
+TEST_F(RDGExecutionTest, StagingRespectsGraphSizeLimitForDynamicBuffersAndPaddedTextures) {
+    auto& slot = Scheduler->BeginFrame();
+    auto constraints = Context.GetRDGConstraints();
+    constraints.MaxBufferSize = 8;
+    constraints.TexturePitchAlignment = 8;
+    const array<byte, 12> bytes{};
+    {
+        RDGBuilder graph{slot, constraints};
+        graph.MarkOutput(graph.CreateBuffer(RDGDynamicBufferDescriptor{bytes.size(), BufferUse::CopySource}, RDGUploadSource::BorrowedBytes(bytes)));
+        auto compiled = graph.Compile();
+        ASSERT_TRUE(compiled);
+        EXPECT_FALSE(compiled->Prepare(slot, Pool, Uploads));
+    }
+    {
+        RDGBuilder graph{slot, constraints};
+        auto desc = ColorDescriptor();
+        desc.Usage |= TextureUse::CopyDestination;
+        const auto image = graph.CreateTexture(desc);
+        graph.UploadTexture(image, {.Width = 1, .Height = 2}, RDGTextureUploadSource::BorrowedBytes(std::span{bytes}.first(8), 4));
+        graph.MarkOutput(image);
+        auto compiled = graph.Compile();
+        ASSERT_TRUE(compiled);
+        EXPECT_FALSE(compiled->Prepare(slot, Pool, Uploads));
+    }
+    EXPECT_EQ(Uploads.GetCapacity(), 0u);
+    Scheduler->WaitIdle();
 }
 
 TEST_F(RDGExecutionTest, ZeroDynamicSliceKeepsRasterClearWithoutAllocatingBuffer) {

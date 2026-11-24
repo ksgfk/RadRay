@@ -775,9 +775,9 @@ VkAttachmentStoreOp MapType(StoreAction v) noexcept {
 
 VmaMemoryUsage MapType(MemoryType v) noexcept {
     switch (v) {
-        case MemoryType::Device: return VMA_MEMORY_USAGE_GPU_ONLY;
-        case MemoryType::Upload: return VMA_MEMORY_USAGE_CPU_TO_GPU;
-        case MemoryType::ReadBack: return VMA_MEMORY_USAGE_GPU_TO_CPU;
+        case MemoryType::Device: return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        case MemoryType::Upload:
+        case MemoryType::ReadBack: return VMA_MEMORY_USAGE_AUTO;
     }
     Unreachable();
 }

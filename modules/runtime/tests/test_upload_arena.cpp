@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <radray/runtime/upload_arena.h>
 
 #include "test_fakes.h"
@@ -95,10 +97,10 @@ TEST(UploadArena, SharedPageUnifiesReadStatesAndPaddingDoesNotOverlap) {
     UploadArena arena{device, 1024};
     const auto constants = arena.Allocate(80, 256, 256, BufferState::CBuffer);
     const auto vertices = arena.Allocate(16, 4, 16, BufferState::Vertex);
-    const auto staging = arena.Allocate(4, 4, 4, BufferState::CopySource);
-    ASSERT_TRUE(constants && vertices && staging);
+    const auto copy = arena.Allocate(4, 4, 4, BufferState::CopySource);
+    ASSERT_TRUE(constants && vertices && copy);
     EXPECT_EQ(constants->Buffer, vertices->Buffer);
-    EXPECT_EQ(staging->Buffer, vertices->Buffer);
+    EXPECT_EQ(copy->Buffer, vertices->Buffer);
     EXPECT_EQ(vertices->Offset, 256u);
     EXPECT_EQ(constants->Size, 80u);
     ASSERT_TRUE(arena.Flush());
@@ -110,6 +112,42 @@ TEST(UploadArena, SharedPageUnifiesReadStatesAndPaddingDoesNotOverlap) {
     EXPECT_EQ(std::get<BarrierBufferDescriptor>(barriers[0]).After, BufferState::CBuffer | BufferState::Vertex | BufferState::CopySource);
 }
 
+TEST(UploadArena, StagingAndDynamicPagesRemainSeparateWithExactBufferUsage) {
+    test::FakeDevice device;
+    device.EnableHostBuffers = true;
+    UploadArena arena{device, 63};
+    const auto staging = arena.AllocateStaging(5, 4);
+    const auto vertex = arena.Allocate(4, 4, 4, BufferState::Vertex);
+    const auto index = arena.Allocate(4, 4, 4, BufferState::Index);
+    ASSERT_TRUE(staging && vertex && index);
+    EXPECT_EQ(staging->ReservedSize, 5u);
+    EXPECT_NE(staging->Buffer, vertex->Buffer);
+    EXPECT_EQ(vertex->Buffer, index->Buffer);
+    constexpr auto stagingUsage = BufferUse::MapWrite | BufferUse::CopySource;
+    EXPECT_EQ(staging->Buffer->GetDesc().Usage, stagingUsage);
+    EXPECT_EQ(vertex->Buffer->GetDesc().Usage, stagingUsage | BufferUse::Vertex | BufferUse::Index | BufferUse::CBuffer | BufferUse::Resource | BufferUse::Indirect);
+    EXPECT_EQ(staging->Buffer->GetDesc().Hints, ResourceHint::PersistentMap);
+    EXPECT_EQ(vertex->Buffer->GetDesc().Hints, ResourceHint::PersistentMap);
+    vector<ResourceBarrierDescriptor> barriers;
+    arena.AppendReadBarriers(barriers);
+    ASSERT_EQ(barriers.size(), 2u);
+    const auto hasBarrier = [&](const UploadAllocation& slice, BufferStates reads) {
+        return std::ranges::any_of(barriers, [&](const auto& entry) {
+            const auto& barrier = std::get<BarrierBufferDescriptor>(entry);
+            return barrier.Target == slice.Buffer.Get() && barrier.Before == BufferState::HostWrite && barrier.After == reads;
+        });
+    };
+    EXPECT_TRUE(hasBarrier(*staging, BufferState::CopySource));
+    EXPECT_TRUE(hasBarrier(*vertex, BufferState::Vertex | BufferState::Index));
+    arena.CommitSubmittedStates();
+    arena.Reset();
+    const auto nextVertex = arena.Allocate(4, 4, 4, BufferState::Vertex);
+    const auto nextStaging = arena.AllocateStaging(4, 4);
+    ASSERT_TRUE(nextVertex && nextStaging);
+    EXPECT_EQ(nextVertex->Data, vertex->Data);
+    EXPECT_EQ(nextStaging->Data, staging->Data);
+}
+
 TEST(UploadArena, ZeroAndInvalidAllocationsDoNotMap) {
     test::FakeDevice device;
     device.EnableHostBuffers = true;
@@ -119,6 +157,10 @@ TEST(UploadArena, ZeroAndInvalidAllocationsDoNotMap) {
     const auto empty = arena.Allocate(0, 1, 0, BufferState::Vertex);
     ASSERT_TRUE(empty);
     EXPECT_FALSE(empty->Buffer);
+    const auto emptyStaging = arena.AllocateStaging(0, 0);
+    ASSERT_TRUE(emptyStaging);
+    EXPECT_FALSE(emptyStaging->Buffer);
+    EXPECT_FALSE(arena.AllocateStaging(16, 0));
     EXPECT_FALSE(arena.Allocate(16, 0, 16, BufferState::Vertex));
     EXPECT_FALSE(arena.Allocate(16, 1, 8, BufferState::Vertex));
     EXPECT_FALSE(arena.Allocate(16, 1, 16, BufferState::UnorderedAccess));
@@ -135,10 +177,10 @@ TEST(UploadArena, FailedPageCreationOrMappingPreservesExistingAllocation) {
     first->Data.Get()[0] = byte{42};
 
     device.BuffersUntilFailure = 0;
-    EXPECT_FALSE(arena.Allocate(32, 4, 32, BufferState::CopySource));
+    EXPECT_FALSE(arena.AllocateStaging(32, 4));
     device.BuffersUntilFailure = -1;
     device.FailMaps = true;
-    EXPECT_FALSE(arena.Allocate(32, 4, 32, BufferState::CopySource));
+    EXPECT_FALSE(arena.AllocateStaging(32, 4));
     EXPECT_EQ(first->Data.Get()[0], byte{42});
     EXPECT_EQ(arena.GetCapacity(), 16u);
     ASSERT_TRUE(arena.Flush());
@@ -156,7 +198,7 @@ TEST(UploadArena, ClearAndDestructionUnmapAndReleasePages) {
     {
         UploadArena arena{device, 16};
         ASSERT_TRUE(arena.Allocate(16, 4, 16, BufferState::Vertex));
-        ASSERT_TRUE(arena.Allocate(32, 4, 32, BufferState::CopySource));
+        ASSERT_TRUE(arena.AllocateStaging(32, 4));
         arena.Reset();
         EXPECT_EQ(probe.LiveBuffers, 2u);
         EXPECT_EQ(probe.MappedBuffers, 2u);

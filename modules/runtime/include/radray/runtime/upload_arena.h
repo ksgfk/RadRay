@@ -2,6 +2,7 @@
 
 // 上传页与帧生命周期契约见 docs/architecture/runtime.md。
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -30,8 +31,11 @@ public:
     void Reset() noexcept;
     // 释放页前还须解除所有参数组和 view 引用。
     void Clear() noexcept;
-    // 有效大小与物理保留范围分开；本帧已返回的分配不搬移，零大小返回空切片。
+    // 动态页支持管线直读和拷贝；reservedSize 可包含绑定所需的尾部填充。
+    // 两个入口均保持本帧切片地址稳定，零大小返回空切片。
     std::optional<UploadAllocation> Allocate(uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
+    // 暂存页仅供传输命令读取，以 size 字节保留切片。
+    std::optional<UploadAllocation> AllocateStaging(uint64_t size, uint64_t alignment);
     bool Flush() noexcept;
     template <class Allocator>
     void AppendReadBarriers(std::vector<gpu::ResourceBarrierDescriptor, Allocator>& barriers) const {
@@ -48,15 +52,18 @@ public:
     gpu::Device& GetDevice() const noexcept;
 
 private:
+    enum class PageKind : uint8_t { Dynamic, Staging };
     struct Page {
         unique_ptr<gpu::Buffer> Buffer;
         byte* Data;
         uint64_t Capacity;
+        PageKind Kind;
         uint64_t Cursor{0};
         uint64_t DirtyBegin{0}, DirtyEnd{0};
         gpu::BufferStates Reads{};
         gpu::BufferStates SubmittedState{gpu::BufferState::HostWrite};
     };
+    std::optional<UploadAllocation> AllocatePageSlice(PageKind kind, uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
     gpu::Device& _device;
     uint64_t _pageSize;
     vector<Page> _pages;

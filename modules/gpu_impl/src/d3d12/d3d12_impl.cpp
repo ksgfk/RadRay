@@ -3055,6 +3055,9 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         if (depthClearFlags) _cmdList->ClearDepthStencilView(depth->cpuDescriptor, depthClearFlags,
                                                              depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
     }
+#ifdef RADRAY_ENABLE_PROFILER
+    PushDebugGroup(desc.Name.empty() ? "Raster pass" : desc.Name);
+#endif
     _renderPassList->BeginRenderPass(static_cast<UINT>(colors.size()), colors.data(), depth ? &*depth : nullptr, flags);
     encoder->SetStencilReference(0);
 #ifdef RADRAY_ENABLE_PROFILER
@@ -3067,6 +3070,7 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
     _renderPassList->EndRenderPass();
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = false;
+    PopDebugGroup();
 #endif
     encoder.reset();
 #ifdef RADRAY_ENABLE_PROFILER

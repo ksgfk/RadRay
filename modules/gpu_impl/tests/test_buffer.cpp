@@ -63,6 +63,23 @@ TEST_P(BufferTest, PersistentMapAllowsCacheOperationsOutsideMap) {
     readback->Unmap();
 }
 
+TEST_P(BufferTest, PipelineReadablePersistentUploadCopiesToReadback) {
+    const auto expected = Pattern();
+    auto upload = GetDevice().CreateBuffer({.Size = BufferSize,
+                                           .Memory = MemoryType::Upload,
+                                           .Usage = BufferUse::MapWrite | BufferUse::CopySource | BufferUse::CBuffer | BufferUse::Vertex,
+                                           .Hints = ResourceHint::PersistentMap});
+    ASSERT_TRUE(upload);
+    auto readback = CreateMappable(MemoryType::ReadBack);
+    void* written = upload->Map(0, BufferSize);
+    ASSERT_NE(written, nullptr);
+    std::memcpy(written, expected.data(), expected.size());
+    upload->FlushMappedRange({0, BufferSize});
+    CopyToHost(*upload, *readback);
+    upload->Unmap();
+    EXPECT_EQ(test::MapAndRead(*readback), expected);
+}
+
 TEST_P(BufferTest, CacheOperationsOutsideMapAreRejected) {
     auto upload = CreateMappable(MemoryType::Upload);
     auto readback = CreateMappable(MemoryType::ReadBack);

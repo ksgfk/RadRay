@@ -339,7 +339,9 @@ TEST_P(BufferUploadGpuTest, DynamicCopyUsesNonzeroSliceOffsetWithoutDeviceUpload
         graph.MarkOutput(a);
         const auto out = graph.ImportBuffer(output.get(), BufferState::HostRead, BufferState::HostRead);
         graph.AddCopyPass("slice", BufferCopyData{b, out, 16}, +[](const BufferCopyData& data, RDGCopyPassContext& context) noexcept {
-            EXPECT_GT(context.ResolveBuffer(data.Source).Offset, 0u);
+            const auto slice = context.ResolveBuffer(data.Source);
+            EXPECT_GT(slice.Offset, 0u);
+            EXPECT_EQ(slice.Buffer->GetDesc().Usage, BufferUse::MapWrite | BufferUse::CopySource);
             return RecordBufferCopy(data, context); }).ReadBuffer(b).WriteBuffer(out);
         graph.MarkOutput(out);
     };
@@ -370,7 +372,7 @@ TEST_P(BufferUploadGpuTest, ConstantsUseNonzeroOffsetsAcrossPagesAndReuseParamet
     for (uint32_t frame = 0; frame < 2; ++frame) {
         runner->Build = [&](RDGBuilder& graph, FrameSlot&) {
             const array<byte, 256> padding{};
-            const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{256, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(padding));
+            const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{256, BufferUse::CBuffer}, RDGUploadSource::SnapshotBytes(padding));
             graph.MarkOutput(prefix);
             const auto output = graph.ImportBuffer(result.get(), frame ? BufferState::Common : BufferState::Undefined, BufferState::Common);
             for (uint32_t i = 0; i < 2; ++i) {

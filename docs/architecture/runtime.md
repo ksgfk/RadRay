@@ -299,6 +299,8 @@ staging 将每片的有效块行连续排列，按设备约束与格式块字节
 上传默认不是图根；必须完成的初始化显式 MarkOutput。裁剪不会将请求自动排回下一帧。
 
 `CreateBuffer(RDGDynamicBufferDescriptor{MaxSize, Usage, Alignment}, source)` 声明动态 Upload 切片。
+Device 缓冲上传与纹理上传的拷贝源都分配在 Staging 页。仅声明 `CopySource` 的动态切片也使用 Staging 页，
+可直接交给自定义 CopyPass。声明了管线直读用途的切片使用 Dynamic 页，即使本帧仅作为拷贝源读取。
 PrepareLayout 在可见命令固定并排序后执行，返回实际字节数；可建立索引，但不得创建 RHI 资源或生成完整 payload。
 Write 接收最终映射区间，不能改变尺寸、图拓扑或登记新上传；生成器之间没有隐式执行依赖。
 声明上界、逻辑有效大小和对齐保留大小分别处理；RHI BufferDescriptor::Size 始终是物理 buffer 容量。
@@ -310,13 +312,17 @@ Pipeline 每槽独占 UploadArena，页首次存活分配时才创建并持久 M
 页直接持有 `gpu::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
 Reset 保留映射；Clear 和析构先 Unmap 再释放页。新增页创建或映射失败时，已有页及返回的切片保持有效。
 一次分配不跨页，空间不足追加页，本帧已使用的 buffer、offset、写指针不搬移，不复制旧页。
-页同时考虑 copy、CBuffer、storage/texel、index 与 indirect（4 字节）对齐；CBuffer 的物理保留范围覆盖后端描述符 padding。
-GPU 只读共享页，Prepare 汇总实际读取用途并集，集中 Flush 后按物理页生成同步，不逐逻辑切片反复转换。
+D3D12 与 Vulkan 按相同规则独立复用两类页。`AllocateStaging` 的物理页仅声明 `MapWrite | CopySource`，
+切片按拷贝布局对齐，保留实际字节数，整页的 GPU 读取状态固定为 `CopySource`。
+`Allocate` 的 Dynamic 页额外声明 `Vertex | Index | CBuffer | Resource | Indirect`。
+RDG 按切片用途合并 copy、CBuffer、storage/texel、index 与 indirect 对齐，CBuffer 的保留范围覆盖后端描述符 padding。
+Prepare 汇总 Dynamic 页上实际读取状态的并集，集中 Flush 后按物理页生成同步。
 页不支持 UAV 或 CopyDestination。已提交页状态同样只在 Submit 后发布。
 
 槽完成 Wait、命令存储 Reset、帧内对象清理后才能 Reset 页游标。稳定参数组可继续引用缓存页，
 页面或范围改变时在 Prepare 更新；引用帧内 view 的参数组须在 view 销毁前解除绑定或销毁。
 图持有的 PassData 先销毁，再释放帧内 view，最后释放底层 owner。
+
 UploadArena 保留峰值页；GetCapacity 表示保留容量，不是有效数据量。Clear 要求 GPU、命令和参数组引用均已解除，不自动缩页。
 
 CPU 验证在 `test_rdg.cpp`、`test_upload_arena.cpp`；GPU 验证在 `test_rdg_upload_gpu.cpp`，
@@ -369,7 +375,9 @@ Record 只 Begin、编码已准备命令和 End。Submit 调用派生的 SubmitF
 
 ### 构图、访问与裁剪
 
-`RDGBuilder(slot, options)` 默认以所属设备的 `DeviceContext::GetRDGConstraints()` 同源设备约束初始化（亦保留显式传入自定义 `RDGDeviceConstraints` 的 `RDGBuilder(slot, constraints, options)` 重载供约束覆盖和测试注入）；constraints 只包含不可变设备约束，不持有设备 owner。Compile 单次冻结声明并返回 CompiledRDG；失败返回空值。
+`RDGBuilder(slot, options)` 与 `DeviceContext::GetRDGConstraints()` 从同一设备能力取得约束。
+显式传入 `RDGDeviceConstraints` 时，对齐取与设备要求的最小公倍数，容量与绑定范围取非零上限中的较小值。
+构图与 Prepare 共用这组约束，包括缓冲拷贝偏移、纹理行距和填充后的暂存大小。Compile 单次冻结声明并返回 CompiledRDG，失败返回空值。
 FullValidation 控制访问用途/Pass 兼容性完整诊断，句柄、依赖、范围、溢出及调度必需的结构检查始终保留；RHI validation 独立配置。
 
 RDGData 与 CompiledRDG 通过 slot.Emplace 创建并登记清理；声明表、嵌套访问/依赖列表、导入表、

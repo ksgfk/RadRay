@@ -714,6 +714,29 @@ gpu::BufferStates BufferReads(gpu::BufferUses usage) noexcept {
     return result;
 }
 
+bool ApplyDeviceConstraints(RDGDeviceConstraints& graph, const RDGDeviceConstraints& device) noexcept {
+    for (const auto field : {&RDGDeviceConstraints::BufferCopyAlignment, &RDGDeviceConstraints::TexturePlacementAlignment,
+                             &RDGDeviceConstraints::TexturePitchAlignment, &RDGDeviceConstraints::CBufferSizeAlignment,
+                             &RDGDeviceConstraints::CBufferOffsetAlignment, &RDGDeviceConstraints::StorageOffsetAlignment,
+                             &RDGDeviceConstraints::TexelOffsetAlignment}) {
+        if (graph.*field == device.*field) continue;
+        const auto alignment = MergeAlignment(graph.*field, device.*field);
+        if (!alignment) return false;
+        graph.*field = *alignment;
+    }
+    for (const auto field : {&RDGDeviceConstraints::MaxBufferSize, &RDGDeviceConstraints::MaxCBufferRange, &RDGDeviceConstraints::MaxStorageRange}) {
+        const auto maximum = device.*field;
+        if (maximum && (!(graph.*field) || maximum < graph.*field)) graph.*field = maximum;
+    }
+    return true;
+}
+
+std::optional<UploadAllocation> AllocateStagingBuffer(UploadArena& arena, const RDGDeviceConstraints& c, uint64_t size, uint64_t alignment) {
+    const auto merged = MergeAlignment(alignment, c.BufferCopyAlignment);
+    if (!merged || (c.MaxBufferSize && size > c.MaxBufferSize)) return std::nullopt;
+    return arena.AllocateStaging(size, *merged);
+}
+
 std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDeviceConstraints& c, uint64_t size,
                                                gpu::BufferUses usage, uint64_t alignment, gpu::BufferStates reads) {
     const auto merge = [&](uint64_t value) {
@@ -732,7 +755,7 @@ std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDevi
         (usage.HasFlag(gpu::BufferUse::Resource) && c.MaxStorageRange && size > c.MaxStorageRange)) return std::nullopt;
     const auto reserved = AlignBytes(size, usage.HasFlag(gpu::BufferUse::CBuffer) ? c.CBufferSizeAlignment : 1);
     if (!reserved) return std::nullopt;
-    return arena.Allocate(size, alignment, *reserved, reads ? reads : BufferReads(usage));
+    return arena.Allocate(size, alignment, *reserved, reads);
 }
 
 }  // namespace
@@ -1174,12 +1197,15 @@ Nullable<gpu::TextureView*> RDGTransientResourcePool::AcquireTextureView(const g
 RDGBlackboard::RDGBlackboard(FrameSlot& slot) : _slot(slot), _entries(&slot.GetMemoryResource()) {}
 
 RDGBuilder::RDGBuilder(FrameSlot& slot, RDGCompileOptions options) noexcept
-    : RDGBuilder(slot, detail::QueryRDGDeviceConstraints(slot.GetDevice()), options) {}
+    : _slot(slot), _data(*slot.Emplace<detail::RDGData>(slot.GetMemoryResource(), slot.GetScratchMemoryResource())), _blackboard(*slot.Emplace<RDGBlackboard>(slot)) {
+    _data.Constraints = detail::QueryRDGDeviceConstraints(slot.GetDevice());
+    _data.Options = options;
+}
 
 RDGBuilder::RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints, RDGCompileOptions options) noexcept
-    : _slot(slot), _data(*slot.Emplace<detail::RDGData>(slot.GetMemoryResource(), slot.GetScratchMemoryResource())), _blackboard(*slot.Emplace<RDGBlackboard>(slot)) {
+    : RDGBuilder(slot, options) {
+    if (!ApplyDeviceConstraints(constraints, _data.Constraints)) Fail(_data, "graph and device alignment requirements overflow");
     _data.Constraints = constraints;
-    _data.Options = options;
 }
 
 RDGBlackboard& RDGBuilder::GetBlackboard() noexcept { return _blackboard; }
@@ -1779,7 +1805,7 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
     if (&slot.GetMemoryResource() != &_data.MemoryResource) return false;
     _execution.reset(std::pmr::polymorphic_allocator<>{&_data.MemoryResource}.new_object<RDGExecution>(RDGExecution{_data, slot, pool, uploads}));
     auto& execution = *_execution;
-    const auto constraints = detail::QueryRDGDeviceConstraints(slot.GetDevice());
+    const auto& constraints = _data.Constraints;
     RDGUploadPrepareContext layout{slot, _data.AliveMeshPasses};
     size_t aliveUploads = 0;
     for (const auto index : _data.ScheduledPasses) aliveUploads += IsUpload(_data.Passes[index]);
@@ -1839,11 +1865,16 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
             const auto& resource = _data.Buffers[i];
             if (!resource.Alive || !sizes[i]) continue;
             if (!resource.Imported && resource.Desc.Memory == gpu::MemoryType::Upload) {
-                auto allocation = AllocateBuffer(uploads, constraints, sizes[i], resource.Desc.Usage, resource.Alignment, reads[i]);
+                const auto usage = resource.Desc.Usage;
+                const auto resolvedReads = reads[i] ? reads[i] : BufferReads(usage);
+                const bool stagingOnly = (usage & ~gpu::BufferUses{gpu::BufferUse::MapWrite}) == gpu::BufferUse::CopySource;
+                const auto allocation = stagingOnly
+                                            ? AllocateStagingBuffer(uploads, constraints, sizes[i], resource.Alignment)
+                                            : AllocateBuffer(uploads, constraints, sizes[i], usage, resource.Alignment, resolvedReads);
                 if (!allocation) return false;
                 direct[i] = *allocation;
                 execution.Slices[i] = {allocation->Buffer, allocation->Offset, sizes[i]};
-                execution.States.BindBuffer(static_cast<uint32_t>(i), allocation->Buffer.Get(), reads[i]);
+                execution.States.BindBuffer(static_cast<uint32_t>(i), allocation->Buffer.Get(), resolvedReads);
             } else {
                 const auto allocation = resource.Imported ? RDGTransientBufferAllocation{resource.Imported, resource.InitialState} : pool.AcquireBuffer(resource.Desc);
                 if (!allocation.Buffer) return false;
@@ -1898,11 +1929,12 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 if (!pitch || *pitch > std::numeric_limits<uint32_t>::max() || lastRow > (std::numeric_limits<uint64_t>::max() - rowBytes) / *pitch) return false;
                 Prepared(execution, pass).StagingPitch = static_cast<uint32_t>(*pitch);
                 mappedSize = *pitch * lastRow + rowBytes;
-                const auto allocation = uploads.Allocate(mappedSize, *placement, mappedSize, gpu::BufferState::CopySource);
+                if (constraints.MaxBufferSize && mappedSize > constraints.MaxBufferSize) return false;
+                const auto allocation = uploads.AllocateStaging(mappedSize, *placement);
                 if (!allocation) return false;
                 Prepared(execution, pass).Staging = *allocation;
             } else if (pass.Kind == RDGPassKind::Upload) {
-                const auto allocation = AllocateBuffer(uploads, constraints, mappedSize, gpu::BufferUse::CopySource, 1, gpu::BufferState::CopySource);
+                const auto allocation = AllocateStagingBuffer(uploads, constraints, mappedSize, 1);
                 if (!allocation) return false;
                 Prepared(execution, pass).Staging = *allocation;
             } else if (direct[access.Index].Buffer) {

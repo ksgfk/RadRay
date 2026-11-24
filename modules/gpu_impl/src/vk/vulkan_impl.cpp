@@ -1465,22 +1465,15 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
-    if (desc.Usage.HasFlag(BufferUse::MapWrite)) {
+    if (desc.Memory == MemoryType::Upload) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-    }
-    if (desc.Usage.HasFlag(BufferUse::MapRead)) {
+    } else if (desc.Memory == MemoryType::ReadBack) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
     }
     if (wantsPersistentMap) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
     vmaInfo.usage = MapType(desc.Memory);
-    vmaInfo.requiredFlags = 0;
-    vmaInfo.preferredFlags = 0;
-    vmaInfo.memoryTypeBits = 0;
-    vmaInfo.pool = VK_NULL_HANDLE;
-    vmaInfo.pUserData = nullptr;
-    vmaInfo.priority = 0;
     VkBuffer vkBuf = VK_NULL_HANDLE;
     VmaAllocation vmaAlloc = VK_NULL_HANDLE;
     VmaAllocationInfo vmaAllocInfo{};

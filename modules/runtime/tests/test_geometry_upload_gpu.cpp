@@ -84,10 +84,10 @@ protected:
                 RDGBufferHandle dynamicVertex, dynamicIndex;
                 if (dynamic) {
                     const array<byte, 8> padding{};
-                    const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{8, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(padding));
+                    const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{8, BufferUse::Vertex}, RDGUploadSource::SnapshotBytes(padding));
                     graph.MarkOutput(prefix);
                     dynamicVertex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(positions), BufferUse::Vertex, 4}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
-                    const auto spacer = graph.CreateBuffer(RDGDynamicBufferDescriptor{32, BufferUse::CopySource}, RDGUploadSource::Generated(32, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext& write) noexcept {
+                    const auto spacer = graph.CreateBuffer(RDGDynamicBufferDescriptor{32, BufferUse::Vertex}, RDGUploadSource::Generated(32, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext& write) noexcept {
                         std::fill(write.Bytes.begin(), write.Bytes.end(), byte{0});
                         return true; }));
                     graph.MarkOutput(spacer);
