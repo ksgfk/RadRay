@@ -19,7 +19,6 @@ void UploadArena::Reset() noexcept {
 }
 
 void UploadArena::Clear() noexcept {
-    for (auto& page : _pages) page.Buffer->Unmap();
     _pages.clear();
 }
 
@@ -61,10 +60,9 @@ std::optional<UploadAllocation> UploadArena::AllocatePageSlice(PageKind kind, ui
                                    gpu::BufferUse::CBuffer | gpu::BufferUse::Resource | gpu::BufferUse::Indirect;
     auto buffer = _device.CreateBuffer({.Size = capacity,
                                         .Memory = gpu::MemoryType::Upload,
-                                        .Usage = kind == PageKind::Staging ? kStagingUsage : kDynamicUsage,
-                                        .Hints = gpu::ResourceHint::PersistentMap});
+                                        .Usage = kind == PageKind::Staging ? kStagingUsage : kDynamicUsage});
     if (!buffer) return std::nullopt;
-    auto* data = static_cast<byte*>(buffer->Map(0, capacity));
+    auto* data = static_cast<byte*>(buffer->GetMappedData().Get());
     if (!data) return std::nullopt;
     _pages.push_back({buffer.Release(), data, capacity, kind});
     return allocate(_pages.back());
@@ -74,7 +72,7 @@ bool UploadArena::Flush() noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.UploadArena.Flush");
     for (auto& page : _pages) {
         if (page.DirtyEnd > page.Capacity) return false;
-        if (page.DirtyEnd > page.DirtyBegin) page.Buffer->FlushMappedRange({page.DirtyBegin, page.DirtyEnd - page.DirtyBegin});
+        if (page.DirtyEnd > page.DirtyBegin && !page.Buffer->FlushMappedRange({page.DirtyBegin, page.DirtyEnd - page.DirtyBegin})) return false;
     }
     return true;
 }

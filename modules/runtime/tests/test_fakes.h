@@ -27,12 +27,10 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    void* Map(uint64_t, uint64_t) noexcept override { return nullptr; }
-    void Unmap() noexcept override {}
-    void FlushMappedRange(gpu::BufferRange) noexcept override {}
-    void InvalidateMappedRange(gpu::BufferRange) noexcept override {}
+    Nullable<void*> GetMappedData() noexcept override { return nullptr; }
+    bool FlushMappedRange(gpu::BufferRange) noexcept override { return false; }
+    bool InvalidateMappedRange(gpu::BufferRange) noexcept override { return false; }
     gpu::BufferDescriptor GetDesc() const noexcept override { return Desc; }
-    gpu::Device* GetDevice() const noexcept override { return nullptr; }
 
     gpu::BufferDescriptor Desc;
 };
@@ -58,27 +56,29 @@ public:
 
 class FakeMappedBuffer final : public FakeBuffer {
 public:
-    FakeMappedBuffer(const gpu::BufferDescriptor& desc, bool failMap, std::function<void()>& onMap, std::function<void(gpu::BufferRange)>& onFlush)
-        : FakeBuffer(desc.Size, desc.Usage), Bytes(static_cast<size_t>(desc.Size)), _failMap(failMap), _onMap(onMap), _onFlush(onFlush) { Desc = desc; }
-    void* Map(uint64_t offset, uint64_t size) noexcept override {
-        if (_onMap) _onMap();
-        return !_failMap && offset <= Bytes.size() && size <= Bytes.size() - offset ? Bytes.data() + offset : nullptr;
-    }
-    void FlushMappedRange(gpu::BufferRange range) noexcept override {
+    FakeMappedBuffer(gpu::Device& device, const gpu::BufferDescriptor& desc, std::function<void(gpu::BufferRange)>& onFlush, std::function<void(gpu::BufferRange)>& onInvalidate)
+        : FakeBuffer(desc.Size, desc.Usage), Bytes(static_cast<size_t>(desc.Size)), _device(device), _onFlush(onFlush), _onInvalidate(onInvalidate) { Desc = desc; }
+    Nullable<void*> GetMappedData() noexcept override { return Desc.Memory == gpu::MemoryType::Device ? nullptr : Bytes.data(); }
+    bool FlushMappedRange(gpu::BufferRange range) noexcept override {
         if (_onFlush) _onFlush(range);
+        return !_device.IsDeviceLost();
+    }
+    bool InvalidateMappedRange(gpu::BufferRange range) noexcept override {
+        if (_onInvalidate) _onInvalidate(range);
+        return !_device.IsDeviceLost();
     }
     vector<byte> Bytes;
 
 private:
-    bool _failMap;
-    std::function<void()>& _onMap;
+    gpu::Device& _device;
     std::function<void(gpu::BufferRange)>& _onFlush;
+    std::function<void(gpu::BufferRange)>& _onInvalidate;
 };
 
 class FakeTexture final : public gpu::Texture {
 public:
-    FakeTexture(gpu::Device& device, gpu::TextureDescriptor desc, std::function<void()>& onDestroy) noexcept
-        : Desc(desc), _device(device), _onDestroy(onDestroy) {}
+    FakeTexture(gpu::TextureDescriptor desc, std::function<void()>& onDestroy) noexcept
+        : Desc(desc), _onDestroy(onDestroy) {}
     ~FakeTexture() noexcept override {
         if (_onDestroy) _onDestroy();
     }
@@ -86,11 +86,9 @@ public:
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
     gpu::TextureDescriptor GetDesc() const noexcept override { return Desc; }
-    gpu::Device* GetDevice() const noexcept override { return &_device; }
     gpu::TextureDescriptor Desc;
 
 private:
-    gpu::Device& _device;
     std::function<void()>& _onDestroy;
 };
 
@@ -283,11 +281,16 @@ public:
         if (!EnableHostBuffers || BuffersUntilFailure == 0) return nullptr;
         if (BuffersUntilFailure > 0) --BuffersUntilFailure;
         if (OnCreateBuffer) OnCreateBuffer(desc);
-        return make_unique<FakeMappedBuffer>(desc, FailMaps, OnMap, OnFlush);
+        if (IsDeviceLost()) return nullptr;
+        if (desc.Memory != gpu::MemoryType::Device) {
+            if (OnMap) OnMap();
+            if (FailMaps || IsDeviceLost()) return nullptr;
+        }
+        return make_unique<FakeMappedBuffer>(*this, desc, OnFlush, OnInvalidate);
     }
     Nullable<unique_ptr<gpu::Texture>> CreateTexture(const gpu::TextureDescriptor& desc) noexcept override {
         if (!EnableTextures || FailTextures) return nullptr;
-        return make_unique<FakeTexture>(*this, desc, OnTextureDestroyed);
+        return make_unique<FakeTexture>(desc, OnTextureDestroyed);
     }
     Nullable<unique_ptr<gpu::TextureView>> CreateTextureView(const gpu::TextureViewDescriptor& desc) noexcept override {
         if (!EnableTextures || FailViews) return nullptr;
@@ -310,7 +313,7 @@ public:
     bool EnableHostBuffers{false}, EnableTextures{false};
     bool FailMaps{false}, FailTextures{false}, FailViews{false};
     std::function<void()> OnMap, OnTextureDestroyed, OnViewDestroyed;
-    std::function<void(gpu::BufferRange)> OnFlush;
+    std::function<void(gpu::BufferRange)> OnFlush, OnInvalidate;
     std::function<void(const gpu::BufferDescriptor&)> OnCreateBuffer;
 };
 
@@ -333,8 +336,8 @@ public:
     void Wait(FrameSlot& slot) noexcept override {
         if (OnWait) OnWait(slot);
     }
-    void OnSlotCompleted(FrameSlot& slot) noexcept override {
-        if (OnCompleted) OnCompleted(slot);
+    void OnSlotRetired(FrameSlot& slot, bool deviceLost) noexcept override {
+        if (!deviceLost && OnCompleted) OnCompleted(slot);
     }
     std::function<void(FrameSlot&)> OnCompleted;
     std::span<const MeshPassRegistration> GetMeshPassRegistrations() noexcept override { return Passes; }

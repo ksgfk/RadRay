@@ -75,11 +75,11 @@ struct Probe {
 class ByteBuffer final : public FakeBuffer {
 public:
     ByteBuffer(BufferDescriptor desc, Probe& probe) : FakeBuffer(desc.Size, desc.Usage), Bytes(desc.Size), _probe(probe) { Desc = desc; }
-    void* Map(uint64_t offset, uint64_t size) noexcept override {
+    Nullable<void*> GetMappedData() noexcept override {
         ++_probe.Maps;
-        return offset <= Bytes.size() && size <= Bytes.size() - offset ? Bytes.data() + offset : nullptr;
+        return Desc.Memory == MemoryType::Device ? nullptr : Bytes.data();
     }
-    void FlushMappedRange(BufferRange) noexcept override { ++_probe.Flushes; }
+    bool FlushMappedRange(BufferRange) noexcept override { ++_probe.Flushes; return true; }
     vector<byte> Bytes;
 
 private:
@@ -93,7 +93,6 @@ public:
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
     TextureDescriptor GetDesc() const noexcept override { return Desc; }
-    Device* GetDevice() const noexcept override { return nullptr; }
     TextureDescriptor Desc;
 };
 
@@ -329,6 +328,41 @@ TEST_F(RDGExecutionTest, MergesRasterAttachmentsFoldsActionsAndHoistsLaterConsta
     EXPECT_EQ(scope.Depth->Clear.Depth, 0.5f);
     EXPECT_EQ(scope.Depth->Clear.Stencil, 3);
     EXPECT_EQ(Trace.BarrierBatches, (vector<size_t>{4, 2}));
+}
+
+TEST(RDG, PersistentUploadRejectsASecondMapInEitherImportOrder) {
+    FakeGpu gpu;
+    gpu.Device->EnableHostBuffers = true;
+    gpu.Device->Capabilities.Limits.HostCoherentAtomSize = 64;
+    size_t maps = 0;
+    gpu.Device->OnMap = [&] { ++maps; };
+    gpu.Device->FailMaps = true;
+    EXPECT_FALSE(GpuUploadBuffer::Create(*gpu.Device, {128, BufferUse::CopySource}));
+    gpu.Device->FailMaps = false;
+    auto upload = GpuUploadBuffer::Create(*gpu.Device, {128, BufferUse::CopySource}).Unwrap();
+    EXPECT_EQ(upload->AlignSliceSize(65), 128u);
+    EXPECT_EQ(upload->AlignSliceSize(UINT64_MAX), 0u);
+    const array<byte, 4> bytes{};
+    ASSERT_TRUE(upload->WriteAndFlush(64, bytes));
+    for (bool rawFirst : {false, true}) {
+        auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+        RDGBuilder graph{scheduler->BeginFrame()};
+        auto raw = graph.ImportBuffer(upload->GetBuffer(), BufferState::HostWrite, BufferState::HostWrite);
+        if (!rawFirst) graph.ImportPersistentOwned(upload);
+        graph.UploadBuffer(raw, 0, RDGUploadSource::SnapshotBytes(bytes));
+        if (rawFirst) graph.ImportPersistentBorrowed(*upload);
+        graph.MarkOutput(raw);
+        EXPECT_FALSE(graph.Compile());
+    }
+    {
+        auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+        RDGBuilder graph{scheduler->BeginFrame()};
+        auto raw = graph.ImportBuffer(upload->GetBuffer(), BufferState::HostWrite, BufferState::HostWrite);
+        graph.UploadBuffer(raw, 0, RDGUploadSource::SnapshotBytes(bytes));
+        graph.MarkOutput(raw);
+        EXPECT_TRUE(graph.Compile());
+    }
+    EXPECT_EQ(maps, 2u);
 }
 
 TEST(RDG, CullsDeadMeshPassesAndKeepsFirstDeclarationOrder) {
@@ -1834,6 +1868,12 @@ public:
     explicit LossTestPipeline(DeviceContext& device) : RenderGraphFramePipeline(device, 1) {}
     std::function<void(RDGBuilder&)> Setup;
     int Submissions{};
+    vector<RDGGpuTimingStatus> Retirements;
+    vector<uint64_t> Sequences;
+    void OnFrameSlotRetired(FrameSlot&, const RDGGpuTimingSnapshot& snapshot) noexcept override {
+        Retirements.push_back(snapshot.Status);
+        Sequences.push_back(snapshot.UserSequence);
+    }
     void Wait(FrameSlot& slot) noexcept override { slot.GetQueue().Wait(); }
 
 private:
@@ -1960,6 +2000,87 @@ TEST(RenderGraphFramePipeline, OptionalTimingAllocationFailureOnHealthyDeviceSti
     scheduler->WaitIdle();
     EXPECT_EQ(runner->Submissions, 1);
     EXPECT_FALSE(runner->GetCompletedGpuTiming(slot));
+}
+
+TEST(RenderGraphFramePipeline, CancellingPreparationDropsItsProfilingModeAndSequence) {
+    FakeGpu gpu;
+    auto pipeline = make_unique<LossTestPipeline>(gpu.Context);
+    auto* runner = pipeline.get();
+    runner->Setup = [](RDGBuilder&) {};
+    auto scheduler = FrameScheduler::Create(gpu.Context, std::move(pipeline), 1).Unwrap();
+    runner->SetGpuProfiling(scheduler->BeginFrame(), RDGGpuProfilingMode::FrameOnly, 73);
+    scheduler->WaitIdle();
+    EXPECT_TRUE(runner->Retirements.empty());
+    ASSERT_TRUE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+    EXPECT_EQ(runner->Sequences, (vector<uint64_t>{0}));
+    EXPECT_EQ(runner->Retirements, (vector<RDGGpuTimingStatus>{RDGGpuTimingStatus::Off}));
+}
+
+TEST(RenderGraphFramePipeline, FailedSubmissionDropsPendingProfilingBeforeReusingTheFrameId) {
+    FakeGpu gpu;
+    auto pipeline = make_unique<LossTestPipeline>(gpu.Context);
+    auto* runner = pipeline.get();
+    runner->Setup = [](RDGBuilder&) {};
+    auto scheduler = FrameScheduler::Create(gpu.Context, std::move(pipeline), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    const auto frameId = slot.GetFrameId();
+    runner->SetGpuProfiling(slot, RDGGpuProfilingMode::FrameOnly, 41);
+    runner->SetGpuProfiling(slot, RDGGpuProfilingMode::FrameAndPasses, 42);
+    gpu.Device->Queue.OnSubmit = [&] { gpu.Device->Lost = true; return false; };
+    EXPECT_FALSE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+    EXPECT_TRUE(runner->Retirements.empty());
+    gpu.Device->Lost = false;
+    gpu.Device->Queue.OnSubmit = {};
+    EXPECT_EQ(scheduler->BeginFrame().GetFrameId(), frameId);
+    ASSERT_TRUE(scheduler->RunFrame());
+    scheduler->WaitIdle();
+    EXPECT_EQ(runner->Sequences, (vector<uint64_t>{0}));
+    EXPECT_EQ(runner->Retirements, (vector<RDGGpuTimingStatus>{RDGGpuTimingStatus::Off}));
+}
+
+TEST(RenderGraphFramePipeline, EachSubmittedSlotRetiresOnceIncludingLoss) {
+    auto device = make_shared<LossTestDevice>();
+    DeviceContext context{device, &device->Queue};
+    auto pipeline = make_unique<LossTestPipeline>(context);
+    auto* runner = pipeline.get();
+    runner->Setup = [](RDGBuilder&) {};
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
+    auto submit = [&](RDGGpuProfilingMode mode, uint64_t sequence) {
+        runner->SetGpuProfiling(scheduler->BeginFrame(), mode, sequence);
+        return scheduler->RunFrame();
+    };
+    ASSERT_TRUE(submit(RDGGpuProfilingMode::Off, 3));
+    scheduler->WaitIdle();
+    ASSERT_TRUE(submit(RDGGpuProfilingMode::FrameOnly, 4));
+    scheduler->WaitIdle();
+    device->Capabilities.Features.TimestampQueries = true;
+    device->Queue.TimestampBits = 64;
+    ASSERT_TRUE(submit(RDGGpuProfilingMode::FrameOnly, 5));
+    scheduler->WaitIdle();
+    device->EnableHostBuffers = true;
+    ASSERT_TRUE(submit(RDGGpuProfilingMode::FrameOnly, 6));
+    device->Lost = true;
+    device->OnInvalidate = [](BufferRange) { ADD_FAILURE() << "lost slot accessed timestamp memory"; };
+    device->OnMap = [] { ADD_FAILURE() << "lost slot mapped timestamp memory"; };
+    scheduler->WaitIdle();
+    scheduler->WaitIdle();
+    EXPECT_EQ(runner->Retirements, (vector<RDGGpuTimingStatus>{RDGGpuTimingStatus::Off, RDGGpuTimingStatus::Unavailable,
+                                                              RDGGpuTimingStatus::AllocationFailed, RDGGpuTimingStatus::DeviceLost}));
+    EXPECT_EQ(runner->Sequences, (vector<uint64_t>{3, 4, 5, 6}));
+}
+
+TEST(RDG, ValidatedCacheOperationsReportFirstAndLatchedDeviceLoss) {
+    auto native = make_shared<FakeDevice>();
+    native->EnableHostBuffers = true;
+    auto device = gpu::detail::CreateValidationDevice(native, {}).Unwrap();
+    auto target = device->CreateBuffer({.Size = 16, .Memory = MemoryType::ReadBack, .Usage = BufferUse::MapRead | BufferUse::CopyDestination}).Unwrap();
+    auto source = device->CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CopySource}).Unwrap();
+    native->OnInvalidate = [&](BufferRange) { native->Lost = true; };
+    EXPECT_FALSE(target->InvalidateMappedRange({0, 16}));
+    EXPECT_FALSE(source->FlushMappedRange({0, 16}));
+    EXPECT_FALSE(device->CreateBuffer(source->GetDesc()));
 }
 
 TEST(RDG, ValidatedQueueRejectsUnrecordedCommandsAndPropagatesNativeLoss) {

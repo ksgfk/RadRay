@@ -66,6 +66,7 @@ struct DiagnosticState {
     array<HRESULT, static_cast<size_t>(DiagnosticFailure::ShutdownFailed) + 1> FailureResults{};
     bool Closed{false};
     DiagnosticQueueSnapshot Snapshot;
+    uint64_t Delivered{};
     UINT64 OldLimit{0};
     UINT64 ExpectedLimit{65536};
     UINT StorageDepth{0}, RetrievalDepth{0};
@@ -178,13 +179,14 @@ static HRESULT _ReadDiagnosticMessage(Read read, UINT64 index, vector<byte>& scr
     return S_OK;
 }
 
-template <class Read>
-static HRESULT _ReadDiagnosticSnapshot(Read read, DiagnosticQueueSnapshot& snapshot) noexcept {
+template <class Read, class Visible>
+static HRESULT _ReadDiagnosticSnapshot(Read read, Visible visible, DiagnosticQueueSnapshot& snapshot) noexcept {
     for (unsigned attempt = 0; attempt < 3; ++attempt) {
         const auto before = read();
+        const auto readable = visible();
         const auto after = read();
         if (before != after) continue;
-        if (after.Stored > after.Accepted || after.Discarded > after.Accepted - after.Stored) return E_UNEXPECTED;
+        if (readable != after.Stored || after.Stored > after.Accepted || after.Discarded > after.Accepted - after.Stored) return E_UNEXPECTED;
         snapshot = after;
         return S_OK;
     }
@@ -192,23 +194,17 @@ static HRESULT _ReadDiagnosticSnapshot(Read read, DiagnosticQueueSnapshot& snaps
 }
 
 HRESULT ReadDiagnosticSnapshot(ID3D12InfoQueue& queue, DiagnosticQueueSnapshot& snapshot) noexcept {
-    const auto status = _ReadDiagnosticSnapshot([&] {
+    return _ReadDiagnosticSnapshot([&] {
         return DiagnosticQueueSnapshot{queue.GetNumMessagesAllowedByStorageFilter(), queue.GetNumStoredMessages(),
                                        queue.GetNumMessagesDiscardedByMessageCountLimit(), queue.GetNumMessagesDeniedByStorageFilter()};
-    },
-                                                snapshot);
-    if (SUCCEEDED(status) && queue.GetNumStoredMessagesAllowedByRetrievalFilter() != snapshot.Stored) return E_UNEXPECTED;
-    return status;
+    }, [&] { return queue.GetNumStoredMessagesAllowedByRetrievalFilter(); }, snapshot);
 }
 
 HRESULT ReadDiagnosticSnapshot(IDXGIInfoQueue& queue, GUID producer, DiagnosticQueueSnapshot& snapshot) noexcept {
-    const auto status = _ReadDiagnosticSnapshot([&] {
+    return _ReadDiagnosticSnapshot([&] {
         return DiagnosticQueueSnapshot{queue.GetNumMessagesAllowedByStorageFilter(producer), queue.GetNumStoredMessages(producer),
                                        queue.GetNumMessagesDiscardedByMessageCountLimit(producer), queue.GetNumMessagesDeniedByStorageFilter(producer)};
-    },
-                                                snapshot);
-    if (SUCCEEDED(status) && queue.GetNumStoredMessagesAllowedByRetrievalFilters(producer) != snapshot.Stored) return E_UNEXPECTED;
-    return status;
+    }, [&] { return queue.GetNumStoredMessagesAllowedByRetrievalFilters(producer); }, snapshot);
 }
 
 bool IsDiagnosticAppendComplete(const DiagnosticQueueSnapshot& before, const DiagnosticQueueSnapshot& after) noexcept {
@@ -224,14 +220,15 @@ bool IsDiagnosticClearComplete(const DiagnosticQueueSnapshot& copied, const Diag
 
 template <class Message, class Snapshot, class Read>
 static HRESULT _CopyDiagnosticBatch(Snapshot snapshot, Read read, DiagnosticQueueSnapshot& before,
-                                    vector<DiagnosticMessage>& messages) noexcept {
+                                    vector<DiagnosticMessage>& messages, uint64_t delivered) noexcept {
     messages.clear();
     HRESULT status = snapshot(before);
     if (FAILED(status)) return status;
     if (before.Stored > 65536) return E_OUTOFMEMORY;
     vector<byte> scratch;
     size_t bytes = 0;
-    for (uint64_t index = 0; index < before.Stored; ++index) {
+    const uint64_t first = before.Accepted - before.Stored;
+    for (uint64_t index = delivered > first ? delivered - first : 0; index < before.Stored; ++index) {
         DiagnosticMessage message;
         status = _ReadDiagnosticMessage<Message>(read, index, scratch, message);
         if (FAILED(status)) break;
@@ -244,25 +241,25 @@ static HRESULT _CopyDiagnosticBatch(Snapshot snapshot, Read read, DiagnosticQueu
     }
     DiagnosticQueueSnapshot after{};
     if (SUCCEEDED(status)) status = snapshot(after);
-    if (SUCCEEDED(status) && before != after) status = E_PENDING;
+    if (SUCCEEDED(status) && !IsDiagnosticAppendComplete(before, after)) status = E_PENDING;
     if (FAILED(status)) messages.clear();
     return status;
 }
 
 HRESULT CopyDiagnosticBatch(ID3D12InfoQueue& queue, DiagnosticQueueSnapshot& snapshot,
-                            vector<DiagnosticMessage>& messages) noexcept {
+                            vector<DiagnosticMessage>& messages, uint64_t delivered) noexcept {
     return _CopyDiagnosticBatch<D3D12_MESSAGE>(
         [&](auto& result) { return ReadDiagnosticSnapshot(queue, result); },
         [&](UINT64 index, D3D12_MESSAGE* message, SIZE_T* size) { return queue.GetMessage(index, message, size); },
-        snapshot, messages);
+        snapshot, messages, delivered);
 }
 
 HRESULT CopyDiagnosticBatch(IDXGIInfoQueue& queue, GUID producer, DiagnosticQueueSnapshot& snapshot,
-                            vector<DiagnosticMessage>& messages) noexcept {
+                            vector<DiagnosticMessage>& messages, uint64_t delivered) noexcept {
     const HRESULT status = _CopyDiagnosticBatch<DXGI_INFO_QUEUE_MESSAGE>(
         [&](auto& result) { return ReadDiagnosticSnapshot(queue, producer, result); },
         [&](UINT64 index, DXGI_INFO_QUEUE_MESSAGE* message, SIZE_T* size) { return queue.GetMessage(producer, index, message, size); },
-        snapshot, messages);
+        snapshot, messages, delivered);
     for (auto& message : messages) message.Source = DiagnosticSource::Dxgi;
     return status;
 }
@@ -274,7 +271,7 @@ static void _ReportCollectionFailure(DiagnosticState& channel, DiagnosticFailure
         _DispatchDiagnostic(channel, _CollectionFailure(channel, failure, reason, result));
 }
 
-static void _PollDiagnosticChannel(DiagnosticState& channel) noexcept {
+static void _PollDiagnosticChannel(DiagnosticState& channel, bool closing = false) noexcept {
     // The callback path must not inspect, clear, or maintain the storage queue.
     if (channel.Closed || channel.Mode == DiagnosticMode::Callback) return;
     const bool intact = _DiagnosticFiltersIntact(channel) &&
@@ -285,36 +282,35 @@ static void _PollDiagnosticChannel(DiagnosticState& channel) noexcept {
     }
     vector<DiagnosticMessage> messages;
     DiagnosticQueueSnapshot before{}, after{};
-    HRESULT status = channel.D3D12 ? CopyDiagnosticBatch(*channel.D3D12.Get(), before, messages)
-                                   : CopyDiagnosticBatch(*channel.Dxgi.Get(), channel.Producer, before, messages);
+    HRESULT status = channel.D3D12 ? CopyDiagnosticBatch(*channel.D3D12.Get(), before, messages, channel.Delivered)
+                                   : CopyDiagnosticBatch(*channel.Dxgi.Get(), channel.Producer, before, messages, channel.Delivered);
+    if (status == E_PENDING && !closing) return;
     if (FAILED(status)) {
         _ReportCollectionFailure(channel, status == E_PENDING ? DiagnosticFailure::InconsistentState : DiagnosticFailure::ReadFailed,
                                  "Diagnostic batch could not be copied completely; storage was not cleared", status);
         return;
     }
-    if (before.Discarded > channel.Snapshot.Discarded)
-        _ReportCollectionFailure(channel, DiagnosticFailure::Overflow, "Native diagnostic storage overflowed");
-    else if (!IsDiagnosticAppendComplete(channel.Snapshot, before))
+    const auto& previous = channel.Snapshot;
+    const uint64_t first = before.Accepted - before.Stored;
+    const uint64_t previousFirst = previous.Accepted - previous.Stored;
+    if (first > channel.Delivered || (!channel.D3D12 && before.Discarded > previous.Discarded))
+        _ReportCollectionFailure(channel, DiagnosticFailure::Overflow, "Native diagnostic storage lost unread messages or overflowed a DXGI producer");
+    else if (before.Accepted < previous.Accepted || before.Denied != previous.Denied || first < previousFirst ||
+             before.Discarded < previous.Discarded || first - previousFirst != before.Discarded - previous.Discarded)
         _ReportCollectionFailure(channel, DiagnosticFailure::InconsistentState, "Diagnostic counters changed inconsistently between checkpoints");
-
-    if (before.Stored != 0) {
+    channel.Delivered = before.Accepted;
+    channel.Snapshot = before;
+    // A queue wait completes only that queue. Another worker may append messages
+    // after the snapshot, so clearing storage here could discard unread diagnostics.
+    if (closing && before.Stored != 0) {
         if (channel.D3D12)
             channel.D3D12->ClearStoredMessages();
         else
             channel.Dxgi->ClearStoredMessages(channel.Producer);
         status = channel.D3D12 ? ReadDiagnosticSnapshot(*channel.D3D12.Get(), after)
                                : ReadDiagnosticSnapshot(*channel.Dxgi.Get(), channel.Producer, after);
-    } else {
-        after = before;
-    }
-    if (FAILED(status)) {
-        _ReportCollectionFailure(channel, DiagnosticFailure::ReadFailed, "Diagnostic counters could not be verified after clear", status);
-    } else {
-        if (!IsDiagnosticClearComplete(before, after))
-            _ReportCollectionFailure(channel, after.Discarded > before.Discarded ? DiagnosticFailure::Overflow : DiagnosticFailure::InconsistentState,
-                                     "Messages arriving during diagnostic clear do not match the retained messages");
-        // After a fault this is only a best-effort restart; Healthy is never reset.
-        channel.Snapshot = after;
+        if (FAILED(status) || !IsDiagnosticClearComplete(before, after) || after.Stored)
+            _ReportCollectionFailure(channel, DiagnosticFailure::InconsistentState, "Diagnostic storage changed during final drain", FAILED(status) ? status : E_UNEXPECTED);
     }
     for (auto& message : messages) {
         message.Channel = channel.Id;
@@ -376,6 +372,7 @@ static bool _StartDiagnosticChannel(DiagnosticState& channel) noexcept {
         status = channel.D3D12 ? ReadDiagnosticSnapshot(*channel.D3D12.Get(), channel.Snapshot)
                                : ReadDiagnosticSnapshot(*channel.Dxgi.Get(), channel.Producer, channel.Snapshot);
     }
+    if (SUCCEEDED(status)) channel.Delivered = channel.Snapshot.Accepted - channel.Snapshot.Stored;
     if (FAILED(status)) _DispatchDiagnostic(channel, _CollectionFailure(channel, DiagnosticFailure::InitializationFailed,
                                                                         "Diagnostic channel initialization failed", status));
     return SUCCEEDED(status);
@@ -415,7 +412,7 @@ static void _CloseDiagnosticChannel(DiagnosticState& channel) noexcept {
 
 static void _ReleaseDiagnosticChannel(const shared_ptr<DiagnosticState>& channel, const shared_ptr<DiagnosticReceiver>& receiver) noexcept {
     std::lock_guard change{channel->Context.CollectionMutex};
-    _PollDiagnosticChannel(*channel);
+    _PollDiagnosticChannel(*channel, channel->Users == 1);
     bool close = false;
     {
         auto& registry = channel->Context;

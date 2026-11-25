@@ -30,12 +30,10 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
-    void* Map(uint64_t, uint64_t) noexcept override { return nullptr; }
-    void Unmap() noexcept override {}
-    void FlushMappedRange(gpu::BufferRange) noexcept override {}
-    void InvalidateMappedRange(gpu::BufferRange) noexcept override {}
+    Nullable<void*> GetMappedData() noexcept override { return nullptr; }
+    bool FlushMappedRange(gpu::BufferRange) noexcept override { return false; }
+    bool InvalidateMappedRange(gpu::BufferRange) noexcept override { return false; }
     gpu::BufferDescriptor GetDesc() const noexcept override { return _desc; }
-    gpu::Device* GetDevice() const noexcept override { return nullptr; }
 
 private:
     gpu::BufferDescriptor _desc;

@@ -1,6 +1,9 @@
 #include "gpu_test_fixture.h"
 
 #include <algorithm>
+#include <array>
+#include <latch>
+#include <thread>
 
 namespace radray::gpu {
 namespace {
@@ -323,6 +326,168 @@ TEST_P(ComputeBindingTest, D3D12RootSignatureOver64DwordsIsRejected) {
         .Vulkan = std::nullopt};
     EXPECT_TRUE(device.CreatePipelineLayout({groups, std::span{&exactBudget, 1}}));
 }
+
+class ConcurrentQueueTest : public test::GpuTest, public testing::WithParamInterface<GpuBackend> {};
+
+TEST_P(ConcurrentQueueTest, IndependentWorkersCreateResourcesAndSubmitSharedParameterSet) {
+    auto selected = OpenDevice(GetParam(), 2);
+    if (!selected) return;
+    auto& device = *selected.Get();
+    const BindingDescriptor bindings[]{MakeBinding(0, BindingKind::RWStructuredBuffer, OutputSlot),
+                                       MakeBinding(1, BindingKind::CBuffer, DataSlot)};
+    auto group = device.CreateBindingGroupLayout({bindings}).Unwrap();
+    const BindingDescriptor sampleBinding = MakeBinding(2, BindingKind::Sampler, {0, 1, 1, 0});
+    auto sampling = device.CreateBindingGroupLayout({std::span{&sampleBinding, 1}}).Unwrap();
+    const PipelineLayoutGroupDescriptor groups[]{{0, group.get()}, {1, sampling.get()}};
+    auto layout = device.CreatePipelineLayout({groups}).Unwrap();
+    auto cache = device.CreatePipelineCache().Unwrap();
+    auto code = test::LoadShader(device, "compute", "ReadConstants", ShaderStage::Compute).Unwrap();
+    const SamplerDescriptor desc{.AddressS = AddressMode::ClampToEdge, .AddressT = AddressMode::ClampToEdge, .AddressR = AddressMode::ClampToEdge,
+                                 .MinFilter = FilterMode::Nearest, .MagFilter = FilterMode::Nearest, .MipmapFilter = FilterMode::Nearest, .AnisotropyClamp = 1};
+    auto sampler = device.CreateSampler(desc).Unwrap();
+    auto shared = device.CreateShaderParameterSet({sampling.get()}).Unwrap();
+    ASSERT_TRUE(shared->Set(2, 0, sampler.get()));
+    ASSERT_TRUE(shared->FlushWrites());
+
+    std::latch start{2};
+    array<Sampler*, 2> cached{};
+    array<std::jthread, 2> workers;
+    for (uint32_t index = 0; index < workers.size(); ++index) {
+        workers[index] = std::jthread{[&, index] {
+            start.arrive_and_wait();
+            auto* queue = device.GetCommandQueue(QueueType::Direct, index).Get();
+            auto allocator = device.CreateCommandAllocator(queue).Unwrap();
+            auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
+            for (int iteration = 0; iteration < 12; ++iteration) {
+                auto buffer = device.CreateBuffer({.Size = 256, .Memory = MemoryType::Device, .Usage = BufferUse::UnorderedAccess}).Unwrap();
+                auto texture = device.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 4, .Height = 4, .DepthOrArraySize = 1,
+                    .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Memory = MemoryType::Device, .Usage = TextureUse::Resource}).Unwrap();
+                auto view = device.CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::Resource}).Unwrap();
+                auto localSampler = device.CreateSampler(desc).Unwrap();
+                cached[index] = device.GetOrCreateSampler(desc).Get();
+                auto set = device.CreateShaderParameterSet({sampling.get()}).Unwrap();
+                ASSERT_TRUE(set->Set(2, 0, localSampler.get()));
+                ASSERT_TRUE(set->FlushWrites());
+                auto pso = device.CreateComputePipelineState({layout.get(), {code.get(), "ReadConstants"}, cache.get()}).Unwrap();
+                const array<uint32_t, 64> input{17, 0};
+                auto constants = test::CreateUploadBuffer(device, test::AsBytes(input), BufferUse::CBuffer).Unwrap();
+                auto local = device.CreateShaderParameterSet({group.get()}).Unwrap();
+                ASSERT_TRUE(local->Set(0, 0, ShaderBufferBinding{buffer.get(), {0, 256}, 4}));
+                ASSERT_TRUE(local->Set(1, 0, ShaderBufferBinding{constants.get(), {0, 256}, 0}));
+                ASSERT_TRUE(local->FlushWrites());
+                command->Begin();
+                test::Barrier(*command, {BarrierBufferDescriptor{buffer.get(), BufferState::Undefined, BufferState::UnorderedAccess},
+                                         BarrierBufferDescriptor{constants.get(), BufferState::HostWrite, BufferState::CBuffer}});
+                auto encoder = command->BeginComputePass().Unwrap();
+                encoder->BindComputePipelineState(pso.get());
+                encoder->BindShaderParameterSet(0, local.get());
+                encoder->BindShaderParameterSet(1, shared.get());
+                encoder->Dispatch(1, 1, 1);
+                command->EndComputePass(std::move(encoder));
+                command->End();
+                CommandBuffer* commands[]{command.get()};
+                ASSERT_TRUE(queue->Submit({.CmdBuffers = commands}));
+                queue->Wait();
+                allocator->Reset();
+            }
+        }};
+    }
+    for (auto& worker : workers) worker.join();
+    ASSERT_NE(cached[0], nullptr);
+    EXPECT_EQ(cached[0], cached[1]);
+}
+
+TEST_P(ConcurrentQueueTest, SecondQueueSignalsWhileFirstWaitsForIdle) {
+    auto selected = OpenDevice(GetParam(), 2);
+    if (!selected) return;
+    auto& device = *selected.Get();
+    auto& first = test::DirectQueue(device);
+    auto& second = *device.GetCommandQueue(QueueType::Direct, 1).Get();
+    auto gate = device.CreateFence().Unwrap();
+    Fence* fences[]{gate.get()};
+    uint64_t values[]{1};
+    ASSERT_TRUE(first.Submit({.WaitFences = fences, .WaitValues = values}));
+    std::latch started{1};
+    std::jthread consumer{[&] { started.count_down(); first.Wait(); }};
+    started.wait();
+    EXPECT_TRUE(second.Submit({.SignalFences = fences, .SignalValues = values}));
+    consumer.join();
+    EXPECT_EQ(gate->GetCompletedValue(), 1u);
+}
+
+TEST_P(ConcurrentQueueTest, DownstreamFenceProvesBothEarlierReadbackWritesCompleted) {
+    auto selected = OpenDevice(GetParam(), 2);
+    if (!selected) return;
+    auto& device = *selected.Get();
+    auto& writer = test::DirectQueue(device);
+    auto& join = *device.GetCommandQueue(QueueType::Direct, 1).Get();
+    const uint32_t value = 21;
+    auto upload = test::CreateUploadBuffer(device, test::AsBytes(value), BufferUse::CopySource).Unwrap();
+    auto readback = test::CreateReadbackBuffer(device, sizeof(value)).Unwrap();
+    auto written = device.CreateFence().Unwrap();
+    auto joined = device.CreateFence().Unwrap();
+    Fence* ready[]{written.get()}, *done[]{joined.get()};
+    uint64_t one[]{1}, two[]{2}, four[]{4};
+    auto first = test::BeginRecording(device);
+    auto second = test::BeginRecording(device);
+    for (auto* recording : {&first, &second}) {
+        if (recording == &second)
+            test::Barrier(*recording->Commands, {BarrierBufferDescriptor{readback.get(), BufferState::HostRead, BufferState::CopyDestination}});
+        recording->Commands->CopyBufferToBuffer(readback.get(), 0, upload.get(), 0, sizeof(value));
+        test::Barrier(*recording->Commands, {BarrierBufferDescriptor{readback.get(), BufferState::CopyDestination, BufferState::HostRead}});
+        recording->Commands->End();
+    }
+    CommandBuffer* a[]{first.Commands.get()}, *b[]{second.Commands.get()};
+    ASSERT_TRUE(writer.Submit({.CmdBuffers = a, .SignalFences = ready, .SignalValues = one}));
+    ASSERT_TRUE(writer.Submit({.CmdBuffers = b, .SignalFences = ready, .SignalValues = four}));
+    ASSERT_TRUE(join.Submit({.SignalFences = done, .SignalValues = one, .WaitFences = ready, .WaitValues = two}));
+    ASSERT_EQ(joined->WaitForStatus(1, 3'000'000'000), FenceStatus::Completed);
+    EXPECT_EQ(test::FromBytes<uint32_t>(test::MapAndRead(*readback)), (vector<uint32_t>{value}));
+    EXPECT_EQ(TakeRhiValidationErrors(), 0u);
+}
+
+TEST_P(ConcurrentQueueTest, InvalidatingFirstReadbackPreservesAGatedOverwrite) {
+    auto selected = OpenDevice(GetParam(), 2);
+    if (!selected) return;
+    auto& device = *selected.Get();
+    auto& queue = test::DirectQueue(device);
+    auto& producer = *device.GetCommandQueue(QueueType::Direct, 1).Get();
+    uint32_t value = 37;
+    auto upload = test::CreateUploadBuffer(device, test::AsBytes(value), BufferUse::CopySource).Unwrap();
+    auto readback = test::CreateReadbackBuffer(device, sizeof(value)).Unwrap();
+    auto gate = device.CreateFence().Unwrap();
+    auto done = device.CreateFence().Unwrap();
+    Fence* completion[]{done.get()};
+    Fence* unblock[]{gate.get()};
+    uint64_t one[]{1}, two[]{2};
+    auto first = test::BeginRecording(device);
+    auto second = test::BeginRecording(device);
+    for (auto* recording : {&first, &second}) {
+        if (recording == &second)
+            test::Barrier(*recording->Commands, {BarrierBufferDescriptor{readback.get(), BufferState::HostRead, BufferState::CopyDestination}});
+        recording->Commands->CopyBufferToBuffer(readback.get(), 0, upload.get(), 0, sizeof(value));
+        test::Barrier(*recording->Commands, {BarrierBufferDescriptor{readback.get(), BufferState::CopyDestination, BufferState::HostRead}});
+        recording->Commands->End();
+    }
+    CommandBuffer* a[]{first.Commands.get()}, *b[]{second.Commands.get()};
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = a, .SignalFences = completion, .SignalValues = one}));
+    ASSERT_EQ(done->WaitForStatus(1, 3'000'000'000), FenceStatus::Completed);
+    // Instrumented drivers may block inside a native submit containing work.
+    // Keep the host that releases its gate independent of that call.
+    std::latch enteringSubmit{1};
+    std::jthread writer{[&] {
+        enteringSubmit.count_down();
+        EXPECT_TRUE(queue.Submit({.CmdBuffers = b, .SignalFences = completion, .SignalValues = two, .WaitFences = unblock, .WaitValues = one}));
+    }};
+    enteringSubmit.wait();
+    EXPECT_EQ(test::MapAndRead(*readback).size(), sizeof(value));
+    EXPECT_TRUE(producer.Submit({.SignalFences = unblock, .SignalValues = one}));
+    writer.join();
+    ASSERT_EQ(done->WaitForStatus(2, 3'000'000'000), FenceStatus::Completed);
+    EXPECT_EQ(test::FromBytes<uint32_t>(test::MapAndRead(*readback)), (vector<uint32_t>{value}));
+}
+
+INSTANTIATE_TEST_SUITE_P(Backends, ConcurrentQueueTest, testing::ValuesIn(test::AllBackends), test::BackendParamName);
 
 INSTANTIATE_TEST_SUITE_P(Backends, ComputeBindingTest, testing::ValuesIn(test::AllBackends), test::BackendParamName);
 

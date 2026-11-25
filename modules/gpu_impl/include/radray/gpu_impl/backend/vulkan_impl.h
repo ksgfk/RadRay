@@ -142,6 +142,7 @@ public:
 
 private:
     DeviceVulkan* _device;
+    std::mutex _mutex;
     vector<unique_ptr<Page>> _pages;
 };
 
@@ -295,7 +296,25 @@ public:
     void Destroy() noexcept override;
 
     bool IsDeviceLost() const noexcept override;
-    bool MarkDeviceLost(VkResult result, std::string_view operation, bool deviceIdleAlreadyCalled = false) noexcept;
+    bool MarkDeviceLost(VkResult result, std::string_view operation) noexcept;
+    template <class Handle, class DestroyFn>
+    void DestroyNative(Handle handle, DestroyFn destroy) noexcept {
+        EnsureLostDeviceDrained();
+        destroy(_device, handle, GetAllocationCallbacks());
+    }
+    void DestroyBuffer(VkBuffer buffer, VmaAllocation allocation) noexcept;
+    void DestroyImage(VkImage image, VmaAllocation allocation) noexcept;
+    void ResetCommandPool(VkCommandPool pool, bool used) noexcept;
+    VkResult FreeDescriptorSet(VkDescriptorPool pool, VkDescriptorSet set) noexcept;
+    void FreeCommandBuffer(VkCommandPool pool, VkCommandBuffer buffer) noexcept;
+    void DestroySurface(VkSurfaceKHR surface) noexcept;
+#ifdef RADRAY_ENABLE_PROFILER
+    void DestroyProfilerContext(void* context) noexcept;
+#endif
+    VkResult WaitPresentationIdle(QueueVulkan& queue) noexcept;
+    VkResult WaitDeviceIdleSerialized() noexcept;
+    std::mutex _lostDrainMutex;
+    std::atomic<bool> _lostDrained{false};
     std::atomic<bool> _deviceLost{false};
     GpuBackend GetBackend() noexcept override;
 
@@ -376,6 +395,7 @@ public:
     DeviceFuncTable _ftb;
     unique_ptr<VulkanRenderPassCache> _renderPassCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
+    std::mutex _samplerMutex;
     unordered_map<SamplerDescriptor, unique_ptr<SamplerVulkan>> _samplerCache;
     DeviceFeaturesVulkan _supportedFeatures;
     DeviceFeaturesVulkan _enabledFeatures;
@@ -384,6 +404,9 @@ public:
     GpuDeviceCapabilities _capabilities;
     bool _externalMemoryWin32{false};
     bool _externalSemaphoreWin32{false};
+
+private:
+    void EnsureLostDeviceDrained() noexcept;
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -416,6 +439,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+    std::mutex _mutex;
     VkQueue _queue;
     QueueIndexInFamily _family;
     QueueType _type;
@@ -678,20 +702,15 @@ public:
 
     uint64_t GetCompletedValue() const noexcept override;
 
-    uint64_t GetLastSignaledValue() const noexcept override;
-
-    void Wait() noexcept override;
-
     void Wait(uint64_t value) noexcept override;
 
-    bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
+    FenceStatus WaitForStatus(uint64_t value, uint64_t timeoutNs) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     unique_ptr<TimelineSemaphoreVulkan> _fence;
-    uint64_t _fenceValue{0};
     std::optional<ExternalFenceInfo> _externalInfo;
     OwnedExternalHandle _externalHandle;
 };
@@ -816,7 +835,7 @@ public:
     Nullable<unique_ptr<LegacyFenceVulkan>> AcquireFenceFromPool() noexcept;
     void CollectRetired() noexcept;
     void DrainAndClear() noexcept;
-    void RecordFailure(VkResult result, bool deviceIdleAlreadyCalled = false) noexcept;
+    void RecordFailure(VkResult result) noexcept;
 
     class Frame {
     public:
@@ -917,19 +936,15 @@ public:
 
     void Destroy() noexcept override;
 
-    void* Map(uint64_t offset, uint64_t size) noexcept override;
+    Nullable<void*> GetMappedData() noexcept override;
 
-    void Unmap() noexcept override;
+    bool FlushMappedRange(BufferRange range) noexcept override;
 
-    void FlushMappedRange(BufferRange range) noexcept override;
-
-    void InvalidateMappedRange(BufferRange range) noexcept override;
+    bool InvalidateMappedRange(BufferRange range) noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
     BufferDescriptor GetDesc() const noexcept override;
-
-    Device* GetDevice() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -987,8 +1002,6 @@ public:
     void SetDebugName(std::string_view name) noexcept override;
 
     TextureDescriptor GetDesc() const noexcept override;
-
-    Device* GetDevice() const noexcept override;
 
 public:
     void DestroyImpl() noexcept;

@@ -11,7 +11,7 @@ Environment::Environment(
     bool validation,
     unique_ptr<gpu::DXGIFactory> factory,
     Nullable<gpu::InstanceVulkan*> instance) noexcept
-    : _backend(backend), _owner(std::this_thread::get_id()),
+    : _backend(backend), _creationThread(std::this_thread::get_id()),
       _factory(std::move(factory)), _instance(instance), _validation(validation) {}
 
 Environment::~Environment() noexcept {
@@ -23,7 +23,7 @@ Environment::~Environment() noexcept {
 }
 
 bool Environment::IsOwnerThread() const noexcept {
-    return _owner == std::this_thread::get_id();
+    return _creationThread == std::this_thread::get_id();
 }
 
 Nullable<unique_ptr<Environment>> Environment::Create(

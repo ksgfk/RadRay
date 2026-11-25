@@ -80,6 +80,17 @@ protected:
     }
 };
 
+TEST_P(RenderPassTest, RejectsAttachmentViewFromAnotherDevice) {
+    auto target = CreateColorTarget();
+    auto other = OpenDevice(GetParam());
+    ASSERT_TRUE(other);
+    auto recording = test::BeginRecording(*other);
+    const RenderPassColorAttachment color{target.View.get(), LoadAction::Clear, StoreAction::Store, {}};
+    EXPECT_FALSE(recording.Commands->BeginRenderPass({.Colors = std::span{&color, 1}, .Width = Size, .Height = Size}));
+    EXPECT_EQ(TakeRhiValidationErrors(), 1u);
+    recording.Commands->End();
+}
+
 TEST_P(RenderPassTest, PipelineCacheRoundTripOwnsImportedBytes) {
     auto& device = GetDevice();
     auto cache = device.CreatePipelineCache().Unwrap();
@@ -130,6 +141,39 @@ TEST_P(RenderPassTest, FullscreenTriangleCoversTarget) {
     commands.EndRenderPass(std::move(encoder));
     test::SubmitAndWait(device, recording);
 
+    EXPECT_EQ(ReadColor(*target.Image), Fill(0xff0000ff));
+}
+
+TEST_P(RenderPassTest, DirectIndexedDrawReadsTheRequestedMappedRange) {
+    auto& device = GetDevice();
+    auto target = CreateColorTarget();
+    auto pipeline = CreateSolidPipeline(std::nullopt);
+    auto indices = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::Index}).Unwrap();
+    const array<uint16_t, 3> order{0, 1, 2};
+    auto* mapped = static_cast<byte*>(indices->GetMappedData().Get());
+    ASSERT_NE(mapped, nullptr);
+    std::memcpy(mapped + 4096, order.data(), sizeof(order));
+    ASSERT_TRUE(indices->FlushMappedRange({4096, sizeof(order)}));
+
+    auto recording = test::BeginRecording(device);
+    auto& commands = *recording.Commands;
+    test::Barrier(commands, {BarrierTextureDescriptor{.Target = target.Image.get(), .Before = TextureState::Undefined, .After = TextureState::RenderTarget},
+                             BarrierBufferDescriptor{indices.get(), BufferState::HostWrite, BufferState::Index}});
+    const RenderPassColorAttachment color{target.View.get(), LoadAction::Clear, StoreAction::Store, {{0.f, 0.f, 0.f, 1.f}}};
+    auto encoder = commands.BeginRenderPass({.Colors = std::span{&color, 1}, .Width = Size, .Height = Size}).Unwrap();
+    encoder->BindGraphicsPipelineState(pipeline.State.get());
+    SetFullViewport(*encoder);
+    const DrawData draw{{1.f, 0.f, 0.f, 1.f}, 0.5f};
+    ASSERT_TRUE(encoder->SetPushConstants(DrawPushId, 0, test::AsBytes(draw)));
+    encoder->BindIndexBuffer({indices.get(), 4, 2});
+    encoder->DrawIndexed(3, 1, 2046, 0, 0);
+    commands.EndRenderPass(std::move(encoder));
+    commands.End();
+
+    CommandBuffer* raw[]{&commands};
+    auto& queue = test::DirectQueue(device);
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = raw}));
+    queue.Wait();
     EXPECT_EQ(ReadColor(*target.Image), Fill(0xff0000ff));
 }
 

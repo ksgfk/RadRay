@@ -63,9 +63,9 @@ struct DiagnosticQueueSnapshot {
 HRESULT ReadDiagnosticSnapshot(ID3D12InfoQueue& queue, DiagnosticQueueSnapshot& snapshot) noexcept;
 HRESULT ReadDiagnosticSnapshot(IDXGIInfoQueue& queue, GUID producer, DiagnosticQueueSnapshot& snapshot) noexcept;
 HRESULT CopyDiagnosticBatch(ID3D12InfoQueue& queue, DiagnosticQueueSnapshot& snapshot,
-                            vector<DiagnosticMessage>& messages) noexcept;
+                            vector<DiagnosticMessage>& messages, uint64_t delivered = 0) noexcept;
 HRESULT CopyDiagnosticBatch(IDXGIInfoQueue& queue, GUID producer, DiagnosticQueueSnapshot& snapshot,
-                            vector<DiagnosticMessage>& messages) noexcept;
+                            vector<DiagnosticMessage>& messages, uint64_t delivered = 0) noexcept;
 bool IsDiagnosticAppendComplete(const DiagnosticQueueSnapshot& before, const DiagnosticQueueSnapshot& after) noexcept;
 bool IsDiagnosticClearComplete(const DiagnosticQueueSnapshot& copied, const DiagnosticQueueSnapshot& after) noexcept;
 

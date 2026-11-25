@@ -3,8 +3,64 @@
 #if defined(RADRAY_PLATFORM_WINDOWS)
 #include <radray/platform/win32_headers.h>
 
+#if defined(RADRAY_ENABLE_D3D12)
+#include <d3d11.h>
+#include <radray/gpu_impl/backend/d3d12_impl.h>
+#include <radray/scope_guard.h>
+#endif
+
 namespace radray::gpu {
 namespace {
+
+#if defined(RADRAY_ENABLE_D3D12)
+TEST(D3D12SwapChainRecovery, ResizeAndBackBufferRefreshFailuresLeaveARetriableChain) {
+    auto factory = d3d12::CreateDXGIFactory({}).Unwrap();
+    auto device = d3d12::CreateDevice({.Factory = factory.get()}).Unwrap();
+    const auto window = ::CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"RadRay DXGI recovery test",
+                                          WS_OVERLAPPEDWINDOW, 0, 0, 160, 120, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    ASSERT_NE(window, nullptr);
+    auto closeWindow = MakeScopeGuard([&] { ::DestroyWindow(window); });
+    ::ShowWindow(window, SW_SHOWNOACTIVATE);
+    auto chain = device->CreateSwapChain({.PresentQueue = &test::DirectQueue(*device), .NativeHandler = window,
+        .Width = 64, .Height = 64, .BackBufferCount = 3, .Format = TextureFormat::BGRA8_UNORM, .PresentMode = PresentMode::FIFO}).Unwrap();
+    auto& native = *static_cast<d3d12::SwapChainD3D12*>(chain.get());
+    auto resize = [&] { return chain->Recreate(64, 64, TextureFormat::BGRA8_UNORM, PresentMode::FIFO); };
+    d3d12::ComPtr<ID3D12Resource> held;
+    ASSERT_EQ(native._swapchain->GetBuffer(0, IID_PPV_ARGS(&held)), S_OK);
+    EXPECT_FALSE(resize());
+    EXPECT_TRUE(native._frames.empty());
+    EXPECT_EQ(chain->AcquireNext(0).Status, SwapChainStatus::RequireRecreate);
+    held.Reset();
+    ASSERT_TRUE(resize());
+
+    // A DXGI flip chain from D3D11 can resize, but GetBuffer cannot return ID3D12Resource.
+    // Exercise the native refresh failure without a hook in the production backend.
+    d3d12::ComPtr<ID3D11Device> otherDevice;
+    ASSERT_TRUE(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &otherDevice, nullptr, nullptr)));
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = desc.Height = 64;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    d3d12::ComPtr<IDXGISwapChain1> otherChain;
+    auto* dxgi = static_cast<d3d12::DXGIFactoryImpl*>(factory.get())->_factory.Get();
+    ASSERT_TRUE(SUCCEEDED(dxgi->CreateSwapChainForComposition(otherDevice.Get(), &desc, nullptr, &otherChain)));
+    auto original = native._swapchain;
+    ASSERT_EQ(otherChain.As(&native._swapchain), S_OK);
+    EXPECT_FALSE(resize());
+    EXPECT_EQ(chain->GetBackBufferCount(), 0u);
+    EXPECT_EQ(chain->AcquireNext(0).Status, SwapChainStatus::RequireRecreate);
+    native._swapchain = original;
+    ASSERT_TRUE(resize());
+    auto acquired = chain->AcquireNext(1000);
+    ASSERT_TRUE(acquired.Frame);
+    EXPECT_EQ(chain->Present(std::move(*acquired.Frame)).Status, SwapChainStatus::Success);
+    test::DirectQueue(*device).Wait();
+}
+#endif
 
 class SwapChainBackBufferTest : public test::BackendTest {
 protected:

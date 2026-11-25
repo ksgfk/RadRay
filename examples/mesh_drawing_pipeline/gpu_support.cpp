@@ -303,13 +303,12 @@ bool PrepareOutputDirectory(const std::filesystem::path& output) {
 }
 
 std::optional<ImageData> GpuFrameResources::ReadImage() const {
-    Nullable<void*> mapped = Readback->Map(0, RowPitch * Height);
+    Nullable<void*> mapped = Readback->GetMappedData();
     if (!mapped) {
         RADRAY_ERR_LOG("无法映射图片读回缓冲");
         return std::nullopt;
     }
-    const auto unmap = MakeScopeGuard([&]() noexcept { Readback->Unmap(); });
-    Readback->InvalidateMappedRange({0, RowPitch * Height});
+    if (!Readback->InvalidateMappedRange({0, RowPitch * Height})) return std::nullopt;
     ImageData image;
     image.Width = Width;
     image.Height = Height;

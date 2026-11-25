@@ -515,6 +515,8 @@ public:
                                  std::optional<gpu::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
     RDGTextureHandle CreateTexture(const gpu::TextureDescriptor& desc);
     RDGBlackboard& GetBlackboard() noexcept;
+    bool IsDynamicBuffer(RDGBufferHandle buffer) const noexcept;
+    std::optional<gpu::BufferDescriptor> GetBufferDescriptor(RDGBufferHandle buffer) const noexcept;
     std::optional<gpu::TextureDescriptor> GetTextureDescriptor(RDGTextureHandle texture) const noexcept;
     RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value);
     RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value, gpu::SubresourceRange range, std::optional<Rect> renderArea = std::nullopt);
@@ -527,6 +529,8 @@ public:
     RDGBufferHandle CreateBuffer(const gpu::BufferDescriptor& desc);
     RDGBufferHandle CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
     RDGBufferHandle ImportPersistentBorrowed(GpuBuffer& buffer);
+    RDGBufferHandle ImportPersistentBorrowed(GpuUploadBuffer& buffer);
+    RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuUploadBuffer>& buffer);
     RDGTextureHandle ImportPersistentBorrowed(GpuTexture& texture);
     RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuBuffer>& buffer);
     RDGTextureHandle ImportPersistentOwned(const IntrusivePtr<GpuTexture>& texture);

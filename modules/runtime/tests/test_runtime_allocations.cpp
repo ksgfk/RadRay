@@ -7,6 +7,7 @@
 
 #include <radray/runtime/frame_scheduler.h>
 #include <radray/runtime/rdg.h>
+#include <radray/runtime/readback_queue.h>
 #include <radray/runtime/transient_parameter_pool.h>
 #include <radray/types.h>
 
@@ -219,6 +220,50 @@ TEST(RuntimeAllocationsTest, O1SteadyStateRdgBuildAndInlineGeneratorZeroGlobalAl
     EXPECT_EQ(steady.Allocations, 0u);
     EXPECT_EQ(steady.Deallocations, 0u);
     scheduler->WaitIdle();
+}
+
+TEST(RuntimeAllocationsTest, SteadyStateReadbackReusesRequestsAndStagingAcrossFrames) {
+    auto device = make_shared<AllocFakeDevice>();
+    device->Capabilities.Detail.GpuName.assign(64, 'G');
+    device->Capabilities.Detail.DriverVersion.assign(64, 'D');
+    DeviceContext context{device, &device->Queue};
+    AsyncReadbackQueue reads{*device};
+    auto source = device->CreateBuffer({.Size = 16, .Usage = gpu::BufferUse::CopySource}).Unwrap();
+    auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
+    RDGTransientResourcePool pool{*device};
+    UploadArena uploads{*device, 64};
+    auto texture = device->CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = 2, .Height = 2, .DepthOrArraySize = 1,
+        .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Usage = gpu::TextureUse::CopySource}).Unwrap();
+    class CopyCommand final : public test::FakeCommandBuffer {
+    public:
+        bool CopyTextureToBufferRegion(const gpu::TextureToBufferCopyDescriptor&) noexcept override { return true; }
+    } command;
+    uint64_t id = 0;
+    const auto runFrame = [&] {
+        auto& slot = scheduler->BeginFrame();
+        pool.BeginFrame();
+        uploads.Reset();
+        RDGBuilder graph{slot};
+        const auto handle = graph.ImportBuffer(source.get(), gpu::BufferState::CopySource);
+        const auto color = graph.ImportTexture(texture.get(), gpu::TextureState::CopySource);
+        const auto bufferId = ++id, textureId = ++id;
+        ASSERT_TRUE(reads.EnqueueBuffer(graph, bufferId, handle, 0, 16));
+        ASSERT_TRUE(reads.EnqueueTexture(graph, textureId, color));
+        auto compiled = graph.Compile();
+        ASSERT_TRUE(compiled);
+        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Record(command));
+        ASSERT_TRUE(scheduler->RunFrame());
+        reads.MarkSubmitted(id);
+        array<byte, 16> data{};
+        ReadbackResultInfo info{};
+        for (auto request : {bufferId, textureId})
+            EXPECT_EQ(reads.Poll(request, id, info, data.data(), data.size()), ReadbackStatus::Ready);
+    };
+    for (int frame = 0; frame < 4; ++frame) runFrame();
+    const auto steady = allocation_probe::Measure(runFrame);
+    EXPECT_EQ(steady.Allocations, 0u);
+    EXPECT_EQ(steady.Deallocations, 0u);
 }
 
 TEST(RuntimeAllocationsTest, M2SortVisibleCommandsAlreadySortedZeroAllocations) {

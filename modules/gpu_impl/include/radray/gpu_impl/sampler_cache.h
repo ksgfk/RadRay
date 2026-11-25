@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <mutex>
 
 #include <radray/nullable.h>
 #include <radray/types.h>
@@ -34,6 +35,7 @@ public:
     void Clear() noexcept;
 
 private:
+    std::mutex _mutex;
     Device* _device;
     unordered_map<SamplerDescriptor, unique_ptr<Sampler>> _cache;
 };

@@ -118,12 +118,11 @@ void Run(benchmark::State& state, GpuBackend backend, uint32_t warmup, const str
         compiled->CommitSubmittedStates();
         scheduler->RunFrame();
         queue.Wait();
-        auto* mapped = timestamps->Map(0, 16);
+        auto* mapped = timestamps->GetMappedData().Get();
         if (!mapped) return false;
-        timestamps->InvalidateMappedRange({0, 16});
+        if (!timestamps->InvalidateMappedRange({0, 16})) return false;
         array<uint64_t, 2> ticks{};
         std::memcpy(ticks.data(), mapped, 16);
-        timestamps->Unmap();
         if (ticks[1] <= ticks[0]) return false;
         sample = {Microseconds(prepareBegin, prepareEnd), Microseconds(recordBegin, recordEnd),
                   static_cast<double>(ticks[1] - ticks[0]) * calibration.TickPeriodNs / 1000.0};

@@ -13,9 +13,6 @@ namespace {
 
 struct MappingProbe {
     uint32_t LiveBuffers{0};
-    uint32_t MappedBuffers{0};
-    bool DestroyedWhileMapped{false};
-    bool UnmappedTwice{false};
 };
 
 class ObservedBuffer final : public test::FakeBuffer {
@@ -26,26 +23,13 @@ public:
         ++_probe.LiveBuffers;
     }
     ~ObservedBuffer() noexcept override {
-        _probe.DestroyedWhileMapped |= _mapped;
         --_probe.LiveBuffers;
     }
-    void* Map(uint64_t offset, uint64_t) noexcept override {
-        _mapped = true;
-        ++_probe.MappedBuffers;
-        return _bytes.data() + offset;
-    }
-    void Unmap() noexcept override {
-        if (_mapped)
-            --_probe.MappedBuffers;
-        else
-            _probe.UnmappedTwice = true;
-        _mapped = false;
-    }
+    Nullable<void*> GetMappedData() noexcept override { return _bytes.data(); }
 
 private:
     MappingProbe& _probe;
     vector<byte> _bytes;
-    bool _mapped{false};
 };
 
 class ObservedDevice final : public test::FakeDevice {
@@ -72,7 +56,7 @@ TEST(UploadArena, GrowthPreservesEarlierAddressesAndResetReusesMappedPages) {
     const auto desc = first->Buffer->GetDesc();
     EXPECT_EQ(desc.Memory, MemoryType::Upload);
     EXPECT_TRUE(desc.Usage.HasFlag(BufferUse::MapWrite | BufferUse::CopySource | BufferUse::Vertex | BufferUse::CBuffer));
-    EXPECT_TRUE(desc.Hints.HasFlag(ResourceHint::PersistentMap));
+    EXPECT_EQ(desc.Hints, ResourceHint::None);
     auto second = arena.Allocate(32, 4, 32, BufferState::CopySource);
     ASSERT_TRUE(second);
     EXPECT_NE(first->Buffer, second->Buffer);
@@ -126,8 +110,8 @@ TEST(UploadArena, StagingAndDynamicPagesRemainSeparateWithExactBufferUsage) {
     constexpr auto stagingUsage = BufferUse::MapWrite | BufferUse::CopySource;
     EXPECT_EQ(staging->Buffer->GetDesc().Usage, stagingUsage);
     EXPECT_EQ(vertex->Buffer->GetDesc().Usage, stagingUsage | BufferUse::Vertex | BufferUse::Index | BufferUse::CBuffer | BufferUse::Resource | BufferUse::Indirect);
-    EXPECT_EQ(staging->Buffer->GetDesc().Hints, ResourceHint::PersistentMap);
-    EXPECT_EQ(vertex->Buffer->GetDesc().Hints, ResourceHint::PersistentMap);
+    EXPECT_EQ(staging->Buffer->GetDesc().Hints, ResourceHint::None);
+    EXPECT_EQ(vertex->Buffer->GetDesc().Hints, ResourceHint::None);
     vector<ResourceBarrierDescriptor> barriers;
     arena.AppendReadBarriers(barriers);
     ASSERT_EQ(barriers.size(), 2u);
@@ -192,7 +176,7 @@ TEST(UploadArena, FailedPageCreationOrMappingPreservesExistingAllocation) {
     EXPECT_EQ(reused->Data, first->Data);
 }
 
-TEST(UploadArena, ClearAndDestructionUnmapAndReleasePages) {
+TEST(UploadArena, ClearAndDestructionReleasePages) {
     MappingProbe probe;
     ObservedDevice device{probe};
     {
@@ -201,16 +185,11 @@ TEST(UploadArena, ClearAndDestructionUnmapAndReleasePages) {
         ASSERT_TRUE(arena.AllocateStaging(32, 4));
         arena.Reset();
         EXPECT_EQ(probe.LiveBuffers, 2u);
-        EXPECT_EQ(probe.MappedBuffers, 2u);
         arena.Clear();
         EXPECT_EQ(arena.GetCapacity(), 0u);
         EXPECT_EQ(probe.LiveBuffers, 0u);
-        EXPECT_EQ(probe.MappedBuffers, 0u);
         arena.Clear();
         ASSERT_TRUE(arena.Allocate(16, 4, 16, BufferState::CBuffer));
     }
     EXPECT_EQ(probe.LiveBuffers, 0u);
-    EXPECT_EQ(probe.MappedBuffers, 0u);
-    EXPECT_FALSE(probe.DestroyedWhileMapped);
-    EXPECT_FALSE(probe.UnmappedTwice);
 }

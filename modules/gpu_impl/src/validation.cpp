@@ -21,7 +21,7 @@ std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDesc
     const auto validate = [&](TextureView* view, TextureViewUsage usage, bool depth) {
         if (!view || !view->IsValid()) return false;
         const auto v = view->GetDesc();
-        if (!v.Target || !v.Target->IsValid() || v.Target->GetDevice() != &device || v.Usage != usage || IsDepthStencilFormat(v.Format) != depth || v.Format == TextureFormat::UNKNOWN) return false;
+        if (!v.Target || !v.Target->IsValid() || v.Usage != usage || IsDepthStencilFormat(v.Format) != depth || v.Format == TextureFormat::UNKNOWN) return false;
         const auto t = v.Target->GetDesc();
         if (v.Range.BaseMipLevel >= 32 || v.Range.BaseMipLevel >= t.MipLevels) return false;
         const auto layers = t.Dim == TextureDimension::Dim3D ? std::max(1u, t.DepthOrArraySize >> v.Range.BaseMipLevel) : v.Range.ArrayLayerCount;
@@ -60,7 +60,7 @@ std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDesc
     const auto validateResolve = [&](TextureView* source, TextureView* target, ResolveMode depthMode, ResolveMode stencilMode) {
         if (!target || !target->IsValid()) return false;
         const auto src = source->GetDesc(), dst = target->GetDesc();
-        if (!dst.Target || !dst.Target->IsValid() || dst.Target->GetDevice() != &device || dst.Format != src.Format) return false;
+        if (!dst.Target || !dst.Target->IsValid() || dst.Format != src.Format) return false;
         const auto st = src.Target->GetDesc(), dt = dst.Target->GetDesc();
         const bool depth = IsDepthStencilFormat(src.Format);
         if (dst.Usage != (depth ? TextureViewUsage::DepthWrite : TextureViewUsage::RenderTarget) ||
@@ -146,7 +146,7 @@ bool ValidateVertexInputState(const VertexInputState& state) noexcept {
 }
 
 namespace {
-std::pair<bool, string> ValidateTextureRegion(const TextureDescriptor& texture, const TextureRegion2D& target, TextureUse usage) {
+std::pair<bool, std::string_view> ValidateTextureRegion(const TextureDescriptor& texture, const TextureRegion2D& target, TextureUse usage) {
     const auto block = GetTextureFormatBlockInfo(texture.Format);
     if (texture.Dim == TextureDimension::UNKNOWN || texture.SampleCount != 1 || block.BytesPerBlock == 0 ||
         IsDepthStencilFormat(texture.Format) ||
@@ -169,7 +169,7 @@ std::pair<bool, string> ValidateTextureRegion(const TextureDescriptor& texture, 
     return {true, {}};
 }
 
-std::pair<bool, string> ValidateTransferLayout(
+std::pair<bool, std::string_view> ValidateTransferLayout(
     const TextureDescriptor& texture, const TextureRegion2D& target, uint64_t capacity,
     uint64_t offset, uint32_t rowPitch, uint32_t rowsPerImage, const DeviceDetail& detail) {
     const auto block = GetTextureFormatBlockInfo(texture.Format);
@@ -191,11 +191,11 @@ std::pair<bool, string> ValidateTransferLayout(
 }
 }  // namespace
 
-std::pair<bool, string> ValidateTextureUploadRegion(const TextureDescriptor& destination, const TextureRegion2D& target) {
+std::pair<bool, std::string_view> ValidateTextureUploadRegion(const TextureDescriptor& destination, const TextureRegion2D& target) {
     return ValidateTextureRegion(destination, target, TextureUse::CopyDestination);
 }
 
-std::pair<bool, string> ValidateBufferTextureCopyRegion(
+std::pair<bool, std::string_view> ValidateBufferTextureCopyRegion(
     const BufferDescriptor& source, const TextureDescriptor& destination,
     const BufferTextureCopyRegion& r, const DeviceDetail& detail) {
     if (!source.Usage.HasFlag(BufferUse::CopySource)) return {false, "Region upload requires a copy source buffer"};
@@ -204,11 +204,11 @@ std::pair<bool, string> ValidateBufferTextureCopyRegion(
     return ValidateTransferLayout(destination, r.Destination, source.Size, r.SourceOffset, r.RowPitch, r.RowsPerImage, detail);
 }
 
-std::pair<bool, string> ValidateTextureReadbackRegion(const TextureDescriptor& source, const TextureRegion2D& region) {
+std::pair<bool, std::string_view> ValidateTextureReadbackRegion(const TextureDescriptor& source, const TextureRegion2D& region) {
     return ValidateTextureRegion(source, region, TextureUse::CopySource);
 }
 
-std::pair<bool, string> ValidateTextureReadbackRegion(
+std::pair<bool, std::string_view> ValidateTextureReadbackRegion(
     const TextureDescriptor& source, const BufferDescriptor& destination,
     const TextureBufferCopyRegion& r, const DeviceDetail& detail) {
     if (!destination.Usage.HasFlag(BufferUse::CopyDestination)) return {false, "Region readback requires a copy destination buffer"};
@@ -230,6 +230,22 @@ bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept {
     if (depthFormat && (query.Usage & (TextureUse::RenderTarget | TextureUse::UnorderedAccess))) return false;
     if (depthUsage && query.Dimension == TextureDimension::Dim3D) return false;
     return true;
+}
+
+bool BufferRangeFits(uint64_t bufferSize, BufferRange range) noexcept {
+    return range.Offset < bufferSize && range.Size != 0 &&
+           (range.Size == BufferRange::All() || range.Size <= bufferSize - range.Offset);
+}
+
+bool IsBufferMemoryUsageValid(const BufferDescriptor& desc) noexcept {
+    const auto mapped = desc.Usage & (BufferUse::MapRead | BufferUse::MapWrite);
+    if (desc.Hints & ~ResourceHints{ResourceHint::Dedicated}) return false;
+    switch (desc.Memory) {
+        case MemoryType::Device: return !mapped;
+        case MemoryType::Upload: return mapped == BufferUse::MapWrite;
+        case MemoryType::ReadBack: return mapped == BufferUse::MapRead;
+    }
+    return false;
 }
 
 std::pair<bool, string> ValidateTextureDescriptor(

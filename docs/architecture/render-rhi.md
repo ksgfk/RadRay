@@ -50,13 +50,11 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 参数与调用顺序由 `rhi_validation.cpp` 统一校验；可复用的描述符与设备能力检查位于 `validation.cpp`。
 后端检查保持薄，聚焦原生能力、格式约束与执行结果。
 
-`FlushMappedRange` / `InvalidateMappedRange` 要求普通 buffer 当前处于 `Map` / `Unmap` 区间内，
-未映射的调用由 RHI 校验拒绝。`PersistentMap` allocation 在创建时已映射，允许在显式 `Map` 之前或
-`Unmap` 之后执行缓存操作；usage 与范围校验仍然适用。Vulkan 非 coherent 范围的 atom 对齐由 VMA 处理。
+主机可见缓冲在 `CreateBuffer` 内完成整块映射。`Upload` 须声明 `MapWrite`，`ReadBack` 须声明 `MapRead`，两者均禁止相反的映射用途。`Device` 缓冲禁止这两种用途。`Hints` 可为空或 `Dedicated`。映射失败或设备丢失时创建返回空。成功后 `GetMappedData()` 提供稳定至销毁的基址，Device 缓冲返回空。
 
-读回缓冲需要调用原生映射接口时，D3D12 的 `E_OUTOFMEMORY` 及 Vulkan 的
-`VK_ERROR_MEMORY_MAP_FAILED`、`VK_ERROR_OUT_OF_HOST_MEMORY`、`VK_ERROR_OUT_OF_DEVICE_MEMORY`
-会使 `Buffer::Map` 记录错误并返回空指针。两个后端在映射调用报告设备丢失时均返回空指针，并锁存 `Device::IsDeviceLost()`。
+CPU 写入 Upload 后须在 GPU 读取前对修改范围调用 `FlushMappedRange`。CPU 读取 ReadBack 前须确认 GPU 写入完成，再对读取范围调用 `InvalidateMappedRange`。两个方法返回布尔值，校验拒绝或设备丢失时返回 false。Vulkan 由 VMA 处理非相干内存的 atom 对齐。调用方负责主机线程间发布及 CPU 与 GPU 的访问顺序。
+
+录制命令时，校验层保存被引用对象的地址和创建序号。提交前同时核对两者，即使原地址已被新对象复用也能拒绝提交。成功提交或重置命令分配器会清除这批引用。GPU 工作完成后，独立缓冲、纹理和查询池可在命令分配器重置前释放，视图等对象已有的父子依赖仍须先解除。
 
 Vulkan 创建 Device 缓冲和纹理时使用 VMA 的 `VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE`，优先设备本地内存。
 Upload 和 ReadBack 缓冲使用 `VMA_MEMORY_USAGE_AUTO`。`MemoryType::Upload` 要求主机可见、顺序写入。
@@ -89,8 +87,9 @@ swapchain 包装保存真实 outstanding frame；Present / DiscardAcquiredFrame 
 原生重建尝试可能在失败时也释放旧 images / sync；包装随之失效，但存活的 swapchain 仍可再次 Recreate，
 AcquireNext 继续透传原生 RequireRecreate 等状态。
 
-RHI 不支持并发 CPU 调用；创建、录制、提交、查询和销毁均由调用方串行化，包括不同对象与独立 allocator。
-内部局部锁不构成线程安全承诺。GPU 多队列执行仍可并行，但须由调用方显式同步。
+独立设备资源、视图、布局、参数集、管线、采样器、查询池、Fence、命令分配器与外部资源扩展可在工作线程创建。独立对象可在 GPU 使用完成、宿主调用退出且依赖已释放后于任意线程销毁。只读能力查询和 Fence 等待可并发。
+同一 Buffer 的缓存操作按实例串行。参数集由一个写入方完成 Set、FlushWrites 和线程间发布后，不同队列可以并发绑定。首次绑定封存参数集，全部使用完成后才能 ResetBindingsForReuse。
+每条队列的 Submit、Wait、交换链操作以及所属命令的创建、录制、重置与销毁由调用方串行组织。不同队列及其独立分配器可并发。跨队列的同一 timeline 信号须由调用方建立 GPU 执行次序。
 本层不跟踪完整 GPU 在途依赖、跨队列同步或资源状态，也不保证检测直接访问
 已释放对象、裸指针 ABA 或未等 GPU 完成就 Reset。调用方仍须满足这些生命周期与同步契约。
 
@@ -138,7 +137,7 @@ D3D12 与 Vulkan 均支持 RGBA 四个通道的全部 16 种写入组合。`Colo
 
 ## D3D12 执行失败
 
-D3D12 在命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 上检查 HRESULT。检出设备移除时，`Device::IsDeviceLost()` 锁存终态并输出 HRESULT、移除原因和可用的 DRED 信息。Submit 入口与 ExecuteCommandLists 返回后也检查设备状态，部分队列调用在设备移除后仍可能返回成功。丢失后创建接口返回空，队列 Submit 返回 false，Present 返回 Error。健康设备的内部提交错误仍会终止进程。
+D3D12 在命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 上检查 HRESULT。检出设备移除时，`Device::IsDeviceLost()` 锁存终态并输出 HRESULT、移除原因和可用的 DRED 信息。Submit 入口与 ExecuteCommandLists 返回后也检查设备状态，部分队列调用在设备移除后仍可能返回成功。丢失后创建接口返回空，队列 Submit 返回 false，Present 返回 DeviceLost。健康设备的内部提交错误仍会终止进程。
 
 ### D3D12 / DXGI 诊断通道
 
@@ -194,26 +193,16 @@ callback 不调用 D3D API，上下文不引用 `DeviceD3D12*`。接收者可能
 覆盖从注册成功开始，不补采注册前消息，也不承诺注销后最终 native Device Release 的全部内部
 D3D12 消息；原生 Device 创建失败依靠 HRESULT 与 DXGI 诊断。
 
-#### 复制、清空与保守校验
+#### 并发读取诊断消息
 
 主动读取通道容量设为 **65,536 条**，push/pop 空 storage/retrieval filter；活动期间外部代码不得
 读取清空、修改容量或过滤器。DXGI 容量可能是多个原生队列的合计，新建原生对象后重新配置。
 APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留；基础 D3D12 关闭时恢复原容量。
 
-两类主动读取使用相同契约：
+每个通道按累计接收序号记录已分发的位置。读取前后核对 accepted、stored、discarded、denied 和 retrieval filter 可见条数。复制期间追加消息时，仍可发布已完整复制的前缀，下一次从该位置继续。读取中原生 FIFO 移动或计数暂时不稳定时，活动通道保留游标供下一次重试。
+普通 Wait 和 Present 允许其他线程继续产生诊断。主动采集保留原生存储，最后一个通道使用者退出才清空并复核。D3D12 达到原生容量后可淘汰已交付的旧消息；淘汰未读消息会报告采集不完整。DXGI producer 发生溢出时保守报告。参见 [D3D12 消息容量规范](https://learn.microsoft.com/en-us/windows/win32/api/d3d12sdklayers/nf-d3d12sdklayers-id3d12infoqueue-setmessagecountlimit)。
 
-1. 取得稳定计数快照（accepted、stored、discarded、denied），复制全部消息到自有内存，再次取快照。
-   两个快照必须完全相同；复制失败或期间有变化的批次不清空。
-2. 与上一次已知状态比较。累计计数必须不回退，discarded/denied 不变，新增 accepted 必须等于
-   新增 stored；溢出、外部清空和不能解释的变化均报告采集不完整。
-3. 完整复制的非空批次才执行 ClearStoredMessages，然后取快照。清空期间新增 accepted 必须等于
-   清空后剩余 stored，discarded/denied 不变。复制后、清空前到达并被删去的消息使校验失败；
-   清空后仍保留的新消息留给下一次读取。空批次同样检查外部清空和计数变化。
-
-快照最多尝试 3 次；单条最大 1 MiB，单批最多 65,536 条、描述文本总计最多 64 MiB。
-读取失败、超限、溢出、过滤器/容量破坏或计数异常使本会话永久不完整，后续仅尽力输出。
-同一通道的重复采集故障去重，类型或 HRESULT 变化另行报告。不再维护滚动游标、精确缺口数或恢复成功状态。
-有限容量和非原子清空无法保证永不丢失；无法确认完整性就必须失败，不能按零错误通过。
+单条消息上限 1 MiB，单批最多 65,536 条，描述总计最多 64 MiB。无法解释的计数变化、读取失败、外部篡改或最后一次排空不完整均使会话永久不完整，相同故障按类型与 HRESULT 去重。
 
 #### 当前测试的诊断收尾
 
@@ -228,11 +217,11 @@ APP producer 延迟创建时用应用消息初始化。DXGI 容量配置保留�
 #### Fence 等待与不可呈现窗口
 
 Fence 查询把 `std::numeric_limits<uint64_t>::max()` 视为设备移除，禁止上层将其比较为成功完成。
-`Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询。超时和设备丢失均返回 false，调用者可查询 `Device::IsDeviceLost()` 区分原因。丢失后的 `GetCompletedValue()` 返回上一次观测到的真实完成值。即使目标值此前已达到，只要调用前已锁存丢失或本次查询检出丢失，`WaitFor` 也返回 false。
-即使 timeoutMs 为 `std::numeric_limits<uint64_t>::max()`，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。
-D3D12 检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除和较早超时的事件
-注册也能唤醒事件。Vulkan 使用有限 vkWaitSemaphores。兼容 Wait() / Wait(value) 的期限为
-30 秒。健康设备等待超时会终止进程，丢失的设备直接结束等待。Vulkan 首次检出丢失时完成一次设备级 idle，同步完成后即可回收在途槽持有的原生对象。
+`WaitForStatus(value, timeoutNs)` 对明确的时间线目标进行等待。已完成返回 Completed，零时长查询未达返回 NotReady，有限等待到期返回 Timeout。设备丢失优先返回 DeviceLost，此后 `GetCompletedValue()` 保留最后观测到的真实完成值。`Wait(value)` 等待最多 30 秒，健康设备超时终止进程，设备丢失时直接返回。
+
+多个宿主线程可以等待同一 Fence。D3D12 每个 Fence 最多创建 16 个独占借用的事件，超时后保留内核注册直到对应目标完成。较低目标可使用空闲事件或新事件。池满、创建事件失败或注册返回 `E_OUTOFMEMORY` 时，在剩余期限内轮询。每次唤醒都重新核对硬件完成值。Vulkan 使用 timeline semaphore 的有限等待。
+
+Vulkan 集中在原生对象释放、分配回滚与池重置入口处理已锁存的设备丢失。清理前串行完成一次设备级 idle，各线程共享排空结果。
 这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
 D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
 对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
@@ -317,7 +306,7 @@ D3D12 storage 在创建时持有唯一的 `ID3D12CommandAllocator`，创建失�
 同一 allocator 同时最多一条 list 处于 Begin/End 区间，关闭后可以继续顺序录制其他 child，无需先提交或等待 GPU。
 开启 RHI 校验时，第二条重叠 Begin 在原生调用前被拒绝，且可以在原录制成功 End 后重试；被拒绝的 End 不释放占用。
 Vulkan 一个 storage 持有一个未开启逐 buffer reset 的 command pool，绑定真实 queue family；安全复用时整池 Reset。
-同线程交错录制不增加 pool；独立 storage 仍遵守 RHI 的 CPU 串行调用契约。
+同线程交错录制不增加 pool。不同队列的独立 storage 可由不同线程录制。
 两端直接暴露各自的录制约束，调用方通过 `GetBackend()` 选择分配策略。
 共享录制内存不提供 GPU 数据同步，barrier 和 Submit 数组顺序仍由调用方负责。
 
@@ -849,7 +838,7 @@ Vulkan 分两步录制本地 layout 转换与 `VK_QUEUE_FAMILY_EXTERNAL` ↔ 当
 新资源由创建端首次完整初始化，Vulkan 初始本地写入允许从 UNDEFINED 开始。
 导入内容首次访问必须 acquire，不能用 UNDEFINED 丢弃；调用顺序为 `等待 ready → Acquire → 本地工作 → Release → signal released`。
 每条 timeline 只有一个 signal 方，值严格递增；Fence 的创建方可以将 signal 责任交给导入端。
-`GetLastSignaledValue()` 只记录本地提交，初始 payload 和另一端的 signal 不改变它；交接使用消息中的明确 value。
+两端通过消息交接明确的 timeline value，再按该值等待。
 扩展的 validation 包装只负责资源包装/解包并透传运行时结果，以便复用普通 RHI 接口。
 普通 RHI 的既有校验保持原行为；外部资源专用的 barrier 和 Fence signal 契约检查不再执行。
 跨端 owner、generation、单 signal 方、timeline 值递增和 GPU 完成由调用方管理。
@@ -894,7 +883,7 @@ Vulkan 的 acquire wait 使用 `ALL_COMMANDS`。RHI 不限制 acquired image 的
 只处理 fence，忽略两个 swapchain 同步槽，`AcquireNext` 也对它们传 `nullptr`——D3D12 靠
 DXGI 的 frame-latency waitable object 达到同一效果。
 
-`Fence` 在 D3D12 是 `ID3D12Fence` + Win32 event（`_fenceValue` 表示"下一个可用值"）；
+`Fence` 在 D3D12 使用 `ID3D12Fence` 和 Win32 事件池，
 在 Vulkan 是 timeline semaphore；设备创建时显式检查 `timelineSemaphore`，不支持则创建失败。
 
 `SwapChainVulkan` 使用无扩展的 acquire fence 回收方案，借鉴 Khronos
@@ -919,7 +908,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 失效，内部保活不延长调用方句柄有效期。连续重建可能积压多代资源，恢复呈现后回收，不以
 数量上限强制释放尚未获证明的对象。
 
-重建一旦尝试替换旧链，无论 native 创建还是 image 初始化失败，都通过故障清理排空设备、
+重建一旦尝试替换旧链，无论 native 创建还是 image 初始化失败，都通过故障清理等待呈现队列、
 等待成功提交的 acquire fence，销毁新链和所有保留代，保持无可 acquire 的状态；保留 surface
 与请求配置，下一次从空链重试。绝不恢复或再次传入已退休的 `oldSwapchain`。
 首次创建 Vulkan 交换链时，若底层返回 `VK_ERROR_DEVICE_LOST`，`CreateSwapChain` 返回空并锁存 `Device::IsDeviceLost()`。
@@ -931,12 +920,12 @@ surface 未固定 extent 时将请求尺寸限制在 min/max 范围内；固定�
 保留尚未退休的旧链并让 Acquire 返回 RequireRecreate，待窗口恢复后重试。
 
 Acquire 的 `TIMEOUT` / `NOT_READY` / `OUT_OF_DATE` 不产生 frame 或完成证明；`SUBOPTIMAL`
-仍产生必须终结的 frame。Present 的 `SUCCESS` / `SUBOPTIMAL` 可提供后继呈现证明；
+返回 Suboptimal 和有效 frame，调用方仍须提交并 Present。Present 的 `SUCCESS` / `SUBOPTIMAL` 可提供后继呈现证明；
 `OUT_OF_DATE` / `SURFACE_LOST` 的排队等待仍保活，不能作为这种证明。Present OOM 不假定
 semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重建或关闭。
-`SURFACE_LOST` 要求重建交换链对象，`DEVICE_LOST` 要求设备恢复，不再等待无法完成的 fence。
+`SurfaceLost` 后可在原对象上调用 Recreate，用仍有效的原生窗口句柄替换 surface。重建失败可再次尝试。`DeviceLost` 要求设备恢复。
 
-关闭与重建失败采用 `vkDeviceWaitIdle` 加已有 acquire fence 等待后清理，surface 最后销毁，
+健康设备在关闭、重建 surface 或重建失败清理时，只对所属呈现队列调用 `vkQueueWaitIdle`，随后等待未完成的 acquire fence。其他队列可并发提交依赖信号。呈现队列首次报告设备丢失时，原生销毁入口接管设备级排空。surface 最后销毁，
 重复 `Destroy` 安全。这是无扩展的实际清理方案；仍存在 Vulkan Guide 说明的
 [退出时呈现资源回收保证缺口](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html#_vk_ext_swapchain_maintenance1_extension)，
 不能把验证层无报错或普通队列 fence 完成当作补足该保证的证据。
@@ -953,7 +942,8 @@ semaphore wait 已排队，消费 RHI token 后禁止继续 acquire，必须重�
 
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
 D3D12 消费 outstanding frame，返回既有 result 的 Success，之后必须 Recreate 或关闭；
-Vulkan 在设备丢失后通过 `DiscardAcquiredFrame` 注销已获取的 token 并返回 Error。健康 Vulkan 设备调用此接口会立即 ABORT。
+Vulkan 在设备丢失后通过 `DiscardAcquiredFrame` 注销已获取的 token 并返回 DeviceLost。健康 Vulkan 设备调用此接口会立即 ABORT。
+D3D12 Recreate 在 ResizeBuffers 或刷新后备缓冲失败时返回 false。帧数组为空时 AcquireNext 返回 RequireRecreate，设备丢失则返回 DeviceLost。
 D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
 不能把它统计成实际可见呈现。Vulkan Present 的 RequireRecreate / Error 同样消费帧，不保留重试 token。
 
@@ -982,7 +972,7 @@ front-face winding 的影响不同。
 和 PSO 兼容语义不变。Framebuffer 在 device 初始化时按 Enabled 固定为 imageless 或传统模式，
 不新增公共模式开关；独立 depth/stencil layouts 同样读取 Enabled，不启用 dynamic rendering 或 synchronization2。
 
-公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、gpu_impl area、name 与 UAV writes。开启 RHI 校验时，ValidateRenderScope 在任何 native Begin 之前校验 view/device、格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。
+公共 RHI 没有 RenderPass/Framebuffer owner、对应 Device 工厂或 PSO 的兼容 pass 指针。RenderPassBeginDescriptor 直接描述有序 color views、可选 depth/stencil view、load/store、clear、extent/layers、gpu_impl area、name 与 UAV writes。开启 RHI 校验时，命令缓冲先在所属设备的对象注册表中核验附件视图和 resolve 视图，再由 `ValidateRenderScope` 检查格式角色、usage、sample、mip/layer、extent、重复重叠与只读操作。全部通过后才开始原生渲染。
 
 PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；resolve 也不进入光栅化签名，同一 PSO 可用于兼容的有/无 resolve pass。只读 aspect 必须 Load + Store，拒绝 Clear/Discard，PSO 按 depth/stencil 分别检查写入。pass 没有重复的 ReadOnly 字段；DSV flags、原生 gpu_impl pass flags 和布局从 view 权限推导。
 
@@ -1081,7 +1071,7 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 - **SwapChain 尚不支持 HDR 输出配置**：公共 descriptor 不提供色彩空间或 HDR metadata 设置；选择浮点或高位深格式不能替代完整 HDR 输出契约。
 - **D3D12 的 swapchain 同步槽未接线**：`Submit` 忽略 `WaitToExecute` / `ReadyToPresent`。
 - **D3D12 纹理不带优化 clear value**：`CreateTexture` 的 `clearPtr` 恒为 `nullptr`。
-- **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 是空实现**；
+- **`Buffer::FlushMappedRange` / `InvalidateMappedRange` 在 D3D12 无需原生缓存操作**，设备丢失时返回 false。
   Vulkan 侧调用 VMA 的对应缓存操作。CPU/GPU 访问的同步仍由调用方完成。
 - **非 Win32/非 Apple 平台没有 surface 创建**，走 `#else`
   后直接报错返回。

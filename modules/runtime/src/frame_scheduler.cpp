@@ -112,7 +112,7 @@ void FrameScheduler::WaitSlot(FrameSlot& slot) noexcept {
     if (!slot._inFlight) return;
     RADRAY_PROFILE_SCOPE_N("RadRay.FrameScheduler.WaitSlot");
     _pipeline->Wait(slot);
-    if (!slot.GetDevice().IsDeviceLost()) _pipeline->OnSlotCompleted(slot);
+    _pipeline->OnSlotRetired(slot, slot.GetDevice().IsDeviceLost());
     slot._inFlight = false;
 }
 

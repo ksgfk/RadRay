@@ -13,7 +13,10 @@ namespace {
 ExternalError Fail(std::string_view op, ExternalError error, std::string_view parameters = {}) noexcept {
     return detail::LogExternalError(op, GpuBackend::Vulkan, error, parameters);
 }
-ExternalError NativeError(VkResult r, std::string_view operation) noexcept { return {radray::format("{} failed: {}", operation, r), ExternalNativeApi::Vulkan, r}; }
+ExternalError NativeError(DeviceVulkan* device, VkResult r, std::string_view operation) noexcept {
+    device->MarkDeviceLost(r, operation);
+    return {radray::format("{} failed: {}", operation, r), ExternalNativeApi::Vulkan, r};
+}
 VkExternalMemoryHandleTypeFlagBits MemoryHandleType(ExternalMemoryHandleType type) noexcept {
     switch (type) {
         case ExternalMemoryHandleType::D3D12Resource: return VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
@@ -54,7 +57,7 @@ std::optional<ExternalError> AllocateOpaque(DeviceVulkan* device, VkMemoryRequir
     create.memoryTypeBits = requirements.memoryTypeBits;
     VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, import, image, buffer};
     const auto r = vmaAllocateDedicatedMemory(device->_vma->_vma, &requirements, &create, &dedicated, allocation, info);
-    if (r != VK_SUCCESS) return NativeError(r, "vmaAllocateDedicatedMemory (opaque import)");
+    if (r != VK_SUCCESS) return NativeError(device, r, "vmaAllocateDedicatedMemory (opaque import)");
     return std::nullopt;
 }
 VkBufferUsageFlags BufferUsage(BufferUses u) noexcept {
@@ -96,23 +99,26 @@ ExternalResult<unique_ptr<BufferVulkan>> MakeBuffer(DeviceVulkan* device, const 
     VmaAllocationInfo info{};
     if (opaque) {
         auto r = device->_ftb.vkCreateBuffer(device->_device, &create, device->GetAllocationCallbacks(), &buffer);
-        if (r != VK_SUCCESS) return NativeError(r, "vkCreateBuffer");
+        if (r != VK_SUCCESS) return NativeError(device, r, "vkCreateBuffer");
         VkMemoryRequirements requirements{};
         device->_ftb.vkGetBufferMemoryRequirements(device->_device, buffer, &requirements);
         const auto error = AllocateOpaque(device, requirements, opaque.Get()->Allocation, *opaque.Get()->VulkanMemory,
                                           next, buffer, VK_NULL_HANDLE, &allocation, &info);
         if (error) {
-            device->_ftb.vkDestroyBuffer(device->_device, buffer, device->GetAllocationCallbacks());
+
+            device->DestroyBuffer(buffer, VK_NULL_HANDLE);
             return *error;
         }
         r = vmaBindBufferMemory(device->_vma->_vma, allocation, buffer);
         if (r != VK_SUCCESS) {
-            vmaDestroyBuffer(device->_vma->_vma, buffer, allocation);
-            return NativeError(r, "vmaBindBufferMemory");
+            auto error = NativeError(device, r, "vmaBindBufferMemory");
+
+            device->DestroyBuffer(buffer, allocation);
+            return error;
         }
     } else {
         const auto r = vmaCreateDedicatedBuffer(device->_vma->_vma, &create, &alloc, next, &buffer, &allocation, &info);
-        if (r != VK_SUCCESS) return NativeError(r, "vmaCreateDedicatedBuffer");
+        if (r != VK_SUCCESS) return NativeError(device, r, "vmaCreateDedicatedBuffer");
     }
     auto result = make_unique<BufferVulkan>(device, buffer, allocation, info);
     result->_reqSize = nativeSize;
@@ -142,23 +148,26 @@ ExternalResult<unique_ptr<ImageVulkan>> MakeImage(DeviceVulkan* device, const Te
     VmaAllocationInfo info{};
     if (opaque) {
         auto r = device->_ftb.vkCreateImage(device->_device, &create, device->GetAllocationCallbacks(), &image);
-        if (r != VK_SUCCESS) return NativeError(r, "vkCreateImage");
+        if (r != VK_SUCCESS) return NativeError(device, r, "vkCreateImage");
         VkMemoryRequirements requirements{};
         device->_ftb.vkGetImageMemoryRequirements(device->_device, image, &requirements);
         const auto error = AllocateOpaque(device, requirements, opaque.Get()->Allocation, *opaque.Get()->VulkanMemory,
                                           next, VK_NULL_HANDLE, image, &allocation, &info);
         if (error) {
-            device->_ftb.vkDestroyImage(device->_device, image, device->GetAllocationCallbacks());
+
+            device->DestroyImage(image, VK_NULL_HANDLE);
             return *error;
         }
         r = vmaBindImageMemory(device->_vma->_vma, allocation, image);
         if (r != VK_SUCCESS) {
-            vmaDestroyImage(device->_vma->_vma, image, allocation);
-            return NativeError(r, "vmaBindImageMemory");
+            auto error = NativeError(device, r, "vmaBindImageMemory");
+
+            device->DestroyImage(image, allocation);
+            return error;
         }
     } else {
         const auto r = vmaCreateDedicatedImage(device->_vma->_vma, &create, &alloc, next, &image, &allocation, &info);
-        if (r != VK_SUCCESS) return NativeError(r, "vmaCreateDedicatedImage");
+        if (r != VK_SUCCESS) return NativeError(device, r, "vmaCreateDedicatedImage");
     }
     auto result = make_unique<ImageVulkan>(device, image, allocation, info);
     result->_rawFormat = create.format;
@@ -180,14 +189,14 @@ ExternalResult<OwnedExternalHandle> ExportMemory(DeviceVulkan* device, VkDeviceM
     const VkMemoryGetWin32HandleInfoKHR info{VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR, nullptr, memory, MemoryHandleType(type)};
     HANDLE handle = nullptr;
     const auto r = device->_ftb.vkGetMemoryWin32HandleKHR(device->_device, &info, &handle);
-    if (r != VK_SUCCESS) return NativeError(r, "vkGetMemoryWin32HandleKHR");
+    if (r != VK_SUCCESS) return NativeError(device, r, "vkGetMemoryWin32HandleKHR");
     return OwnedExternalHandle{reinterpret_cast<uintptr_t>(handle)};
 }
 ExternalResult<uint32_t> ImportMemoryTypes(DeviceVulkan* device, BorrowedExternalHandle handle) noexcept {
     VkMemoryWin32HandlePropertiesKHR properties{};
     properties.sType = VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR;
     const auto r = device->_ftb.vkGetMemoryWin32HandlePropertiesKHR(device->_device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT, reinterpret_cast<HANDLE>(handle.Value), &properties);
-    if (r != VK_SUCCESS) return NativeError(r, "vkGetMemoryWin32HandlePropertiesKHR");
+    if (r != VK_SUCCESS) return NativeError(device, r, "vkGetMemoryWin32HandlePropertiesKHR");
     if (properties.memoryTypeBits == 0) return ExternalError{"External memory handle has no compatible Vulkan memory types"};
     return properties.memoryTypeBits;
 }
@@ -200,8 +209,7 @@ ExternalResult<Output> ExportObject(Input* input, std::string_view operation) no
     else if constexpr (std::is_same_v<Input, Texture>) {
         const auto d = object->GetDesc();
         parameters = radray::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
-    } else
-        parameters = radray::format("lastLocalSignal={}", object->GetLastSignaledValue());
+    }
     parameters += radray::format(" handleType={}", radray::gpu::detail::ExternalHandleName(object->_externalInfo->HandleType));
     auto handle = object->_externalHandle.Duplicate();
     if (auto* error = std::get_if<ExternalError>(&handle)) return Fail(operation, *error, parameters);
@@ -246,7 +254,7 @@ ExternalSupport ExternalResourceVulkan::QueryTextureSupport(const TextureDescrip
     output.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
     output.pNext = &externalProperties;
     const auto r = vkGetPhysicalDeviceImageFormatProperties2(_device->_physicalDevice, &input, &output);
-    if (r != VK_SUCCESS) return {false, false, NativeError(r, radray::format("vkGetPhysicalDeviceImageFormatProperties2 for {}", detail::ExternalHandleName(external.HandleType)))};
+    if (r != VK_SUCCESS) return {false, false, NativeError(_device, r, radray::format("vkGetPhysicalDeviceImageFormatProperties2 for {}", detail::ExternalHandleName(external.HandleType)))};
     const auto& p = output.imageFormatProperties;
     if (native.extent.width > p.maxExtent.width || native.extent.height > p.maxExtent.height || native.extent.depth > p.maxExtent.depth ||
         native.mipLevels > p.maxMipLevels || native.arrayLayers > p.maxArrayLayers || !(p.sampleCounts & native.samples)) return {false, false, {"Texture dimensions, mip count, layer count or sample count exceed the Vulkan external image limits"}};
@@ -317,14 +325,13 @@ ExternalResult<unique_ptr<Fence>> ExternalResourceVulkan::CreateExportableFence(
     const VkSemaphoreCreateInfo create{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &timeline, 0};
     VkSemaphore semaphore = VK_NULL_HANDLE;
     auto r = _device->_ftb.vkCreateSemaphore(_device->_device, &create, _device->GetAllocationCallbacks(), &semaphore);
-    if (r != VK_SUCCESS) return Fail("CreateExportableFence", NativeError(r, "vkCreateSemaphore"), params);
+    if (r != VK_SUCCESS) return Fail("CreateExportableFence", NativeError(_device, r, "vkCreateSemaphore"), params);
     auto owned = make_unique<TimelineSemaphoreVulkan>(_device, semaphore);
     const VkSemaphoreGetWin32HandleInfoKHR get{VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR, nullptr, semaphore, FenceHandleType(desc.HandleType)};
     HANDLE handle = nullptr;
     r = _device->_ftb.vkGetSemaphoreWin32HandleKHR(_device->_device, &get, &handle);
-    if (r != VK_SUCCESS) return Fail("CreateExportableFence", NativeError(r, "vkGetSemaphoreWin32HandleKHR"), params);
+    if (r != VK_SUCCESS) return Fail("CreateExportableFence", NativeError(_device, r, "vkGetSemaphoreWin32HandleKHR"), params);
     auto result = make_unique<FenceVulkan>(_device, std::move(owned));
-    result->_fenceValue = 1;
     result->_externalInfo = ExternalFenceInfo{desc.HandleType, std::get<ExternalDeviceIdentity>(identity), std::nullopt};
     if (desc.HandleType == ExternalFenceHandleType::OpaqueWin32) result->_externalInfo->VulkanIdentity = VulkanIdentity(_device);
     result->_externalHandle = OwnedExternalHandle{reinterpret_cast<uintptr_t>(handle)};
@@ -391,11 +398,11 @@ ExternalResult<unique_ptr<Fence>> ExternalResourceVulkan::ImportFence(BorrowedEx
     const VkSemaphoreCreateInfo create{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &timeline, 0};
     VkSemaphore semaphore = VK_NULL_HANDLE;
     const auto created = _device->_ftb.vkCreateSemaphore(_device->_device, &create, _device->GetAllocationCallbacks(), &semaphore);
-    if (created != VK_SUCCESS) return Fail("ImportFence", NativeError(created, "vkCreateSemaphore"), params);
+    if (created != VK_SUCCESS) return Fail("ImportFence", NativeError(_device, created, "vkCreateSemaphore"), params);
     auto owned = make_unique<TimelineSemaphoreVulkan>(_device, semaphore);
     const VkImportSemaphoreWin32HandleInfoKHR import{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_WIN32_HANDLE_INFO_KHR, nullptr, owned->_semaphore, 0, FenceHandleType(info.HandleType), reinterpret_cast<HANDLE>(handle.Value), nullptr};
     const auto r = _device->_ftb.vkImportSemaphoreWin32HandleKHR(_device->_device, &import);
-    if (r != VK_SUCCESS) return Fail("ImportFence", NativeError(r, "vkImportSemaphoreWin32HandleKHR"), params);
+    if (r != VK_SUCCESS) return Fail("ImportFence", NativeError(_device, r, "vkImportSemaphoreWin32HandleKHR"), params);
     auto result = make_unique<FenceVulkan>(_device, std::move(owned));
     result->_externalInfo = info;
     return unique_ptr<Fence>{std::move(result)};

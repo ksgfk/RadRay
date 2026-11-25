@@ -235,6 +235,7 @@ private:
     void TryReleaseFreePages() noexcept;
 
     DeviceD3D12* _device = nullptr;
+    std::mutex _mutex;
     vector<unique_ptr<Page>> _pages;
     size_t _hint = 0;
     D3D12_DESCRIPTOR_HEAP_TYPE _type{};
@@ -278,6 +279,7 @@ private:
     DeviceD3D12* _device;
     unique_ptr<DescriptorHeap> _heap;
     FirstFitAllocator _allocator;
+    std::mutex _mutex;
 #ifdef RADRAY_ENABLE_PROFILER
     UINT _liveDescriptors{};
     UINT _peakDescriptors{};
@@ -413,7 +415,8 @@ public:
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     SamplerTablesD3D12 _samplerTables;
-    uint64_t _nextSamplerId{1};
+    std::atomic<uint64_t> _nextSamplerId{1};
+    std::mutex _samplerTableMutex;
     SamplerCache _samplerCache;
     GpuDeviceCapabilities _capabilities;
     CD3DX12FeatureSupport _features;
@@ -450,6 +453,7 @@ public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;
     unique_ptr<FenceD3D12> _fence;
+    uint64_t _waitValue{0};
     D3D12_COMMAND_LIST_TYPE _type;
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU timestamp context for this queue; null when profiling is disabled or unsupported.
@@ -457,9 +461,6 @@ public:
 #endif
 };
 
-/**
- * Fence 保存的 _fenceValue 表示下一个可用的值, _fenceValue - 1 表示已提交的的值
- */
 class FenceD3D12 final : public Fence {
 public:
     FenceD3D12(
@@ -476,20 +477,24 @@ public:
 
     uint64_t GetCompletedValue() const noexcept override;
 
-    uint64_t GetLastSignaledValue() const noexcept override;
-
-    void Wait() noexcept override;
-
     void Wait(uint64_t value) noexcept override;
 
-    bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
+    FenceStatus WaitForStatus(uint64_t value, uint64_t timeoutNs) noexcept override;
+
+    using RegisterEvent = HRESULT (*)(ID3D12Fence*, uint64_t, HANDLE) noexcept;
+    FenceStatus WaitWithEvents(uint64_t value, uint64_t timeoutNs, decltype(&Win32Event::Create) createEvent, RegisterEvent registerEvent) noexcept;
 
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12Fence> _fence;
     mutable std::atomic<uint64_t> _lastCompletedValue{0};
-    uint64_t _fenceValue{0};
-    Win32Event _event{};
+    std::mutex _eventPoolMutex;
+    size_t _eventCount{1};
+    struct WaitEvent {
+        Win32Event Handle;
+        uint64_t ArmedValue{};
+    };
+    vector<WaitEvent> _eventPool;
     std::optional<ExternalFenceInfo> _externalInfo;
     OwnedExternalHandle _externalHandle;
 };
@@ -702,25 +707,21 @@ public:
         DeviceD3D12* device,
         ComPtr<ID3D12Resource> buf,
         ComPtr<D3D12MA::Allocation> alloc) noexcept;
-    ~BufferD3D12() noexcept override = default;
+    ~BufferD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
-    void* Map(uint64_t offset, uint64_t size) noexcept override;
+    Nullable<void*> GetMappedData() noexcept override;
 
-    void Unmap() noexcept override;
+    bool FlushMappedRange(BufferRange range) noexcept override;
 
-    void FlushMappedRange(BufferRange range) noexcept override;
-
-    void InvalidateMappedRange(BufferRange range) noexcept override;
+    bool InvalidateMappedRange(BufferRange range) noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
     BufferDescriptor GetDesc() const noexcept override;
-
-    Device* GetDevice() const noexcept override;
 
 public:
     DeviceD3D12* _device;
@@ -769,7 +770,6 @@ public:
 class TextureD3D12 final : public Texture {
 public:
     TextureD3D12(
-        DeviceD3D12* device,
         ComPtr<ID3D12Resource> tex,
         ComPtr<D3D12MA::Allocation> alloc) noexcept;
     ~TextureD3D12() noexcept override = default;
@@ -782,10 +782,7 @@ public:
 
     TextureDescriptor GetDesc() const noexcept override;
 
-    Device* GetDevice() const noexcept override;
-
 public:
-    DeviceD3D12* _device;
     ComPtr<ID3D12Resource> _tex;
     ComPtr<D3D12MA::Allocation> _alloc;
     D3D12_RESOURCE_DESC _rawDesc;
@@ -950,7 +947,7 @@ public:
 
 private:
     bool FlushSamplerTable(DescriptorTableStorageD3D12& storage) noexcept;
-    void ReleaseSamplerTable(DescriptorTableStorageD3D12& storage) noexcept;
+    void ReleaseSamplerTableLocked(DescriptorTableStorageD3D12& storage) noexcept;
 
 public:
     DeviceD3D12* _device{nullptr};

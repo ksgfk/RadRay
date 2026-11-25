@@ -1,5 +1,8 @@
 #include "gpu_test_fixture.h"
 #include <radray/gpu_impl/factory.h>
+#if defined(RADRAY_ENABLE_VULKAN)
+#include <radray/gpu_impl/backend/vulkan_impl.h>
+#endif
 
 #include <radray/logger.h>
 
@@ -79,31 +82,31 @@ void GpuTest::TearDown() {
     EXPECT_EQ(_rhiErrors.load(), 0u) << "RHI validation reported diagnostics the test did not expect";
 }
 
-Nullable<Device*> GpuTest::OpenDevice(GpuBackend backend) {
+Nullable<Device*> GpuTest::OpenDevice(GpuBackend backend, uint32_t directQueueCount) {
     string reason;
     OpenStatus status = OpenStatus::Unavailable;
     if (backend == GpuBackend::D3D12) {
 #if defined(RADRAY_ENABLE_D3D12)
-        status = CreateD3D12Device(reason);
+        status = CreateD3D12Device(reason, directQueueCount);
 #else
         reason = "D3D12 backend is not built";
 #endif
     } else {
 #if defined(RADRAY_ENABLE_VULKAN)
-        status = CreateVulkanDevice(reason);
+        status = CreateVulkanDevice(reason, directQueueCount);
 #else
         reason = "Vulkan backend is not built";
 #endif
     }
     if (status == OpenStatus::Opened) return _devices.back().get();
-    if (status == OpenStatus::Unavailable && !IsRequired(backend))
+    if (status == OpenStatus::UnsupportedTopology || (status == OpenStatus::Unavailable && !IsRequired(backend)))
         SkipTest(reason);
     else
         FailTest(reason);
     return nullptr;
 }
 
-GpuTest::OpenStatus GpuTest::CreateD3D12Device(string& reason) {
+GpuTest::OpenStatus GpuTest::CreateD3D12Device(string& reason, uint32_t directQueueCount) {
 #if defined(RADRAY_ENABLE_D3D12)
     if (!_dxgiFactory) {
         auto context = CreateDXGIDiagnosticContext();
@@ -138,7 +141,7 @@ GpuTest::OpenStatus GpuTest::CreateD3D12Device(string& reason) {
         reason = "no D3D12 adapter is available";
         return OpenStatus::Unavailable;
     }
-    const D3D12DeviceDescriptor desc{.Factory = _dxgiFactory.get(), .AdapterIndex = adapter};
+    const D3D12DeviceDescriptor desc{.Factory = _dxgiFactory.get(), .AdapterIndex = adapter, .QueueCounts = {directQueueCount, 0, 0}};
     return AddDevice(CreateDevice(desc, {.IsEnabled = true, .LogCallback = OnRhiMessage, .LogUserData = this}), reason);
 #else
     reason = "D3D12 backend is not built";
@@ -146,7 +149,7 @@ GpuTest::OpenStatus GpuTest::CreateD3D12Device(string& reason) {
 #endif
 }
 
-GpuTest::OpenStatus GpuTest::CreateVulkanDevice(string& reason) {
+GpuTest::OpenStatus GpuTest::CreateVulkanDevice(string& reason, uint32_t directQueueCount) {
 #if defined(RADRAY_ENABLE_VULKAN)
     if (!_vulkanInstance) {
         _vulkanInstance = InitVulkanEnv({.AppName = "radray_render_test",
@@ -180,7 +183,22 @@ GpuTest::OpenStatus GpuTest::CreateVulkanDevice(string& reason) {
         reason = "no Vulkan physical device is available";
         return OpenStatus::Unavailable;
     }
-    const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
+    if (directQueueCount > 1) {
+        auto* instance = static_cast<vulkan::InstanceVulkanImpl*>(_vulkanInstance.Get());
+        vector<VkPhysicalDevice> devices;
+        if (vulkan::EnumerateVectorFromVkFunc(devices, vkEnumeratePhysicalDevices, instance->_instance) != VK_SUCCESS || *adapter >= devices.size()) {
+            reason = "cannot enumerate physical devices for the queue topology";
+            return OpenStatus::Failed;
+        }
+        vector<VkQueueFamilyProperties> families;
+        vulkan::EnumerateVectorFromVkFunc(families, vkGetPhysicalDeviceQueueFamilyProperties, devices[*adapter]);
+        vector<uint32_t> used(families.size());
+        if (vulkan::AllocateQueueIndicesVulkan(QueueType::Direct, directQueueCount, families, used).size() != directQueueCount) {
+            reason = "adapter has fewer independent Direct queues than the test needs";
+            return OpenStatus::UnsupportedTopology;
+        }
+    }
+    const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, directQueueCount}};
     const VulkanDeviceDescriptor desc{.PhysicalDeviceIndex = adapter, .Queues = queues};
     return AddDevice(CreateDevice(desc, {.IsEnabled = true, .LogCallback = OnRhiMessage, .LogUserData = this}), reason);
 #else
@@ -237,11 +255,10 @@ Nullable<unique_ptr<Shader>> LoadShader(Device& device, std::string_view source,
 Nullable<unique_ptr<Buffer>> CreateUploadBuffer(Device& device, std::span<const byte> data, BufferUses usage) {
     auto buffer = device.CreateBuffer({.Size = data.size(), .Memory = MemoryType::Upload, .Usage = usage | BufferUse::MapWrite});
     if (!buffer) return nullptr;
-    void* mapped = buffer->Map(0, data.size());
+    void* mapped = buffer->GetMappedData().Get();
     if (!mapped) return nullptr;
     std::memcpy(mapped, data.data(), data.size());
-    buffer->FlushMappedRange({0, data.size()});
-    buffer->Unmap();
+    if (!buffer->FlushMappedRange({0, data.size()})) return nullptr;
     return buffer;
 }
 
@@ -251,14 +268,12 @@ Nullable<unique_ptr<Buffer>> CreateReadbackBuffer(Device& device, uint64_t size)
 
 vector<byte> MapAndRead(Buffer& readback) {
     const uint64_t size = readback.GetDesc().Size;
-    const auto* mapped = static_cast<const byte*>(readback.Map(0, size));
-    if (!mapped) {
-        ADD_FAILURE() << "readback buffer could not be mapped";
+    const auto* mapped = static_cast<const byte*>(readback.GetMappedData().Get());
+    if (!mapped || !readback.InvalidateMappedRange({0, size})) {
+        ADD_FAILURE() << "readback memory unavailable";
         return {};
     }
-    readback.InvalidateMappedRange({0, size});
     vector<byte> result(mapped, mapped + size);
-    readback.Unmap();
     return result;
 }
 

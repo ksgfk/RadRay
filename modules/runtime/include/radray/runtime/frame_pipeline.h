@@ -27,7 +27,7 @@ public:
     // 等待实际提交完成；返回后仍须重置命令存储才能释放帧内对象。
     virtual void Wait(FrameSlot& slot) noexcept = 0;
     // 调度器在 Wait 返回后、命令与帧对象回收前发布本槽的完成结果。
-    virtual void OnSlotCompleted(FrameSlot& slot) noexcept;
+    virtual void OnSlotRetired(FrameSlot& slot, bool deviceLost) noexcept;
 };
 
 }  // namespace radray

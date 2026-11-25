@@ -30,17 +30,18 @@ protected:
     // Returns null after skipping when the backend is not built or has no usable adapter,
     // and after failing when the backend is listed in RADRAY_TEST_REQUIRED_BACKENDS or
     // initialization fails on an available adapter.
-    Nullable<Device*> OpenDevice(GpuBackend backend);
+    Nullable<Device*> OpenDevice(GpuBackend backend, uint32_t directQueueCount = 1);
 
     uint32_t TakeRhiValidationErrors() noexcept { return _rhiErrors.exchange(0); }
 
 private:
     enum class OpenStatus { Opened,
                             Unavailable,
+                            UnsupportedTopology,
                             Failed };
 
-    OpenStatus CreateD3D12Device(string& reason);
-    OpenStatus CreateVulkanDevice(string& reason);
+    OpenStatus CreateD3D12Device(string& reason, uint32_t directQueueCount);
+    OpenStatus CreateVulkanDevice(string& reason, uint32_t directQueueCount);
     OpenStatus AddDevice(Nullable<shared_ptr<Device>> device, string& reason);
 
     static void OnNativeMessage(LogLevel level, std::string_view message, void* userData);
@@ -75,7 +76,7 @@ Nullable<unique_ptr<Buffer>> CreateUploadBuffer(Device& device, std::span<const 
 
 Nullable<unique_ptr<Buffer>> CreateReadbackBuffer(Device& device, uint64_t size);
 
-// Maps a ReadBack buffer whose GPU writes are complete and returns its content.
+// Invalidates and reads the persistent mapping after the GPU writes have completed.
 vector<byte> MapAndRead(Buffer& readback);
 
 // Row pitch of buffer/texture copies for one row of a color texture.

@@ -34,6 +34,7 @@ SamplerCache::~SamplerCache() noexcept {
 
 Nullable<Sampler*> SamplerCache::GetOrCreate(
     const SamplerDescriptor& desc) noexcept {
+    std::lock_guard lock{_mutex};
     if (_device == nullptr) {
         return nullptr;
     }
@@ -50,6 +51,7 @@ Nullable<Sampler*> SamplerCache::GetOrCreate(
 }
 
 void SamplerCache::Clear() noexcept {
+    std::lock_guard lock{_mutex};
     for (auto& [desc, sampler] : _cache) {
         (void)desc;
         if (sampler != nullptr) {

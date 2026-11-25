@@ -394,7 +394,6 @@ enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1,
     External = Dedicated << 1,
-    PersistentMap = External << 1,
 };
 
 enum class LoadAction : int32_t {
@@ -420,11 +419,21 @@ enum class PresentMode : int32_t {
     Immediate
 };
 
+enum class FenceStatus : uint8_t {
+    Completed,
+    NotReady,
+    Timeout,
+    DeviceLost
+};
+
 enum class SwapChainStatus : int32_t {
     Error,
     Success,
     RetryLater,
-    RequireRecreate
+    RequireRecreate,
+    Suboptimal,
+    SurfaceLost,
+    DeviceLost
 };
 
 enum class QueryType : int32_t {
@@ -1275,6 +1284,7 @@ struct DeviceLimits {
     uint64_t TexelBufferOffsetAlignment{1};
     float MaxSamplerAnisotropy{1};
     float MinSamplerLodBias{0}, MaxSamplerLodBias{0};
+    uint64_t HostCoherentAtomSize{1};
 };
 
 struct DeviceFeatures {
@@ -1654,17 +1664,12 @@ public:
 
     GpuObjectTags GetTag() const noexcept final;
 
+    // Zero checks once. A finite wait that expires reports Timeout.
+    virtual FenceStatus WaitForStatus(uint64_t value, uint64_t timeoutNs) noexcept = 0;
+
     virtual uint64_t GetCompletedValue() const noexcept = 0;
 
-    virtual uint64_t GetLastSignaledValue() const noexcept = 0;
-
-    virtual void Wait() noexcept = 0;
-
     virtual void Wait(uint64_t value) noexcept = 0;
-
-    // Finite CPU wait. Timeout or detected device loss returns false. A zero timeout only polls.
-    // The caller serializes waits on this fence. Even the maximum uint64_t timeout is finite.
-    virtual bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept = 0;
 };
 
 class SwapChainSyncObject : public GpuObject {
@@ -1735,17 +1740,14 @@ public:
 
     GpuObjectTags GetTag() const noexcept final;
 
-    virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
+    // Host-visible buffers retain this base address until destruction.
+    virtual Nullable<void*> GetMappedData() noexcept = 0;
 
-    virtual void Unmap() noexcept = 0;
+    virtual bool FlushMappedRange(BufferRange range) noexcept = 0;
 
-    virtual void FlushMappedRange(BufferRange range) noexcept = 0;
-
-    virtual void InvalidateMappedRange(BufferRange range) noexcept = 0;
+    virtual bool InvalidateMappedRange(BufferRange range) noexcept = 0;
 
     virtual BufferDescriptor GetDesc() const noexcept = 0;
-
-    virtual Device* GetDevice() const noexcept = 0;
 };
 
 class Texture : public Resource {
@@ -1755,8 +1757,6 @@ public:
     GpuObjectTags GetTag() const noexcept final;
 
     virtual TextureDescriptor GetDesc() const noexcept = 0;
-
-    virtual Device* GetDevice() const noexcept = 0;
 };
 
 class TextureView : public ResourceView {
@@ -1909,6 +1909,7 @@ std::string_view format_as(TextureState v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
 std::string_view format_as(GpuObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
+std::string_view format_as(FenceStatus v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
 
 // Constant expressions

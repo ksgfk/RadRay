@@ -4,7 +4,7 @@ namespace radray {
 
 FramePipeline::~FramePipeline() noexcept = default;
 
-void FramePipeline::OnSlotCompleted(FrameSlot&) noexcept {}
+void FramePipeline::OnSlotRetired(FrameSlot&, bool) noexcept {}
 
 std::span<const MeshPassRegistration> FramePipeline::GetMeshPassRegistrations() noexcept {
     return {};

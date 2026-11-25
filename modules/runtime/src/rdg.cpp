@@ -116,7 +116,9 @@ struct RDGBuffer {
     RDGExternalOwnership Ownership{};
     Nullable<GpuBuffer*> Persistent{nullptr};
     IntrusivePtr<GpuBuffer> Owner{};
+    IntrusivePtr<GpuUploadBuffer> UploadOwner{};
     bool Dynamic{false};
+    bool OwnerWrites{false};
     uint64_t Alignment{1};
     bool Output{false};
     bool Alive{false};
@@ -1209,6 +1211,15 @@ RDGBuilder::RDGBuilder(FrameSlot& slot, RDGDeviceConstraints constraints, RDGCom
 }
 
 RDGBlackboard& RDGBuilder::GetBlackboard() noexcept { return _blackboard; }
+bool RDGBuilder::IsDynamicBuffer(RDGBufferHandle buffer) const noexcept {
+    return buffer.Index < _data.Buffers.size() && _data.Buffers[buffer.Index].Dynamic;
+}
+
+std::optional<gpu::BufferDescriptor> RDGBuilder::GetBufferDescriptor(RDGBufferHandle buffer) const noexcept {
+    if (buffer.Index >= _data.Buffers.size()) return std::nullopt;
+    return _data.Buffers[buffer.Index].Desc;
+}
+
 std::optional<gpu::TextureDescriptor> RDGBuilder::GetTextureDescriptor(RDGTextureHandle texture) const noexcept {
     if (texture.Index >= _data.Textures.size()) return std::nullopt;
     return _data.Textures[texture.Index].Desc;
@@ -1309,6 +1320,19 @@ RDGBufferHandle RDGBuilder::ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates 
     _data.Buffers.push_back({.Desc = buffer->GetDesc(), .Imported = buffer, .InitialState = initialState, .FinalState = finalState, .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}, .Ownership = ownership});
     _data.BufferImports.emplace(buffer, index);
     return {index};
+}
+
+RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuUploadBuffer& buffer) {
+    const auto handle = ImportBuffer(buffer.GetBuffer(), gpu::BufferState::HostWrite, gpu::BufferState::HostWrite);
+    _data.Buffers[handle.Index].OwnerWrites = true;
+    return handle;
+}
+
+RDGBufferHandle RDGBuilder::ImportPersistentOwned(const IntrusivePtr<GpuUploadBuffer>& buffer) {
+    const auto handle = ImportPersistentBorrowed(*buffer);
+    auto& resource = _data.Buffers[handle.Index];
+    if (!resource.UploadOwner) resource.UploadOwner = buffer;
+    return handle;
 }
 
 RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuBuffer& buffer) {
@@ -1456,6 +1480,10 @@ RDGPassHandle RDGBuilder::UploadBuffer(RDGBufferHandle dst, uint64_t offset, RDG
         return {};
     }
     const auto& resource = _data.Buffers[dst.Index];
+    if (resource.OwnerWrites) {
+        Fail(_data, "persistent upload buffer is written by its owner");
+        return {};
+    }
     const auto& desc = resource.Desc;
     if (offset > desc.Size || source.GetMaxSize() > desc.Size - offset || desc.Memory == gpu::MemoryType::ReadBack ||
         (desc.Memory == gpu::MemoryType::Device && (!desc.Usage.HasFlag(gpu::BufferUse::CopyDestination) || offset % std::max(uint64_t{1}, _data.Constraints.BufferCopyAlignment))) ||
@@ -1709,6 +1737,7 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
                 }
                 if (!access.Texture && _data.Buffers[access.Index].Desc.Memory == gpu::MemoryType::Upload) {
                     if (pass.Kind == RDGPassKind::HostWrite) {
+                        if (_data.Buffers[access.Index].OwnerWrites) Fail(_data, "persistent upload buffer is written by its owner");
                         if (gpuAccessed[access.Index]) Fail(_data, "direct upload must precede GPU access");
                         hostRanges[access.Index].push_back({Upload(_data, pass).UploadOffset, Upload(_data, pass).UploadOffset + Upload(_data, pass).Source.GetMaxSize()});
                     } else {
@@ -1944,16 +1973,15 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 Prepared(execution, pass).Staging.Size = mappedSize;
             } else {
                 auto& physical = execution.States.GetBuffer(access.Index);
-                Nullable<byte*> mapped = static_cast<byte*>(physical.Resource->Map(Upload(_data, pass).UploadOffset, mappedSize));
+                auto* mapped = static_cast<byte*>(physical.Resource->GetMappedData().Get());
                 if (!mapped) return false;
-                Prepared(execution, pass).Staging = {physical.Resource, mapped, Upload(_data, pass).UploadOffset, mappedSize, mappedSize};
+                Prepared(execution, pass).Staging = {physical.Resource, mapped + Upload(_data, pass).UploadOffset, Upload(_data, pass).UploadOffset, mappedSize, mappedSize};
             }
             RDGUploadWriteContext write{{Prepared(execution, pass).Staging.Data.Get(), static_cast<size_t>(mappedSize)}, Prepared(execution, pass).ActualSize, Prepared(execution, pass).StagingPitch, rowBytes, rows, depth};
             const bool written = Upload(_data, pass).Source.Write(write, Upload(_data, pass).SourceRowPitch, Upload(_data, pass).SourceRowsPerImage);
             if (pass.Kind == RDGPassKind::HostWrite && _data.Buffers[access.Index].Imported) {
                 auto& physical = execution.States.GetBuffer(access.Index);
-                if (written) physical.Resource->FlushMappedRange({Upload(_data, pass).UploadOffset, mappedSize});
-                physical.Resource->Unmap();
+                if (written && !physical.Resource->FlushMappedRange({Upload(_data, pass).UploadOffset, mappedSize})) return false;
                 execution.States.PrepareHostWrite(access.Index);
             }
             Prepared(execution, pass).Staging.Data = nullptr;

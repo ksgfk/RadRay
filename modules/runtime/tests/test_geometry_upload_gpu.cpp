@@ -1,6 +1,8 @@
 #include "../../gpu_impl/tests/gpu_test_fixture.h"
 #include "test_fakes.h"
 
+#include <thread>
+
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/rdg.h>
@@ -13,7 +15,9 @@ using namespace gpu;
 
 class GeometryUploadGpuTest : public gpu::test::BackendTest {
 protected:
-    void DrawPooledGeometry(bool separateUploadFrame, bool dynamic = false) {
+    enum class Source { Pool, Arena, Persistent, PartiallyFlushed };
+    void DrawPooledGeometry(bool separateUploadFrame, Source source = Source::Pool) {
+        const bool dynamic = source == Source::Arena;
         auto& device = GetDevice();
         auto& queue = gpu::test::DirectQueue(device);
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
@@ -29,6 +33,34 @@ protected:
         ASSERT_TRUE(unusedVertex && unusedIndex && vertex && index);
         const array positions{-1.f, -1.f, 0.5f, 3.f, -1.f, 0.5f, -1.f, 3.f, 0.5f};
         const array<uint32_t, 3> order{0, 1, 2};
+
+        IntrusivePtr<GpuUploadBuffer> uploadedVertices, uploadedIndices;
+        if (source == Source::Persistent) {
+            std::jthread worker{[&] {
+                uploadedVertices = GpuUploadBuffer::Create(device, {sizeof(positions), BufferUse::Vertex}).Unwrap();
+                uploadedIndices = GpuUploadBuffer::Create(device, {sizeof(order), BufferUse::Index}).Unwrap();
+                EXPECT_TRUE(uploadedVertices->WriteAndFlush(0, gpu::test::AsBytes(positions)));
+                EXPECT_TRUE(uploadedIndices->WriteAndFlush(0, gpu::test::AsBytes(order)));
+            }};
+            worker.join();
+        }
+
+        unique_ptr<Buffer> partialVertices, partialIndices;
+        if (source == Source::PartiallyFlushed) {
+            const auto createPartial = [&](BufferUse usage, std::span<const byte> data) {
+                auto buffer = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::Upload,
+                                                   .Usage = BufferUse::MapWrite | usage}).Unwrap();
+                auto* mapped = buffer->GetMappedData().Get();
+                if (!mapped) return unique_ptr<Buffer>{};
+                std::memcpy(mapped, data.data(), data.size());
+                buffer->FlushMappedRange({0, 4096});
+
+                return buffer;
+            };
+            partialVertices = createPartial(BufferUse::Vertex, gpu::test::AsBytes(positions));
+            partialIndices = createPartial(BufferUse::Index, gpu::test::AsBytes(order));
+            ASSERT_TRUE(partialVertices && partialIndices);
+        }
 
         auto vs = gpu::test::LoadShader(device, "geometry", "VSMain", ShaderStage::Vertex).Unwrap();
         auto ps = gpu::test::LoadShader(device, "graphics", "SolidPS", ShaderStage::Pixel).Unwrap();
@@ -61,7 +93,7 @@ protected:
         bool uploadFrame = true;
         pipeline->OnExtract = [&](FrameSlot& slot) {
             RDGBuilder graph{slot};
-            if (uploadFrame && !dynamic) {
+            if (uploadFrame && source == Source::Pool) {
                 const auto vb = graph.ImportPersistentOwned(vertex->GetGpuBuffer());
                 const auto ib = graph.ImportPersistentOwned(index->GetGpuBuffer());
                 graph.UploadBuffer(vb, vertex->GetByteOffset(), RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
@@ -80,6 +112,7 @@ protected:
                     int32_t Base;
                     DrawData Constants;
                     RDGBufferHandle DynamicVertex{}, DynamicIndex{};
+                    bool ArenaOffsets;
                 };
                 RDGBufferHandle dynamicVertex, dynamicIndex;
                 if (dynamic) {
@@ -93,7 +126,17 @@ protected:
                     graph.MarkOutput(spacer);
                     dynamicIndex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(order), BufferUse::Index, 32}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(order)));
                 }
-                auto pass = graph.AddRasterPass("draw pooled triangle", PassData{pso.get(), {0, {vertex->GetBuffer(), 0, vertex->GetBuffer()->GetDesc().Size}}, index->GetIndexBufferView(), index->GetIndexCount(), index->GetFirstIndex(), static_cast<int32_t>(vertex->GetFirstVertex()), draw, dynamicVertex, dynamicIndex}, +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
+                if (source == Source::Persistent) {
+                    dynamicVertex = graph.ImportPersistentOwned(uploadedVertices);
+                    dynamicIndex = graph.ImportPersistentOwned(uploadedIndices);
+                    uploadedVertices.Reset();
+                    uploadedIndices.Reset();
+                }
+                if (source == Source::PartiallyFlushed) {
+                    dynamicVertex = graph.ImportBuffer(partialVertices.get(), BufferState::HostWrite, BufferState::HostWrite);
+                    dynamicIndex = graph.ImportBuffer(partialIndices.get(), BufferState::HostWrite, BufferState::HostWrite);
+                }
+                auto pass = graph.AddRasterPass("draw pooled triangle", PassData{pso.get(), {0, {vertex->GetBuffer(), 0, vertex->GetBuffer()->GetDesc().Size}}, index->GetIndexBufferView(), index->GetIndexCount(), index->GetFirstIndex(), static_cast<int32_t>(vertex->GetFirstVertex()), draw, dynamicVertex, dynamicIndex, dynamic}, +[](const PassData& data, RDGRasterPassContext& ctx) noexcept {
                         auto& encoder = ctx.GetEncoder();
                         encoder.BindGraphicsPipelineState(data.Pipeline);
                         encoder.SetViewport({0, 0, 4, 4, 0, 1});
@@ -102,8 +145,8 @@ protected:
                         auto index = data.Index;
                         if (data.DynamicVertex.IsValid()) {
                             const auto v = ctx.ResolveBuffer(data.DynamicVertex), i = ctx.ResolveBuffer(data.DynamicIndex);
-                            EXPECT_EQ(v.Offset, 8u);
-                            EXPECT_EQ(i.Offset, 32u);
+                            EXPECT_EQ(v.Offset, data.ArenaOffsets ? 8u : 0u);
+                            EXPECT_EQ(i.Offset, data.ArenaOffsets ? 32u : 0u);
                             EXPECT_NE(v.Buffer, i.Buffer);
                             vertex = {0, {v.Buffer.Get(), v.Offset, v.Size}};
                             index = {i.Buffer.Get(), static_cast<uint32_t>(i.Offset), 4};
@@ -114,7 +157,7 @@ protected:
                         encoder.DrawIndexed(data.Count, 1, data.DynamicVertex.IsValid() ? 0 : data.First, data.DynamicVertex.IsValid() ? 0 : data.Base, 0);
                         return true; });
                 pass.WriteColor(0, color, LoadAction::Clear, StoreAction::Store);
-                if (dynamic) {
+                if (dynamicVertex.IsValid()) {
                     pass.ReadBuffer(dynamicVertex, BufferState::Vertex).ReadBuffer(dynamicIndex, BufferState::Index);
                 } else {
                     vertices->AddPassReadAccess(graph, pass, BufferState::Vertex | BufferState::ShaderRead);
@@ -138,7 +181,7 @@ protected:
         };
         pipeline->OnSubmit = [&](FrameSlot&) {
             auto* raw = recorded.Get();
-            queue.Submit({.CmdBuffers = std::span{&raw, 1}});
+            ASSERT_TRUE(queue.Submit({.CmdBuffers = std::span{&raw, 1}}));
             compiled->CommitSubmittedStates();
         };
         pipeline->OnWait = [&](FrameSlot&) { queue.Wait(); };
@@ -151,7 +194,7 @@ protected:
         }
         scheduler->WaitIdle();
         EXPECT_EQ(gpu::test::FromBytes<uint32_t>(gpu::test::ReadTexture(device, *target, TextureState::Common)), vector<uint32_t>(16, 0xff0000ff));
-        if (dynamic) return;
+        if (source != Source::Pool) return;
         const auto actual = gpu::test::ReadBuffer(device, *vertex->GetBuffer(), BufferState::Common, vertex->GetBuffer()->GetDesc().Size);
         ASSERT_GE(actual.size(), vertex->GetByteOffset() + sizeof(positions));
         EXPECT_EQ(std::memcmp(actual.data() + vertex->GetByteOffset(), positions.data(), sizeof(positions)), 0);
@@ -161,15 +204,19 @@ protected:
 TEST_P(GeometryUploadGpuTest, UploadOnlyFrameThenDrawUsesCommonBoundary) { DrawPooledGeometry(true); }
 TEST_P(GeometryUploadGpuTest, UploadsBothPoolsAndDrawsInOneFrame) { DrawPooledGeometry(false); }
 
-TEST_P(GeometryUploadGpuTest, DynamicVertexAndIndexUseSliceOffsetsAcrossPages) { DrawPooledGeometry(false, true); }
+TEST_P(GeometryUploadGpuTest, DynamicVertexAndIndexUseSliceOffsetsAcrossPages) { DrawPooledGeometry(false, Source::Arena); }
+
+TEST_P(GeometryUploadGpuTest, WorkerPublishedPersistentGeometryDrawsThroughOwnedImports) { DrawPooledGeometry(false, Source::Persistent); }
+
+TEST_P(GeometryUploadGpuTest, IndexedDrawReadsOnlyTheFlushedVertexAndIndexPrefix) { DrawPooledGeometry(false, Source::PartiallyFlushed); }
 
 TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferRelease) {
     auto& device = GetDevice();
     auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
-    auto upload = device.CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::CopySource | BufferUse::MapWrite, .Hints = ResourceHint::PersistentMap}).Unwrap();
+    auto upload = device.CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::CopySource | BufferUse::MapWrite}).Unwrap();
     const array<byte, 16> expected{byte{42}, byte{7}};
-    auto* data = upload->Map(0, expected.size());
+    auto* data = upload->GetMappedData().Get();
     ASSERT_NE(data, nullptr);
     std::memcpy(data, expected.data(), expected.size());
     upload->FlushMappedRange({0, expected.size()});
@@ -193,7 +240,7 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferReleas
     auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 1).Unwrap();
     scheduler->RunFrame();
     scheduler->BeginFrame();
-    upload->Unmap();
+
     upload.reset();
     const auto actual = gpu::test::ReadBuffer(device, *destination, BufferState::CopyDestination, expected.size());
     EXPECT_EQ(actual, (vector<byte>{expected.begin(), expected.end()}));

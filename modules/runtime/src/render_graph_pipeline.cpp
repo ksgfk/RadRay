@@ -15,23 +15,43 @@ public:
     UploadArena Uploads;
     Nullable<gpu::CommandBuffer*> Command{nullptr};
     Nullable<CompiledRDG*> CompiledGraph{nullptr};
-    RDGGpuProfilingMode Profiling{RDGGpuProfilingMode::Off};
-    uint64_t UserSequence{};
+    class ProfilingResetGuard {
+    public:
+        explicit ProfilingResetGuard(SlotState& state) noexcept : Target(&state) {}
+        ~ProfilingResetGuard() noexcept { if (Target) Target->ClearPending(); }
+        Nullable<SlotState*> Target;
+    };
+    Nullable<ProfilingResetGuard*> PendingGuard{nullptr};
+    void BindFrame(FrameSlot& slot) {
+        if (!PendingGuard) PendingGuard = slot.Emplace<ProfilingResetGuard>(*this);
+    }
+    void ClearPending() noexcept {
+        CompiledGraph = nullptr;
+        Command = nullptr;
+        if (PendingGuard) PendingGuard->Target = nullptr;
+        PendingGuard = nullptr;
+        PendingProfiling = RDGGpuProfilingMode::Off;
+        PendingUserSequence = 0;
+    }
+    RDGGpuProfilingMode PendingProfiling{RDGGpuProfilingMode::Off};
+    uint64_t PendingUserSequence{};
     uint32_t QueryCount{};
     unique_ptr<gpu::QueryPool> Queries;
     unique_ptr<gpu::Buffer> Readback;
+    Nullable<const uint64_t*> MappedTicks{nullptr};
+    ~SlotState() noexcept { ClearPending(); }
     gpu::BufferState ReadbackState{gpu::BufferState::Undefined};
     RDGGpuTimingSnapshot Timing;
     bool TimingReady{};
     bool AbandonIfLost(FrameSlot& slot) noexcept;
     void PrepareTiming(FrameSlot& slot);
+    void ReadTiming(FrameSlot& slot) noexcept;
 };
 
 bool RenderGraphFramePipeline::SlotState::AbandonIfLost(FrameSlot& slot) noexcept {
     if (!slot.GetDevice().IsDeviceLost()) return false;
     CompiledGraph = nullptr;
     Command = nullptr;
-    Profiling = RDGGpuProfilingMode::Off;
     QueryCount = 0;
     TimingReady = false;
     return true;
@@ -41,10 +61,14 @@ void RenderGraphFramePipeline::SlotState::PrepareTiming(FrameSlot& slot) {
     TimingReady = false;
     QueryCount = 0;
     Timing.Passes.clear();
+    Timing.TotalNanoseconds = 0;
+    Timing.FrameId = slot.GetFrameId();
+
+    Timing.Status = PendingProfiling == RDGGpuProfilingMode::Off ? RDGGpuTimingStatus::Off : RDGGpuTimingStatus::Unavailable;
     auto& device = slot.GetDevice();
-    if (Profiling == RDGGpuProfilingMode::Off || !device.GetCapabilities().Features.TimestampQueries ||
+    if (PendingProfiling == RDGGpuProfilingMode::Off || !device.GetCapabilities().Features.TimestampQueries ||
         !slot.GetQueue().GetTimestampValidBits()) return;
-    if (Profiling == RDGGpuProfilingMode::FrameAndPasses) {
+    if (PendingProfiling == RDGGpuProfilingMode::FrameAndPasses) {
         auto names = CompiledGraph->GetRecordedPassNames();
         if (names.size() > (std::numeric_limits<uint32_t>::max() - 2u) / 2u) return;
         Timing.Passes.reserve(names.size());
@@ -55,23 +79,25 @@ void RenderGraphFramePipeline::SlotState::PrepareTiming(FrameSlot& slot) {
         auto queries = device.CreateQueryPool({gpu::QueryType::Timestamp, count, "RDG GPU timings"});
         auto buffer = device.CreateBuffer({.Size = uint64_t{count} * sizeof(uint64_t), .Memory = gpu::MemoryType::ReadBack,
                                            .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
-        if (!queries || !buffer) {
+        auto* ticks = queries && buffer ? static_cast<const uint64_t*>(buffer->GetMappedData().Get()) : nullptr;
+        if (!ticks) {
+            Timing.Status = RDGGpuTimingStatus::AllocationFailed;
             RADRAY_WARN_LOG("RDG: cannot allocate timestamp resources for {} queries", count);
             return;
         }
+        MappedTicks = ticks;
         Queries = queries.Release();
         Readback = buffer.Release();
         ReadbackState = gpu::BufferState::Undefined;
     }
-    Timing.FrameId = slot.GetFrameId();
-    Timing.UserSequence = UserSequence;
     QueryCount = count;
 }
 
 void RenderGraphFramePipeline::SetGpuProfiling(FrameSlot& slot, RDGGpuProfilingMode mode, uint64_t sequence) noexcept {
     auto& state = *_slotStates.at(slot.GetIndex());
-    state.Profiling = mode;
-    state.UserSequence = sequence;
+    state.BindFrame(slot);
+    state.PendingProfiling = mode;
+    state.PendingUserSequence = sequence;
 }
 
 Nullable<const RDGGpuTimingSnapshot*> RenderGraphFramePipeline::GetCompletedGpuTiming(const FrameSlot& slot) const noexcept {
@@ -79,33 +105,42 @@ Nullable<const RDGGpuTimingSnapshot*> RenderGraphFramePipeline::GetCompletedGpuT
     return state.TimingReady ? &state.Timing : nullptr;
 }
 
-void RenderGraphFramePipeline::OnGpuTimingCompleted(FrameSlot&, const RDGGpuTimingSnapshot&) noexcept {}
-
-void RenderGraphFramePipeline::OnSlotCompleted(FrameSlot& slot) noexcept {
-    auto& state = *_slotStates[slot.GetIndex()];
-    if (!state.QueryCount) return;
-    const auto size = uint64_t{state.QueryCount} * sizeof(uint64_t);
-    state.QueryCount = 0;
+void RenderGraphFramePipeline::SlotState::ReadTiming(FrameSlot& slot) noexcept {
+    if (!QueryCount) return;
+    const auto size = uint64_t{QueryCount} * sizeof(uint64_t);
+    QueryCount = 0;
     const auto bits = slot.GetQueue().GetTimestampValidBits();
-    const auto period = state.Queries->GetTimestampCalibration(&slot.GetQueue()).TickPeriodNs;
+    const auto period = Queries->GetTimestampCalibration(&slot.GetQueue()).TickPeriodNs;
     if (!bits || bits > 64 || !std::isfinite(period) || period <= 0) return;
-    const auto* ticks = static_cast<const uint64_t*>(state.Readback->Map(0, size));
-    if (!ticks) {
-        RADRAY_WARN_LOG("RDG: cannot map completed GPU timestamps");
-        return;
-    }
-    state.Readback->InvalidateMappedRange({0, size});
+    if (!Readback->InvalidateMappedRange({0, size})) return;
+    const auto* ticks = MappedTicks.Get();
     const uint64_t mask = std::numeric_limits<uint64_t>::max() >> (64 - bits);
     const auto elapsed = [&](size_t first) {
         const double ns = static_cast<double>((ticks[first + 1] - ticks[first]) & mask) * period;
         return ns >= static_cast<double>(std::numeric_limits<uint64_t>::max()) ? std::numeric_limits<uint64_t>::max() : static_cast<uint64_t>(ns);
     };
-    state.Timing.TotalNanoseconds = elapsed(0);
-    for (size_t i = 0; i < state.Timing.Passes.size(); ++i) state.Timing.Passes[i].Nanoseconds = elapsed(2 + 2 * i);
-    state.Readback->Unmap();
-    state.TimingReady = true;
-    RADRAY_PROFILE_PLOT("RadRay.RDG.GpuNanoseconds", static_cast<double>(state.Timing.TotalNanoseconds));
-    OnGpuTimingCompleted(slot, state.Timing);
+    Timing.TotalNanoseconds = elapsed(0);
+    for (size_t i = 0; i < Timing.Passes.size(); ++i) Timing.Passes[i].Nanoseconds = elapsed(2 + 2 * i);
+    Timing.Status = RDGGpuTimingStatus::Valid;
+    TimingReady = true;
+    RADRAY_PROFILE_PLOT("RadRay.RDG.GpuNanoseconds", static_cast<double>(Timing.TotalNanoseconds));
+}
+
+void RenderGraphFramePipeline::OnFrameSlotRetired(FrameSlot&, const RDGGpuTimingSnapshot&) noexcept {}
+
+void RenderGraphFramePipeline::OnSlotRetired(FrameSlot& slot, bool deviceLost) noexcept {
+    auto& state = *_slotStates[slot.GetIndex()];
+    if (!deviceLost) state.ReadTiming(slot);
+    if (deviceLost || slot.GetDevice().IsDeviceLost()) {
+        state.Timing.Status = RDGGpuTimingStatus::DeviceLost;
+        state.TimingReady = false;
+    }
+    if (!state.TimingReady) {
+        state.Timing.TotalNanoseconds = 0;
+        state.Timing.Passes.clear();
+    }
+    state.QueryCount = 0;
+    OnFrameSlotRetired(slot, state.Timing);
 }
 
 RenderGraphFramePipeline::RenderGraphFramePipeline(DeviceContext& device, uint32_t slotCount, uint64_t uploadPageSize) : _constraints(device.GetRDGConstraints()) {
@@ -122,6 +157,7 @@ void RenderGraphFramePipeline::Extract(FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Extract");
     if (slot.GetIndex() >= _slotStates.size()) RADRAY_ABORT("RenderGraphFramePipeline: invalid slot index");
     auto& state = *_slotStates[slot.GetIndex()];
+    state.BindFrame(slot);
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.ExtractFrameData");
         ExtractFrameData(slot);
@@ -194,10 +230,12 @@ bool RenderGraphFramePipeline::Submit(FrameSlot& slot) noexcept {
     if (submitted) {
         if (state.QueryCount) state.ReadbackState = gpu::BufferState::HostRead;
         state.CompiledGraph->CommitSubmittedStates();
+        state.Timing.UserSequence = state.PendingUserSequence;
+        state.ClearPending();
+    } else {
+        state.CompiledGraph = nullptr;
+        state.Command = nullptr;
     }
-    state.Profiling = RDGGpuProfilingMode::Off;
-    state.CompiledGraph = nullptr;
-    state.Command = nullptr;
     return submitted;
 }
 

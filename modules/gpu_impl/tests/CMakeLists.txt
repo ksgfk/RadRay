@@ -11,7 +11,7 @@ add_executable(test_radray_gpu_impl
     test_vulkan_device_features.cpp
     test_swapchain.cpp
     test_vulkan_swapchain.cpp)
-target_link_libraries(test_radray_gpu_impl PRIVATE radraygpu_impl GTest::gtest_main)
+target_link_libraries(test_radray_gpu_impl PRIVATE radraygpu_impl GTest::gtest_main $<$<BOOL:${RADRAY_ENABLE_D3D12}>:d3d11>)
 radray_default_compile_flags(test_radray_gpu_impl)
 radray_optimize_flags_binary(test_radray_gpu_impl)
 radray_set_build_path(test_radray_gpu_impl)

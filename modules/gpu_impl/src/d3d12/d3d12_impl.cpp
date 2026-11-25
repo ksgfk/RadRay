@@ -9,6 +9,7 @@
 #include "d3d12_diagnostics.h"
 
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <algorithm>
 #include <limits>
@@ -170,7 +171,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
             return false;
         }
         auto name = radray::format("SwapChain_BackBuffer_{}", i);
-        frame.image = make_unique<TextureD3D12>(swapChain->_device, std::move(rt), ComPtr<D3D12MA::Allocation>{});
+        frame.image = make_unique<TextureD3D12>(std::move(rt), ComPtr<D3D12MA::Allocation>{});
         frame.image->_name = name;
         frame.image->_dimension = TextureDimension::Dim2D;
         frame.image->_format = swapChain->_reqFormat;
@@ -393,6 +394,7 @@ CpuDescriptorAllocator::Page::Page(
       Capacity(capacity) {}
 
 std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    std::lock_guard lock{_mutex};
     if (count == 0) {
         return std::nullopt;
     }
@@ -479,6 +481,7 @@ std::optional<CpuDescriptorAllocator::Allocation> CpuDescriptorAllocator::Alloca
 }
 
 void CpuDescriptorAllocator::Destroy(CpuDescriptorAllocator::Allocation view) noexcept {
+    std::lock_guard lock{_mutex};
     if (view.PagePtr == nullptr) {
         return;
     }
@@ -541,6 +544,7 @@ GpuDescriptorAllocator::GpuDescriptorAllocator(
 }
 
 std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    std::lock_guard lock{_mutex};
     const auto allocation = _allocator.Allocate(count);
     if (!allocation.has_value()) {
         return std::nullopt;
@@ -561,6 +565,7 @@ std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Alloca
 }
 
 void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept {
+    std::lock_guard lock{_mutex};
     _allocator.Destroy(allocation.ParentAllocation);
 #ifdef RADRAY_ENABLE_PROFILER
     RADRAY_ASSERT(_liveDescriptors >= allocation.Length);
@@ -1176,7 +1181,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
         if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
+    if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
         if (!MarkDeviceLost(hr, "CreateSwapChain")) RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
     }
@@ -1201,6 +1206,10 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
 
 Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& desc_) noexcept {
     if (IsDeviceLost()) return nullptr;
+    if (!IsBufferMemoryUsageValid(desc_)) {
+        RADRAY_ERR_LOG("CreateBuffer: invalid memory, mapping usage or hints");
+        return nullptr;
+    }
     BufferDescriptor desc = desc_;
     const uint64_t logicalSize = desc.Size;
     D3D12_RESOURCE_DESC resDesc{};
@@ -1290,6 +1299,14 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
     result->_reqSize = logicalSize;
+    if (desc.Memory != MemoryType::Device) {
+        const D3D12_RANGE readRange{0, desc.Memory == MemoryType::ReadBack ? static_cast<SIZE_T>(logicalSize) : 0};
+        const HRESULT hr = result->_buf->Map(0, &readRange, &result->_mappedData);
+        if (FAILED(hr) || !result->_mappedData) {
+            if (!MarkDeviceLost(hr, "ID3D12Resource::Map")) RADRAY_ERR_LOG("CreateBuffer: mapping failed: {}", GetErrorName(hr));
+            return nullptr;
+        }
+    }
     return result;
 }
 
@@ -1349,7 +1366,7 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
         if (!MarkDeviceLost(hr, "CreateTexture")) RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    auto result = make_unique<TextureD3D12>(this, std::move(texture), std::move(allocRes));
+    auto result = make_unique<TextureD3D12>(std::move(texture), std::move(allocRes));
     result->_dimension = desc.Dim;
     result->_format = desc.Format;
     result->_memory = desc.Memory;
@@ -2087,7 +2104,9 @@ bool ShaderParameterSetD3D12::IsValid() const noexcept {
 }
 
 void ShaderParameterSetD3D12::Destroy() noexcept {
-    for (auto& storage : _tables) ReleaseSamplerTable(storage);
+    if (!_device) return;
+    std::lock_guard lock{_device->_samplerTableMutex};
+    for (auto& storage : _tables) ReleaseSamplerTableLocked(storage);
     _tables.clear();
     _copySources.clear();
     _copyDestinations.clear();
@@ -2097,7 +2116,7 @@ void ShaderParameterSetD3D12::Destroy() noexcept {
     _device = nullptr;
 }
 
-void ShaderParameterSetD3D12::ReleaseSamplerTable(DescriptorTableStorageD3D12& storage) noexcept {
+void ShaderParameterSetD3D12::ReleaseSamplerTableLocked(DescriptorTableStorageD3D12& storage) noexcept {
     if (!storage.SharedTable) return;
     auto entry = *storage.SharedTable;
     storage.SharedTable.reset();
@@ -2105,8 +2124,9 @@ void ShaderParameterSetD3D12::ReleaseSamplerTable(DescriptorTableStorageD3D12& s
 }
 
 bool ShaderParameterSetD3D12::FlushSamplerTable(DescriptorTableStorageD3D12& storage) noexcept {
+    std::lock_guard lock{_device->_samplerTableMutex};
     if (storage.SharedTable && (*storage.SharedTable)->first == storage.SamplerIds) return true;
-    ReleaseSamplerTable(storage);
+    ReleaseSamplerTableLocked(storage);
     auto& cache = _device->_samplerTables;
     auto entry = cache.find(storage.SamplerIds);
     if (entry == cache.end()) {
@@ -2130,8 +2150,9 @@ bool ShaderParameterSetD3D12::FlushSamplerTable(DescriptorTableStorageD3D12& sto
 }
 
 void ShaderParameterSetD3D12::ResetBindingsForReuse() noexcept {
+    std::lock_guard lock{_device->_samplerTableMutex};
     for (auto& storage : _tables) {
-        ReleaseSamplerTable(storage);
+        ReleaseSamplerTableLocked(storage);
         std::fill(storage.SamplerIds.begin(), storage.SamplerIds.end(), 0);
         std::fill(storage.InitializedSlots.begin(), storage.InitializedSlots.end(), 0);
         storage.Dirty.Ranges.clear();
@@ -2497,7 +2518,6 @@ Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValu
         return nullptr;
     }
     auto result = make_unique<FenceD3D12>(this, std::move(fence), std::move(e.value()));
-    result->_fenceValue = initValue + 1;
     result->_lastCompletedValue = initValue;
     return result;
 }
@@ -2575,17 +2595,14 @@ bool CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         auto* f = CastD3D12Object(desc.SignalFences[i]);
         uint64_t signalValue = desc.SignalValues[i];
         if (!_CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal")) return false;
-        if (signalValue + 1 > f->_fenceValue) {
-            f->_fenceValue = signalValue + 1;
-        }
     }
     return true;
 }
 
 void CmdQueueD3D12::Wait() noexcept {
-    if (_device->IsDeviceLost() || !_CheckD3D12Result(_device, _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal")) return;
-    ++_fence->_fenceValue;
-    _fence->Wait();
+    const auto value = ++_waitValue;
+    if (_device->IsDeviceLost() || !_CheckD3D12Result(_device, _queue->Signal(_fence->_fence.Get(), value), "ID3D12CommandQueue::Signal")) return;
+    _fence->Wait(value);
     if (_device->_diagnostics) detail::FlushDiagnostics(_device->_diagnostics);
 }
 
@@ -2641,8 +2658,9 @@ FenceD3D12::FenceD3D12(
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept
     : _device(device),
-      _fence(std::move(fence)),
-      _event(std::move(event)) {}
+      _fence(std::move(fence)) {
+    _eventPool.push_back({std::move(event), 0});
+}
 
 bool FenceD3D12::IsValid() const noexcept {
     return _fence != nullptr;
@@ -2652,45 +2670,81 @@ void FenceD3D12::Destroy() noexcept {
     _externalHandle.Reset();
     _externalInfo.reset();
     _fence = nullptr;
-    _event.Destroy();
+    _eventPool.clear();
 }
 
 void FenceD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _fence.Get());
 }
 
-void FenceD3D12::Wait() noexcept {
-    Wait(_fenceValue - 1);
-}
-
 void FenceD3D12::Wait(uint64_t value) noexcept {
-    if (!WaitFor(value, 30000) && !_device->IsDeviceLost()) {
+    if (WaitForStatus(value, 30'000'000'000) == FenceStatus::Timeout) {
         detail::FlushDiagnostics(_device->_diagnostics);
         RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
     }
 }
 
-bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
-    if (GetCompletedValue() >= value) return !_device->IsDeviceLost();
-    if (timeoutMs == 0 || _device->IsDeviceLost()) return false;
-    const DWORD duration = static_cast<DWORD>(std::min<uint64_t>(timeoutMs, INFINITE - 1));
-    const uint64_t start = ::GetTickCount64();
-    const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
-    if (!_CheckD3D12Result(_device, hr, "ID3D12Fence::SetEventOnCompletion")) return false;
-    while (GetCompletedValue() < value) {
-        if (_device->IsDeviceLost()) return false;
-        const uint64_t elapsed = ::GetTickCount64() - start;
-        if (elapsed >= duration) return GetCompletedValue() >= value && !_device->IsDeviceLost();
-        const DWORD waitResult = ::WaitForSingleObject(_event.Get(), duration - static_cast<DWORD>(elapsed));
-        if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value && !_device->IsDeviceLost();
-        if (waitResult != WAIT_OBJECT_0) {
-            const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
-            if (!_CheckD3D12Result(_device, HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject")) return false;
-            RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
+FenceStatus FenceD3D12::WaitForStatus(uint64_t value, uint64_t timeoutNs) noexcept {
+    return WaitWithEvents(value, timeoutNs, Win32Event::Create, [](ID3D12Fence* fence, uint64_t target, HANDLE event) noexcept {
+        return fence->SetEventOnCompletion(target, event);
+    });
+}
+
+FenceStatus FenceD3D12::WaitWithEvents(
+    uint64_t value, uint64_t timeoutNs, decltype(&Win32Event::Create) createEvent, RegisterEvent registerEvent) noexcept {
+    const auto initial = GetCompletedValue();
+    if (_device->IsDeviceLost()) return FenceStatus::DeviceLost;
+    if (initial >= value) return FenceStatus::Completed;
+    if (!timeoutNs) return FenceStatus::NotReady;
+    const auto start = std::chrono::steady_clock::now();
+    WaitEvent event;
+    {
+        std::lock_guard lock{_eventPoolMutex};
+        auto available = std::ranges::find_if(_eventPool, [initial](const WaitEvent& e) { return e.ArmedValue <= initial; });
+        if (available == _eventPool.end())
+            available = std::ranges::find_if(_eventPool, [value](const WaitEvent& e) { return e.ArmedValue <= value; });
+        if (available != _eventPool.end()) {
+            event = std::move(*available);
+            _eventPool.erase(available);
+        } else {
+            constexpr size_t kMaxFenceWaitEvents = 16;
+            if (_eventCount < kMaxFenceWaitEvents) {
+                if (auto fresh = createEvent(false)) {
+                    event.Handle = std::move(*fresh);
+                    ++_eventCount;
+                }
+            }
         }
-        // An earlier timed-out registration or device removal can also wake it.
     }
-    return !_device->IsDeviceLost();
+    const auto giveBack = MakeScopeGuard([&]() noexcept {
+        if (event.Handle.Get()) {
+            std::lock_guard lock{_eventPoolMutex};
+            _eventPool.push_back(std::move(event));
+        }
+    });
+    bool canRegister = event.Handle.Get() != nullptr;
+    for (;;) {
+        const auto completed = GetCompletedValue();
+        if (_device->IsDeviceLost()) return FenceStatus::DeviceLost;
+        if (completed >= value) return FenceStatus::Completed;
+        // A timed-out registration stays in the kernel until its fence value completes.
+        if (canRegister && event.ArmedValue <= completed) {
+            const HRESULT hr = registerEvent(_fence.Get(), value, event.Handle.Get());
+            if (SUCCEEDED(hr)) event.ArmedValue = value;
+            else if (hr == E_OUTOFMEMORY) canRegister = false;
+            else if (!_CheckD3D12Result(_device, hr, "SetEventOnCompletion")) return FenceStatus::DeviceLost;
+        }
+        const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
+        if (elapsed >= timeoutNs) return FenceStatus::Timeout;
+        const uint64_t left = timeoutNs - elapsed;
+        const auto ms = static_cast<DWORD>(std::min<uint64_t>(INFINITE - 1, left / 1'000'000 + (left % 1'000'000 != 0)));
+        if (completed < event.ArmedValue && event.ArmedValue <= value) {
+            const auto result = ::WaitForSingleObject(event.Handle.Get(), ms);
+            if (result != WAIT_TIMEOUT && result != WAIT_OBJECT_0) RADRAY_ABORT("Fence wait failed: {}", ::GetLastError());
+        } else {
+            ::Sleep(left < 1'000'000 ? 0 : 1);
+        }
+    }
 }
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
@@ -2703,10 +2757,6 @@ uint64_t FenceD3D12::GetCompletedValue() const noexcept {
     }
     while (previous < value && !_lastCompletedValue.compare_exchange_weak(previous, value)) {}
     return std::max(previous, value);
-}
-
-uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
-    return _fenceValue - 1;
 }
 
 CommandAllocatorD3D12::CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue, ComPtr<ID3D12CommandAllocator> allocator) noexcept
@@ -3661,9 +3711,10 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     SwapChainAcquireResult result{};
     if (_device->IsDeviceLost()) {
         result.NativeStatusCode = _device->_device->GetDeviceRemovedReason();
+        result.Status = SwapChainStatus::DeviceLost;
         return result;
     }
-    if (_requiresRecreateAfterDiscard) {
+    if (_frames.empty() || _requiresRecreateAfterDiscard) {
         result.Status = SwapChainStatus::RequireRecreate;
         return result;
     }
@@ -3717,7 +3768,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
     auto diagnostics = MakeScopeGuard([&] { if (_device->_diagnostics) detail::FlushDiagnostics(_device->_diagnostics); });
     SwapChainPresentResult result{};
     InvalidateFrame(frame);
-    if (_device->IsDeviceLost()) return {.NativeStatusCode = _device->_device->GetDeviceRemovedReason(), .Status = SwapChainStatus::Error};
+    if (_device->IsDeviceLost()) return {.NativeStatusCode = _device->_device->GetDeviceRemovedReason(), .Status = SwapChainStatus::DeviceLost};
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
     if (!_IsPresentableHwnd(hwnd)) {
         RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
@@ -3748,7 +3799,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame frame) noexcept {
         result.Status = SwapChainStatus::RetryLater;
         return result;
     }
-    if (!_CheckD3D12Result(_device, hr, "IDXGISwapChain::Present")) return {.NativeStatusCode = hr, .Status = SwapChainStatus::Error};
+    if (!_CheckD3D12Result(_device, hr, "IDXGISwapChain::Present")) return {.NativeStatusCode = hr, .Status = SwapChainStatus::DeviceLost};
     result.NativeStatusCode = static_cast<int64_t>(hr);
     result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
     if (hr != DXGI_STATUS_OCCLUDED) _frameLatencyReady = false;
@@ -3774,7 +3825,11 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
     const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
-    if (!_CheckD3D12Result(_device, hr, "IDXGISwapChain::ResizeBuffers")) return false;
+    if (FAILED(hr)) {
+        if (!_device->MarkDeviceLost(hr, "IDXGISwapChain::ResizeBuffers"))
+            RADRAY_ERR_LOG("IDXGISwapChain::ResizeBuffers failed: {} {}", GetErrorName(hr), hr);
+        return false;
+    }
     _reqFormat = format;
     _mode = presentMode;
     if (!_RefreshSwapChainBackBuffers(this)) {
@@ -3819,48 +3874,29 @@ bool BufferD3D12::IsValid() const noexcept {
     return _buf != nullptr;
 }
 
+BufferD3D12::~BufferD3D12() noexcept { Destroy(); }
+
 void BufferD3D12::Destroy() noexcept {
     _externalHandle.Reset();
     _externalInfo.reset();
     if (_mappedData) {
-        Unmap();
+        const D3D12_RANGE noWrites{0, 0};
+        _buf->Unmap(0, _memory == MemoryType::ReadBack ? &noWrites : nullptr);
     }
     _mappedData = nullptr;
     _buf = nullptr;
     _alloc = nullptr;
 }
 
-void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
-    if (_hints.HasFlag(ResourceHint::PersistentMap) && _mappedData != nullptr) {
-        return static_cast<byte*>(_mappedData) + offset;
-    }
-    const D3D12_RANGE readRange = _usage.HasFlag(BufferUse::MapRead)
-                                      ? D3D12_RANGE{offset, offset + size}
-                                      : D3D12_RANGE{0, 0};
-    void* ptr = nullptr;
-    if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
-        FAILED(hr)) {
-        if (_device->MarkDeviceLost(hr, "ID3D12Resource::Map")) return nullptr;
-        detail::FlushDiagnostics(_device->_diagnostics);
-        if (_memory == MemoryType::ReadBack && hr == E_OUTOFMEMORY) {
-            RADRAY_ERR_LOG("ID3D12Resource::Map readback failed: {} {}", GetErrorName(hr), hr);
-            return nullptr;
-        }
-        RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
-    }
-    _mappedData = ptr;
-    return static_cast<byte*>(ptr) + offset;
+Nullable<void*> BufferD3D12::GetMappedData() noexcept { return _mappedData; }
+
+bool BufferD3D12::FlushMappedRange(BufferRange range) noexcept {
+    return _mappedData && _memory == MemoryType::Upload && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
 }
 
-void BufferD3D12::Unmap() noexcept {
-    const D3D12_RANGE noWriteRange{0, 0};
-    _buf->Unmap(0, _usage.HasFlag(BufferUse::MapWrite) ? nullptr : &noWriteRange);
-    _mappedData = nullptr;
+bool BufferD3D12::InvalidateMappedRange(BufferRange range) noexcept {
+    return _mappedData && _memory == MemoryType::ReadBack && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
 }
-
-void BufferD3D12::FlushMappedRange(BufferRange) noexcept {}
-
-void BufferD3D12::InvalidateMappedRange(BufferRange) noexcept {}
 
 void BufferD3D12::SetDebugName(std::string_view name) noexcept {
     _name = string(name);
@@ -3919,11 +3955,9 @@ TimestampQueryCalibration QueryPoolD3D12::GetTimestampCalibration(CommandQueue* 
 }
 
 TextureD3D12::TextureD3D12(
-    DeviceD3D12* device,
     ComPtr<ID3D12Resource> tex,
     ComPtr<D3D12MA::Allocation> alloc) noexcept
-    : _device(device),
-      _tex(std::move(tex)),
+    : _tex(std::move(tex)),
       _alloc(std::move(alloc)) {
     _rawDesc = _tex->GetDesc();
 }
@@ -4079,7 +4113,7 @@ SamplerD3D12::SamplerD3D12(
     DeviceD3D12* device,
     CpuDescriptorHeapViewRAII heapView) noexcept
     : _device(device),
-      _samplerView(std::move(heapView)), _samplerId(device->_nextSamplerId++) {
+      _samplerView(std::move(heapView)), _samplerId(device->_nextSamplerId.fetch_add(1, std::memory_order_relaxed)) {
     if (!_samplerId) RADRAY_ABORT("D3D12 sampler identities exhausted");
 }
 
@@ -4113,14 +4147,6 @@ GpuBackend DeviceD3D12::GetBackend() noexcept {
 
 const GpuDeviceCapabilities& DeviceD3D12::GetCapabilities() const noexcept {
     return _capabilities;
-}
-
-Device* BufferD3D12::GetDevice() const noexcept {
-    return _device;
-}
-
-Device* TextureD3D12::GetDevice() const noexcept {
-    return _device;
 }
 
 TextureViewDescriptor TextureViewD3D12::GetDesc() const noexcept {

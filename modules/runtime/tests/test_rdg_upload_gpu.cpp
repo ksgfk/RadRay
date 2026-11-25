@@ -17,6 +17,10 @@ public:
     UploadPipeline(DeviceContext& device, uint32_t slots, uint64_t pageSize = 1024 * 1024) : RenderGraphFramePipeline(device, slots, pageSize) {}
     std::function<void(RDGBuilder&, FrameSlot&)> Build;
     void Wait(FrameSlot& slot) noexcept override { slot.GetQueue().Wait(); }
+    vector<RDGGpuTimingStatus> Retired;
+    void OnFrameSlotRetired(FrameSlot&, const RDGGpuTimingSnapshot& snapshot) noexcept override {
+        Retired.push_back(snapshot.Status);
+    }
 
 private:
     void ExtractFrameData(FrameSlot&) noexcept override {}
@@ -57,11 +61,15 @@ TEST_P(GpuTimingTest, PublishesOnlyRequestedScopesWithSubmittedUserSequence) {
         const auto frameId = slot.GetFrameId();
         scheduler->RunFrame();
         scheduler->WaitIdle();
+        scheduler->WaitIdle();
+        ASSERT_EQ(runner->Retired.size(), id - 19);
         const auto result = runner->GetCompletedGpuTiming(slot);
         if (mode == RDGGpuProfilingMode::Off || !device.GetCapabilities().Features.TimestampQueries || !slot.GetQueue().GetTimestampValidBits()) {
             EXPECT_FALSE(result);
+            EXPECT_EQ(runner->Retired.back(), mode == RDGGpuProfilingMode::Off ? RDGGpuTimingStatus::Off : RDGGpuTimingStatus::Unavailable);
         } else {
             ASSERT_TRUE(result);
+            EXPECT_EQ(runner->Retired.back(), RDGGpuTimingStatus::Valid);
             EXPECT_EQ(result->UserSequence, id);
             EXPECT_EQ(result->FrameId, frameId);
             ASSERT_EQ(result->Passes.size(), mode == RDGGpuProfilingMode::FrameAndPasses ? 2u : 0u);
@@ -134,7 +142,7 @@ TEST_P(VolumeClearTest, ClearsEverySliceOfSingleMipColorTarget) {
     scheduler->WaitIdle();
     vector<byte> pixels(7 * 3 * 3 * 4);
     ReadbackResultInfo result{};
-    ASSERT_TRUE(readbacks.Poll(1, 1, result, pixels.data(), pixels.size()));
+    ASSERT_EQ(readbacks.Poll(1, 1, result, pixels.data(), pixels.size()), ReadbackStatus::Ready);
     ASSERT_TRUE(result.Ready);
     for (size_t i = 0; i < pixels.size(); i += 4) {
         EXPECT_EQ(pixels[i], byte{0});
@@ -168,7 +176,7 @@ TEST_P(VolumeClearTest, PartialClearPreservesPixelsAcrossMipsAndArrayLayers) {
     scheduler->WaitIdle();
     array<byte, 12> crop{};
     ReadbackResultInfo cropped{};
-    ASSERT_TRUE(readbacks.Poll(5, 1, cropped, crop.data(), crop.size()));
+    ASSERT_EQ(readbacks.Poll(5, 1, cropped, crop.data(), crop.size()), ReadbackStatus::Ready);
     EXPECT_EQ(cropped.PackedRowPitch, 12u);
     EXPECT_EQ(gpu::test::FromBytes<uint32_t>(crop), (vector<uint32_t>{0xffff0000u, 0xffff0000u, 0xff00ff00u}));
     for (uint32_t mip = 0; mip < 2; ++mip) {
@@ -176,7 +184,7 @@ TEST_P(VolumeClearTest, PartialClearPreservesPixelsAcrossMipsAndArrayLayers) {
             const uint32_t width = 8u >> mip, height = 4u >> mip;
             vector<byte> pixels(width * height * 4);
             ReadbackResultInfo info{};
-            ASSERT_TRUE(readbacks.Poll(1 + 2 * mip + layer, 1, info, pixels.data(), pixels.size()));
+            ASSERT_EQ(readbacks.Poll(1 + 2 * mip + layer, 1, info, pixels.data(), pixels.size()), ReadbackStatus::Ready);
             ASSERT_TRUE(info.Ready);
             for (uint32_t y = 0; y < height; ++y) {
                 for (uint32_t x = 0; x < width; ++x) {

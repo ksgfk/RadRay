@@ -7,6 +7,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include <radray/enum_flags.h>
+#include <radray/logger.h>
 #include <radray/utility.h>
 
 namespace radray::gpu {
@@ -552,6 +553,10 @@ std::string_view format_as(GpuObjectTag v) noexcept {
 }
 
 std::string_view format_as(PresentMode v) noexcept {
+    return EnumNameOr(v);
+}
+
+std::string_view format_as(FenceStatus v) noexcept {
     return EnumNameOr(v);
 }
 

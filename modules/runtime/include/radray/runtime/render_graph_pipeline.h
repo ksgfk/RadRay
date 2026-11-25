@@ -14,6 +14,8 @@ namespace radray {
 
 enum class RDGGpuProfilingMode { Off, FrameOnly, FrameAndPasses };
 
+enum class RDGGpuTimingStatus { Valid, Off, Unavailable, AllocationFailed, DeviceLost };
+
 struct RDGGpuPassTiming {
     string Name;
     uint64_t Nanoseconds{};
@@ -24,6 +26,7 @@ struct RDGGpuTimingSnapshot {
     uint64_t UserSequence{};
     uint64_t TotalNanoseconds{};
     vector<RDGGpuPassTiming> Passes;
+    RDGGpuTimingStatus Status{RDGGpuTimingStatus::Off};
 };
 
 class RenderGraphFramePipeline : public FramePipeline {
@@ -34,14 +37,14 @@ public:
     void Prepare(FrameSlot& slot) noexcept final;
     void Record(FrameSlot& slot) noexcept final;
     bool Submit(FrameSlot& slot) noexcept final;
-    void OnSlotCompleted(FrameSlot& slot) noexcept final;
+    void OnSlotRetired(FrameSlot& slot, bool deviceLost) noexcept final;
     // BeginFrame 后设置，仅应用于本次提交。
     void SetGpuProfiling(FrameSlot& slot, RDGGpuProfilingMode mode, uint64_t userSequence) noexcept;
     // 快照属于已完成的槽，有效至该槽下一次 Prepare。
     Nullable<const RDGGpuTimingSnapshot*> GetCompletedGpuTiming(const FrameSlot& slot) const noexcept;
 
 protected:
-    virtual void OnGpuTimingCompleted(FrameSlot& slot, const RDGGpuTimingSnapshot& snapshot) noexcept;
+    virtual void OnFrameSlotRetired(FrameSlot& slot, const RDGGpuTimingSnapshot& snapshot) noexcept;
     virtual void ExtractFrameData(FrameSlot& slot) noexcept = 0;
     // 执行回调可在 Record 期间借用管线输入；清理时不得访问它。
     virtual void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept = 0;

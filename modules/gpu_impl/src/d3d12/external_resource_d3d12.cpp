@@ -53,8 +53,7 @@ ExternalResult<Output> ExportObject(Input* input, std::string_view operation) no
     else if constexpr (std::is_same_v<Input, Texture>) {
         const auto d = object->GetDesc();
         parameters = radray::format("dim={} {}x{} depthOrLayers={} mips={} samples={} format={} usage={} reinterpret={}", d.Dim, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.SampleCount, d.Format, d.Usage, object->_externalInfo->AllowFormatReinterpretation);
-    } else
-        parameters = radray::format("lastLocalSignal={}", object->GetLastSignaledValue());
+    }
     parameters += radray::format(" handleType={}", radray::gpu::detail::ExternalHandleName(object->_externalInfo->HandleType));
     auto handle = object->_externalHandle.Duplicate();
     if (auto* e = std::get_if<ExternalError>(&handle)) return Fail(operation, *e, parameters);
@@ -157,7 +156,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::CreateExportableTextu
     if (FAILED(hr)) return Fail("CreateExportableTexture", NativeError(hr, "ID3D12Device::CreateCommittedResource"), params);
     auto handle = Share(_device, native.Get());
     if (auto* error = std::get_if<ExternalError>(&handle)) return Fail("CreateExportableTexture", *error, params);
-    auto result = make_unique<TextureD3D12>(_device, std::move(native), ComPtr<D3D12MA::Allocation>{});
+    auto result = make_unique<TextureD3D12>(std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_dimension = desc.Dim;
     result->_format = desc.Format;
     result->_memory = desc.Memory;
@@ -185,7 +184,6 @@ ExternalResult<unique_ptr<Fence>> ExternalResourceD3D12::CreateExportableFence(c
         return Fail("CreateExportableFence", {"CreateEvent failed for the shared fence", ExternalNativeApi::Win32, error}, params);
     }
     auto result = make_unique<FenceD3D12>(_device, std::move(native), std::move(*event));
-    result->_fenceValue = 1;
     result->_externalInfo = ExternalFenceInfo{desc.HandleType, std::get<ExternalDeviceIdentity>(identity), std::nullopt};
     result->_externalHandle = std::get<OwnedExternalHandle>(std::move(handle));
     return unique_ptr<Fence>{std::move(result)};
@@ -233,7 +231,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::ImportTexture(Borrowe
     if (!Matches(d, MakeTextureResourceDesc(desc, info.AllowFormatReinterpretation), desc.Usage.HasFlag(TextureUse::Resource)) || !SharedDefaultResource(native.Get())) return Fail("ImportTexture", {"Exported texture metadata or native resource parameters do not match"}, params);
     if (info.SourceBackend == GpuBackend::D3D12 && (info.NativeFormat != uint32_t(d.Format) || info.NativeFlags != uint32_t(d.Flags) || info.NativeTiling != uint32_t(d.Layout) || info.Allocation.Size != _device->_device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes))
         return Fail("ImportTexture", {"Exported texture metadata or native resource parameters do not match"}, params);
-    auto result = make_unique<TextureD3D12>(_device, std::move(native), ComPtr<D3D12MA::Allocation>{});
+    auto result = make_unique<TextureD3D12>(std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_dimension = desc.Dim;
     result->_format = desc.Format;
     result->_memory = MemoryType::Device;
@@ -257,7 +255,6 @@ ExternalResult<unique_ptr<Fence>> ExternalResourceD3D12::ImportFence(BorrowedExt
         return Fail("ImportFence", {"CreateEvent failed for the shared fence", ExternalNativeApi::Win32, error}, params);
     }
     auto result = make_unique<FenceD3D12>(_device, std::move(native), std::move(*event));
-    result->_fenceValue = 1;
     result->_externalInfo = info;
     return unique_ptr<Fence>{std::move(result)};
 }

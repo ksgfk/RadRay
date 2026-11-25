@@ -72,7 +72,7 @@ DeviceContext 必须晚于 Scheduler 销毁。每个 Slot 的 `GetDevice()`、`G
 `BeginFrame() -> FrameSlot&` 开启下一槽，在场景更新和上传准备之前完成等待、allocator Reset、参数集解绑、帧数据清理和退役清理。
 开启后重复调用直接返回同一槽，不重复等待、析构帧对象或释放准备期登记的退役对象。
 `GetCurrentSlot()` 仅在 BeginFrame 至 Submit 返回之间返回该槽，其他时间为空。
-准备过程未调用 RunFrame 时，下一次 BeginFrame 保留本轮准备；WaitIdle 则清理并取消准备，保留下一槽索引与帧编号。
+准备过程未调用 RunFrame 时，下一次 BeginFrame 保留本轮准备；WaitIdle 则清理并取消准备，保留下一槽索引与帧编号。取消时帧槽析构已登记的对象，连同当帧设置的采样档位与用户序号一起清理。
 `RunFrame()` 可直接调用；尚未开启槽时内部自动调用 BeginFrame。完整顺序为：
 
 ```text
@@ -90,8 +90,7 @@ RunFrame：复用已开启槽（或先自动 BeginFrame）
     → RunFrame 返回，结束外部输入借用
 ```
 
-`RunFrame` 在成功提交后返回 true，GPU 的异步完成由围栏报告。设备丢失时返回 false，关闭当前槽的 `Emplace` 登记窗口，保留槽、帧号与本帧已登记的对象，供 `WaitIdle()` 回收。健康设备的内部提交被拒绝时立即终止。只有成功提交的图发布持久资源终态。调度器在等待中检出设备丢失时跳过完成回调及 GPU 计时读取。新槽和已回收的槽不调用 Wait；
-在途标记表示存在尚未由 Scheduler 回收的 Submit；即使没有提交或底层已经完成，也会在复用前调用一次 Wait。
+`RunFrame` 在成功提交后返回 true，GPU 的异步完成由围栏报告。设备丢失时返回 false，关闭当前槽的 `Emplace` 登记窗口，保留槽、帧号与本帧已登记的对象，供 `WaitIdle()` 回收。健康设备的内部提交被拒绝时立即终止。只有成功提交的图发布持久资源终态。每次成功提交的槽在 Wait 返回后收到一次 `OnSlotRetired(slot, deviceLost)`，随后清除在途标记。未提交或已回收的槽跳过 Wait 和退役回调。
 `WaitIdle()` 先等待所有在途槽，再对**全部槽**调用 `ResetCommandStorage()`，
 解除 command allocator 所有 epoch 引用。随后关闭准备窗口，按帧从旧到新对各槽调用 `ResetFrameData()`，
 清空 CPU 数据并析构登记的对象；已开始但尚未提交的当前槽最后清理。
@@ -100,7 +99,7 @@ RunFrame：复用已开启槽（或先自动 BeginFrame）
 它保留当前索引，重复调用不会重复等待已回收提交。Scheduler 析构先执行 WaitIdle，
 再销毁全部 Slot，最后销毁 Pipeline，确保 Pipeline 拥有的资源晚于命令存储释放。
 Slot 自身不持有 fence 或完成值，Reset 和析构均不等待。
-所有调用和析构遵守 [RHI 串行调用与命令存储契约](render-rhi.md#命令录制存储)，不可并发或重入。
+FrameScheduler 的调用与析构由宿主串行组织，回调期间禁止重入。命令录制遵守 [RHI 命令存储契约](render-rhi.md#命令录制存储)。
 
 ### 帧内分配与资源释放
 
@@ -227,7 +226,7 @@ Prepare 中的 `SortVisibleCommands()` 先调用 DynamicContext 的 `FinalizeVis
 
 ## GPU 资源与批量上传
 
-`gpu_resource.h/.cpp` 集中定义 `GpuBuffer` 和 `GpuTexture`，两者分别继承非原子的 `RefCountedBase<T>`。
+`GpuBuffer`、`GpuTexture` 和 `GpuUploadBuffer` 使用线程安全的侵入式引用计数。`GpuTexture` 的 View 缓存支持并发查询和创建。提交状态的快照与发布由构图和提交线程串行组织。
 初始引用数为 0；工厂分配并构造对象，
 使用显式 `IntrusivePtr` 构造取得首个强引用。计数基类统一检查溢出、下溢和带引用析构，并在归零时立即销毁对象。
 引用计数只表达 CPU 所有权，不等待 GPU；调用方须保活资源至 GPU 使用完成且相关命令存储引用解除。
@@ -263,6 +262,9 @@ Usage 默认 Resource，原生用途自动增加 CopyDestination；支持 vertex
 具体 Pass 声明 CopySource、Vertex、Index、ShaderRead 等实际用途，RDG 负责图内转换并恢复 Common。
 上传只初始化指定区间，调用方须先初始化随后读取的内容；该包装不提供映射、自动扩容或默认 shader 参数绑定。
 
+`GpuUploadBuffer::Create` 在创建期映射整块 Upload 缓冲并保留地址至析构。用 `GetSliceAlignment` 和 `AlignSliceSize` 划分切片，对齐同时满足用途约束与 `HostCoherentAtomSize`（D3D12 为 1，Vulkan 为 nonCoherentAtomSize）。工作线程可通过 `GetMappedData` 写入相互隔离的切片。提交前完成线程间交接并调用 `FlushMappedRange`，或用 `WriteAndFlush` 复制并刷新。一块切片须在最后一次读取它的 GPU 工作完成后才能覆写。
+该包装的 Borrowed / Owned 导入使用 HostWrite 初态和终态。类型化导入在 RDG 逻辑资源上登记写入由所有者负责。对同一物理缓冲混用类型化导入和图内 `UploadBuffer` 时，两种登记顺序均在 Compile 被拒绝。普通裸导入的 Upload 缓冲可使用 HostWrite，Prepare 按基址加偏移写入并刷新修改范围。
+
 ### 纹理与持久状态
 
 `GpuTexture::Create(device, descriptor)` 创建设备支持的单采样 Device 纹理，`ArrayLayers` 对 3D 表示深度，对 Cube 表示面数。
@@ -287,7 +289,7 @@ Build、Prepare、Record 不修改已提交状态。状态不表示全部区域�
 | `SnapshotBytes` | 立即复制为 OwnedBytes | 按 OwnedBytes 处理 | 原数据可在调用返回后失效 |
 | `Generated` | 保存显式数据和函数指针 | 可选 PrepareLayout 决定实际尺寸，Write 直接填最终区间 | 上下文保持到生成完成 |
 
-源 CPU 所有权与目标 GPU owner 分别表达。Build/Compile 不申请、Map 或 Flush 上传页，
+源 CPU 所有权与目标 GPU owner 分别表达。Build/Compile 不申请或刷新上传页，
 常规 Borrow/Owned/Generate 不复制 payload；Snapshot 是调用方显式选择的付费例外。
 被裁剪来源不计算布局、不写映射、不产生 Copy。CPU 消费结束、命令提交、GPU 完成是三个独立时间点。
 
@@ -298,7 +300,7 @@ CPU 源的行距以字节计，RowsPerImage 以块行计。Borrow/Owned 跳过�
 staging 将每片的有效块行连续排列，按设备约束与格式块字节数的公倍数对齐行距与偏移。
 上传默认不是图根；必须完成的初始化显式 MarkOutput。裁剪不会将请求自动排回下一帧。
 
-`CreateBuffer(RDGDynamicBufferDescriptor{MaxSize, Usage, Alignment}, source)` 声明动态 Upload 切片。
+`CreateBuffer(RDGDynamicBufferDescriptor{MaxSize, Usage, Alignment}, source)` 声明动态 Upload 切片。`IsDynamicBuffer(handle)` 可识别动态切片，其描述符的 Size 是上界，Prepare 时解析的切片给出实际大小。
 Device 缓冲上传与纹理上传的拷贝源都分配在 Staging 页。仅声明 `CopySource` 的动态切片也使用 Staging 页，
 可直接交给自定义 CopyPass。声明了管线直读用途的切片使用 Dynamic 页，即使本帧仅作为拷贝源读取。
 PrepareLayout 在可见命令固定并排序后执行，返回实际字节数；可建立索引，但不得创建 RHI 资源或生成完整 payload。
@@ -308,9 +310,7 @@ Write 接收最终映射区间，不能改变尺寸、图拓扑或登记新上�
 
 ### 每槽 UploadArena
 
-Pipeline 每槽独占 UploadArena，页首次存活分配时才创建并持久 Map；页大小默认 1 MiB，可由 Pipeline 构造参数指定。
-页直接持有 `gpu::Buffer`，由 Arena 创建 Upload 内存并设置 MapWrite、PersistentMap，保存映射地址和容量，集中调用 FlushMappedRange。
-Reset 保留映射；Clear 和析构先 Unmap 再释放页。新增页创建或映射失败时，已有页及返回的切片保持有效。
+Pipeline 每槽独占 UploadArena，默认页大小为 1 MiB，可经构造参数设置。首次分配时创建带 MapWrite 的 Upload 缓冲，保存常驻基址和容量，集中调用 FlushMappedRange。Reset 保留页供后续帧复用，Clear 和析构释放页。新页创建失败时，已有页及已返回切片仍有效。
 一次分配不跨页，空间不足追加页，本帧已使用的 buffer、offset、写指针不搬移，不复制旧页。
 D3D12 与 Vulkan 按相同规则独立复用两类页。`AllocateStaging` 的物理页仅声明 `MapWrite | CopySource`，
 切片按拷贝布局对齐，保留实际字节数，整页的 GPU 读取状态固定为 `CopySource`。
@@ -446,7 +446,7 @@ HostWrite 保留逻辑依赖但不产生 GPU 组。连续就绪 Upload 合批，
 - Raster 使用首 Pass 的 Load / Clear 和末 Pass 的 Store，`AllowUavWrites` 为全组 UAV 写访问的逻辑或；每个逻辑子 Pass 回调前重置 `SetStencilReference(0)`。
 - Raster / Compute 每组只开关一次 Encoder，但每个逻辑子 Pass 保留独立 debug group，并且 Context 只允许解析当前子 Pass 声明的资源。回调失败时立即停止后续回调并关闭 Encoder。
 
-被裁剪的 MeshPass 不触发当帧提取或排序；其独占资源不向池借出，其上传不执行 Map 或 Copy。
+被裁剪的 MeshPass 不触发当帧提取或排序；其独占资源不向池借出，其上传不申请页面或执行 Copy。
 使用 Scene 时，调用方在 RunFrame 前显式同步当前全部 registrations，不受当帧图裁剪影响。
 
 ### 上传与资源状态
@@ -510,9 +510,22 @@ Frame 0 后更新绿色材质，调用方以当前 registrations 显式同步增
 
 两个入图方法也接受 `gpu::TextureRegion2D`，可选择单采样颜色纹理的局部矩形或体纹理切片。预留计划须与该区域的宽高深和格式匹配。只指定 mip 和数组层时，预留计划须匹配整个子资源。`Poll` 按块行去掉设备行距填充，返回紧凑字节。
 
-`Poll` 通过已完成的 fence 值判断 Ready。空目标指针可重复查询格式与紧密字节数，非空目标容量不足返回失败。成功读取会映射缓冲、刷新主机缓存并逐块行去除行填充，随后回收请求。带深度的体纹理读回所选 mip 的所有切片。
+队列独占暂存缓冲。构图至执行期间须保持队列有效，销毁前等待所有已提交读回的 GPU 工作完成，例如调用 `FrameScheduler::WaitIdle()`。取消与提交均推进批次代次。同一请求 ID 可在取消后重用，旧图再调用 Prepare 会失败。放弃的图应停止录制与提交。
 
-`RenderGraphFramePipeline::SetGpuProfiling` 在 BeginFrame 后为该次提交设置外部序号与采样档位。默认 Off，FrameOnly 在图命令首尾各记录一次，FrameAndPasses 额外记录实际 GPU 执行的各个 Pass。查询值在同一命令缓冲中解析至 ReadBack 缓冲并转换至 HostRead。调度器等待该槽完成后，依据提交队列的有效位数和 tick 周期换算纳秒，发布 `OnGpuTimingCompleted` 回调。宿主也可在槽的下一次 Prepare 前用 `GetCompletedGpuTiming` 读取快照中的 FrameId、UserSequence、整帧耗时和 Pass 明细。
+`ReserveBuffer` 按字节数预留，`EnqueueReservedBuffer` 在逻辑缓冲的指定偏移登记拷贝，`EnqueueBuffer` 合并两步。源须声明 CopySource 并满足拷贝偏移对齐。Prepare 解析实际源和目标切片，动态源过短时跳过拷贝，屏障仍会使用暂存缓冲。结果的 Texture.Width 为零，PackedByteSize 为请求字节数。
+
+| `Poll` 状态 | 含义及请求生命周期 |
+|---|---|
+| Pending | 请求尚未提交或目标 Fence 未完成。 |
+| Ready | 空目标可反复查询格式和紧凑字节数。有足够空间时，先 Invalidate，再按块行复制并回收请求。 |
+| SourceOutOfRange | 动态源实际切片过短。达到该批 Fence 后报告并回收请求及暂存缓冲。 |
+| DestinationTooSmall | 目标容量不足，保留请求供重试。 |
+| InvalidRequest | ID 不存在，或缓存操作被拒绝。 |
+| DeviceLost | 设备已丢失，或 Invalidate 首次报告丢失。 |
+
+`SetGpuProfiling` 在 BeginFrame 后设置当前槽的采样档位和 UserSequence，成功提交时固化。帧槽清理会丢弃未提交设置，复用槽时默认为 Off 和序号 0。FrameOnly 记录图首尾，FrameAndPasses 额外记录各 GPU Pass。查询在同一命令缓冲内解析至 ReadBack 并转换至 HostRead。
+
+每次成功提交只触发一次 `OnFrameSlotRetired(slot, snapshot)`。快照携带 UserSequence 和 Valid、Off、Unavailable、AllocationFailed 或 DeviceLost。健康设备依据时间戳有效位数及 tick 周期换算纳秒，丢失后跳过读取。宿主可在下次 Prepare 前通过 `GetCompletedGpuTiming` 读取有效快照。
 
 ## Scene 绘制输入
 
@@ -1051,7 +1064,7 @@ Environment 必须晚于 DeviceContext 及所有依赖它的 GPU 资源销毁。
 再销毁 DeviceContext，最后销毁 Environment。DeviceContext 析构先等待其 Direct 队列，随后显式释放内部 `_pipelineCache`，最后释放 Device owner（避免独占最后一个 Device 引用时管线缓存析构访问已销毁设备）。
 如果外部仍持有同一 Device 的共享引用，Environment 也必须继续存活。
 
-调用方在环境的创建线程串行组织生命周期，RHI 的 CPU 调用遵守其串行化契约。
+环境销毁前，调用方须结束所有使用它的线程。`IsOwnerThread()` 可供宿主识别创建线程。独立资源创建与 Fence 等待遵守 [RHI 并发契约](render-rhi.md)。
 应用可使用上述多槽帧循环，或直接通过 RHI 组织 Pass、录制、同步和提交；帧资源释放由 Slot 的对象清理链承担，
 共享旧资源可将 owner 移入当前 Slot 的 `Emplace` 保活；跨 Scheduler 或跨队列的通用退役仍由应用组织。
 

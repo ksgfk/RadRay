@@ -8,6 +8,7 @@
 #include <radray/gpu/external_resource.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <mutex>
@@ -29,9 +30,9 @@ struct ObjectRecord;
 
 struct ValidationContext {
     shared_ptr<Device> NativeDevice;
-    Nullable<Device*> Owner{nullptr};
     GpuValidationOptions Options;
     mutable std::mutex Mutex;
+    uint64_t NextObjectId{1};
     unordered_map<const GpuObject*, ObjectRecord*> Objects;
     size_t LiveOwned{0};
 
@@ -129,7 +130,8 @@ struct ObjectRecord {
     GpuObject* Native;
     GpuObject* Public;
     bool Owned;
-    bool Live{true};
+    uint64_t ObjectId;
+    std::atomic<bool> Live{true};
     bool Open{false};
     size_t Dependents{0};
     vector<ObjectRecord*> Dependencies;
@@ -138,6 +140,8 @@ struct ObjectRecord {
     ObjectRecord(shared_ptr<ValidationContext> context, GpuObject* native, GpuObject* object, bool owned)
         : Context(std::move(context)), Native(native), Public(object), Owned(owned) {
         std::lock_guard lock{Context->Mutex};
+        if (!Context->NextObjectId) RADRAY_ABORT("RHI validation: object IDs exhausted");
+        ObjectId = Context->NextObjectId++;
         Context->Objects.emplace(Public, this);
         if (Owned) ++Context->LiveOwned;
     }
@@ -253,10 +257,6 @@ bool RangeFits(uint64_t total, uint64_t offset, uint64_t size, bool allowEmpty =
     return offset <= total && size <= total - offset && (allowEmpty || size != 0);
 }
 
-bool BufferRangeFits(const BufferDescriptor& desc, BufferRange range) noexcept {
-    return range.Offset < desc.Size && (range.Size == BufferRange::All() || RangeFits(desc.Size, range.Offset, range.Size));
-}
-
 uint64_t RangeSize(const BufferDescriptor& desc, BufferRange range) noexcept {
     return range.Size == BufferRange::All() ? desc.Size - range.Offset : range.Size;
 }
@@ -267,56 +267,28 @@ uint32_t ArrayLayers(const TextureDescriptor& desc) noexcept {
 
 bool Is3D(const TextureDescriptor& desc) noexcept { return desc.Dim == TextureDimension::Dim3D; }
 
+// Half-open intervals. All endpoints originate in checked buffer ranges.
 class BufferValidation final : public ValidatedObject<Buffer> {
 public:
     BufferValidation(shared_ptr<ValidationContext> context, unique_ptr<Buffer> native)
         : ValidatedObject(std::move(context), std::move(native)), Desc(Real()->GetDesc()) {}
     BufferDescriptor Desc;
-    bool Mapped{false};
-    void* Map(uint64_t offset, uint64_t size) noexcept override {
-        if (!Ready("Map")) return nullptr;
-        if (Mapped || Desc.Memory == MemoryType::Device || !RangeFits(Desc.Size, offset, size)) {
-            Context->Reject("Map", "buffer is already mapped, not host visible, or range is invalid");
-            return nullptr;
-        }
-        if (!Desc.Usage.HasFlag(BufferUse::MapRead) && !Desc.Usage.HasFlag(BufferUse::MapWrite)) {
-            Context->Reject("Map", "buffer must declare MapRead or MapWrite usage");
-            return nullptr;
-        }
-        auto* result = Real()->Map(offset, size);
-        if (result) Mapped = true;
-        return result;
+    Nullable<void*> GetMappedData() noexcept override {
+        return Ready("GetMappedData") ? Real()->GetMappedData() : nullptr;
     }
-    void Unmap() noexcept override {
-        if (!Ready("Unmap")) return;
-        if (!Mapped) {
-            Context->Reject("Unmap", "buffer is not mapped");
-            return;
-        }
-        Real()->Unmap();
-        Mapped = false;
+    bool ValidateMapped(BufferRange range, BufferUse usage, std::string_view operation) const noexcept {
+        if (!Ready(operation) || Context->NativeDevice->IsDeviceLost()) return false;
+        return (Desc.Usage.HasFlag(usage) && BufferRangeFits(Desc.Size, range)) || Context->Reject(operation, "mapped memory usage or range is invalid");
     }
-    bool ValidateMapped(BufferRange range, bool write, std::string_view operation) const noexcept {
-        if (!Ready(operation)) return false;
-        if (!Mapped && !Desc.Hints.HasFlag(ResourceHint::PersistentMap))
-            return Context->Reject(operation, "buffer is not mapped");
-        if (Desc.Memory == MemoryType::Device || !Desc.Usage.HasFlag(write ? BufferUse::MapWrite : BufferUse::MapRead) || !BufferRangeFits(Desc, range))
-            return Context->Reject(operation, "mapped memory usage or range is invalid");
-        return true;
+    bool FlushMappedRange(BufferRange range) noexcept override {
+        return ValidateMapped(range, BufferUse::MapWrite, "FlushMappedRange") && Real()->FlushMappedRange(range);
     }
-    void FlushMappedRange(BufferRange range) noexcept override {
-        if (ValidateMapped(range, true, "FlushMappedRange")) Real()->FlushMappedRange(range);
-    }
-    void InvalidateMappedRange(BufferRange range) noexcept override {
-        if (ValidateMapped(range, false, "InvalidateMappedRange")) Real()->InvalidateMappedRange(range);
+    bool InvalidateMappedRange(BufferRange range) noexcept override {
+        return ValidateMapped(range, BufferUse::MapRead, "InvalidateMappedRange") && Real()->InvalidateMappedRange(range);
     }
     BufferDescriptor GetDesc() const noexcept override {
         if (!Ready("GetDesc")) Context->Fatal("GetDesc", "cannot query a destroyed object");
         return Desc;
-    }
-    Device* GetDevice() const noexcept override {
-        if (!Ready("GetDevice")) Context->Fatal("GetDevice", "cannot query a destroyed resource");
-        return Context->Owner.Get();
     }
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
@@ -331,10 +303,6 @@ public:
     TextureDescriptor GetDesc() const noexcept override {
         if (!Ready("GetDesc")) Context->Fatal("GetDesc", "cannot query a destroyed object");
         return Desc;
-    }
-    Device* GetDevice() const noexcept override {
-        if (!Ready("GetDevice")) Context->Fatal("GetDevice", "cannot query a destroyed resource");
-        return Context->Owner.Get();
     }
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
@@ -372,21 +340,19 @@ public:
 class FenceValidation final : public ValidatedObject<Fence> {
 public:
     using ValidatedObject::ValidatedObject;
+    std::mutex SignalMutex;
+    uint64_t LastSignal{0};
+    FenceStatus WaitForStatus(uint64_t value, uint64_t timeoutNs) noexcept override {
+        if (!Ready("WaitForStatus")) Context->Fatal("WaitForStatus", "cannot wait on a destroyed fence");
+        return Real()->WaitForStatus(value, timeoutNs);
+    }
     uint64_t GetCompletedValue() const noexcept override {
         if (!Ready("GetCompletedValue")) Context->Fatal("GetCompletedValue", "cannot query a destroyed fence");
         return Real()->GetCompletedValue();
     }
-    uint64_t GetLastSignaledValue() const noexcept override {
-        if (!Ready("GetLastSignaledValue")) Context->Fatal("GetLastSignaledValue", "cannot query a destroyed fence");
-        return Real()->GetLastSignaledValue();
-    }
-    void Wait() noexcept override {
-        if (Ready("Wait")) Real()->Wait();
-    }
     void Wait(uint64_t value) noexcept override {
         if (Ready("Wait")) Real()->Wait(value);
     }
-    bool WaitFor(uint64_t value, uint64_t timeout) noexcept override { return Ready("WaitFor") && Real()->WaitFor(value, timeout); }
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
 
@@ -456,7 +422,7 @@ public:
         for (size_t i = 0; i < Values.size(); ++i) Values[i].resize(layout->Bindings[i].Count);
     }
     BindingGroupLayoutValidation* Layout;
-    bool Sealed{false};
+    std::atomic<bool> Sealed{false};
     vector<vector<std::optional<ShaderParameterValue>>> Values;
     bool ValidateValue(const BindingInfo& binding, const ShaderParameterValue& value, std::string_view operation) const noexcept {
         const auto validateBuffer = [&](Buffer* buffer, BufferRange range, bool texel, uint32_t stride, TextureFormat format) {
@@ -466,7 +432,7 @@ public:
             const auto kind = binding.Kind;
             const auto usage = kind == BindingKind::CBuffer ? BufferUse::CBuffer : kind == BindingKind::RWStructuredBuffer || kind == BindingKind::RWRawBuffer || kind == BindingKind::RWTypedBuffer ? BufferUse::UnorderedAccess
                                                                                                                                                                                                      : BufferUse::Resource;
-            if (!desc.Usage.HasFlag(usage) || !BufferRangeFits(desc, range)) return Context->Reject(operation, "buffer binding usage or range is invalid");
+            if (!desc.Usage.HasFlag(usage) || !BufferRangeFits(desc.Size, range)) return Context->Reject(operation, "buffer binding usage or range is invalid");
             const auto size = RangeSize(desc, range);
             const auto& limits = Context->NativeDevice->GetCapabilities().Limits;
             if (texel) {
@@ -642,6 +608,21 @@ public:
     Nullable<ObjectRecord*> Active{nullptr};
     uint32_t DebugDepth{0};
     vector<ObjectRecord*> EpochReferences;
+    vector<std::pair<const GpuObject*, uint64_t>> RecordedObjects;
+    void Track(const GpuObject* object) {
+        const auto record = Context->Find(object);
+        const std::pair<const GpuObject*, uint64_t> reference{object, record.Get()->ObjectId};
+        if (std::find(RecordedObjects.begin(), RecordedObjects.end(), reference) == RecordedObjects.end())
+            RecordedObjects.push_back(reference);
+    }
+    bool ReferencesLive() const noexcept {
+        std::lock_guard lock{Context->Mutex};
+        for (const auto& [object, id] : RecordedObjects) {
+            const auto found = Context->Objects.find(object);
+            if (found == Context->Objects.end() || found->second->ObjectId != id || !found->second->Live) return false;
+        }
+        return true;
+    }
     void Destroy() noexcept override {
         if (!Live) return;
         if (!CanDestroy("Destroy")) {
@@ -655,6 +636,7 @@ public:
     void ResetLogical() noexcept {
         for (auto* reference : EpochReferences) RemoveDependency(reference);
         EpochReferences.clear();
+        RecordedObjects.clear();
         Active = nullptr;
         Open = false;
         State = RecordingState::Initial;
@@ -736,7 +718,7 @@ public:
     void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override;
     void ResolveQueryData(const QueryResolveDescriptor& desc) noexcept override;
     bool ValidateTransferQueue(const TextureDescriptor& texture, const TextureRegion2D& image, uint64_t bufferOffset, std::string_view operation) const noexcept;
-    bool ValidateTextureBufferCopy(Texture* texture, SubresourceRange range, Buffer* buffer, uint64_t offset, bool toTexture, std::string_view operation) const noexcept;
+    bool ValidateTextureBufferCopy(Texture* texture, SubresourceRange range, Buffer* buffer, uint64_t offset, bool toTexture, std::string_view operation) noexcept;
     bool ValidateQueryQueue(std::string_view operation, std::optional<QueryPipelineStage> stage = std::nullopt) const noexcept;
     void SetDebugName(std::string_view name) noexcept override { ValidatedObject::ForwardDebugName(name); }
 };
@@ -833,6 +815,19 @@ public:
             this->Context->Reject("BindShaderParameterSet", "each dynamic binding requires exactly one offset");
             return;
         }
+        Command->Track(input);
+        for (const auto& expected : target.Get()->Bindings) {
+            if (expected.Immutable) continue;
+            const auto* actual = set.Get()->Layout->Resolve(expected.Binding, "BindShaderParameterSet").Get();
+            const auto index = static_cast<size_t>(actual - set.Get()->Layout->Bindings.data());
+            for (uint32_t i = 0; i < expected.Count; ++i) {
+                std::visit([&](const auto& value) {
+                    using V = std::decay_t<decltype(value)>;
+                    if constexpr (std::is_pointer_v<V>) Command->Track(value);
+                    else Command->Track(value.Target);
+                }, *set.Get()->Values[index][i]);
+            }
+        }
         this->Real()->BindShaderParameterSet(group, set.Get()->Real(), offsets);
         this->AddDependency(set.Get());
         set.Get()->Sealed = true;
@@ -869,7 +864,10 @@ public:
     bool Indirect(Buffer* buffer, uint64_t offset, uint64_t bytes, std::string_view operation) const noexcept {
         if (!Lookup(*this->Context, buffer, operation)) return false;
         const auto desc = buffer->GetDesc();
-        return (desc.Usage.HasFlag(BufferUse::Indirect) && !(offset % 4) && RangeFits(desc.Size, offset, bytes, true)) || this->Context->Reject(operation, "indirect argument usage, alignment, or range is invalid");
+        if (!desc.Usage.HasFlag(BufferUse::Indirect) || offset % 4 || !RangeFits(desc.Size, offset, bytes, true))
+            return this->Context->Reject(operation, "indirect argument usage, alignment, or range is invalid");
+        Command->Track(buffer);
+        return true;
     }
 };
 
@@ -911,6 +909,7 @@ public:
             return;
         }
         Real()->BindGraphicsPipelineState(pipeline.Get()->Real());
+        Command->Track(input);
         AddDependency(pipeline.Get());
         if (Layout.Get() != pipeline.Get()->Layout) BoundSets.clear();
         if (Pipeline.Get() != pipeline.Get()) VertexBuffers.clear();
@@ -948,7 +947,10 @@ public:
             return;
         }
         Real()->BindVertexBuffers(nativeBindings);
-        for (const auto& binding : bindings) VertexBuffers[binding.Binding] = binding.View;
+        for (const auto& binding : bindings) {
+            Command->Track(binding.View.Target);
+            VertexBuffers[binding.Binding] = binding.View;
+        }
     }
     void BindIndexBuffer(IndexBufferView view) noexcept override {
         if (!Active("BindIndexBuffer")) return;
@@ -962,6 +964,7 @@ public:
         auto converted = view;
         converted.Target = native.Get();
         Real()->BindIndexBuffer(converted);
+        Command->Track(view.Target);
         IndexBuffer = view;
     }
     bool DrawReady(std::string_view operation, bool indexed) const noexcept {
@@ -1000,10 +1003,14 @@ public:
         Real()->DrawIndexed(count, instances, first, vertexOffset, firstInstance);
     }
     void DrawIndirect(Buffer* buffer, uint64_t offset, uint32_t count) noexcept override {
-        if (DrawReady("DrawIndirect", false) && (Context->NativeDevice->GetCapabilities().Features.IndirectDraw || Context->Reject("DrawIndirect", "indirect draws are unsupported")) && Indirect(buffer, offset, uint64_t(count) * sizeof(DrawIndirectArguments), "DrawIndirect")) Real()->DrawIndirect(Lookup(*Context, buffer, "DrawIndirect").Get(), offset, count);
+        if (DrawReady("DrawIndirect", false) && (Context->NativeDevice->GetCapabilities().Features.IndirectDraw || Context->Reject("DrawIndirect", "indirect draws are unsupported")) && Indirect(buffer, offset, uint64_t(count) * sizeof(DrawIndirectArguments), "DrawIndirect")) {
+            Real()->DrawIndirect(Lookup(*Context, buffer, "DrawIndirect").Get(), offset, count);
+        }
     }
     void DrawIndexedIndirect(Buffer* buffer, uint64_t offset, uint32_t count) noexcept override {
-        if (DrawReady("DrawIndexedIndirect", true) && (Context->NativeDevice->GetCapabilities().Features.IndirectDraw || Context->Reject("DrawIndirect", "indirect draws are unsupported")) && Indirect(buffer, offset, uint64_t(count) * sizeof(DrawIndexedIndirectArguments), "DrawIndexedIndirect")) Real()->DrawIndexedIndirect(Lookup(*Context, buffer, "DrawIndexedIndirect").Get(), offset, count);
+        if (DrawReady("DrawIndexedIndirect", true) && (Context->NativeDevice->GetCapabilities().Features.IndirectDraw || Context->Reject("DrawIndirect", "indirect draws are unsupported")) && Indirect(buffer, offset, uint64_t(count) * sizeof(DrawIndexedIndirectArguments), "DrawIndexedIndirect")) {
+            Real()->DrawIndexedIndirect(Lookup(*Context, buffer, "DrawIndexedIndirect").Get(), offset, count);
+        }
     }
 };
 
@@ -1016,6 +1023,7 @@ public:
         const auto pipeline = WrapperOf<ComputePipelineValidation>(*Context, input, "BindComputePipelineState");
         if (!pipeline) return;
         Real()->BindComputePipelineState(pipeline.Get()->Real());
+        Command->Track(input);
         AddDependency(pipeline.Get());
         if (Layout.Get() != pipeline.Get()->Layout) BoundSets.clear();
         Layout = pipeline.Get()->Layout;
@@ -1038,7 +1046,9 @@ public:
         Real()->Dispatch(x, y, z);
     }
     void DispatchIndirect(Buffer* buffer, uint64_t offset) noexcept override {
-        if (DispatchReady("DispatchIndirect") && (Context->NativeDevice->GetCapabilities().Features.IndirectDispatch || Context->Reject("DispatchIndirect", "indirect dispatch is unsupported")) && Indirect(buffer, offset, sizeof(DispatchIndirectArguments), "DispatchIndirect")) Real()->DispatchIndirect(Lookup(*Context, buffer, "DispatchIndirect").Get(), offset);
+        if (DispatchReady("DispatchIndirect") && (Context->NativeDevice->GetCapabilities().Features.IndirectDispatch || Context->Reject("DispatchIndirect", "indirect dispatch is unsupported")) && Indirect(buffer, offset, sizeof(DispatchIndirectArguments), "DispatchIndirect")) {
+            Real()->DispatchIndirect(Lookup(*Context, buffer, "DispatchIndirect").Get(), offset);
+        }
     }
 };
 
@@ -1070,7 +1080,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferValidation::BeginRende
             converted.DepthStencil->Resolve->Target = target.Get();
         }
     }
-    const auto signature = ValidateRenderScope(desc, *Context->Owner.Get());
+    const auto signature = ValidateRenderScope(desc, *Context->NativeDevice);
     if (!signature) {
         Context->Reject("BeginRenderPass", "attachments, load/store operations, or render area are invalid");
         return nullptr;
@@ -1168,7 +1178,7 @@ void CommandBufferValidation::ResourceBarrier(std::span<const ResourceBarrierDes
             if (!native) return false;
             if constexpr (std::is_same_v<V, BarrierBufferDescriptor>) {
                 const auto desc = value.Target->GetDesc();
-                if (!BufferRangeFits(desc, value.Range) || !BufferStateUsage(value.Before, desc.Usage) || !BufferStateUsage(value.After, desc.Usage) || value.After.HasFlag(BufferState::Undefined)) return false;
+                if (!BufferRangeFits(desc.Size, value.Range) || !BufferStateUsage(value.Before, desc.Usage) || !BufferStateUsage(value.After, desc.Usage) || value.After.HasFlag(BufferState::Undefined)) return false;
                 if ((value.BeforeStages.value() | value.AfterStages.value()) & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute}.value()) return false;
             } else if constexpr (std::is_same_v<V, BarrierTextureDescriptor>) {
                 const auto desc = value.Target->GetDesc();
@@ -1262,6 +1272,7 @@ void CommandBufferValidation::ResourceBarrier(std::span<const ResourceBarrierDes
 #endif
         converted.push_back(barrier);
     }
+    for (const auto& barrier : barriers) std::visit([this](const auto& value) { Track(value.Target); }, barrier);
     Real()->ResourceBarrier(converted);
 }
 
@@ -1275,6 +1286,8 @@ void CommandBufferValidation::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset
         Context->Reject("CopyBufferToBuffer", "copy usage, alignment, overlap, or range is invalid");
         return;
     }
+    Track(src);
+    Track(dst);
     Real()->CopyBufferToBuffer(destination.Get(), dstOffset, source.Get(), srcOffset, size);
 }
 
@@ -1295,10 +1308,13 @@ bool CommandBufferValidation::CopyTextureToBufferRegion(const TextureToBufferCop
     const auto destination = Lookup(*Context, desc.Destination, "CopyTextureToBufferRegion");
     if (!source || !destination) return false;
     const auto texture = desc.Source->GetDesc();
-    const auto [valid, reason] = ValidateTextureReadbackRegion(texture, desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetDetail());
+    const auto [valid, reason] = ValidateTextureReadbackRegion(texture, desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Detail);
     if (!valid) return Context->Reject("CopyTextureToBufferRegion", reason);
     if (!ValidateTransferQueue(texture, desc.Region.Source, desc.Region.DestinationOffset, "CopyTextureToBufferRegion")) return false;
-    return Real()->CopyTextureToBufferRegion({source.Get(), destination.Get(), desc.Region});
+    if (!Real()->CopyTextureToBufferRegion({source.Get(), destination.Get(), desc.Region})) return false;
+    Track(desc.Source);
+    Track(desc.Destination);
+    return true;
 }
 
 bool CommandBufferValidation::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
@@ -1306,14 +1322,18 @@ bool CommandBufferValidation::CopyBufferToTextureRegion(const BufferToTextureCop
     const auto source = Lookup(*Context, desc.Source, "CopyBufferToTextureRegion");
     const auto destination = Lookup(*Context, desc.Destination, "CopyBufferToTextureRegion");
     if (!source || !destination) return false;
-    const auto [valid, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetDetail());
+    const auto [valid, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Detail);
     if (!valid) return Context->Reject("CopyBufferToTextureRegion", reason);
     if (!ValidateTransferQueue(desc.Destination->GetDesc(), desc.Region.Destination, desc.Region.SourceOffset, "CopyBufferToTextureRegion")) return false;
-    return Real()->CopyBufferToTextureRegion({source.Get(), destination.Get(), desc.Region});
+    if (!Real()->CopyBufferToTextureRegion({source.Get(), destination.Get(), desc.Region})) return false;
+    Track(desc.Source);
+    Track(desc.Destination);
+    return true;
 }
 
-bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, SubresourceRange range, Buffer* buffer, uint64_t offset, bool toTexture, std::string_view operation) const noexcept {
-    if (!Lookup(*Context, texture, operation) || !Lookup(*Context, buffer, operation)) return false;
+bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, SubresourceRange range, Buffer* buffer, uint64_t offset, bool toTexture, std::string_view operation) noexcept {
+    const auto nativeTexture = Lookup(*Context, texture, operation);
+    if (!nativeTexture || !Lookup(*Context, buffer, operation)) return false;
     const auto t = texture->GetDesc();
     const auto b = buffer->GetDesc();
     if (range.ArrayLayerCount == SubresourceRange::All || range.MipLevelCount == SubresourceRange::All || !NormalizeSubresourceRange(t, range) || !t.Usage.HasFlag(toTexture ? TextureUse::CopyDestination : TextureUse::CopySource) || !b.Usage.HasFlag(toTexture ? BufferUse::CopySource : BufferUse::CopyDestination) || t.SampleCount != 1) return Context->Reject(operation, "texture-buffer copy usage or explicit subresources are invalid");
@@ -1322,8 +1342,8 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
     if (Context->NativeDevice->GetBackend() == GpuBackend::D3D12) {
         if (!std::has_single_bit(range.Aspects.value())) return Context->Reject(operation, "D3D12 buffer-texture copies require exactly one aspect");
         if (offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT) return Context->Reject(operation, "texture-buffer copy offset is not aligned");
-        const auto* nativeTexture = static_cast<d3d12::TextureD3D12*>(Lookup(*Context, texture, operation).Get());
-        const auto& nativeDesc = nativeTexture->_rawDesc;
+        const auto* device = static_cast<d3d12::DeviceD3D12*>(Context->NativeDevice.get());
+        const auto& nativeDesc = static_cast<d3d12::TextureD3D12*>(nativeTexture.Get())->_rawDesc;
         const auto plane = range.Aspects == TextureAspect::Stencil ? 1u : 0u;
         const auto layers = Is3D(t) ? 1u : t.DepthOrArraySize;
         uint64_t end = offset;
@@ -1332,11 +1352,13 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
                 end = Align(end, uint64_t{D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT});
                 D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
                 uint64_t bytes{};
-                nativeTexture->_device->_device->GetCopyableFootprints(&nativeDesc, D3D12CalcSubresource(mip, layer, plane, t.MipLevels, layers), 1, end, &footprint, nullptr, nullptr, &bytes);
+                device->_device->GetCopyableFootprints(&nativeDesc, D3D12CalcSubresource(mip, layer, plane, t.MipLevels, layers), 1, end, &footprint, nullptr, nullptr, &bytes);
                 if (bytes == std::numeric_limits<uint64_t>::max() || !RangeFits(b.Size, footprint.Offset, bytes)) return Context->Reject(operation, "texture-buffer copy exceeds buffer range");
                 end = footprint.Offset + bytes;
             }
         }
+        Track(texture);
+        Track(buffer);
         return true;
     }
 #endif
@@ -1373,6 +1395,8 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
             end += required;
         }
     }
+    Track(texture);
+    Track(buffer);
     return true;
 }
 
@@ -1419,6 +1443,8 @@ void CommandBufferValidation::CopyTextureToTexture(const TextureCopyDescriptor& 
         return;
     }
 #endif
+    Track(desc.Source);
+    Track(desc.Destination);
     Real()->CopyTextureToTexture(converted);
 }
 
@@ -1455,6 +1481,8 @@ void CommandBufferValidation::ResolveTexture(const TextureResolveDescriptor& des
     auto converted = desc;
     converted.Source = src.Get();
     converted.Destination = dst.Get();
+    Track(desc.Source);
+    Track(desc.Destination);
     Real()->ResolveTexture(converted);
 }
 
@@ -1486,6 +1514,7 @@ void CommandBufferValidation::ResetQueryPool(QueryPool* pool, uint32_t first, ui
         Context->Reject("ResetQueryPool", "query range is invalid");
         return;
     }
+    Track(pool);
     Real()->ResetQueryPool(native.Get(), first, count);
 }
 
@@ -1500,6 +1529,7 @@ void CommandBufferValidation::WriteTimestamp(const QueryTimestampDescriptor& des
     if (!ValidateQueryQueue("WriteTimestamp", desc.Stage)) return;
     auto converted = desc;
     converted.Pool = pool.Get();
+    Track(desc.Pool);
     Real()->WriteTimestamp(converted);
 }
 
@@ -1516,6 +1546,8 @@ void CommandBufferValidation::ResolveQueryData(const QueryResolveDescriptor& des
     auto converted = desc;
     converted.Pool = pool.Get();
     converted.Destination = dst.Get();
+    Track(desc.Pool);
+    Track(desc.Destination);
     Real()->ResolveQueryData(converted);
 }
 
@@ -1559,6 +1591,7 @@ public:
                 Context->Reject("Submit", "a command buffer occurs twice in the same submission");
                 return false;
             }
+            if (!wrapper.Get()->ReferencesLive()) return Context->Reject("Submit", "recorded object has been destroyed");
             commands.push_back(wrapper.Get()->Real());
         }
         vector<Fence*> waits, signals;
@@ -1571,7 +1604,7 @@ public:
             auto* input = desc.SignalFences[i];
             const auto native = Lookup(*Context, input, "Submit");
             if (!native) return false;
-            if (desc.SignalValues[i] == std::numeric_limits<uint64_t>::max() || desc.SignalValues[i] <= input->GetLastSignaledValue() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
+            if (desc.SignalValues[i] == std::numeric_limits<uint64_t>::max() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
                 Context->Reject("Submit", "fence signal values must increase and signal each fence once");
                 return false;
             }
@@ -1602,8 +1635,26 @@ public:
         converted.SignalFences = signals;
         converted.WaitToExecute = waitSync;
         converted.ReadyToPresent = presentSync;
+        // A fence can be signaled from different queues. Lock only the signal set, in a stable order.
+        vector<FenceValidation*> ordered;
+        for (auto* input : desc.SignalFences) ordered.push_back(static_cast<FenceValidation*>(input));
+        std::ranges::sort(ordered, {}, &ObjectRecord::ObjectId);
+        vector<std::unique_lock<std::mutex>> locks;
+        for (auto* fence : ordered) locks.emplace_back(fence->SignalMutex);
+        for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
+            if (desc.SignalValues[i] <= static_cast<FenceValidation*>(desc.SignalFences[i])->LastSignal) {
+                locks.clear();
+                return Context->Reject("Submit", "fence signal values must increase");
+            }
+        }
         if (!Real()->Submit(converted)) return false;
-        for (auto* command : desc.CmdBuffers) static_cast<CommandBufferValidation*>(command)->State = CommandBufferValidation::RecordingState::Submitted;
+        for (size_t i = 0; i < desc.SignalFences.size(); ++i)
+            static_cast<FenceValidation*>(desc.SignalFences[i])->LastSignal = desc.SignalValues[i];
+        for (auto* input : desc.CmdBuffers) {
+            auto* command = static_cast<CommandBufferValidation*>(input);
+            command->State = CommandBufferValidation::RecordingState::Submitted;
+            command->RecordedObjects.clear();
+        }
         return true;
     }
 };
@@ -1767,10 +1818,9 @@ private:
 
 class DeviceValidation final : public Device {
 public:
-    explicit DeviceValidation(shared_ptr<ValidationContext> context) : _context(std::move(context)) { _context->Owner = this; }
+    explicit DeviceValidation(shared_ptr<ValidationContext> context) : _context(std::move(context)) {}
     ~DeviceValidation() noexcept override {
         if (LiveChildren()) _context->Fatal("device destructor", "destroy all device objects before their device");
-        _context->Owner = nullptr;
     }
     bool IsValid() const noexcept override { return _context->NativeDevice->IsValid(); }
     bool LiveChildren() const noexcept {
@@ -1887,13 +1937,10 @@ public:
     }
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override {
         if (!Ready("CreateBuffer")) return nullptr;
-        constexpr auto bufferHints = ResourceHint::Dedicated | ResourceHint::PersistentMap;
-        if ((desc.Hints.value() & ~bufferHints.value()) || !desc.Size || !ValidEnum(desc.Memory) || !desc.Usage || (desc.Usage.value() & ~((uint32_t(BufferUse::Indirect) << 1) - 1)) || (GetCapabilities().Limits.MaxBufferSize && desc.Size > GetCapabilities().Limits.MaxBufferSize) || (desc.Memory == MemoryType::Device && (desc.Usage.HasFlag(BufferUse::MapRead) || desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Hints.HasFlag(ResourceHint::PersistentMap))) || (desc.Hints.HasFlag(ResourceHint::PersistentMap) && !desc.Usage.HasFlag(BufferUse::MapRead) && !desc.Usage.HasFlag(BufferUse::MapWrite))) {
-            _context->Reject("CreateBuffer", "buffer size, usage, memory, or persistent mapping descriptor is invalid");
-            return nullptr;
-        }
-        if ((desc.Usage.HasFlag(BufferUse::MapRead) && (desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Memory != MemoryType::ReadBack)) || (desc.Usage.HasFlag(BufferUse::MapWrite) && desc.Memory != MemoryType::Upload)) {
-            _context->Reject("CreateBuffer", "MapRead requires readback memory and MapWrite requires upload memory");
+        if (!desc.Size || !ValidEnum(desc.Memory) || !IsBufferMemoryUsageValid(desc) || !desc.Usage ||
+            (desc.Usage.value() & ~((uint32_t(BufferUse::Indirect) << 1) - 1)) ||
+            (GetCapabilities().Limits.MaxBufferSize && desc.Size > GetCapabilities().Limits.MaxBufferSize)) {
+            _context->Reject("CreateBuffer", "invalid buffer size, memory, usage or hints");
             return nullptr;
         }
         if (GetBackend() == GpuBackend::D3D12 && !desc.Usage.HasFlag(BufferUse::UnorderedAccess) &&

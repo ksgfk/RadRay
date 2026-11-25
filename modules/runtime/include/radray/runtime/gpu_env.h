@@ -41,7 +41,7 @@ private:
         Nullable<gpu::InstanceVulkan*> instance) noexcept;
 
     gpu::GpuBackend _backend;
-    std::thread::id _owner;
+    const std::thread::id _creationThread;
     unique_ptr<gpu::DXGIFactory> _factory;
     Nullable<gpu::InstanceVulkan*> _instance;
     bool _validation;
