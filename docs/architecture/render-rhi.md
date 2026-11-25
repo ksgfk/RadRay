@@ -54,6 +54,10 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 未映射的调用由 RHI 校验拒绝。`PersistentMap` allocation 在创建时已映射，允许在显式 `Map` 之前或
 `Unmap` 之后执行缓存操作；usage 与范围校验仍然适用。Vulkan 非 coherent 范围的 atom 对齐由 VMA 处理。
 
+读回缓冲需要调用原生映射接口时，D3D12 的 `E_OUTOFMEMORY` 及 Vulkan 的
+`VK_ERROR_MEMORY_MAP_FAILED`、`VK_ERROR_OUT_OF_HOST_MEMORY`、`VK_ERROR_OUT_OF_DEVICE_MEMORY`
+会使 `Buffer::Map` 记录错误并返回空指针。两个后端在映射调用报告设备丢失时均返回空指针，并锁存 `Device::IsDeviceLost()`。
+
 Vulkan 创建 Device 缓冲和纹理时使用 VMA 的 `VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE`，优先设备本地内存。
 Upload 和 ReadBack 缓冲使用 `VMA_MEMORY_USAGE_AUTO`。`MemoryType::Upload` 要求主机可见、顺序写入。
 VMA 根据 Vulkan buffer usage 选型。独显上，纯传输用途优先非 `DEVICE_LOCAL` 主机内存，包含顶点、索引、常量、
@@ -918,6 +922,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 重建一旦尝试替换旧链，无论 native 创建还是 image 初始化失败，都通过故障清理排空设备、
 等待成功提交的 acquire fence，销毁新链和所有保留代，保持无可 acquire 的状态；保留 surface
 与请求配置，下一次从空链重试。绝不恢复或再次传入已退休的 `oldSwapchain`。
+首次创建 Vulkan 交换链时，若底层返回 `VK_ERROR_DEVICE_LOST`，`CreateSwapChain` 返回空并锁存 `Device::IsDeviceLost()`。
 surface 的 `maxImageCount == 0` 表示没有上限，只应用最小值限制。
 
 每次创建或重建先用 `vkGetPhysicalDeviceSurfaceSupportKHR` 检查指定 present queue 的实际 family。

@@ -3840,7 +3840,12 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
     void* ptr = nullptr;
     if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
         FAILED(hr)) {
+        if (_device->MarkDeviceLost(hr, "ID3D12Resource::Map")) return nullptr;
         detail::FlushDiagnostics(_device->_diagnostics);
+        if (_memory == MemoryType::ReadBack && hr == E_OUTOFMEMORY) {
+            RADRAY_ERR_LOG("ID3D12Resource::Map readback failed: {} {}", GetErrorName(hr), hr);
+            return nullptr;
+        }
         RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
     }
     _mappedData = ptr;
