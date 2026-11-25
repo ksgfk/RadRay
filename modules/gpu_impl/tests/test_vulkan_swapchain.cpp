@@ -227,6 +227,28 @@ protected:
     unique_ptr<SwapChain> _swapchain;
 };
 
+TEST_F(VulkanSwapChainWindowTest, FailedCreationLatchesOnlyDeviceLoss) {
+    const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
+    auto device = vulkan::CreateDeviceVulkan({.Queues = queues});
+    ASSERT_TRUE(device);
+    const auto client = ClientRect();
+    const SwapChainDescriptor desc{.PresentQueue = &test::DirectQueue(*device.Get()), .NativeHandler = _window,
+                                   .Width = uint32_t(client.right), .Height = uint32_t(client.bottom), .BackBufferCount = 3,
+                                   .Format = TextureFormat::BGRA8_UNORM, .PresentMode = PresentMode::FIFO};
+
+    device->_ftb.vkCreateSwapchainKHR = +[](VkDevice, const VkSwapchainCreateInfoKHR*, const VkAllocationCallbacks*, VkSwapchainKHR*) {
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    };
+    EXPECT_FALSE(device->CreateSwapChain(desc));
+    ASSERT_FALSE(device->IsDeviceLost());
+
+    device->_ftb.vkCreateSwapchainKHR = +[](VkDevice, const VkSwapchainCreateInfoKHR*, const VkAllocationCallbacks*, VkSwapchainKHR*) {
+        return VK_ERROR_DEVICE_LOST;
+    };
+    EXPECT_FALSE(device->CreateSwapChain(desc));
+    EXPECT_TRUE(device->IsDeviceLost());
+}
+
 TEST_F(VulkanSwapChainWindowTest, PresentsBeforeAndAfterResize) {
     const auto client = ClientRect();
     _swapchain = _device->CreateSwapChain({.PresentQueue = &test::DirectQueue(*_device), .NativeHandler = _window,

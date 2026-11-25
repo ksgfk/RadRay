@@ -1407,6 +1407,7 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     VkImageUsageFlags imageUsage{};
     VkSwapchainKHR swapchain = _CreateVkSwapChain(this, surface.get(), desc, VK_NULL_HANDLE, swapchainSize, rawFormat, imageUsage, createResult);
     if (swapchain == VK_NULL_HANDLE) {
+        MarkDeviceLost(createResult, "CreateSwapChain");
         return nullptr;
     }
     auto result = make_unique<SwapChainVulkan>(this, presentQueue, std::move(surface), swapchain, desc);
@@ -4836,6 +4837,12 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
     } else {
         if (auto vr = vmaMapMemory(_device->_vma->_vma, _allocation, &mappedData);
             vr != VK_SUCCESS) {
+            if (_device->MarkDeviceLost(vr, "vmaMapMemory")) return nullptr;
+            if (_memory == MemoryType::ReadBack && (vr == VK_ERROR_MEMORY_MAP_FAILED ||
+                    vr == VK_ERROR_OUT_OF_HOST_MEMORY || vr == VK_ERROR_OUT_OF_DEVICE_MEMORY)) {
+                RADRAY_ERR_LOG("vmaMapMemory readback failed: {}", vr);
+                return nullptr;
+            }
             RADRAY_ABORT("vmaMapMemory failed: {}", vr);
         }
         mappedData = static_cast<byte*>(mappedData) + offset;
