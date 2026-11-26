@@ -76,9 +76,8 @@ TEST(VulkanDeviceLoss, FrozenTimelineAndSingleIdleBeforeNativeDestruction) {
             } else if (lossAt == LossAt::Drain) {
                 chain.Destroy();
             } else {
-                Fence* signal = &fence;
-                uint64_t value = 8;
-                EXPECT_FALSE(queue.Submit({.SignalFences = {&signal, 1}, .SignalValues = {&value, 1}}));
+                FenceSignalDescriptor signal[]{{&fence, 8}};
+                EXPECT_FALSE(queue.Submit({.SignalFences = signal}));
             }
             EXPECT_TRUE(device.IsDeviceLost());
             EXPECT_EQ(probe.QueueIdles, lossAt == LossAt::Drain ? 1 : 0);
@@ -259,7 +258,7 @@ protected:
         test::Barrier(*recording.Commands, {BarrierTextureDescriptor{.Target = frame.GetBackBuffer(), .Before = TextureState::Undefined, .After = TextureState::Present}});
         recording.Commands->End();
         CommandBuffer* commands[]{recording.Commands.get()};
-        SwapChainSyncObject* waits[]{frame.GetWaitToDraw()};
+        SwapChainWaitDescriptor waits[]{{frame.GetWaitToDraw(), PipelineStage::BottomOfPipe}};
         SwapChainSyncObject* signals[]{frame.GetReadyToPresent()};
         auto& queue = test::DirectQueue(*_device);
         queue.Submit({.CmdBuffers = commands, .WaitToExecute = waits, .ReadyToPresent = signals});

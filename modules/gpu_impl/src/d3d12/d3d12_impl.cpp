@@ -2557,10 +2557,9 @@ void CmdQueueD3D12::Destroy() noexcept {
 bool CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     RADRAY_PROFILE_SCOPE_N("CmdQueueD3D12::Submit");
     if (_device->IsDeviceLost() || _device->MarkDeviceLost(_device->_device->GetDeviceRemovedReason(), "CommandQueue::Submit")) return false;
-    for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
-        auto* f = CastD3D12Object(desc.WaitFences[i]);
-        uint64_t waitValue = desc.WaitValues[i];
-        if (!_CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait")) return false;
+    for (const auto& wait : desc.WaitFences) {
+        auto* f = CastD3D12Object(wait.Target);
+        if (!_CheckD3D12Result(_device, _queue->Wait(f->_fence.Get(), wait.Value), "ID3D12CommandQueue::Wait")) return false;
     }
 
     vector<ID3D12CommandList*> submits;
@@ -2577,10 +2576,9 @@ bool CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 #endif
     }
 
-    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
-        auto* f = CastD3D12Object(desc.SignalFences[i]);
-        uint64_t signalValue = desc.SignalValues[i];
-        if (!_CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal")) return false;
+    for (const auto& signal : desc.SignalFences) {
+        auto* f = CastD3D12Object(signal.Target);
+        if (!_CheckD3D12Result(_device, _queue->Signal(f->_fence.Get(), signal.Value), "ID3D12CommandQueue::Signal")) return false;
     }
     return true;
 }

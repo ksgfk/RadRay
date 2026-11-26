@@ -404,13 +404,13 @@ TEST_P(ConcurrentQueueTest, SecondQueueSignalsWhileFirstWaitsForIdle) {
     auto& first = test::DirectQueue(device);
     auto& second = *device.GetCommandQueue(QueueType::Direct, 1).Get();
     auto gate = device.CreateFence().Unwrap();
-    Fence* fences[]{gate.get()};
-    uint64_t values[]{1};
-    ASSERT_TRUE(first.Submit({.WaitFences = fences, .WaitValues = values}));
+    FenceWaitDescriptor wait[]{{gate.get(), 1}};
+    FenceSignalDescriptor signal[]{{gate.get(), 1}};
+    ASSERT_TRUE(first.Submit({.WaitFences = wait}));
     std::latch started{1};
     std::jthread consumer{[&] { started.count_down(); first.Wait(); }};
     started.wait();
-    EXPECT_TRUE(second.Submit({.SignalFences = fences, .SignalValues = values}));
+    EXPECT_TRUE(second.Submit({.SignalFences = signal}));
     consumer.join();
     EXPECT_EQ(gate->GetCompletedValue(), 1u);
 }
@@ -426,8 +426,8 @@ TEST_P(ConcurrentQueueTest, DownstreamFenceProvesBothEarlierReadbackWritesComple
     auto readback = test::CreateReadbackBuffer(device, sizeof(value)).Unwrap();
     auto written = device.CreateFence().Unwrap();
     auto joined = device.CreateFence().Unwrap();
-    Fence* ready[]{written.get()}, *done[]{joined.get()};
-    uint64_t one[]{1}, two[]{2}, four[]{4};
+    FenceSignalDescriptor firstWrite[]{{written.get(), 1}}, lastWrite[]{{written.get(), 4}}, done[]{{joined.get(), 1}};
+    FenceWaitDescriptor ready[]{{written.get(), 2}};
     auto first = test::BeginRecording(device);
     auto second = test::BeginRecording(device);
     for (auto* recording : {&first, &second}) {
@@ -438,9 +438,9 @@ TEST_P(ConcurrentQueueTest, DownstreamFenceProvesBothEarlierReadbackWritesComple
         recording->Commands->End();
     }
     CommandBuffer* a[]{first.Commands.get()}, *b[]{second.Commands.get()};
-    ASSERT_TRUE(writer.Submit({.CmdBuffers = a, .SignalFences = ready, .SignalValues = one}));
-    ASSERT_TRUE(writer.Submit({.CmdBuffers = b, .SignalFences = ready, .SignalValues = four}));
-    ASSERT_TRUE(join.Submit({.SignalFences = done, .SignalValues = one, .WaitFences = ready, .WaitValues = two}));
+    ASSERT_TRUE(writer.Submit({.CmdBuffers = a, .SignalFences = firstWrite}));
+    ASSERT_TRUE(writer.Submit({.CmdBuffers = b, .SignalFences = lastWrite}));
+    ASSERT_TRUE(join.Submit({.WaitFences = ready, .SignalFences = done}));
     ASSERT_EQ(joined->WaitForStatus(1, 3'000'000'000), FenceStatus::Completed);
     EXPECT_EQ(test::FromBytes<uint32_t>(test::MapAndRead(*readback)), (vector<uint32_t>{value}));
     EXPECT_EQ(TakeRhiValidationErrors(), 0u);
@@ -457,9 +457,8 @@ TEST_P(ConcurrentQueueTest, InvalidatingFirstReadbackPreservesAGatedOverwrite) {
     auto readback = test::CreateReadbackBuffer(device, sizeof(value)).Unwrap();
     auto gate = device.CreateFence().Unwrap();
     auto done = device.CreateFence().Unwrap();
-    Fence* completion[]{done.get()};
-    Fence* unblock[]{gate.get()};
-    uint64_t one[]{1}, two[]{2};
+    FenceSignalDescriptor firstDone[]{{done.get(), 1}}, lastDone[]{{done.get(), 2}}, unblock[]{{gate.get(), 1}};
+    FenceWaitDescriptor wait[]{{gate.get(), 1, PipelineStage::Copy}};
     auto first = test::BeginRecording(device);
     auto second = test::BeginRecording(device);
     for (auto* recording : {&first, &second}) {
@@ -470,18 +469,18 @@ TEST_P(ConcurrentQueueTest, InvalidatingFirstReadbackPreservesAGatedOverwrite) {
         recording->Commands->End();
     }
     CommandBuffer* a[]{first.Commands.get()}, *b[]{second.Commands.get()};
-    ASSERT_TRUE(queue.Submit({.CmdBuffers = a, .SignalFences = completion, .SignalValues = one}));
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = a, .SignalFences = firstDone}));
     ASSERT_EQ(done->WaitForStatus(1, 3'000'000'000), FenceStatus::Completed);
     // Instrumented drivers may block inside a native submit containing work.
     // Keep the host that releases its gate independent of that call.
     std::latch enteringSubmit{1};
     std::jthread writer{[&] {
         enteringSubmit.count_down();
-        EXPECT_TRUE(queue.Submit({.CmdBuffers = b, .SignalFences = completion, .SignalValues = two, .WaitFences = unblock, .WaitValues = one}));
+        EXPECT_TRUE(queue.Submit({.CmdBuffers = b, .WaitFences = wait, .SignalFences = lastDone}));
     }};
     enteringSubmit.wait();
     EXPECT_EQ(test::MapAndRead(*readback).size(), sizeof(value));
-    EXPECT_TRUE(producer.Submit({.SignalFences = unblock, .SignalValues = one}));
+    EXPECT_TRUE(producer.Submit({.SignalFences = unblock}));
     writer.join();
     ASSERT_EQ(done->WaitForStatus(2, 3'000'000'000), FenceStatus::Completed);
     EXPECT_EQ(test::FromBytes<uint32_t>(test::MapAndRead(*readback)), (vector<uint32_t>{value}));

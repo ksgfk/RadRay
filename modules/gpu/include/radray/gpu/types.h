@@ -224,6 +224,22 @@ enum class QueueType : uint32_t {
     MAX_COUNT
 };
 
+enum class PipelineStage : uint32_t {
+    NONE = 0,
+    TopOfPipe = 1u << 0,
+    DrawIndirect = 1u << 1,
+    VertexInput = 1u << 2,
+    VertexShader = 1u << 3,
+    PixelShader = 1u << 4,
+    DepthStencil = 1u << 5,
+    ColorAttachment = 1u << 6,
+    ComputeShader = 1u << 7,
+    Copy = 1u << 8,
+    BottomOfPipe = 1u << 9,
+    AllGraphics = 1u << 10,
+    AllCommands = 1u << 11,
+};
+
 enum class SampleCount : uint32_t {
     X1 = 1,
     X2 = 2,
@@ -578,6 +594,8 @@ struct is_flags<gpu::ResolveMode> : public std::true_type {};
 template <>
 struct is_flags<gpu::TextureAspect> : public std::true_type {};
 template <>
+struct is_flags<gpu::PipelineStage> : public std::true_type {};
+template <>
 struct is_flags<gpu::ShaderStage> : public std::true_type {};
 template <>
 struct is_compound_enum_flags<gpu::ShaderStage> : public std::true_type {};
@@ -593,6 +611,7 @@ using SampleCountMask = EnumFlags<gpu::SampleCount>;
 using BufferStates = EnumFlags<gpu::BufferState>;
 using TextureStates = EnumFlags<gpu::TextureState>;
 using ResolveModes = EnumFlags<ResolveMode>;
+using PipelineStages = EnumFlags<PipelineStage>;
 using ShaderStages = EnumFlags<ShaderStage>;
 using TextureAspects = EnumFlags<TextureAspect>;
 
@@ -819,14 +838,28 @@ struct TimestampClockCalibrationResult {
     int64_t NativeError{0};
 };
 
+struct FenceWaitDescriptor {
+    Fence* Target{nullptr};
+    uint64_t Value{0};
+    PipelineStages DstStages{PipelineStage::AllCommands};
+};
+
+struct FenceSignalDescriptor {
+    Fence* Target{nullptr};
+    uint64_t Value{0};
+};
+
+struct SwapChainWaitDescriptor {
+    SwapChainSyncObject* Target{nullptr};
+    PipelineStages DstStages{PipelineStage::AllCommands};
+};
+
 struct CommandQueueSubmitDescriptor {
-    std::span<CommandBuffer*> CmdBuffers{};
-    std::span<Fence*> SignalFences{};
-    std::span<uint64_t> SignalValues{};
-    std::span<Fence*> WaitFences{};
-    std::span<uint64_t> WaitValues{};
-    std::span<SwapChainSyncObject*> WaitToExecute{};
-    std::span<SwapChainSyncObject*> ReadyToPresent{};
+    std::span<CommandBuffer* const> CmdBuffers{};
+    std::span<const FenceWaitDescriptor> WaitFences{};
+    std::span<const FenceSignalDescriptor> SignalFences{};
+    std::span<const SwapChainWaitDescriptor> WaitToExecute{};
+    std::span<SwapChainSyncObject* const> ReadyToPresent{};
 };
 
 struct BufferRange {
@@ -848,6 +881,8 @@ struct BarrierBufferDescriptor {
     BufferRange Range{BufferRange::AllRange()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
     ExternalOwnershipTransfer ExternalTransfer{ExternalOwnershipTransfer::None};
+    // Include the destination stages in the source scope to chain a preceding queue wait.
+    bool AfterQueueWait{false};
 };
 
 struct SubresourceRange {
@@ -871,6 +906,8 @@ struct BarrierTextureDescriptor {
     SubresourceRange Range{SubresourceRange::AllSub()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
     ExternalOwnershipTransfer ExternalTransfer{ExternalOwnershipTransfer::None};
+    // Include the destination stages in the source scope to chain a preceding queue wait.
+    bool AfterQueueWait{false};
 };
 
 struct BarrierUavDescriptor {
@@ -1904,6 +1941,7 @@ public:
 AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
 SubresourceRange ResolveSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
+bool AreWaitStagesSupported(QueueType queue, PipelineStages stages) noexcept;
 bool IsValidShaderStages(ShaderStages stages) noexcept;
 bool IsValidSamplerDescriptor(const SamplerDescriptor& s) noexcept;
 bool IsValidBindingMapping(const BindingDescriptor& b, GpuBackend backend) noexcept;
@@ -1937,6 +1975,7 @@ std::string_view format_as(SampleCount value) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
+std::string_view format_as(PipelineStage v) noexcept;
 std::string_view format_as(BufferState v) noexcept;
 std::string_view format_as(ResolveMode v) noexcept;
 std::string_view format_as(TextureState v) noexcept;

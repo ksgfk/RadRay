@@ -453,6 +453,23 @@ VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept {
     }
 }
 
+VkPipelineStageFlags PipelineStagesToVulkan(PipelineStages stages) noexcept {
+    VkPipelineStageFlags flags = 0;
+    if (stages.HasFlag(PipelineStage::TopOfPipe)) flags |= VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    if (stages.HasFlag(PipelineStage::DrawIndirect)) flags |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+    if (stages.HasFlag(PipelineStage::VertexInput)) flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    if (stages.HasFlag(PipelineStage::VertexShader)) flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+    if (stages.HasFlag(PipelineStage::PixelShader)) flags |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    if (stages.HasFlag(PipelineStage::DepthStencil)) flags |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    if (stages.HasFlag(PipelineStage::ColorAttachment)) flags |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (stages.HasFlag(PipelineStage::ComputeShader)) flags |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    if (stages.HasFlag(PipelineStage::Copy)) flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (stages.HasFlag(PipelineStage::BottomOfPipe)) flags |= VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    if (stages.HasFlag(PipelineStage::AllGraphics)) flags |= VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    if (stages.HasFlag(PipelineStage::AllCommands)) flags |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    return flags;
+}
+
 VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept {
     VkAccessFlags access = 0;
     if (v.HasFlag(BufferState::HostRead)) {

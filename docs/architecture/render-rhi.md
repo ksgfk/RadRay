@@ -252,7 +252,7 @@ Vulkan 将字节行距和块行间距转换为 `VkBufferImageCopy` 的 texel 单
 2D / 2D array / cube layer 可以互相复制，mip、layer、区域、copy usage 仍逐项检查。
 D3D12 每次复制的源、目标必须属于不同 subresource，即使同一 subresource 内的区域互不重叠也拒绝。
 D3D12 backbuffer 描述提供 CopySource / CopyDestination，并按原生 DENY_SHADER_RESOURCE
-标志报告 Resource；不会因其为外部纹理而丢失实际支持的复制用途。
+标志报告 Resource。Vulkan 创建或重建交换链时，按 surface 支持的 transfer source / destination 分别申请并报告 CopySource / CopyDestination。
 
 Vulkan 的整子资源 buffer/image 复制一次只处理一个 aspect。组合 depth/stencil 格式必须显式选择
 `Depth` 或 `Stencil`，不能使用展开为双 aspect 的 `Auto`。Stencil 每 texel 为 1 字节，D16 depth 为
@@ -603,12 +603,11 @@ Vulkan 传统 render-pass 路径不需要对应 begin flag，写阶段是否合�
 
 `ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>`，
 调用方给出 before/after 状态。gpu_impl 层**不做** per-resource 状态跟踪，初始状态在创建时固化
-（buffer 按 memory type 映射；D3D12 texture 使用 COMMON，Vulkan image 使用 UNDEFINED layout）。Buffer/Texture barrier 均不支持跨队列
-ownership transfer；Vulkan 的源/目标 queue family 均为 `VK_QUEUE_FAMILY_IGNORED`。
+（buffer 按 memory type 映射；D3D12 texture 使用 COMMON，Vulkan image 使用 UNDEFINED layout）。普通 Buffer/Texture barrier 的 Vulkan 源和目标 queue family 均为 `VK_QUEUE_FAMILY_IGNORED`。显式 ExternalTransfer 用于外部所有权交接。
 
 后端各自把状态对翻译成原生形式：D3D12 把 UAV→UAV 变成 UAV barrier，把无变化和
 PRESENT↔COMMON 这类等价转换直接跳过；Vulkan 生成 buffer/image memory barrier，
-access mask 与 layout 由 helper 映射，swapchain image 从 Undefined 转换时补 src stage。
+access mask 与 layout 由 helper 映射。`AfterQueueWait` 将目标阶段并入源阶段，使窄阶段的队列等待先于首次资源屏障。交换链首次转换规则见[同步](#同步)。
 
 `BarrierUavDescriptor` 显式表达 UAV 写入后的 shader read/write memory ordering，`Target` 必须是
 非空 texture 或 buffer。D3D12 使用 resource UAV barrier；Vulkan 使用 shader write → shader
@@ -878,15 +877,14 @@ Vulkan 的 [External Image Implied Layouts](https://docs.vulkan.org/spec/latest/
 
 ## 同步
 
-`CommandQueueSubmitDescriptor` 一次表达三类同步：fence + value 对、`WaitToExecute`
-（acquire 信号量）、`ReadyToPresent`（present 信号量）。
+`CommandQueueSubmitDescriptor` 中，每个 `FenceWaitDescriptor` 同时指定 fence、值和 `DstStages`，每个 `SwapChainWaitDescriptor` 为 acquire 对象指定自己的等待阶段。两者默认等待 `PipelineStage::AllCommands`。
+`FenceSignalDescriptor` 指定 fence 和值，`ReadyToPresent` 保存呈现信号对象，二者均在本次提交末尾发出。
 
-Vulkan 的 acquire wait 使用 `ALL_COMMANDS`。RHI 不限制 acquired image 的首次访问阶段，
-布局转换、transfer readback 与颜色附件访问都必须在 acquire 完成之后；不能只等待颜色/计算阶段。
+RHI 校验拒绝空掩码和未知位。Copy 队列接受 TopOfPipe、Copy、BottomOfPipe、AllCommands；Compute 还接受 DrawIndirect、ComputeShader；Direct 接受所有已定义阶段。Vulkan 还检查实际 queue family 支持的阶段。
 
-两个后端在这里不对称：Vulkan 完整实现三类；D3D12 的 `Submit`
-只处理 fence，忽略两个 swapchain 同步槽，`AcquireNext` 也对它们传 `nullptr`——D3D12 靠
-DXGI 的 frame-latency waitable object 达到同一效果。
+Vulkan Sync1 将每个等待的阶段按信号量顺序传入 `VkSubmitInfo::pWaitDstStageMask`。交换链图像从 Undefined 或 Present 首次转换时，单独发出 image barrier，源访问掩码为零，源和目标都取转换后的用途阶段。颜色输出、复制、直接转 Present 分别对应 ColorAttachment、Copy、BottomOfPipe。[Vulkan 提交与交换链同步](https://docs.vulkan.org/refpages/latest/refpages/source/VkSubmitInfo.html)
+
+D3D12 将每项 fence 等待或信号转成队列级 Wait / Signal。DXGI 通过 frame-latency waitable object 管理获取，返回帧的两个交换链同步指针均为空。
 
 `Fence` 在 D3D12 使用 `ID3D12Fence` 和 Win32 事件池，
 在 Vulkan 是 timeline semaphore；设备创建时显式检查 `timelineSemaphore`，不支持则创建失败。

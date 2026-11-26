@@ -475,6 +475,27 @@ private:
     uint32_t _pass;
 };
 
+// The plan borrows its frame slot. Build() spans are valid until the plan is modified or destroyed.
+class RDGSubmitPlan final {
+public:
+    RDGSubmitPlan(const RDGSubmitPlan&) = delete;
+    RDGSubmitPlan& operator=(const RDGSubmitPlan&) = delete;
+    RDGSubmitPlan(RDGSubmitPlan&&) noexcept = default;
+    void AddWaitFence(gpu::Fence* fence, uint64_t value, gpu::PipelineStages dstStages = gpu::PipelineStage::AllCommands);
+    void AddSignalFence(gpu::Fence* fence, uint64_t value);
+    gpu::CommandQueueSubmitDescriptor Build() const noexcept;
+
+private:
+    friend class CompiledRDG;
+    RDGSubmitPlan(FrameSlot& slot, const gpu::CommandQueueSubmitDescriptor& prepared);
+    gpu::QueueType _queueType;
+    std::pmr::vector<gpu::CommandBuffer*> _commands;
+    std::pmr::vector<gpu::FenceWaitDescriptor> _waits;
+    std::pmr::vector<gpu::FenceSignalDescriptor> _signals;
+    std::span<const gpu::SwapChainWaitDescriptor> _acquire;
+    std::span<gpu::SwapChainSyncObject* const> _present;
+};
+
 class CompiledRDG final {
 public:
     explicit CompiledRDG(detail::RDGData& data) noexcept;
@@ -486,6 +507,7 @@ public:
     // 计时查询 0/1 保留给整帧，之后按实际 GPU 录制顺序每个 Pass 两项。
     vector<string> GetRecordedPassNames() const;
     bool Record(gpu::CommandBuffer& commandBuffer, Nullable<gpu::QueryPool*> passTimestamps = nullptr) noexcept;
+    RDGSubmitPlan CreateSubmitPlan(std::span<gpu::CommandBuffer* const> cmdBuffers) const;
     void CommitSubmittedStates() noexcept;
 
 private:
@@ -499,12 +521,35 @@ private:
     bool _prepareAttempted{false}, _prepared{false}, _recordAttempted{false}, _recorded{false}, _committed{false};
 };
 
-// 外部同步由调用方负责；这些标志记录所有权屏障。
+// 外部队列所有权屏障方向。
 class RDGExternalOwnership {
 public:
     bool Acquire{false};
     bool Release{false};
     friend bool operator==(const RDGExternalOwnership&, const RDGExternalOwnership&) = default;
+};
+
+struct RDGFenceSync {
+    gpu::Fence* Target{nullptr};
+    uint64_t Value{0};
+};
+
+struct RDGTextureImportDescriptor {
+    gpu::Texture* Target{nullptr};
+    gpu::TextureState InitialState{gpu::TextureState::Undefined};
+    std::optional<gpu::TextureState> FinalState{};
+    std::optional<RDGFenceSync> WaitFence{};
+    std::optional<RDGFenceSync> SignalFence{};
+    RDGExternalOwnership Ownership{};
+};
+
+struct RDGBufferImportDescriptor {
+    gpu::Buffer* Target{nullptr};
+    gpu::BufferStates InitialState{gpu::BufferState::Undefined};
+    std::optional<gpu::BufferStates> FinalState{};
+    std::optional<RDGFenceSync> WaitFence{};
+    std::optional<RDGFenceSync> SignalFence{};
+    RDGExternalOwnership Ownership{};
 };
 
 // 构图器和编译后的图借用槽内存储，直到槽位回收。
@@ -518,9 +563,15 @@ public:
     RDGBuilder& operator=(const RDGBuilder&) = delete;
 
     RDGTextureHandle ImportTexture(gpu::Texture* texture, gpu::TextureState initialState,
-                                   std::optional<gpu::TextureState> finalState = std::nullopt, RDGExternalOwnership ownership = {});
+                                   std::optional<gpu::TextureState> finalState = std::nullopt);
     RDGBufferHandle ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates initialState,
-                                 std::optional<gpu::BufferStates> finalState = std::nullopt, RDGExternalOwnership ownership = {});
+                                 std::optional<gpu::BufferStates> finalState = std::nullopt);
+    RDGTextureHandle ImportTexture(const RDGTextureImportDescriptor& desc);
+    RDGBufferHandle ImportBuffer(const RDGBufferImportDescriptor& desc);
+    // The caller retains the acquired frame through submission and presentation.
+    RDGTextureHandle ImportBackBuffer(const gpu::SwapChainFrame& frame, gpu::TextureState initialState = gpu::TextureState::Undefined);
+    void AddWaitFence(gpu::Fence* fence, uint64_t value, gpu::PipelineStages dstStages = gpu::PipelineStage::AllCommands);
+    void AddSignalFence(gpu::Fence* fence, uint64_t value);
     RDGTextureHandle CreateTexture(const gpu::TextureDescriptor& desc);
     RDGBlackboard& GetBlackboard() noexcept;
     bool IsDynamicBuffer(RDGBufferHandle buffer) const noexcept;

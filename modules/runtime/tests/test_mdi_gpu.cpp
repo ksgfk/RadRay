@@ -343,10 +343,6 @@ TEST_P(MdiGpuTest, MixedIndexedAndNonIndexedNonZeroOffsetMultiChunkAndEmptyFollo
                 .ReadBuffer(nonIdxArgs, BufferState::Indirect);
             graph.MarkOutput(target);
         }
-        bool SubmitFrame(FrameSlot& slot, CommandBuffer& cmd) noexcept override {
-            auto* raw = &cmd;
-            return slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
-        }
 
         Scene& _scene;
         MdiQuadResources& _res;
@@ -543,10 +539,6 @@ TEST_P(MdiGpuTest, CompactedInstancePrepareLayoutAndWriteMatchesDirectUnderBothR
                 }
                 graph.MarkOutput(target);
             }
-            bool SubmitFrame(FrameSlot& slot, CommandBuffer& cmd) noexcept override {
-                auto* raw = &cmd;
-                return slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
-            }
 
             Scene& _scene;
             MdiQuadResources& _res;
@@ -694,10 +686,6 @@ TEST_P(MdiGpuTest, BatchLevelIndirectFirstInstanceFallbackMatchesDirectPixels) {
                     .ReadBuffer(instH, BufferState::Vertex);
                 if (_useMdi) pass.ReadBuffer(idxArgs, BufferState::Indirect);
                 graph.MarkOutput(target);
-            }
-            bool SubmitFrame(FrameSlot& slot, CommandBuffer& cmd) noexcept override {
-                auto* raw = &cmd;
-                return slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
             }
 
             Scene& _scene;

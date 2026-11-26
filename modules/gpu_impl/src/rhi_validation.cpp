@@ -1578,10 +1578,16 @@ public:
     }
     bool Submit(const CommandQueueSubmitDescriptor& desc) noexcept override {
         if (!Ready("Submit") || Context->NativeDevice->IsDeviceLost()) return false;
-        if (desc.WaitFences.size() != desc.WaitValues.size() || desc.SignalFences.size() != desc.SignalValues.size()) {
-            Context->Reject("Submit", "fence and value arrays must have matching sizes");
-            return false;
-        }
+        const auto validWait = [&](PipelineStages stages) {
+            if (!AreWaitStagesSupported(GetQueueType(), stages))
+                return Context->Reject("Submit", "wait stages must be nonempty and supported by the queue");
+#ifdef RADRAY_ENABLE_VULKAN
+            if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan &&
+                !vulkan::ArePipelineStagesSupportedVulkan(vulkan::PipelineStagesToVulkan(stages), static_cast<vulkan::QueueVulkan*>(Real())->_queueFlags))
+                return Context->Reject("Submit", "wait stages are unsupported by the Vulkan queue family");
+#endif
+            return true;
+        };
         vector<CommandBuffer*> commands;
         for (auto* input : desc.CmdBuffers) {
             const auto wrapper = WrapperOf<CommandBufferValidation>(*Context, input, "Submit");
@@ -1597,32 +1603,29 @@ public:
             if (!wrapper.Get()->ReferencesLive()) return Context->Reject("Submit", "recorded object has been destroyed");
             commands.push_back(wrapper.Get()->Real());
         }
-        vector<Fence*> waits, signals;
-        for (auto* input : desc.WaitFences) {
-            const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return false;
-            waits.push_back(native.Get());
+        vector<FenceWaitDescriptor> waits;
+        for (const auto& wait : desc.WaitFences) {
+            const auto native = Lookup(*Context, wait.Target, "Submit");
+            if (!native || !validWait(wait.DstStages)) return false;
+            waits.push_back({native.Get(), wait.Value, wait.DstStages});
         }
-        for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
-            auto* input = desc.SignalFences[i];
-            const auto native = Lookup(*Context, input, "Submit");
+        vector<FenceSignalDescriptor> signals;
+        for (const auto& signal : desc.SignalFences) {
+            const auto native = Lookup(*Context, signal.Target, "Submit");
             if (!native) return false;
-            if (desc.SignalValues[i] == std::numeric_limits<uint64_t>::max() || std::find(signals.begin(), signals.end(), native.Get()) != signals.end()) {
-                Context->Reject("Submit", "fence signal values must increase and signal each fence once");
-                return false;
-            }
-            signals.push_back(native.Get());
+            if (signal.Value == std::numeric_limits<uint64_t>::max() || std::ranges::find(signals, native.Get(), &FenceSignalDescriptor::Target) != signals.end())
+                return Context->Reject("Submit", "fence signal values must increase and signal each fence once");
+            signals.push_back({native.Get(), signal.Value});
         }
-        vector<SwapChainSyncObject*> waitSync, presentSync;
-        for (auto* input : desc.WaitToExecute) {
-            const auto native = Lookup(*Context, input, "Submit");
-            if (!native) return false;
-            if (std::find(waitSync.begin(), waitSync.end(), native.Get()) != waitSync.end()) {
-                Context->Reject("Submit", "a swapchain wait sync occurs twice");
-                return false;
-            }
-            waitSync.push_back(native.Get());
+        vector<SwapChainWaitDescriptor> waitSync;
+        for (const auto& wait : desc.WaitToExecute) {
+            const auto native = Lookup(*Context, wait.Target, "Submit");
+            if (!native || !validWait(wait.DstStages)) return false;
+            if (std::ranges::find(waitSync, native.Get(), &SwapChainWaitDescriptor::Target) != waitSync.end())
+                return Context->Reject("Submit", "a swapchain wait sync occurs twice");
+            waitSync.push_back({native.Get(), wait.DstStages});
         }
+        vector<SwapChainSyncObject*> presentSync;
         for (auto* input : desc.ReadyToPresent) {
             const auto native = Lookup(*Context, input, "Submit");
             if (!native) return false;
@@ -1640,19 +1643,19 @@ public:
         converted.ReadyToPresent = presentSync;
         // A fence can be signaled from different queues. Lock only the signal set, in a stable order.
         vector<FenceValidation*> ordered;
-        for (auto* input : desc.SignalFences) ordered.push_back(static_cast<FenceValidation*>(input));
+        for (const auto& signal : desc.SignalFences) ordered.push_back(static_cast<FenceValidation*>(signal.Target));
         std::ranges::sort(ordered, {}, &ObjectRecord::ObjectId);
         vector<std::unique_lock<std::mutex>> locks;
         for (auto* fence : ordered) locks.emplace_back(fence->SignalMutex);
-        for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
-            if (desc.SignalValues[i] <= static_cast<FenceValidation*>(desc.SignalFences[i])->LastSignal) {
+        for (const auto& signal : desc.SignalFences) {
+            if (signal.Value <= static_cast<FenceValidation*>(signal.Target)->LastSignal) {
                 locks.clear();
                 return Context->Reject("Submit", "fence signal values must increase");
             }
         }
         if (!Real()->Submit(converted)) return false;
-        for (size_t i = 0; i < desc.SignalFences.size(); ++i)
-            static_cast<FenceValidation*>(desc.SignalFences[i])->LastSignal = desc.SignalValues[i];
+        for (const auto& signal : desc.SignalFences)
+            static_cast<FenceValidation*>(signal.Target)->LastSignal = signal.Value;
         for (auto* input : desc.CmdBuffers) {
             auto* command = static_cast<CommandBufferValidation*>(input);
             command->State = CommandBufferValidation::RecordingState::Submitted;

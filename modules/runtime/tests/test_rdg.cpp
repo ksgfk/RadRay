@@ -248,7 +248,9 @@ protected:
         pipeline->OnSubmit = [&](FrameSlot& slot) {
             if (Recorded) {
                 auto* command = PreparedCommand.Get();
-                slot.GetQueue().Submit({.CmdBuffers = std::span{&command, 1}});
+                auto plan = Compiled->CreateSubmitPlan({&command, 1});
+                if (InspectPlan) InspectPlan(plan);
+                ASSERT_TRUE(slot.GetQueue().Submit(plan.Build()));
                 Compiled->CommitSubmittedStates();
             }
         };
@@ -274,6 +276,7 @@ protected:
     unique_ptr<FrameScheduler> Scheduler;
     std::function<void(RDGBuilder&)> Setup;
     std::function<void()> AfterCompile, AfterPrepare, AfterRecord;
+    std::function<void(RDGSubmitPlan&)> InspectPlan;
     Nullable<CompiledRDG*> Compiled{nullptr};
     bool ExpectSuccess{true};
 };
@@ -1029,7 +1032,7 @@ TEST(RenderGraphFramePipeline, ExtractedGeometryUsesPageDeclaredWhileEmpty) {
             Command.IndexCount = Geometry->GetIndexCount();
             list.VisibleCommands.push_back({.CachedCommand = &Command});
         }
-        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+        bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { return true; }
         IndexBufferPool& Pool;
         FakePipeline Pipeline;
         MeshDrawCommand Command;
@@ -1891,10 +1894,9 @@ public:
 private:
     void ExtractFrameData(FrameSlot&) noexcept override {}
     void SetupGraph(RDGBuilder& graph, FrameSlot&) noexcept override { Setup(graph); }
-    bool SubmitFrame(FrameSlot& slot, CommandBuffer& command) noexcept override {
+    bool SubmitFrame(FrameSlot& slot, RDGSubmitPlan& plan) noexcept override {
         ++Submissions;
-        auto* raw = &command;
-        return slot.GetQueue().Submit({.CmdBuffers = {&raw, 1}});
+        return slot.GetQueue().Submit(plan.Build());
     }
 };
 
@@ -2182,7 +2184,7 @@ private:
             };
         }
     }
-    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+    bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { return true; }
     array<Nullable<uint32_t*>, 2> _values{nullptr, nullptr};
 };
 
@@ -2268,7 +2270,7 @@ private:
     void ExtractMeshPass(MeshPassId pass, FrameSlot&, MeshPassFrameDrawList& list) noexcept override {
         if (!Source->GatherVisiblePrimitives(pass, std::span{&Candidate, 1}, list)) RADRAY_ABORT("cannot gather test scene");
     }
-    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+    bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { return true; }
     Buffer& Vertices;
     Buffer& Indices;
 };
@@ -2389,7 +2391,7 @@ protected:
         Extracted.push_back(pass);
         list.VisibleCommands = {{.SortKey = 8}, {.SortKey = 1}};
     }
-    bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { Events.push_back("submit"); return true; }
+    bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { Events.push_back("submit"); return true; }
 };
 
 TEST(RenderGraphFramePipeline, ExtractsAndSortsOnlyAliveMeshPassesBeforeExecution) {
@@ -2461,8 +2463,8 @@ TEST_F(RDGExecutionTest, ExternalOwnershipIsRecordedWithoutExecutionGroupsOrStat
     FakeBuffer buffer{64, BufferUse::Vertex};
     ProbeTexture texture{ColorDescriptor()};
     Setup = [&](RDGBuilder& graph) {
-        graph.MarkOutput(graph.ImportBuffer(&buffer, BufferState::Vertex, BufferState::Vertex, {true, true}));
-        graph.MarkOutput(graph.ImportTexture(&texture, TextureState::ShaderRead, TextureState::ShaderRead, {true, true}));
+        graph.MarkOutput(graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::Vertex, .FinalState = BufferState::Vertex, .Ownership = {true, true}}));
+        graph.MarkOutput(graph.ImportTexture({.Target = &texture, .InitialState = TextureState::ShaderRead, .FinalState = TextureState::ShaderRead, .Ownership = {true, true}}));
     };
     Run();
     ASSERT_EQ(Trace.Barriers.size(), 4u);
@@ -2484,8 +2486,8 @@ TEST_F(RDGExecutionTest, ExternalOwnershipAcquiresOnceBeforeFirstAccessAndReleas
     FakeBuffer buffer{64, BufferUse::Vertex | BufferUse::CopySource};
     ProbeTexture texture{ColorDescriptor()};
     Setup = [&](RDGBuilder& graph) {
-        const auto b = graph.ImportBuffer(&buffer, BufferState::Vertex, BufferState::Vertex, {true, true});
-        const auto t = graph.ImportTexture(&texture, TextureState::ShaderRead, TextureState::ShaderRead, {true, true});
+        const auto b = graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::Vertex, .FinalState = BufferState::Vertex, .Ownership = {true, true}});
+        const auto t = graph.ImportTexture({.Target = &texture, .InitialState = TextureState::ShaderRead, .FinalState = TextureState::ShaderRead, .Ownership = {true, true}});
         for (uint32_t i = 0; i < 2; ++i) {
             {
                 struct PassData {
@@ -2509,18 +2511,188 @@ TEST_F(RDGExecutionTest, ExternalOwnershipAcquiresOnceBeforeFirstAccessAndReleas
 
 TEST_F(RDGExecutionTest, CulledExternalResourcesDoNotTransferOwnership) {
     FakeBuffer buffer{64, BufferUse::Vertex};
-    Setup = [&](RDGBuilder& graph) { graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, true}); };
+    Setup = [&](RDGBuilder& graph) { graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::Vertex, .Ownership = {true, true}}); };
     Run();
     EXPECT_TRUE(Trace.Barriers.empty());
 }
 
 TEST_F(RDGExecutionTest, ExternalOwnershipWithoutFinalStateStillTransfersBothDirections) {
     FakeBuffer buffer{64, BufferUse::Vertex};
-    Setup = [&](RDGBuilder& graph) { graph.MarkOutput(graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, true})); };
+    Setup = [&](RDGBuilder& graph) { graph.MarkOutput(graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::Vertex, .Ownership = {true, true}})); };
     Run();
     ASSERT_EQ(Trace.Barriers.size(), 2u);
     EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[0]).ExternalTransfer, ExternalOwnershipTransfer::Acquire);
     EXPECT_EQ(std::get<BarrierBufferDescriptor>(Trace.Barriers[1]).ExternalTransfer, ExternalOwnershipTransfer::Release);
+}
+
+namespace {
+
+class PlanFence final : public Fence {
+public:
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    FenceStatus WaitForStatus(uint64_t, uint64_t) noexcept override { return FenceStatus::Completed; }
+    uint64_t GetCompletedValue() const noexcept override { return 0; }
+    void Wait(uint64_t) noexcept override {}
+};
+
+class FrameSync final : public SwapChainSyncObject {
+public:
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+};
+
+class PlanSwapChain final : public SwapChain {
+public:
+    SwapChainFrame Frame(Texture& texture, Nullable<SwapChainSyncObject*> acquire, Nullable<SwapChainSyncObject*> present) {
+        return MakeFrame(this, 1, &texture, 0, acquire.Get(), present.Get());
+    }
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    SwapChainAcquireResult AcquireNext(uint64_t) noexcept override { return {}; }
+    SwapChainPresentResult Present(SwapChainFrame) noexcept override { return {}; }
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame) noexcept override { return {}; }
+    bool Recreate(uint32_t, uint32_t, TextureFormat, PresentMode) noexcept override { return false; }
+    uint32_t GetBackBufferCount() const noexcept override { return 1; }
+    SwapChainDescriptor GetDesc() const noexcept override { return {}; }
+};
+
+}  // namespace
+
+TEST_F(RDGExecutionTest, BackBuffersWaitAtTheirOwnFirstUseAndAlwaysReachPresent) {
+    PlanSwapChain chains[4];
+    FrameSync acquire[3], present[3];
+    auto desc = ColorDescriptor();
+    desc.Usage |= TextureUse::CopyDestination;
+    ProbeTexture color{desc}, copy{desc}, idle{desc}, implicitSync{desc};
+    auto drawFrame = chains[0].Frame(color, &acquire[0], &present[0]);
+    auto copyFrame = chains[1].Frame(copy, &acquire[1], &present[1]);
+    auto idleFrame = chains[2].Frame(idle, &acquire[2], &present[2]);
+    auto implicitFrame = chains[3].Frame(implicitSync, nullptr, nullptr);
+    Setup = [&](RDGBuilder& graph) {
+        const auto draw = graph.ImportBackBuffer(drawFrame, TextureState::Present);
+        EXPECT_EQ(graph.ImportBackBuffer(drawFrame, TextureState::Present), draw);
+        graph.AddClearColor(draw, {});
+        auto dst = graph.ImportBackBuffer(copyFrame);
+        graph.AddCopyPass("copy", 0, +[](const int&, RDGCopyPassContext&) noexcept { return true; }).WriteTexture(dst);
+        graph.ImportBackBuffer(idleFrame);
+        graph.ImportBackBuffer(implicitFrame);
+    };
+    InspectPlan = [&](RDGSubmitPlan& plan) {
+        auto submit = plan.Build();
+        ASSERT_EQ(submit.CmdBuffers.size(), 1u);
+        EXPECT_EQ(submit.CmdBuffers[0], PreparedCommand.Get());
+        ASSERT_EQ(submit.WaitToExecute.size(), 3u);
+        ASSERT_EQ(submit.ReadyToPresent.size(), 3u);
+        const PipelineStage expected[]{PipelineStage::ColorAttachment, PipelineStage::Copy, PipelineStage::BottomOfPipe};
+        for (size_t i = 0; i < 3; ++i) {
+            EXPECT_EQ(submit.WaitToExecute[i].Target, &acquire[i]);
+            EXPECT_EQ(submit.WaitToExecute[i].DstStages, expected[i]);
+            EXPECT_EQ(submit.ReadyToPresent[i], &present[i]);
+        }
+        for (const auto* image : {&color, &copy, &idle, &implicitSync}) {
+            EXPECT_TRUE(std::ranges::any_of(Trace.Barriers, [&](const auto& barrier) {
+                const auto* transition = std::get_if<BarrierTextureDescriptor>(&barrier);
+                return transition && transition->Target == image && transition->After == TextureState::Present;
+            }));
+        }
+    };
+    Run();
+    EXPECT_TRUE(drawFrame.IsValid());
+}
+
+TEST_F(RDGExecutionTest, FenceWaitsMergeLiveFirstUsesAfterEmptyUpload) {
+    PlanFence producer, unused, completion;
+    FakeBuffer vertices{64, BufferUse::Vertex | BufferUse::Indirect | BufferUse::CopyDestination};
+    FakeBuffer culled{64, BufferUse::Vertex};
+    ProbeTexture texture{ColorDescriptor()};
+    Setup = [&](RDGBuilder& graph) {
+        const auto vb = graph.ImportBuffer({.Target = &vertices, .InitialState = BufferState::Vertex, .WaitFence = RDGFenceSync{&producer, 42}});
+        graph.UploadBuffer(vb, 0, RDGUploadSource::Generated(4, 0,
+            +[](const int&, RDGUploadWriteContext&) noexcept { return false; },
+            +[](int&, RDGUploadPrepareContext&) noexcept -> uint64_t { return 0; }));
+        graph.AddRasterPass("draw", 0, +[](const int&, RDGRasterPassContext&) noexcept { return true; })
+            .WriteColor(0, graph.CreateTexture(ColorDescriptor()), LoadAction::Clear, StoreAction::Store)
+            .ReadBuffer(vb, BufferState::Vertex).ReadBuffer(vb, BufferState::Indirect).NeverCull();
+        const auto input = graph.ImportTexture({.Target = &texture, .InitialState = TextureState::Common,
+                                               .WaitFence = RDGFenceSync{&producer, 38}, .SignalFence = RDGFenceSync{&completion, 7}});
+        graph.AddComputePass("sample", 0, +[](const int&, RDGComputePassContext&) noexcept { return true; }).ReadTexture(input).NeverCull();
+        graph.ImportBuffer({.Target = &culled, .WaitFence = RDGFenceSync{&unused, 99}, .SignalFence = RDGFenceSync{&unused, 100}});
+        graph.AddSignalFence(&completion, 7);
+    };
+    InspectPlan = [&](RDGSubmitPlan& plan) {
+        auto submit = plan.Build();
+        ASSERT_EQ(submit.WaitFences.size(), 1u);
+        EXPECT_EQ(submit.WaitFences[0].Target, &producer);
+        EXPECT_EQ(submit.WaitFences[0].Value, 42u);
+        EXPECT_TRUE(std::ranges::any_of(Trace.Barriers, [&](const auto& barrier) {
+            const auto* transition = std::get_if<BarrierTextureDescriptor>(&barrier);
+            return transition && transition->Target == &texture && transition->AfterQueueWait;
+        }));
+        EXPECT_EQ(submit.WaitFences[0].DstStages, PipelineStage::VertexInput | PipelineStage::DrawIndirect | PipelineStage::ComputeShader);
+        plan.AddWaitFence(&producer, 43, PipelineStage::Copy);
+        plan.AddSignalFence(&completion, 7);
+        submit = plan.Build();
+        EXPECT_EQ(submit.WaitFences[0].Value, 43u);
+        EXPECT_TRUE(submit.WaitFences[0].DstStages.HasFlag(PipelineStage::Copy));
+        ASSERT_EQ(submit.SignalFences.size(), 1u);
+        EXPECT_EQ(submit.SignalFences[0].Target, &completion);
+        EXPECT_EQ(submit.SignalFences[0].Value, 7u);
+    };
+    Run();
+}
+
+TEST(RDG, BackBufferRejectsOrdinaryImportInEitherOrderAndReusedSyncAcrossFrames) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    PlanSwapChain chains[2];
+    FrameSync sync;
+    ProbeTexture a{ColorDescriptor()}, b{ColorDescriptor()};
+    auto first = chains[0].Frame(a, &sync, nullptr);
+    auto second = chains[1].Frame(b, nullptr, &sync);
+    RDGBuilder ordinaryFirst{slot}, frameFirst{slot}, reused{slot};
+    ordinaryFirst.ImportTexture(&a, TextureState::Undefined);
+    ordinaryFirst.ImportBackBuffer(first);
+    EXPECT_FALSE(ordinaryFirst.Compile());
+    frameFirst.ImportBackBuffer(first);
+    frameFirst.ImportTexture(&a, TextureState::Undefined);
+    EXPECT_FALSE(frameFirst.Compile());
+    reused.ImportBackBuffer(first);
+    reused.ImportBackBuffer(second);
+    EXPECT_FALSE(reused.Compile());
+    auto alias = chains[1].Frame(a, &sync, nullptr);
+    RDGBuilder sameImage{slot};
+    sameImage.ImportBackBuffer(first);
+    sameImage.ImportBackBuffer(alias);
+    EXPECT_FALSE(sameImage.Compile());
+}
+
+TEST(RDG, InvalidFenceDeclarationsFailEvenOnCulledResources) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    auto& slot = scheduler->BeginFrame();
+    FakeBuffer buffer{64, BufferUse::Vertex};
+    PlanFence fence;
+    RDGBuilder missing{slot}, overflow{slot}, conflict{slot}, emptyWait{slot};
+    missing.ImportBuffer({.Target = &buffer, .WaitFence = RDGFenceSync{}});
+    EXPECT_FALSE(missing.Compile());
+    overflow.AddSignalFence(&fence, std::numeric_limits<uint64_t>::max());
+    EXPECT_FALSE(overflow.Compile());
+    conflict.AddSignalFence(&fence, 3);
+    conflict.ImportBuffer({.Target = &buffer, .SignalFence = RDGFenceSync{&fence, 4}});
+    EXPECT_FALSE(conflict.Compile());
+    emptyWait.AddWaitFence(&fence, 0, PipelineStage::NONE);
+    EXPECT_FALSE(emptyWait.Compile());
+}
+
+TEST(RDG, InvalidAcquiredFrameFailsCompilation) {
+    FakeGpu gpu;
+    auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
+    RDGBuilder graph{scheduler->BeginFrame()};
+    graph.ImportBackBuffer(SwapChainFrame{});
+    EXPECT_FALSE(graph.Compile());
 }
 
 TEST(RDG, DuplicateImportsRequireConsistentOwnership) {
@@ -2528,7 +2700,7 @@ TEST(RDG, DuplicateImportsRequireConsistentOwnership) {
     FakeGpu gpu;
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
     RDGBuilder graph{scheduler->BeginFrame()};
-    graph.ImportBuffer(&buffer, BufferState::Vertex, std::nullopt, {true, false});
+    graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::Vertex, .Ownership = {true, false}});
     graph.ImportBuffer(&buffer, BufferState::Vertex);
     EXPECT_FALSE(graph.Compile());
 }
@@ -2536,7 +2708,7 @@ TEST(RDG, DuplicateImportsRequireConsistentOwnership) {
 TEST_F(RDGExecutionTest, SameStateGroupReadStillAcquiresExternalOwnership) {
     FakeBuffer buffer{64, BufferUse::CopySource};
     Setup = [&](RDGBuilder& graph) {
-        const auto handle = graph.ImportBuffer(&buffer, BufferState::CopySource, std::nullopt, {true, false});
+        const auto handle = graph.ImportBuffer({.Target = &buffer, .InitialState = BufferState::CopySource, .Ownership = {true, false}});
         {
             struct PassData {
                 decltype(&Trace) TraceRef;
@@ -3849,7 +4021,7 @@ TEST(RDG, DeviceLevelIndirectFallbackSkipsIndirectBuffersWhenUnsupportedOrZeroMa
                     .NeverCull();
             }
         }
-        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+        bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { return true; }
 
         const MeshDrawCommand& _command;
     };
@@ -3943,7 +4115,7 @@ TEST(RDG, BatchLevelIndirectFallbackSplitsZeroAndNonZeroFirstInstanceBatches) {
                 .ReadBuffer(args, BufferState::Indirect)
                 .NeverCull();
         }
-        bool SubmitFrame(FrameSlot&, CommandBuffer&) noexcept override { return true; }
+        bool SubmitFrame(FrameSlot&, RDGSubmitPlan&) noexcept override { return true; }
 
         const MeshDrawCommand& _cmd0;
         const MeshDrawCommand& _cmd1;

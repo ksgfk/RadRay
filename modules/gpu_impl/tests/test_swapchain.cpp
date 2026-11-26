@@ -114,11 +114,11 @@ protected:
         test::Barrier(*recording.Commands, {BarrierTextureDescriptor{.Target = frame.GetBackBuffer(), .Before = TextureState::RenderTarget, .After = TextureState::Present}});
         recording.Commands->End();
         CommandBuffer* commands[]{recording.Commands.get()};
-        SwapChainSyncObject* waits[]{frame.GetWaitToDraw()};
+        SwapChainWaitDescriptor waits[]{{frame.GetWaitToDraw(), PipelineStage::ColorAttachment}};
         SwapChainSyncObject* signals[]{frame.GetReadyToPresent()};
         auto& queue = test::DirectQueue(device);
         queue.Submit({.CmdBuffers = commands,
-                      .WaitToExecute = {waits, waits[0] ? 1u : 0u},
+                      .WaitToExecute = {waits, waits[0].Target ? 1u : 0u},
                       .ReadyToPresent = {signals, signals[0] ? 1u : 0u}});
         EXPECT_EQ(_swapchain->Present(std::move(frame)).Status, SwapChainStatus::Success);
         queue.Wait();
@@ -147,6 +147,41 @@ TEST_P(SwapChainBackBufferTest, FrameViewsSurviveSubmissionAndRecreate) {
     ASSERT_TRUE(_swapchain->Recreate(uint32_t(resized.right), uint32_t(resized.bottom), TextureFormat::BGRA8_UNORM, PresentMode::FIFO));
     ASSERT_FALSE(HasFatalFailure());
     for (int frame = 0; frame < 3; ++frame) PresentWithFrameView();
+}
+
+TEST_P(SwapChainBackBufferTest, CopyWaitOrdersFirstLayoutTransitionInMixedBarrierBatch) {
+    auto& device = GetDevice();
+    auto& queue = test::DirectQueue(device);
+    const auto bounds = ClientRect();
+    _swapchain = device.CreateSwapChain({.PresentQueue = &queue, .NativeHandler = _window,
+                                        .Width = uint32_t(bounds.right), .Height = uint32_t(bounds.bottom), .BackBufferCount = 3,
+                                        .Format = TextureFormat::BGRA8_UNORM, .PresentMode = PresentMode::FIFO}).Unwrap();
+    auto acquired = _swapchain->AcquireNext(1000);
+    ASSERT_TRUE(acquired.Frame);
+    auto& frame = *acquired.Frame;
+    auto* image = frame.GetBackBuffer();
+    const auto desc = image->GetDesc();
+    if (!desc.Usage.HasFlag(TextureUse::CopyDestination)) {
+        _swapchain->DiscardAcquiredFrame(std::move(frame));
+        GTEST_SKIP() << "Surface does not support transfer destinations";
+    }
+    const auto pitch = test::CopyRowPitch(device, desc.Width, 4);
+    vector<byte> pixels(size_t{pitch} * desc.Height, byte{0x7f});
+    auto upload = test::CreateUploadBuffer(device, pixels, BufferUse::CopySource).Unwrap();
+    auto recording = test::BeginRecording(device);
+    auto& cmd = *recording.Commands;
+    test::Barrier(cmd, {BarrierBufferDescriptor{upload.get(), BufferState::HostWrite, BufferState::CopySource},
+                        BarrierTextureDescriptor{image, TextureState::Undefined, TextureState::CopyDestination}});
+    cmd.CopyBufferToTexture(image, {0, 1, 0, 1}, upload.get(), 0);
+    test::Barrier(cmd, {BarrierTextureDescriptor{image, TextureState::CopyDestination, TextureState::Present}});
+    cmd.End();
+    CommandBuffer* commands[]{&cmd};
+    const SwapChainWaitDescriptor waits[]{{frame.GetWaitToDraw(), PipelineStage::Copy}};
+    SwapChainSyncObject* signals[]{frame.GetReadyToPresent()};
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = commands, .WaitToExecute = {waits, waits[0].Target ? 1u : 0u},
+                              .ReadyToPresent = {signals, signals[0] ? 1u : 0u}}));
+    EXPECT_EQ(_swapchain->Present(std::move(frame)).Status, SwapChainStatus::Success);
+    queue.Wait();
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, SwapChainBackBufferTest, testing::ValuesIn(test::AllBackends), test::BackendParamName);

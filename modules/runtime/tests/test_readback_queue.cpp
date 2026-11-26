@@ -29,11 +29,10 @@ public:
         EXPECT_EQ(Reads.Poll(3, UINT64_MAX, info), ReadbackStatus::Pending);
         EXPECT_FALSE(info.Ready);
     }
-    bool SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& command) noexcept override {
-        auto* raw = &command;
-        gpu::Fence* signal = &Fence;
+    bool SubmitFrame(FrameSlot& slot, RDGSubmitPlan& plan) noexcept override {
         auto next = Submitted + 1;
-        if (!slot.GetQueue().Submit({.CmdBuffers = {&raw, 1}, .SignalFences = {&signal, 1}, .SignalValues = {&next, 1}})) return false;
+        plan.AddSignalFence(&Fence, next);
+        if (!slot.GetQueue().Submit(plan.Build())) return false;
         Submitted = next;
         Reads.MarkSubmitted(Submitted);
         return true;
@@ -195,11 +194,9 @@ TEST_P(ReadbackQueueTest, PersistentUploadOwnedByGraphSuppliesBufferReadback) {
             EXPECT_TRUE(Reads.EnqueueBuffer(graph, 8, shortSource, 0, 8));
             EXPECT_TRUE(Reads.EnqueueBuffer(graph, 9, shortSource, 0, 4));
         }
-        bool SubmitFrame(FrameSlot& slot, gpu::CommandBuffer& cmd) noexcept override {
-            gpu::CommandBuffer* commands[]{&cmd};
-            gpu::Fence* signals[]{&Fence};
-            uint64_t values[]{1};
-            if (!slot.GetQueue().Submit({.CmdBuffers = commands, .SignalFences = signals, .SignalValues = values})) return false;
+        bool SubmitFrame(FrameSlot& slot, RDGSubmitPlan& plan) noexcept override {
+            plan.AddSignalFence(&Fence, 1);
+            if (!slot.GetQueue().Submit(plan.Build())) return false;
             Reads.MarkSubmitted(1);
             return true;
         }

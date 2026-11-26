@@ -699,7 +699,7 @@ Compile 先裁剪，再通过 `ExtractMeshPass` 调用 `PreparePassDrawCommands`
 Depth/Color/Transparent 共用普通缩放参数组，Outline 使用放大参数组；runtime 先绑定 PSO，再在首次绑定或切换 PSO 后重绑 Pass 参数组，
 最后完成几何、模板、命令参数和 DrawIndexed。相机、局部缩放或变换变化不需要重新调用 Processor，材质变化则重建关联命令的颜色副本。
 
-每帧最后由图记录颜色读回拷贝与收尾屏障，`SubmitFrame` signal 本槽 fence 后返回；复用槽时由 Pipeline.Wait 等待该值。
+每帧最后由图记录颜色读回拷贝与收尾屏障，`SubmitFrame` 向图的提交计划追加本槽 fence signal，成功提交后保存完成值；复用槽时由 Pipeline.Wait 等待该值。
 每槽上传缓冲、瞬态附件池和读回缓冲独立；颜色 CopySource、深度 DepthWrite 的真实物理终态保存在池内，复用时作为首次 barrier 的 Before。
 主循环只调用 RunFrame，结束时调用 WaitIdle，再从 `(frameCount - 1) % slotCount` 对应的读回缓冲保存图片。
 Scheduler 的析构同样等待全部在途槽并重置命令存储，随后才销毁 Pipeline 的每槽资源和瞬态池；外部共享资源和源 Scene 晚于 Scheduler 销毁。

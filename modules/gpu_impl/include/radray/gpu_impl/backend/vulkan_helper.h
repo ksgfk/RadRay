@@ -281,6 +281,7 @@ std::optional<VkSurfaceFormatKHR> SelectSurfaceFormat(VkPhysicalDevice gpu, VkSu
 
 VkImageAspectFlags ImageFormatToAspectFlags(VkFormat v) noexcept;
 
+VkPipelineStageFlags PipelineStagesToVulkan(PipelineStages stages) noexcept;
 VkAccessFlags BufferStateToAccessFlags(BufferStates v) noexcept;
 VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
 

@@ -140,6 +140,19 @@ std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescripto
     return range;
 }
 
+bool AreWaitStagesSupported(QueueType queue, PipelineStages stages) noexcept {
+    using enum PipelineStage;
+    constexpr auto copy = TopOfPipe | Copy | BottomOfPipe | AllCommands;
+    constexpr auto compute = copy | DrawIndirect | ComputeShader;
+    constexpr auto direct = compute | VertexInput | VertexShader | PixelShader | DepthStencil | ColorAttachment | AllGraphics;
+    switch (queue) {
+        case QueueType::Direct: return stages && !(stages & ~direct);
+        case QueueType::Compute: return stages && !(stages & ~compute);
+        case QueueType::Copy: return stages && !(stages & ~copy);
+        default: return false;
+    }
+}
+
 bool IsValidShaderStages(ShaderStages stages) noexcept {
     return stages && !(stages & ~ShaderStages{ShaderStage::Graphics | ShaderStage::Compute});
 }
@@ -501,6 +514,10 @@ std::string_view format_as(TextureDimension v) noexcept {
         case TextureDimension::CubeArray: return "CubeArray";
     }
     Unreachable();
+}
+
+std::string_view format_as(PipelineStage v) noexcept {
+    return v == PipelineStage::NONE ? "NONE" : EnumFlagBitNameOr(v);
 }
 
 std::string_view format_as(BufferState v) noexcept {

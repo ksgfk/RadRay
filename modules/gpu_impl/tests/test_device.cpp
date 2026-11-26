@@ -101,6 +101,24 @@ TEST(D3D12DeviceLoss, WaitRejectsCachedValueOnFirstAndSubsequentLoss) {
 
 class DeviceTest : public test::BackendTest {};
 
+TEST_P(DeviceTest, RejectsEmptyAndUnknownFenceWaitStages) {
+    auto& device = GetDevice();
+    auto fence = device.CreateFence().Unwrap();
+    for (const auto stages : {PipelineStages{}, PipelineStages{1u << 30}}) {
+        const FenceWaitDescriptor wait[]{{fence.get(), 0, stages}};
+        EXPECT_FALSE(test::DirectQueue(device).Submit({.WaitFences = wait}));
+        EXPECT_EQ(TakeRhiValidationErrors(), 1u);
+    }
+}
+
+TEST(QueueWaitStages, RestrictionsFollowTheLogicalQueueType) {
+    EXPECT_TRUE(AreWaitStagesSupported(QueueType::Copy, PipelineStage::Copy | PipelineStage::BottomOfPipe));
+    EXPECT_FALSE(AreWaitStagesSupported(QueueType::Copy, PipelineStage::ComputeShader));
+    EXPECT_TRUE(AreWaitStagesSupported(QueueType::Compute, PipelineStage::ComputeShader | PipelineStage::DrawIndirect));
+    EXPECT_FALSE(AreWaitStagesSupported(QueueType::Compute, PipelineStage::VertexInput));
+    EXPECT_TRUE(AreWaitStagesSupported(QueueType::Direct, PipelineStage::VertexShader | PipelineStage::ColorAttachment));
+}
+
 TEST_P(DeviceTest, TimelineSupportsIndependentWaitersAndFiniteTimeouts) {
     auto& device = GetDevice();
     auto fence = device.CreateFence().Release();
@@ -120,9 +138,9 @@ TEST_P(DeviceTest, TimelineSupportsIndependentWaitersAndFiniteTimeouts) {
         }};
     }
     started.wait();
-    Fence* signal = fence.get();
     uint64_t value = workers.size();
-    ASSERT_TRUE(test::DirectQueue(device).Submit({.SignalFences = {&signal, 1}, .SignalValues = {&value, 1}}));
+    FenceSignalDescriptor signal[]{{fence.get(), value}};
+    ASSERT_TRUE(test::DirectQueue(device).Submit({.SignalFences = signal}));
     for (auto& worker : workers) worker.join();
     for (auto status : results) EXPECT_EQ(status, FenceStatus::Completed);
     EXPECT_EQ(fence->GetCompletedValue(), value);

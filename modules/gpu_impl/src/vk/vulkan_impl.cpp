@@ -167,9 +167,7 @@ static VkSwapchainKHR _CreateVkSwapChain(
     swapchianCreateInfo.imageExtent = swapchainSize;
     swapchianCreateInfo.imageArrayLayers = 1;
     swapchianCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if (surfaceProperties.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
-        swapchianCreateInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    }
+    swapchianCreateInfo.imageUsage |= surfaceProperties.supportedUsageFlags & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     swapchianCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     swapchianCreateInfo.queueFamilyIndexCount = 0;
     swapchianCreateInfo.pQueueFamilyIndices = nullptr;
@@ -225,6 +223,7 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
         f.image->_memory = MemoryType::DeviceLocal;
         f.image->_usage = TextureUse::RenderTarget;
         if (imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) f.image->_usage |= TextureUse::CopySource;
+        if (imageUsage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) f.image->_usage |= TextureUse::CopyDestination;
         f.image->_nativeUsage = imageUsage;
     }
     swapChain->_frames = std::move(frames);
@@ -3207,21 +3206,19 @@ bool QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkPipelineStageFlags> waitStages;
     bool useTimelineSubmit = false;
 
-    for (auto* syncObj : desc.WaitToExecute) {
-        auto* waitSync = CastVkObject(syncObj);
+    for (const auto& wait : desc.WaitToExecute) {
+        auto* waitSync = CastVkObject(wait.Target);
         waitSemaphores.emplace_back(waitSync->_semaphore->_semaphore);
-        // The acquired image's first use can be a transfer or a layout transition.
-        waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        waitStages.emplace_back(PipelineStagesToVulkan(wait.DstStages));
         waitValues.emplace_back(0);
     }
 
-    for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
-        auto* fenceObj = CastVkObject(desc.WaitFences[i]);
-        uint64_t waitValue = desc.WaitValues[i];
+    for (const auto& wait : desc.WaitFences) {
+        auto* fenceObj = CastVkObject(wait.Target);
         useTimelineSubmit = true;
         waitSemaphores.emplace_back(fenceObj->_fence->_semaphore);
-        waitValues.emplace_back(waitValue);
-        waitStages.emplace_back(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        waitValues.emplace_back(wait.Value);
+        waitStages.emplace_back(PipelineStagesToVulkan(wait.DstStages));
     }
 
     for (auto* syncObj : desc.ReadyToPresent) {
@@ -3231,12 +3228,11 @@ bool QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     }
 
     VkFence submitFence = VK_NULL_HANDLE;
-    for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
-        auto* fenceObj = CastVkObject(desc.SignalFences[i]);
-        uint64_t signalValue = desc.SignalValues[i];
+    for (const auto& signal : desc.SignalFences) {
+        auto* fenceObj = CastVkObject(signal.Target);
         useTimelineSubmit = true;
         signalSemaphores.emplace_back(fenceObj->_fence->_semaphore);
-        signalValues.emplace_back(signalValue);
+        signalValues.emplace_back(signal.Value);
     }
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -3504,7 +3500,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
 
             auto srcStage = shaderStages(BufferStateToPipelineStageFlags(bb->Before), bb->BeforeStages);
             auto dstStage = shaderStages(BufferStateToPipelineStageFlags(bb->After), bb->AfterStages);
-            srcStageMask |= srcStage;
+            srcStageMask |= bb->AfterQueueWait ? srcStage | dstStage : srcStage;
             dstStageMask |= dstStage;
         } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
             auto tex = CastVkObject(tb->Target);
@@ -3516,7 +3512,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
                 return;
             }
             const auto add = [&](TextureAspects aspects, TextureStates before, TextureStates after) {
-                auto& imgBarrier = imageBarriers.emplace_back();
+                VkImageMemoryBarrier imgBarrier{};
                 imgBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                 imgBarrier.srcAccessMask = TextureStateToAccessFlags(before);
                 imgBarrier.dstAccessMask = TextureStateToAccessFlags(after);
@@ -3527,10 +3523,17 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
                 imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 imgBarrier.image = tex->_image;
                 imgBarrier.subresourceRange = {aspects.value(), normalized.BaseMipLevel, normalized.MipLevelCount, normalized.BaseArrayLayer, normalized.ArrayLayerCount};
-                auto srcStage = shaderStages(TextureStateToPipelineStageFlags(before, true), tb->BeforeStages);
-                if (tex->_isSwapchainImage && before == TextureState::Undefined) srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-                srcStageMask |= srcStage;
-                dstStageMask |= shaderStages(TextureStateToPipelineStageFlags(after, false), tb->AfterStages);
+                const auto dstStage = shaderStages(TextureStateToPipelineStageFlags(after, false), tb->AfterStages);
+                if (tex->_isSwapchainImage && (before == TextureState::Undefined || before == TextureState::Present)) {
+                    // Chain the acquire wait to the layout transition at the image's first use.
+                    imgBarrier.srcAccessMask = 0;
+                    _device->_ftb.vkCmdPipelineBarrier(_cmdBuffer, dstStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &imgBarrier);
+                    return;
+                }
+                imageBarriers.push_back(imgBarrier);
+                if (tb->AfterQueueWait) srcStageMask |= dstStage;
+                srcStageMask |= shaderStages(TextureStateToPipelineStageFlags(before, true), tb->BeforeStages);
+                dstStageMask |= dstStage;
             };
             if (separate && IsDepthStencilFormat(tex->_format)) {
                 for (auto aspect : {TextureAspect::Depth, TextureAspect::Stencil}) {

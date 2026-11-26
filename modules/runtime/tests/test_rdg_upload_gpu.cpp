@@ -25,10 +25,6 @@ public:
 private:
     void ExtractFrameData(FrameSlot&) noexcept override {}
     void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override { Build(graph, slot); }
-    bool SubmitFrame(FrameSlot& slot, CommandBuffer& command) noexcept override {
-        auto* raw = &command;
-        return slot.GetQueue().Submit({.CmdBuffers = std::span{&raw, 1}});
-    }
 };
 
 struct BufferCopyData {
@@ -123,6 +119,52 @@ TEST_P(GpuTimingTest, ExternalQueryPoolSurvivesOverwriteAndIndependentCopySchedu
     EXPECT_GE(ticks[1], ticks[0]);
 }
 INSTANTIATE_TEST_SUITE_P(Backends, GpuTimingTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
+
+class RDGQueueSyncTest : public gpu::test::GpuTest, public testing::WithParamInterface<GpuBackend> {};
+
+TEST_P(RDGQueueSyncTest, SecondQueueReadsColorAfterResourceFenceAndSignalsCompletion) {
+    auto selected = OpenDevice(GetParam(), 2);
+    if (!selected) return;
+    auto& device = *selected.Get();
+    shared_ptr<Device> borrowed{&device, [](Device*) {}};
+    DeviceContext producer{borrowed, &gpu::test::DirectQueue(device)};
+    DeviceContext consumer{borrowed, device.GetCommandQueue(QueueType::Direct, 1).Get()};
+    auto ready = device.CreateFence().Unwrap();
+    auto done = device.CreateFence().Unwrap();
+    auto image = device.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 8, .Height = 4, .DepthOrArraySize = 1,
+                                       .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM,
+                                       .Usage = TextureUse::RenderTarget | TextureUse::CopySource}).Unwrap();
+    auto writer = make_unique<UploadPipeline>(producer, 1);
+    writer->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto target = graph.ImportTexture({.Target = image.get(), .SignalFence = RDGFenceSync{ready.get(), 1}});
+        graph.AddClearColor(target, {{0, 1, 0, 1}});
+        graph.MarkOutput(target);
+    };
+    AsyncReadbackQueue readbacks{device};
+    auto reader = make_unique<UploadPipeline>(consumer, 1);
+    reader->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto source = graph.ImportTexture({.Target = image.get(), .InitialState = TextureState::RenderTarget,
+                                                 .WaitFence = RDGFenceSync{ready.get(), 1}});
+        EXPECT_TRUE(readbacks.EnqueueTexture(graph, 1, source));
+        graph.AddSignalFence(done.get(), 5);
+    };
+    auto writeFrames = FrameScheduler::Create(producer, std::move(writer), 1).Unwrap();
+    auto readFrames = FrameScheduler::Create(consumer, std::move(reader), 1).Unwrap();
+    writeFrames->RunFrame();
+    readFrames->RunFrame();
+    readbacks.MarkSubmitted(5);
+    ASSERT_EQ(done->WaitForStatus(5, 5'000'000'000), FenceStatus::Completed);
+    vector<byte> pixels(8 * 4 * 4);
+    ReadbackResultInfo result{};
+    ASSERT_EQ(readbacks.Poll(1, done->GetCompletedValue(), result, pixels.data(), pixels.size()), ReadbackStatus::Ready);
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        EXPECT_EQ(pixels[i], byte{0});
+        EXPECT_EQ(pixels[i + 1], byte{255});
+        EXPECT_EQ(pixels[i + 2], byte{0});
+        EXPECT_EQ(pixels[i + 3], byte{255});
+    }
+}
+INSTANTIATE_TEST_SUITE_P(Backends, RDGQueueSyncTest, testing::ValuesIn(gpu::test::AllBackends), gpu::test::BackendParamName);
 
 class VolumeClearTest : public gpu::test::BackendTest {};
 TEST_P(VolumeClearTest, ClearsEverySliceOfSingleMipColorTarget) {

@@ -356,7 +356,7 @@ ExtractMeshPass 可从已导入的同一缓冲继续切分区间。若无法保�
 Extract 调用 ExtractFrameData → SetupGraph → Compile → ExtractMeshPass，仅提取存活且去重的 MeshPass。
 ExtractFrameData 保存稳定输入、候选集合和描述信息，不要求生成完整 payload。
 Prepare 固定/排序可见命令 → 来源实际布局 → 物化资源 → 分配与填充 → 存活 Pass Prepare → Flush/屏障准备 → 获取命令缓冲。
-Record 只 Begin、编码已准备命令和 End。Submit 调用派生的 SubmitFrame，返回后发布图状态；派生类仍实现 Wait。
+Record 执行 Begin、编码已准备命令和 End。Submit 将编译图生成的计划交给 `SubmitFrame(FrameSlot&, RDGSubmitPlan&)`，提交成功后发布图状态。默认实现调用 `slot.GetQueue().Submit(plan.Build())`。需要记录帧槽完成值的管线可在重写中追加 signal，提交成功后更新完成值，由 Wait 等待。
 未实现 ExtractMeshPass 却声明了存活 mesh pass 时带诊断终止。阶段失败不可恢复，不提供重试或部分提交。
 
 ### 构图、访问与裁剪
@@ -463,12 +463,19 @@ tracker 是 RDGExecution 的成员，物理状态表使用稠密资源索引和�
 持久 wrapper 通过公开 CommitSubmittedState 接口更新；tracker 自身只保存图内预期状态，不提前修改持久状态。
 直接使用 CompiledRDG 的调用者同样负责这一边界；被裁剪或未提交的图不发布状态。
 
-`ImportTexture` / `ImportBuffer` 的可选 `RDGExternalOwnership{Acquire, Release}` 声明外部所有权边界。
-重复导入同一资源时所有权声明必须一致。执行按资源维护待 Acquire 与待 Release 标记：
-首次组访问合并状态转换并发出 Acquire；没有执行组但被 MarkOutput 保活时，图末也消费 Acquire。
-即使 Before 与 After 相同，所有权屏障仍发出；被裁剪的资源不转移所有权。
-图末完成终态转换后，在独立 barrier 调用中 Release，未指定终态则保持当前状态。
-这些声明只生成 RHI ExternalTransfer 屏障；外部队列等待/信号、跨进程同步与资源支持性仍由调用方负责。
+### 导入资源与队列同步
+
+`ImportTexture` 和 `ImportBuffer` 的简式重载接受资源、初态和可选终态。`RDGTextureImportDescriptor` / `RDGBufferImportDescriptor` 还接受 `WaitFence`、`SignalFence` 和 `Ownership`。资源上的 fence 只随存活资源进入提交。图级 `AddWaitFence` 和 `AddSignalFence` 始终进入提交。队列等待约束 GPU 访问，Prepare 中写入映射内存所需的 CPU 同步由调用方负责。
+
+`ImportBackBuffer(frame)` 借用已获取的帧，将后缓冲标为输出，终态固定为 Present。调用方保有该帧并负责提交后的 Present 或依契约 Discard。每个窗口分别导入，非空 acquire / present 对象自动进入提交。未绘制的帧仍会执行必要的终态转换，并在 BottomOfPipe 消费 acquire。同一帧可按相同初态重复导入。无效帧、与普通纹理导入混用、不同帧复用同一同步对象均使 Compile 失败。
+
+Prepare 规划屏障时，按存活执行组中第一次实际 GPU 访问推导等待阶段，跳过 HostWrite 和实际大小为零的上传。颜色、深度模板、复制、顶点或索引、间接参数分别等待对应硬件阶段。着色器访问按 Compute 或 Raster 的顶点与像素阶段推导，同一缓冲的多个只读用途取并集。普通导入资源仅有收尾屏障，或需要外部所有权 acquire 时，资源 fence 等待使用 AllCommands。
+
+同一 fence 的等待合并为最大值及所有等待阶段的并集。相同 signal 值只提交一次。同一图内为同一 fence 声明不同 signal 值、空 fence 目标或保留的最大 signal 值都会使 Compile 失败。重复导入同一资源时已声明的所有权、初态、终态及同方向的 fence 须一致。
+
+独立使用编译图时，Record 成功后调用 `CreateSubmitPlan(cmdBuffers)`。计划使用帧槽内存，可在提交前追加 fence，其目标、阶段和 signal 值须有效且与已有声明兼容。`Build()` 返回借用计划的描述符，须在计划修改、销毁或帧槽回收前使用。调用方在队列提交成功后调用 `CommitSubmittedStates()`。
+
+`RDGExternalOwnership{Acquire, Release}` 控制外部所有权屏障。首次组访问合并状态转换并发出 Acquire，只有 MarkOutput 的资源也会在图末消费待处理的 Acquire。终态转换后单独发出 Release，未指定终态时保持当前状态。同状态交接也会发出屏障。跨进程句柄传递和外部生产者的同步由调用方负责。
 
 ### 每槽瞬态资源池
 

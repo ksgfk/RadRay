@@ -205,8 +205,8 @@ TEST_P(BufferTest, PartialUploadFeedsAConcurrentReadbackConsumer) {
         test::Barrier(*recording.Commands, {BarrierBufferDescriptor{readback.get(), BufferState::CopyDestination, BufferState::HostRead}});
         recording.Commands->End();
         CommandBuffer* commands[]{recording.Commands.get()};
-        Fence* signals[]{fence.get()};
-        ASSERT_TRUE(queue.Submit({.CmdBuffers = commands, .SignalFences = signals, .SignalValues = {&value, 1}}));
+        FenceSignalDescriptor signals[]{{fence.get(), value}};
+        ASSERT_TRUE(queue.Submit({.CmdBuffers = commands, .SignalFences = signals}));
         ASSERT_TRUE(consumed.try_acquire_for(std::chrono::seconds{6}));
     }
 }
@@ -252,10 +252,10 @@ TEST_P(BufferTest, WaitingForLaterQueueSubmissionConsumesBothOverwrites) {
         recording->Commands->End();
     }
     CommandBuffer* firstCommands[]{first.Commands.get()}, *lastCommands[]{second.Commands.get()};
-    Fence* firstSignal[]{firstFence.get()}, *lastSignal[]{lastFence.get()};
-    uint64_t one[]{1}, three[]{3};
-    ASSERT_TRUE(queue.Submit({.CmdBuffers = firstCommands, .SignalFences = firstSignal, .SignalValues = one}));
-    ASSERT_TRUE(queue.Submit({.CmdBuffers = lastCommands, .SignalFences = lastSignal, .SignalValues = three, .WaitFences = firstSignal, .WaitValues = one}));
+    FenceSignalDescriptor firstSignal[]{{firstFence.get(), 1}}, lastSignal[]{{lastFence.get(), 3}};
+    FenceWaitDescriptor wait[]{{firstFence.get(), 1, PipelineStage::Copy}};
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = firstCommands, .SignalFences = firstSignal}));
+    ASSERT_TRUE(queue.Submit({.CmdBuffers = lastCommands, .WaitFences = wait, .SignalFences = lastSignal}));
     // The first signal on lastFence crosses the CPU's wait threshold.
     ASSERT_EQ(lastFence->WaitForStatus(1, 3'000'000'000), FenceStatus::Completed);
     ASSERT_EQ(test::FromBytes<uint32_t>(test::MapAndRead(*readback)), (vector<uint32_t>{value}));

@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <radray/runtime/gpu_resource.h>
@@ -92,6 +93,15 @@ struct RDGPreparedUpload {
     std::pmr::vector<gpu::ResourceBarrierDescriptor> Barriers;
 };
 
+struct RDGImportSync {
+    bool Texture;
+    uint32_t Index;
+    std::optional<RDGFenceSync> Wait{}, Signal{};
+    Nullable<const gpu::SwapChainFrame*> Frame{nullptr};
+    Nullable<gpu::SwapChainSyncObject*> Acquire{nullptr}, Present{nullptr};
+    gpu::PipelineStages FirstStages{};
+};
+
 struct RDGTexture {
     gpu::TextureDescriptor Desc;
     Nullable<gpu::Texture*> Imported{nullptr};
@@ -100,6 +110,7 @@ struct RDGTexture {
     std::optional<uint32_t> LastWriter{};
     std::pmr::vector<uint32_t> Readers;
     RDGExternalOwnership Ownership{};
+    std::optional<uint32_t> Sync{};
     Nullable<GpuTexture*> Persistent{nullptr};
     IntrusivePtr<GpuTexture> Owner{};
     bool Output{false};
@@ -114,6 +125,7 @@ struct RDGBuffer {
     std::optional<uint32_t> LastWriter{};
     std::pmr::vector<uint32_t> Readers;
     RDGExternalOwnership Ownership{};
+    std::optional<uint32_t> Sync{};
     Nullable<GpuBuffer*> Persistent{nullptr};
     IntrusivePtr<GpuBuffer> Owner{};
     bool Dynamic{false};
@@ -144,6 +156,9 @@ struct RDGData {
     std::pmr::vector<RDGBuffer> Buffers{&MemoryResource};
     std::pmr::unordered_map<gpu::Texture*, uint32_t> TextureImports{&MemoryResource};
     std::pmr::unordered_map<gpu::Buffer*, uint32_t> BufferImports{&MemoryResource};
+    std::pmr::vector<RDGImportSync> ImportSync{&MemoryResource};
+    std::pmr::vector<gpu::FenceWaitDescriptor> Waits{&MemoryResource};
+    std::pmr::vector<gpu::FenceSignalDescriptor> Signals{&MemoryResource};
     std::pmr::vector<RDGPass> Passes{&MemoryResource};
     std::pmr::vector<RDGUserPass> UserPasses{&MemoryResource};
     std::pmr::vector<RDGUpload> Uploads{&MemoryResource};
@@ -161,6 +176,7 @@ struct RDGPhysicalResource {
     bool PendingWrite{false};
     bool PendingExternalAcquire{false};
     bool NeedsExternalRelease{false};
+    bool PendingQueueWait{false};
 };
 
 class RDGStateTracker {
@@ -206,6 +222,8 @@ struct RDGExecution {
     std::pmr::vector<unique_ptr<gpu::TextureView>> ViewOwners{&Data.MemoryResource};
     std::pmr::vector<RDGBufferSlice> Slices{&Data.MemoryResource};
     std::pmr::vector<RDGPreparedUpload> PreparedUploads{&Data.MemoryResource};
+    std::pmr::vector<gpu::SwapChainWaitDescriptor> AcquireWaits{&Data.MemoryResource};
+    std::pmr::vector<gpu::SwapChainSyncObject*> PresentSignals{&Data.MemoryResource};
 };
 
 }  // namespace detail
@@ -905,25 +923,33 @@ void RDGStateTracker::Initialize() {
 }
 
 void RDGStateTracker::BindTexture(uint32_t index, gpu::Texture* texture, gpu::TextureState initialState) noexcept {
-    const auto& ownership = _data.Textures[index].Ownership;
-    _textures[index] = {texture, initialState, IsWriteState(initialState), ownership.Acquire, ownership.Release};
+    const auto& resource = _data.Textures[index];
+    auto& current = _textures[index];
+    current = {texture, initialState, IsWriteState(initialState), resource.Ownership.Acquire, resource.Ownership.Release};
+    if (resource.Sync) {
+        const auto& sync = _data.ImportSync[*resource.Sync];
+        current.PendingQueueWait = sync.Wait.has_value() || sync.Acquire;
+    }
 }
 
 void RDGStateTracker::BindBuffer(uint32_t index, gpu::Buffer* buffer, gpu::BufferStates initialState) noexcept {
-    const auto& ownership = _data.Buffers[index].Ownership;
-    _buffers[index] = {buffer, initialState, IsWriteState(initialState), ownership.Acquire, ownership.Release};
+    const auto& resource = _data.Buffers[index];
+    auto& current = _buffers[index];
+    current = {buffer, initialState, IsWriteState(initialState), resource.Ownership.Acquire, resource.Ownership.Release};
+    current.PendingQueueWait = resource.Sync && _data.ImportSync[*resource.Sync].Wait;
 }
 
 void RDGStateTracker::TransitionTexture(uint32_t index, gpu::TextureState next, bool write, std::pmr::vector<gpu::ResourceBarrierDescriptor>& barriers) noexcept {
     auto& current = _textures[index];
     const auto before = current.CurrentState;
+    const bool afterWait = std::exchange(current.PendingQueueWait, false);
     if (current.PendingExternalAcquire) {
         barriers.emplace_back(gpu::BarrierTextureDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .ExternalTransfer = gpu::ExternalOwnershipTransfer::Acquire});
         current.PendingExternalAcquire = false;
     } else if (before == gpu::TextureState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
         barriers.emplace_back(gpu::BarrierUavDescriptor{current.Resource.Get()});
-    } else if (before != next || current.PendingWrite) {
-        barriers.emplace_back(gpu::BarrierTextureDescriptor{current.Resource.Get(), before, next});
+    } else if (before != next || current.PendingWrite || (afterWait && next == gpu::TextureState::ShaderRead)) {
+        barriers.emplace_back(gpu::BarrierTextureDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .AfterQueueWait = afterWait});
     }
     current.CurrentState = next;
     current.PendingWrite = write;
@@ -935,13 +961,14 @@ void RDGStateTracker::TransitionBuffer(uint32_t index, gpu::BufferStates next, b
     const auto& logical = _data.Buffers[index];
     if (logical.Dynamic) return;
     const auto before = current.CurrentState;
+    const bool afterWait = next != gpu::BufferState::HostWrite && std::exchange(current.PendingQueueWait, false);
     if (current.PendingExternalAcquire) {
         barriers.emplace_back(gpu::BarrierBufferDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .ExternalTransfer = gpu::ExternalOwnershipTransfer::Acquire});
         current.PendingExternalAcquire = false;
     } else if (before == gpu::BufferState::UnorderedAccess && next == before && (current.PendingWrite || write)) {
         barriers.emplace_back(gpu::BarrierUavDescriptor{current.Resource.Get()});
-    } else if (before != next || current.PendingWrite) {
-        barriers.emplace_back(gpu::BarrierBufferDescriptor{current.Resource.Get(), before, next});
+    } else if (before != next || current.PendingWrite || (afterWait && (next & (gpu::BufferState::ShaderRead | gpu::BufferState::CBuffer)))) {
+        barriers.emplace_back(gpu::BarrierBufferDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .AfterQueueWait = afterWait});
     }
     current.CurrentState = next;
     current.PendingWrite = write;
@@ -950,6 +977,40 @@ void RDGStateTracker::TransitionBuffer(uint32_t index, gpu::BufferStates next, b
 void RDGStateTracker::PrepareHostWrite(uint32_t index) noexcept {
     TransitionBuffer(index, gpu::BufferState::HostWrite, false, _beginBarriers);
 }
+
+namespace {
+
+gpu::PipelineStages FirstAccessStages(const RDGAccess& access, RDGPassKind kind) noexcept {
+    using enum gpu::PipelineStage;
+    const auto shaders = kind == RDGPassKind::Compute ? gpu::PipelineStages{ComputeShader} : VertexShader | PixelShader;
+    if (access.Texture) {
+        switch (static_cast<gpu::TextureState>(access.State)) {
+            case gpu::TextureState::RenderTarget: return ColorAttachment;
+            case gpu::TextureState::DepthRead:
+            case gpu::TextureState::DepthWrite:
+            case gpu::TextureState::DepthReadStencilWrite:
+            case gpu::TextureState::DepthWriteStencilRead: return DepthStencil;
+            case gpu::TextureState::CopySource:
+            case gpu::TextureState::CopyDestination:
+            case gpu::TextureState::ResolveSource:
+            case gpu::TextureState::ResolveDestination: return Copy;
+            case gpu::TextureState::AttachmentResolveDestination: return ColorAttachment | DepthStencil;
+            case gpu::TextureState::ShaderRead:
+            case gpu::TextureState::UnorderedAccess: return shaders;
+            default: return AllCommands;
+        }
+    }
+    using B = gpu::BufferState;
+    const gpu::BufferStates state{access.State};
+    gpu::PipelineStages stages{};
+    if (state & (B::CopySource | B::CopyDestination)) stages |= Copy;
+    if (state & (B::Vertex | B::Index)) stages |= VertexInput;
+    if (state.HasFlag(B::Indirect)) stages |= DrawIndirect;
+    if (state & (B::CBuffer | B::ShaderRead | B::UnorderedAccess)) stages |= shaders;
+    return stages ? stages : gpu::PipelineStages{AllCommands};
+}
+
+}  // namespace
 
 void RDGStateTracker::PrepareBarriers(StagingBufferPool& staging, DynamicBufferArena& dynamic, std::span<RDGPreparedUpload> preparedUploads, std::span<const uint32_t> uploadCounts) {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.PlanBarriers");
@@ -966,8 +1027,15 @@ void RDGStateTracker::PrepareBarriers(StagingBufferPool& staging, DynamicBufferA
             for (const auto& access : Accesses(_data, pass)) {
                 group.Uav |= access.Write && access.State == (access.Texture ? static_cast<uint32_t>(gpu::TextureState::UnorderedAccess) : static_cast<uint32_t>(gpu::BufferState::UnorderedAccess));
                 auto& stamp = seen[AccessIndex(_data, access)];
+                if (group.Kind == RDGPassKind::Upload && !preparedUploads[pass.PreparedUpload].ActualSize) continue;
+                if (stamp == std::numeric_limits<size_t>::max()) {
+                    const auto syncIndex = access.Texture ? _data.Textures[access.Index].Sync : _data.Buffers[access.Index].Sync;
+                    if (syncIndex) {
+                        auto& sync = _data.ImportSync[*syncIndex];
+                        sync.FirstStages = FirstAccessStages(access, pass.Kind);
+                    }
+                }
                 if (group.Kind == RDGPassKind::Upload) {
-                    if (!preparedUploads[pass.PreparedUpload].ActualSize) continue;
                     // 仅有一个生产者的资源不需要区间索引。
                     if (uploadCounts[AccessIndex(_data, access)] == 1) {
                         if (access.Texture)
@@ -1294,36 +1362,136 @@ RDGPassHandle RDGBuilder::AddClearDepthStencil(RDGTextureHandle texture, gpu::De
     return AddClearDepthStencil(texture, value, slice.ToSubresourceRange(), clearDepth, clearStencil, renderArea);
 }
 
-RDGTextureHandle RDGBuilder::ImportTexture(gpu::Texture* texture, gpu::TextureState initialState, std::optional<gpu::TextureState> finalState, RDGExternalOwnership ownership) {
-    RequireOpen(_data);
-    const auto found = _data.TextureImports.find(texture);
-    if (found != _data.TextureImports.end()) {
-        const auto i = found->second;
-        auto& previous = _data.Textures[i];
-        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState) || previous.Ownership != ownership) Fail(_data, "inconsistent duplicate texture import");
-        if (finalState) previous.FinalState = finalState;
-        return {i};
+namespace {
+
+void MergeWait(std::pmr::vector<gpu::FenceWaitDescriptor>& waits, gpu::Fence* fence, uint64_t value, gpu::PipelineStages dstStages) {
+    const auto it = std::ranges::find(waits, fence, &gpu::FenceWaitDescriptor::Target);
+    if (it == waits.end()) {
+        waits.push_back({fence, value, dstStages});
+    } else {
+        it->Value = std::max(it->Value, value);
+        it->DstStages |= dstStages;
     }
-    const auto index = static_cast<uint32_t>(_data.Textures.size());
-    _data.Textures.push_back({.Desc = texture->GetDesc(), .Imported = texture, .InitialState = initialState, .FinalState = finalState, .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}, .Ownership = ownership});
-    _data.TextureImports.emplace(texture, index);
+}
+
+bool MergeSignal(std::pmr::vector<gpu::FenceSignalDescriptor>& signals, gpu::Fence* fence, uint64_t value) {
+    if (!fence || value == std::numeric_limits<uint64_t>::max()) return false;
+    const auto it = std::ranges::find(signals, fence, &gpu::FenceSignalDescriptor::Target);
+    if (it != signals.end()) return it->Value == value;
+    signals.push_back({fence, value});
+    return true;
+}
+
+void MergeImportSync(RDGData& data, std::optional<uint32_t>& index, bool texture, uint32_t resource,
+                     std::optional<RDGFenceSync> wait, std::optional<RDGFenceSync> signal) {
+    if (!wait && !signal) return;
+    if (!index) {
+        index = static_cast<uint32_t>(data.ImportSync.size());
+        data.ImportSync.push_back({texture, resource});
+    }
+    auto& sync = data.ImportSync[*index];
+    const auto merge = [&](auto& previous, const auto& next) {
+        if (!next) return;
+        if (previous && (previous->Target != next->Target || previous->Value != next->Value))
+            Fail(data, "inconsistent fence on repeated resource import");
+        previous = next;
+    };
+    merge(sync.Wait, wait);
+    merge(sync.Signal, signal);
+}
+
+}  // namespace
+
+RDGTextureHandle RDGBuilder::ImportTexture(gpu::Texture* texture, gpu::TextureState initialState, std::optional<gpu::TextureState> finalState) {
+    return ImportTexture({.Target = texture, .InitialState = initialState, .FinalState = finalState});
+}
+
+RDGTextureHandle RDGBuilder::ImportTexture(const RDGTextureImportDescriptor& desc) {
+    RequireOpen(_data);
+    if (!desc.Target) {
+        Fail(_data, "missing texture import target");
+        return {};
+    }
+    const auto [it, inserted] = _data.TextureImports.try_emplace(desc.Target, static_cast<uint32_t>(_data.Textures.size()));
+    const auto index = it->second;
+    if (inserted) {
+        _data.Textures.push_back({.Desc = desc.Target->GetDesc(), .Imported = desc.Target, .InitialState = desc.InitialState, .FinalState = desc.FinalState,
+                                 .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}, .Ownership = desc.Ownership});
+    }
+    auto& resource = _data.Textures[index];
+    if (!inserted) {
+        if (resource.Sync && _data.ImportSync[*resource.Sync].Frame) Fail(_data, "back buffer also imported as an ordinary texture");
+        if (resource.InitialState != desc.InitialState || (resource.FinalState && desc.FinalState && resource.FinalState != desc.FinalState) || resource.Ownership != desc.Ownership)
+            Fail(_data, "inconsistent duplicate texture import");
+        if (desc.FinalState) resource.FinalState = desc.FinalState;
+    }
+    MergeImportSync(_data, resource.Sync, true, index, desc.WaitFence, desc.SignalFence);
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates initialState, std::optional<gpu::BufferStates> finalState, RDGExternalOwnership ownership) {
+RDGBufferHandle RDGBuilder::ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates initialState, std::optional<gpu::BufferStates> finalState) {
+    return ImportBuffer({.Target = buffer, .InitialState = initialState, .FinalState = finalState});
+}
+
+RDGBufferHandle RDGBuilder::ImportBuffer(const RDGBufferImportDescriptor& desc) {
     RequireOpen(_data);
-    const auto found = _data.BufferImports.find(buffer);
-    if (found != _data.BufferImports.end()) {
-        const auto i = found->second;
-        auto& previous = _data.Buffers[i];
-        if (previous.InitialState != initialState || (previous.FinalState && finalState && previous.FinalState != finalState) || previous.Ownership != ownership) Fail(_data, "inconsistent duplicate buffer import");
-        if (finalState) previous.FinalState = finalState;
-        return {i};
+    if (!desc.Target) {
+        Fail(_data, "missing buffer import target");
+        return {};
     }
-    const auto index = static_cast<uint32_t>(_data.Buffers.size());
-    _data.Buffers.push_back({.Desc = buffer->GetDesc(), .Imported = buffer, .InitialState = initialState, .FinalState = finalState, .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}, .Ownership = ownership});
-    _data.BufferImports.emplace(buffer, index);
+    const auto [it, inserted] = _data.BufferImports.try_emplace(desc.Target, static_cast<uint32_t>(_data.Buffers.size()));
+    const auto index = it->second;
+    if (inserted) {
+        _data.Buffers.push_back({.Desc = desc.Target->GetDesc(), .Imported = desc.Target, .InitialState = desc.InitialState, .FinalState = desc.FinalState,
+                                .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}, .Ownership = desc.Ownership});
+    }
+    auto& resource = _data.Buffers[index];
+    if (!inserted) {
+        if (resource.InitialState != desc.InitialState || (resource.FinalState && desc.FinalState && resource.FinalState != desc.FinalState) || resource.Ownership != desc.Ownership)
+            Fail(_data, "inconsistent duplicate buffer import");
+        if (desc.FinalState) resource.FinalState = desc.FinalState;
+    }
+    MergeImportSync(_data, resource.Sync, false, index, desc.WaitFence, desc.SignalFence);
     return {index};
+}
+
+RDGTextureHandle RDGBuilder::ImportBackBuffer(const gpu::SwapChainFrame& frame, gpu::TextureState initialState) {
+    RequireOpen(_data);
+    if (!frame.IsValid() || !frame.GetBackBuffer()) {
+        Fail(_data, "invalid acquired swapchain frame");
+        return {};
+    }
+    if (const auto found = _data.TextureImports.find(frame.GetBackBuffer()); found != _data.TextureImports.end()) {
+        const auto& resource = _data.Textures[found->second];
+        if (!resource.Sync || !_data.ImportSync[*resource.Sync].Frame) {
+            Fail(_data, "ordinary texture also imported as a back buffer");
+        } else {
+            const auto& sync = _data.ImportSync[*resource.Sync];
+            if (sync.Frame.Get() != &frame || resource.InitialState != initialState || sync.Acquire.Get() != frame.GetWaitToDraw() || sync.Present.Get() != frame.GetReadyToPresent())
+                Fail(_data, "inconsistent duplicate back buffer import");
+        }
+        return {found->second};
+    }
+    const auto handle = ImportTexture(frame.GetBackBuffer(), initialState, gpu::TextureState::Present);
+    auto& resource = _data.Textures[handle.Index];
+    resource.Sync = static_cast<uint32_t>(_data.ImportSync.size());
+    _data.ImportSync.push_back({.Texture = true, .Index = handle.Index, .Frame = &frame, .Acquire = frame.GetWaitToDraw(), .Present = frame.GetReadyToPresent()});
+    MarkOutput(handle);
+    return handle;
+}
+
+void RDGBuilder::AddWaitFence(gpu::Fence* fence, uint64_t value, gpu::PipelineStages dstStages) {
+    RequireOpen(_data);
+    if (!fence || !gpu::AreWaitStagesSupported(_slot.GetQueue().GetQueueType(), dstStages)) {
+        Fail(_data, "invalid graph fence wait");
+        return;
+    }
+    MergeWait(_data.Waits, fence, value, dstStages);
+}
+
+void RDGBuilder::AddSignalFence(gpu::Fence* fence, uint64_t value) {
+    RequireOpen(_data);
+    if (!MergeSignal(_data.Signals, fence, value)) Fail(_data, "invalid or conflicting graph fence signal");
 }
 
 RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuBuffer& buffer) {
@@ -1674,6 +1842,39 @@ void RDGBuilder::AddOrderBarrier(RDGPassHandle barrier) {
     _data.Passes[barrier.Index].OrderBarrier = true;
 }
 
+namespace {
+
+bool ValidateImportSync(RDGData& data) {
+    if (data.ImportSync.empty()) return true;
+    std::pmr::vector<gpu::FenceSignalDescriptor> signals{data.Signals, &data.ScratchResource};
+    std::pmr::set<gpu::SwapChainSyncObject*> binary{&data.ScratchResource};
+    for (const auto& sync : data.ImportSync) {
+        if (sync.Wait && !sync.Wait->Target) Fail(data, "missing resource wait fence");
+        if (sync.Signal && !MergeSignal(signals, sync.Signal->Target, sync.Signal->Value)) Fail(data, "invalid or conflicting resource fence signal");
+        for (const auto object : {sync.Acquire, sync.Present}) {
+            if (object && !binary.insert(object.Get()).second) Fail(data, "swapchain synchronization object used more than once");
+        }
+    }
+    return !data.Failed;
+}
+
+void PrepareSubmitSync(RDGExecution& execution) {
+    auto& data = execution.Data;
+    for (const auto& sync : data.ImportSync) {
+        if (!(sync.Texture ? data.Textures[sync.Index].Alive : data.Buffers[sync.Index].Alive)) continue;
+        if (sync.Wait) {
+            const bool acquireOwnership = sync.Texture ? data.Textures[sync.Index].Ownership.Acquire : data.Buffers[sync.Index].Ownership.Acquire;
+            const auto stages = sync.FirstStages && !acquireOwnership ? sync.FirstStages : gpu::PipelineStages{gpu::PipelineStage::AllCommands};
+            MergeWait(data.Waits, sync.Wait->Target, sync.Wait->Value, stages);
+        }
+        if (sync.Signal) MergeSignal(data.Signals, sync.Signal->Target, sync.Signal->Value);
+        if (sync.Acquire) execution.AcquireWaits.push_back({sync.Acquire.Get(), sync.FirstStages ? sync.FirstStages : gpu::PipelineStages{gpu::PipelineStage::BottomOfPipe}});
+        if (sync.Present) execution.PresentSignals.push_back(sync.Present.Get());
+    }
+}
+
+}  // namespace
+
 Nullable<CompiledRDG*> RDGBuilder::Compile() {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile");
     RADRAY_PROFILE_PLOT("RadRay.RDG.DeclaredPasses", static_cast<int64_t>(_data.Passes.size()));
@@ -1681,7 +1882,7 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
     RADRAY_PROFILE_PLOT("RadRay.RDG.DeclaredBuffers", static_cast<int64_t>(_data.Buffers.size()));
     RequireOpen(_data);
     _data.Sealed = true;
-    if (_data.Failed) return nullptr;
+    if (_data.Failed || !ValidateImportSync(_data)) return nullptr;
     {
         RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Compile.ValidateResources");
         for (const auto& resource : _data.Textures) {
@@ -2015,6 +2216,7 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Stagi
         }
     }
     execution.Pass = nullptr;
+    PrepareSubmitSync(execution);
     _prepared = true;
     return true;
 }
@@ -2124,6 +2326,32 @@ bool CompiledRDG::Record(gpu::CommandBuffer& command, Nullable<gpu::QueryPool*> 
     if (!execution.States.GetReleaseBarriers().empty()) command.ResourceBarrier(execution.States.GetReleaseBarriers());
     _recorded = true;
     return true;
+}
+
+RDGSubmitPlan::RDGSubmitPlan(FrameSlot& slot, const gpu::CommandQueueSubmitDescriptor& prepared)
+    : _queueType(slot.GetQueue().GetQueueType()),
+      _commands(prepared.CmdBuffers.begin(), prepared.CmdBuffers.end(), &slot.GetMemoryResource()),
+      _waits(prepared.WaitFences.begin(), prepared.WaitFences.end(), &slot.GetMemoryResource()),
+      _signals(prepared.SignalFences.begin(), prepared.SignalFences.end(), &slot.GetMemoryResource()),
+      _acquire(prepared.WaitToExecute), _present(prepared.ReadyToPresent) {}
+
+void RDGSubmitPlan::AddWaitFence(gpu::Fence* fence, uint64_t value, gpu::PipelineStages dstStages) {
+    if (!fence || !gpu::AreWaitStagesSupported(_queueType, dstStages)) RADRAY_ABORT("RDG: invalid submit-time wait");
+    MergeWait(_waits, fence, value, dstStages);
+}
+
+void RDGSubmitPlan::AddSignalFence(gpu::Fence* fence, uint64_t value) {
+    if (!MergeSignal(_signals, fence, value)) RADRAY_ABORT("RDG: invalid or conflicting submit-time signal");
+}
+
+gpu::CommandQueueSubmitDescriptor RDGSubmitPlan::Build() const noexcept {
+    return {.CmdBuffers = _commands, .WaitFences = _waits, .SignalFences = _signals, .WaitToExecute = _acquire, .ReadyToPresent = _present};
+}
+
+RDGSubmitPlan CompiledRDG::CreateSubmitPlan(std::span<gpu::CommandBuffer* const> cmdBuffers) const {
+    if (!_recorded || _committed) RADRAY_ABORT("RDG: create the submit plan after Record and before commit");
+    return RDGSubmitPlan{_execution->Slot, {.CmdBuffers = cmdBuffers, .WaitFences = _data.Waits, .SignalFences = _data.Signals,
+                                            .WaitToExecute = _execution->AcquireWaits, .ReadyToPresent = _execution->PresentSignals}};
 }
 
 void CompiledRDG::CommitSubmittedStates() noexcept {

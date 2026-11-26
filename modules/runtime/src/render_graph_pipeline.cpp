@@ -225,10 +225,16 @@ void RenderGraphFramePipeline::Record(FrameSlot& slot) noexcept {
     state.AbandonIfLost(slot);
 }
 
+bool RenderGraphFramePipeline::SubmitFrame(FrameSlot& slot, RDGSubmitPlan& plan) noexcept {
+    return slot.GetQueue().Submit(plan.Build());
+}
+
 bool RenderGraphFramePipeline::Submit(FrameSlot& slot) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.FramePipeline.Submit");
     auto& state = *_slotStates[slot.GetIndex()];
-    const bool submitted = SubmitFrame(slot, *state.Command);
+    gpu::CommandBuffer* commands[]{state.Command.Get()};
+    auto plan = state.CompiledGraph->CreateSubmitPlan(commands);
+    const bool submitted = SubmitFrame(slot, plan);
     if (submitted) {
         if (state.QueryCount) state.ReadbackState = gpu::BufferState::HostRead;
         state.CompiledGraph->CommitSubmittedStates();
