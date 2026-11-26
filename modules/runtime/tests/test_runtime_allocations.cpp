@@ -170,7 +170,8 @@ TEST(RuntimeAllocationsTest, O1SteadyStateRdgBuildAndInlineGeneratorZeroGlobalAl
     DeviceContext context{device, &device->Queue};
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64 * 1024};
+    StagingBufferPool staging{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
     const string longRaster(48, 'R');
     const string longCompute(48, 'C');
     const string longCopy(48, 'P');
@@ -182,16 +183,17 @@ TEST(RuntimeAllocationsTest, O1SteadyStateRdgBuildAndInlineGeneratorZeroGlobalAl
         .MipLevels = 1,
         .SampleCount = 1,
         .Format = gpu::TextureFormat::RGBA8_UNORM,
-        .Memory = gpu::MemoryType::Device,
+        .Memory = gpu::MemoryType::DeviceLocal,
         .Usage = gpu::TextureUse::RenderTarget | gpu::TextureUse::Resource};
 
     const auto runFrame = [&] {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot};
         const auto color = graph.CreateTexture(colorDesc);
-        const auto dynBuf = graph.CreateBuffer(
+        const auto dynBuf = graph.CreateDynamicBuffer(
             RDGDynamicBufferDescriptor{.MaxSize = 16, .Usage = gpu::BufferUse::CBuffer},
             RDGUploadSource::Generated(16, uint64_t{0xCAFEBABEULL},
                                        +[](const uint64_t& val, RDGUploadWriteContext& out) noexcept {
@@ -209,7 +211,7 @@ TEST(RuntimeAllocationsTest, O1SteadyStateRdgBuildAndInlineGeneratorZeroGlobalAl
             .NeverCull();
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
         ASSERT_TRUE(scheduler->RunFrame());
     };
 
@@ -231,7 +233,8 @@ TEST(RuntimeAllocationsTest, SteadyStateReadbackReusesRequestsAndStagingAcrossFr
     auto source = device->CreateBuffer({.Size = 16, .Usage = gpu::BufferUse::CopySource}).Unwrap();
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64};
+    StagingBufferPool staging{*device, 64};
+    DynamicBufferArena uploads{*device, 64};
     auto texture = device->CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = 2, .Height = 2, .DepthOrArraySize = 1,
         .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Usage = gpu::TextureUse::CopySource}).Unwrap();
     class CopyCommand final : public test::FakeCommandBuffer {
@@ -242,7 +245,8 @@ TEST(RuntimeAllocationsTest, SteadyStateReadbackReusesRequestsAndStagingAcrossFr
     const auto runFrame = [&] {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot};
         const auto handle = graph.ImportBuffer(source.get(), gpu::BufferState::CopySource);
         const auto color = graph.ImportTexture(texture.get(), gpu::TextureState::CopySource);
@@ -251,7 +255,7 @@ TEST(RuntimeAllocationsTest, SteadyStateReadbackReusesRequestsAndStagingAcrossFr
         ASSERT_TRUE(reads.EnqueueTexture(graph, textureId, color));
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
         ASSERT_TRUE(compiled->Record(command));
         ASSERT_TRUE(scheduler->RunFrame());
         reads.MarkSubmitted(id);
@@ -329,7 +333,8 @@ TEST(RuntimeAllocationsTest, C4DenseBucketedRdgPassSteadyStateZeroGlobalAllocati
     DeviceContext context{device, &device->Queue};
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1).Unwrap();
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64 * 1024};
+    StagingBufferPool staging{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
 
     constexpr uint32_t kBufferCount = 40;
     vector<unique_ptr<test::FakeBuffer>> buffers;
@@ -341,7 +346,8 @@ TEST(RuntimeAllocationsTest, C4DenseBucketedRdgPassSteadyStateZeroGlobalAllocati
     const auto runFrame = [&] {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot};
         auto pass = graph.AddComputePass("dense_bucketed", uint32_t{0}, +[](const uint32_t&, RDGComputePassContext&) noexcept { return true; });
         for (uint32_t i = 0; i < kBufferCount; ++i) {
@@ -351,7 +357,7 @@ TEST(RuntimeAllocationsTest, C4DenseBucketedRdgPassSteadyStateZeroGlobalAllocati
         pass.NeverCull();
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
         ASSERT_TRUE(scheduler->RunFrame());
     };
 

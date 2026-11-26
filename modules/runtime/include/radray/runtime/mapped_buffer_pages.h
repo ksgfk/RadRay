@@ -20,22 +20,16 @@ struct UploadAllocation {
     uint64_t ReservedSize{0};
 };
 
-class UploadArena final {
-public:
-    explicit UploadArena(gpu::Device& device, uint64_t pageSize = 1024 * 1024) noexcept;
-    ~UploadArena() noexcept;
-    UploadArena(const UploadArena&) = delete;
-    UploadArena& operator=(const UploadArena&) = delete;
+namespace detail {
 
-    // GPU 完成、命令存储重置后复用；稳定页上的参数组绑定可保留。
-    void Reset() noexcept;
-    // 释放页前还须解除所有参数组和 view 引用。
+class MappedBufferPages {
+public:
+    MappedBufferPages(const MappedBufferPages&) = delete;
+    MappedBufferPages& operator=(const MappedBufferPages&) = delete;
+
+    // Called after GPU completion, command-storage reset and release of slice bindings.
+    void BeginFrame() noexcept;
     void Clear() noexcept;
-    // 动态页支持管线直读和拷贝；reservedSize 可包含绑定所需的尾部填充。
-    // 两个入口均保持本帧切片地址稳定，零大小返回空切片。
-    std::optional<UploadAllocation> Allocate(uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
-    // 暂存页仅供传输命令读取，以 size 字节保留切片。
-    std::optional<UploadAllocation> AllocateStaging(uint64_t size, uint64_t alignment);
     bool Flush() noexcept;
     template <class Allocator>
     void AppendReadBarriers(std::vector<gpu::ResourceBarrierDescriptor, Allocator>& barriers) const {
@@ -51,22 +45,28 @@ public:
     uint64_t GetCapacity() const noexcept;
     gpu::Device& GetDevice() const noexcept;
 
+protected:
+    MappedBufferPages(gpu::Device& device, uint64_t pageSize, gpu::BufferUses usage) noexcept;
+    ~MappedBufferPages() noexcept = default;
+    std::optional<UploadAllocation> AllocateInDomain(gpu::MemoryType memory, uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
+
 private:
-    enum class PageKind : uint8_t { Dynamic, Staging };
     struct Page {
         unique_ptr<gpu::Buffer> Buffer;
         byte* Data;
         uint64_t Capacity;
-        PageKind Kind;
+        gpu::MemoryType Memory;
+        uint8_t IdleFrames{0};
         uint64_t Cursor{0};
         uint64_t DirtyBegin{0}, DirtyEnd{0};
         gpu::BufferStates Reads{};
         gpu::BufferStates SubmittedState{gpu::BufferState::HostWrite};
     };
-    std::optional<UploadAllocation> AllocatePageSlice(PageKind kind, uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
     gpu::Device& _device;
     uint64_t _pageSize;
+    gpu::BufferUses _usage;
     vector<Page> _pages;
 };
 
+}  // namespace detail
 }  // namespace radray

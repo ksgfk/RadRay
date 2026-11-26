@@ -22,8 +22,8 @@ struct GeometryPage {
 };
 
 struct GeometryPoolStorage {
-    GeometryPoolStorage(gpu::Device& device, uint32_t stride, uint32_t capacity, gpu::BufferUses usage, std::string_view name)
-        : Device(device), Stride(stride), PageCapacity(capacity), Usage(usage), Name(name) {}
+    GeometryPoolStorage(gpu::Device& device, uint32_t stride, uint32_t capacity, gpu::BufferUses usage, GpuBufferMemory memory, std::string_view name)
+        : Device(device), Stride(stride), PageCapacity(capacity), Usage(usage), Memory(memory), Name(name) {}
     ~GeometryPoolStorage() noexcept {
 #if RADRAY_IS_DEBUG
         for (const auto& page : Pages) {
@@ -50,6 +50,7 @@ struct GeometryPoolStorage {
     uint32_t Stride;
     uint32_t PageCapacity;
     gpu::BufferUses Usage;
+    GpuBufferMemory Memory;
     string Name;
     vector<unique_ptr<GeometryPage>> Pages;
     uint32_t CommittedPageCount{0};
@@ -57,17 +58,18 @@ struct GeometryPoolStorage {
     uint64_t TotalFreeElements{0};
 };
 
-bool ValidAdditionalUsage(gpu::BufferUses usage) noexcept {
+bool ValidAdditionalUsage(gpu::BufferUses usage, GpuBufferMemory memory) noexcept {
     constexpr auto kDeviceUsage = gpu::BufferUse::Common | gpu::BufferUse::CopySource | gpu::BufferUse::CopyDestination |
                                   gpu::BufferUse::Vertex | gpu::BufferUse::Index | gpu::BufferUse::CBuffer |
                                   gpu::BufferUse::Resource | gpu::BufferUse::UnorderedAccess | gpu::BufferUse::Indirect;
+    if (memory != GpuBufferMemory::DeviceLocal && (usage & (gpu::BufferUse::CopyDestination | gpu::BufferUse::Common | gpu::BufferUse::UnorderedAccess))) return false;
     return !(usage & ~kDeviceUsage);
 }
 
 Nullable<unique_ptr<GeometryPage>> CreateCommittedPage(const GeometryPoolStorage& storage, uint32_t slot, uint32_t capacity, Nullable<const VertexInput*> input) {
     const uint64_t bytes = uint64_t{capacity} * storage.Stride;
     if (input && bytes > std::numeric_limits<uint32_t>::max()) return nullptr;
-    auto buffer = GpuBuffer::Create(storage.Device, {.Size = bytes, .Usage = storage.Usage});
+    auto buffer = GpuBuffer::Create(storage.Device, {.Size = bytes, .Usage = storage.Usage, .Memory = storage.Memory});
     if (!buffer) return nullptr;
     buffer->GetBuffer()->SetDebugName(radray::format("{}[{}]", storage.Name, slot));
     auto page = make_unique<GeometryPage>(buffer.Release(), capacity);
@@ -145,7 +147,7 @@ void AddReadAccess(const GeometryPoolStorage& storage, RDGBuilder& graph, RDGRas
 class VertexBufferPool::Impl : public GeometryPoolStorage {
 public:
     Impl(gpu::Device& device, const VertexBufferPoolDescriptor& desc)
-        : GeometryPoolStorage(device, desc.VertexStride, desc.PageVertexCapacity, gpu::BufferUse::Vertex | gpu::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix),
+        : GeometryPoolStorage(device, desc.VertexStride, desc.PageVertexCapacity, gpu::BufferUse::Vertex | desc.AdditionalUsage, desc.Memory, desc.DebugNamePrefix),
           Input{{desc.Layouts.begin(), desc.Layouts.end()}, {desc.Attributes.begin(), desc.Attributes.end()}, {}} {}
     VertexInput Input;
 };
@@ -153,12 +155,12 @@ public:
 class IndexBufferPool::Impl : public GeometryPoolStorage {
 public:
     Impl(gpu::Device& device, const IndexBufferPoolDescriptor& desc)
-        : GeometryPoolStorage(device, desc.IndexStride, desc.PageIndexCapacity, gpu::BufferUse::Index | gpu::BufferUse::CopyDestination | desc.AdditionalUsage, desc.DebugNamePrefix) {}
+        : GeometryPoolStorage(device, desc.IndexStride, desc.PageIndexCapacity, gpu::BufferUse::Index | desc.AdditionalUsage, desc.Memory, desc.DebugNamePrefix) {}
 };
 
 Nullable<unique_ptr<VertexBufferPool>> VertexBufferPool::Create(gpu::Device& device, const VertexBufferPoolDescriptor& desc) {
     uint32_t vertices = 0, instances = 0;
-    if (!desc.VertexStride || !desc.PageVertexCapacity || uint64_t{desc.VertexStride} * desc.PageVertexCapacity > std::numeric_limits<uint32_t>::max() || !ValidAdditionalUsage(desc.AdditionalUsage)) return nullptr;
+    if (!desc.VertexStride || !desc.PageVertexCapacity || uint64_t{desc.VertexStride} * desc.PageVertexCapacity > std::numeric_limits<uint32_t>::max() || !ValidAdditionalUsage(desc.AdditionalUsage, desc.Memory)) return nullptr;
     for (const auto& layout : desc.Layouts) {
         if (layout.StepMode == gpu::VertexStepMode::Vertex) {
             if (layout.Binding != desc.VertexStreamBinding || layout.ArrayStride != desc.VertexStride) return nullptr;
@@ -193,7 +195,7 @@ uint64_t VertexBufferPool::GetFreeBytes() const noexcept { return FreeBytes(*_im
 void VertexBufferPool::AddPassReadAccess(RDGBuilder& graph, RDGRasterPassBuilder& pass, gpu::BufferStates state) const { AddReadAccess(*_impl, graph, pass, state); }
 
 Nullable<unique_ptr<IndexBufferPool>> IndexBufferPool::Create(gpu::Device& device, const IndexBufferPoolDescriptor& desc) {
-    if ((desc.IndexStride != 2 && desc.IndexStride != 4) || !desc.PageIndexCapacity || !ValidAdditionalUsage(desc.AdditionalUsage)) return nullptr;
+    if ((desc.IndexStride != 2 && desc.IndexStride != 4) || !desc.PageIndexCapacity || !ValidAdditionalUsage(desc.AdditionalUsage, desc.Memory)) return nullptr;
     return unique_ptr<IndexBufferPool>{new IndexBufferPool{make_unique<Impl>(device, desc)}};
 }
 

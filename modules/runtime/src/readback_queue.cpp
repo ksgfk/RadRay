@@ -35,7 +35,7 @@ bool AsyncReadbackQueue::ReserveTexture(uint64_t id, const ReadbackTexturePlan& 
     if (!block.BytesPerBlock) return false;
     const uint64_t rowBytes = uint64_t{block.Columns(plan.Width)} * block.BytesPerBlock;
     const uint64_t rows = uint64_t{block.Rows(plan.Height)} * plan.Depth;
-    const auto alignment = std::lcm<uint64_t>(block.BytesPerBlock, std::max(1u, _device.GetCapabilities().Detail.TextureDataPitchAlignment));
+    const auto alignment = std::lcm<uint64_t>(block.BytesPerBlock, std::max(1u, _device.GetCapabilities().Limits.TextureDataPitchAlignment));
     const auto pitch = ((rowBytes + alignment - 1) / alignment) * alignment;
     if (pitch > std::numeric_limits<uint32_t>::max() || rows > std::numeric_limits<size_t>::max() / pitch) return false;
     return Reserve(id, {false, plan, rowBytes * rows, rowBytes}, pitch, rows);
@@ -61,7 +61,7 @@ bool AsyncReadbackQueue::Reserve(uint64_t id, const ReadbackResultInfo& info, ui
         staging = std::move(*best);
         _free.erase(best);
     } else {
-        auto buffer = _device.CreateBuffer({.Size = size, .Memory = gpu::MemoryType::ReadBack, .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
+        auto buffer = _device.CreateBuffer({.Size = size, .Memory = gpu::MemoryType::HostReadBack, .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
         if (!buffer) return false;
         staging.Mapped = static_cast<const byte*>(buffer->GetMappedData().Get());
         if (!staging.Mapped) return false;
@@ -78,7 +78,7 @@ bool AsyncReadbackQueue::EnqueueReservedBuffer(RDGBuilder& graph, uint64_t id, R
     auto& request = found->second;
     const auto size = request.Info.PackedByteSize;
     const auto desc = graph.GetBufferDescriptor(source);
-    const auto alignment = std::max<uint64_t>(1, _device.GetCapabilities().Detail.BufferCopyOffsetAlignment);
+    const auto alignment = std::max<uint64_t>(1, _device.GetCapabilities().Limits.BufferCopyOffsetAlignment);
     if (request.Progress != State::Reserved || request.Info.Texture.Width || !desc || !desc->Usage.HasFlag(gpu::BufferUse::CopySource) ||
         offset % alignment || offset > desc->Size || size > desc->Size - offset) return false;
     auto dst = graph.ImportBuffer(request.Staging.Buffer.get(), request.Staging.LastState, gpu::BufferStates{gpu::BufferState::HostRead});
@@ -137,7 +137,7 @@ bool AsyncReadbackQueue::EnqueueReserved(RDGBuilder& graph, uint64_t id, RDGText
     const auto desc = graph.GetTextureDescriptor(source);
     if (!desc || request.Info.Texture != ReadbackTexturePlan{region.Width, region.Height, desc->Format, region.Depth}) return false;
     const gpu::TextureBufferCopyRegion transfer{region, 0, static_cast<uint32_t>(request.RowPitch)};
-    if (!gpu::ValidateTextureReadbackRegion(*desc, request.Staging.Buffer->GetDesc(), transfer, _device.GetCapabilities().Detail).first) return false;
+    if (!gpu::ValidateTextureReadbackRegion(*desc, request.Staging.Buffer->GetDesc(), transfer, _device.GetCapabilities().Limits).first) return false;
     const auto dst = graph.ImportBuffer(request.Staging.Buffer.get(), request.Staging.LastState, gpu::BufferStates{gpu::BufferState::HostRead});
     struct Copy {
         RDGBufferHandle Destination;

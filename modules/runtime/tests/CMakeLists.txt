@@ -1,4 +1,5 @@
 add_executable(test_radray_runtime
+    test_fakes.cpp
     test_pipeline_layout_registry.cpp
     test_pso_cache.cpp
     test_asset_manager.cpp
@@ -14,7 +15,7 @@ add_executable(test_radray_runtime
     test_transient_parameter_pool.cpp
     test_frame_scheduler.cpp
     test_geometry_buffer_pool.cpp
-    test_upload_arena.cpp
+    test_mapped_buffer_pools.cpp
     test_rdg_upload_gpu.cpp
     test_geometry_upload_gpu.cpp
     test_mdi_gpu.cpp
@@ -39,7 +40,7 @@ gtest_discover_tests(test_radray_runtime)
 
 if (NOT RADRAY_ENABLE_MIMALLOC)
     # 独立进程映像替换全局 operator new/delete，用于 O1/O2/M2 零堆分配验收。
-    add_executable(test_radray_runtime_allocations test_runtime_allocations.cpp)
+    add_executable(test_radray_runtime_allocations test_runtime_allocations.cpp test_fakes.cpp)
     target_link_libraries(test_radray_runtime_allocations PRIVATE RadRay::runtime GTest::gtest_main)
     radray_default_compile_flags(test_radray_runtime_allocations)
     radray_optimize_flags_binary(test_radray_runtime_allocations)

@@ -10,9 +10,10 @@ namespace radray {
 
 class RenderGraphFramePipeline::SlotState {
 public:
-    SlotState(gpu::Device& device, uint64_t pageSize) noexcept : TransientPool(device), Uploads(device, pageSize) {}
+    SlotState(gpu::Device& device, uint64_t pageSize) noexcept : TransientPool(device), Staging(device, pageSize), Dynamic(device, pageSize) {}
     RDGTransientResourcePool TransientPool;
-    UploadArena Uploads;
+    StagingBufferPool Staging;
+    DynamicBufferArena Dynamic;
     Nullable<gpu::CommandBuffer*> Command{nullptr};
     Nullable<CompiledRDG*> CompiledGraph{nullptr};
     class ProfilingResetGuard {
@@ -77,7 +78,7 @@ void RenderGraphFramePipeline::SlotState::PrepareTiming(FrameSlot& slot) {
     const auto count = 2u + 2u * static_cast<uint32_t>(Timing.Passes.size());
     if (!Queries || Queries->GetCount() < count) {
         auto queries = device.CreateQueryPool({gpu::QueryType::Timestamp, count, "RDG GPU timings"});
-        auto buffer = device.CreateBuffer({.Size = uint64_t{count} * sizeof(uint64_t), .Memory = gpu::MemoryType::ReadBack,
+        auto buffer = device.CreateBuffer({.Size = uint64_t{count} * sizeof(uint64_t), .Memory = gpu::MemoryType::HostReadBack,
                                            .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
         auto* ticks = queries && buffer ? static_cast<const uint64_t*>(buffer->GetMappedData().Get()) : nullptr;
         if (!ticks) {
@@ -187,8 +188,9 @@ void RenderGraphFramePipeline::Prepare(FrameSlot& slot) noexcept {
     if (!state.CompiledGraph) RADRAY_ABORT("RenderGraphFramePipeline: no extracted graph");
     for (const auto pass : state.CompiledGraph->GetAliveMeshPasses()) slot.GetPassDrawList(pass).SortVisibleCommands();
     state.TransientPool.BeginFrame();
-    state.Uploads.Reset();
-    const bool prepared = state.CompiledGraph->Prepare(slot, state.TransientPool, state.Uploads);
+    state.Staging.BeginFrame();
+    state.Dynamic.BeginFrame();
+    const bool prepared = state.CompiledGraph->Prepare(slot, state.TransientPool, state.Staging, state.Dynamic);
     if (state.AbandonIfLost(slot)) return;
     if (!prepared) RADRAY_ABORT("RenderGraphFramePipeline: RDG Prepare failed");
     state.PrepareTiming(slot);

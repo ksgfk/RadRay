@@ -6,7 +6,8 @@
 #include <radray/runtime/geometry_buffer_pool.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/rdg.h>
-#include <radray/runtime/upload_arena.h>
+#include <radray/runtime/dynamic_buffer_arena.h>
+#include <radray/runtime/staging_buffer_pool.h>
 
 namespace radray {
 namespace {
@@ -15,7 +16,7 @@ using namespace gpu;
 
 class GeometryUploadGpuTest : public gpu::test::BackendTest {
 protected:
-    enum class Source { Pool, Arena, Persistent, PartiallyFlushed };
+    enum class Source { Pool, MappedPool, Arena, Persistent, PartiallyFlushed };
     void DrawPooledGeometry(bool separateUploadFrame, Source source = Source::Pool) {
         const bool dynamic = source == Source::Arena;
         auto& device = GetDevice();
@@ -23,8 +24,9 @@ protected:
         DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
         const array layouts{VertexBufferLayout{0, 12, VertexStepMode::Vertex}};
         const array attributes{VertexInputAttribute{0, 0, "POSITION", 0, VertexFormat::FLOAT32X3}};
-        auto vertices = VertexBufferPool::Create(device, {.VertexStride = 12, .PageVertexCapacity = 4, .AdditionalUsage = BufferUse::Resource | BufferUse::CopySource, .Layouts = layouts, .Attributes = attributes});
-        auto indices = IndexBufferPool::Create(device, {.PageIndexCapacity = 4, .AdditionalUsage = BufferUse::CopySource});
+        const auto memory = source == Source::MappedPool ? GpuBufferMemory::DeviceUploadWithFallback : GpuBufferMemory::DeviceLocal;
+        auto vertices = VertexBufferPool::Create(device, {.VertexStride = 12, .PageVertexCapacity = 4, .AdditionalUsage = BufferUse::Resource | BufferUse::CopySource, .Layouts = layouts, .Attributes = attributes, .Memory = memory});
+        auto indices = IndexBufferPool::Create(device, {.PageIndexCapacity = 4, .AdditionalUsage = BufferUse::CopySource, .Memory = memory});
         ASSERT_TRUE(vertices && indices);
         auto unusedVertex = vertices->Allocate(1);
         auto unusedIndex = indices->Allocate(1);
@@ -34,21 +36,23 @@ protected:
         const array positions{-1.f, -1.f, 0.5f, 3.f, -1.f, 0.5f, -1.f, 3.f, 0.5f};
         const array<uint32_t, 3> order{0, 1, 2};
 
-        IntrusivePtr<GpuUploadBuffer> uploadedVertices, uploadedIndices;
+        IntrusivePtr<GpuBuffer> uploadedVertices, uploadedIndices;
         if (source == Source::Persistent) {
             std::jthread worker{[&] {
-                uploadedVertices = GpuUploadBuffer::Create(device, {sizeof(positions), BufferUse::Vertex}).Unwrap();
-                uploadedIndices = GpuUploadBuffer::Create(device, {sizeof(order), BufferUse::Index}).Unwrap();
-                EXPECT_TRUE(uploadedVertices->WriteAndFlush(0, gpu::test::AsBytes(positions)));
-                EXPECT_TRUE(uploadedIndices->WriteAndFlush(0, gpu::test::AsBytes(order)));
+                uploadedVertices = GpuBuffer::Create(device, {sizeof(positions), BufferUse::Vertex, GpuBufferMemory::DeviceUploadWithFallback}).Unwrap();
+                uploadedIndices = GpuBuffer::Create(device, {sizeof(order), BufferUse::Index, GpuBufferMemory::DeviceUploadWithFallback}).Unwrap();
+                std::memcpy(uploadedVertices->GetMappedData().Unwrap(), positions.data(), sizeof(positions));
+                std::memcpy(uploadedIndices->GetMappedData().Unwrap(), order.data(), sizeof(order));
             }};
             worker.join();
+            ASSERT_TRUE(uploadedIndices->FlushMappedRange({0, sizeof(order)}));
+            ASSERT_TRUE(uploadedVertices->FlushMappedRange({0, sizeof(positions)}));
         }
 
         unique_ptr<Buffer> partialVertices, partialIndices;
         if (source == Source::PartiallyFlushed) {
             const auto createPartial = [&](BufferUse usage, std::span<const byte> data) {
-                auto buffer = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::Upload,
+                auto buffer = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::HostUpload,
                                                    .Usage = BufferUse::MapWrite | usage}).Unwrap();
                 auto* mapped = buffer->GetMappedData().Get();
                 if (!mapped) return unique_ptr<Buffer>{};
@@ -85,7 +89,8 @@ protected:
                        .Unwrap();
         auto target = device.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 4, .Height = 4, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::CopySource}).Unwrap();
         RDGTransientResourcePool transient{device};
-        UploadArena uploads{device, dynamic ? 64u : 16u};
+        StagingBufferPool staging{device, dynamic ? 64u : 16u};
+        DynamicBufferArena uploads{device, dynamic ? 64u : 16u};
         Nullable<CommandBuffer*> recorded{nullptr};
         Nullable<CompiledRDG*> compiled{nullptr};
         auto pipeline = make_unique<radray::test::CallbackPipeline>();
@@ -93,7 +98,7 @@ protected:
         bool uploadFrame = true;
         pipeline->OnExtract = [&](FrameSlot& slot) {
             RDGBuilder graph{slot};
-            if (uploadFrame && source == Source::Pool) {
+            if (uploadFrame && (source == Source::Pool || source == Source::MappedPool)) {
                 const auto vb = graph.ImportPersistentOwned(vertex->GetGpuBuffer());
                 const auto ib = graph.ImportPersistentOwned(index->GetGpuBuffer());
                 graph.UploadBuffer(vb, vertex->GetByteOffset(), RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
@@ -117,14 +122,14 @@ protected:
                 RDGBufferHandle dynamicVertex, dynamicIndex;
                 if (dynamic) {
                     const array<byte, 8> padding{};
-                    const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{8, BufferUse::Vertex}, RDGUploadSource::SnapshotBytes(padding));
+                    const auto prefix = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{8, BufferUse::Vertex}, RDGUploadSource::SnapshotBytes(padding));
                     graph.MarkOutput(prefix);
-                    dynamicVertex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(positions), BufferUse::Vertex, 4}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
-                    const auto spacer = graph.CreateBuffer(RDGDynamicBufferDescriptor{32, BufferUse::Vertex}, RDGUploadSource::Generated(32, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext& write) noexcept {
+                    dynamicVertex = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{sizeof(positions), BufferUse::Vertex, 4}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(positions)));
+                    const auto spacer = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{32, BufferUse::Vertex}, RDGUploadSource::Generated(32, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext& write) noexcept {
                         std::fill(write.Bytes.begin(), write.Bytes.end(), byte{0});
                         return true; }));
                     graph.MarkOutput(spacer);
-                    dynamicIndex = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(order), BufferUse::Index, 32}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(order)));
+                    dynamicIndex = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{sizeof(order), BufferUse::Index, 32}, RDGUploadSource::BorrowedBytes(gpu::test::AsBytes(order)));
                 }
                 if (source == Source::Persistent) {
                     dynamicVertex = graph.ImportPersistentOwned(uploadedVertices);
@@ -169,8 +174,9 @@ protected:
         };
         pipeline->OnPrepare = [&](FrameSlot& slot) {
             transient.BeginFrame();
-            uploads.Reset();
-            ASSERT_TRUE(compiled->Prepare(slot, transient, uploads));
+            staging.BeginFrame();
+            uploads.BeginFrame();
+            ASSERT_TRUE(compiled->Prepare(slot, transient, staging, uploads));
             recorded = slot.AcquireCommandBuffer();
             ASSERT_TRUE(recorded);
         };
@@ -204,6 +210,8 @@ protected:
 TEST_P(GeometryUploadGpuTest, UploadOnlyFrameThenDrawUsesCommonBoundary) { DrawPooledGeometry(true); }
 TEST_P(GeometryUploadGpuTest, UploadsBothPoolsAndDrawsInOneFrame) { DrawPooledGeometry(false); }
 
+TEST_P(GeometryUploadGpuTest, GraphWritesMappedGeometryPagesBeforeDrawing) { DrawPooledGeometry(true, Source::MappedPool); }
+
 TEST_P(GeometryUploadGpuTest, DynamicVertexAndIndexUseSliceOffsetsAcrossPages) { DrawPooledGeometry(false, Source::Arena); }
 
 TEST_P(GeometryUploadGpuTest, WorkerPublishedPersistentGeometryDrawsThroughOwnedImports) { DrawPooledGeometry(false, Source::Persistent); }
@@ -214,7 +222,7 @@ TEST_P(GeometryUploadGpuTest, BeginFrameResetsReferencesBeforeUploadBufferReleas
     auto& device = GetDevice();
     auto& queue = gpu::test::DirectQueue(device);
     DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &queue};
-    auto upload = device.CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::CopySource | BufferUse::MapWrite}).Unwrap();
+    auto upload = device.CreateBuffer({.Size = 16, .Memory = MemoryType::HostUpload, .Usage = BufferUse::CopySource | BufferUse::MapWrite}).Unwrap();
     const array<byte, 16> expected{byte{42}, byte{7}};
     auto* data = upload->GetMappedData().Get();
     ASSERT_NE(data, nullptr);

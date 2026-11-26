@@ -222,7 +222,7 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
         f.image->_mipLevels = 1;
         f.image->_sampleCount = 1;
         f.image->_format = format;
-        f.image->_memory = MemoryType::Device;
+        f.image->_memory = MemoryType::DeviceLocal;
         f.image->_usage = TextureUse::RenderTarget;
         if (imageUsage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) f.image->_usage |= TextureUse::CopySource;
         f.image->_nativeUsage = imageUsage;
@@ -1180,10 +1180,6 @@ void DeviceVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-DeviceDetail DeviceVulkan::GetDetail() const noexcept {
-    return _capabilities.Detail;
-}
-
 static VkImageUsageFlags _TextureUsageFlags(TextureUses usage) noexcept {
     VkImageUsageFlags result = 0;
     if (usage.HasFlag(TextureUse::CopySource)) result |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1427,7 +1423,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     bufInfo.flags = 0;
     uint64_t allocSize = desc.Size;
     if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
-        const uint64_t align = std::max<uint64_t>(1, _capabilities.Detail.CBufferAlignment);
+        const uint64_t align = std::max<uint64_t>(1, _capabilities.Limits.CBufferOffsetAlignment);
         allocSize = Align(allocSize, align);
     }
     bufInfo.size = allocSize;
@@ -1435,10 +1431,10 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     bufInfo.queueFamilyIndexCount = 0;
     bufInfo.pQueueFamilyIndices = nullptr;
-    if (desc.Usage.HasFlag(BufferUse::MapRead) || desc.Usage.HasFlag(BufferUse::CopySource)) {
+    if (desc.Usage.HasFlag(BufferUse::CopySource)) {
         bufInfo.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     }
-    if (desc.Usage.HasFlag(BufferUse::MapWrite) || desc.Usage.HasFlag(BufferUse::CopyDestination)) {
+    if (desc.Usage.HasFlag(BufferUse::CopyDestination)) {
         bufInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     }
     if (desc.Usage.HasFlag(BufferUse::Index)) {
@@ -1464,25 +1460,40 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
-    if (desc.Memory == MemoryType::Upload) {
-        vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
-    } else if (desc.Memory == MemoryType::ReadBack) {
-        vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
-    }
-    if (desc.Memory != MemoryType::Device) {
+    if (desc.Memory == MemoryType::DeviceUpload && !_capabilities.Memory.HostVisibleDeviceLocalBytes) return nullptr;
+    const auto arch = _capabilities.Memory.Architecture;
+    const bool uma = arch == MemoryArchitecture::IntegratedUMA || arch == MemoryArchitecture::CacheCoherentUMA;
+    if (desc.Memory == MemoryType::DeviceLocal) {
+        vmaInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        // With no host access requested, equally ranked types use Vulkan's order: pure DEVICE_LOCAL precedes its host-visible supersets.
+    } else {
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        vmaInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        if (desc.Memory == MemoryType::DeviceUpload || uma) {
+            vmaInfo.requiredFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        } else {
+            if (!_hostOnlyMemoryTypeBits) return nullptr;
+            vmaInfo.memoryTypeBits = _hostOnlyMemoryTypeBits;
+        }
+        if (desc.Memory == MemoryType::HostReadBack || arch == MemoryArchitecture::CacheCoherentUMA) {
+            vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
+            if (arch == MemoryArchitecture::CacheCoherentUMA) vmaInfo.preferredFlags |= VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        } else {
+            vmaInfo.flags |= VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        }
     }
+    if (!bufInfo.usage) bufInfo.usage = desc.Memory == MemoryType::HostReadBack ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     vmaInfo.usage = MapType(desc.Memory);
     VkBuffer vkBuf = VK_NULL_HANDLE;
     VmaAllocation vmaAlloc = VK_NULL_HANDLE;
     VmaAllocationInfo vmaAllocInfo{};
-    if (auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &vmaInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
-        vr != VK_SUCCESS) {
+    const auto vr = vmaCreateBuffer(_vma->_vma, &bufInfo, &vmaInfo, &vkBuf, &vmaAlloc, &vmaAllocInfo);
+    if (vr != VK_SUCCESS) {
         if (!MarkDeviceLost(vr, "CreateBuffer")) RADRAY_ERR_LOG("vmaCreateBuffer failed: {}", vr);
         return nullptr;
     }
     auto result = make_unique<BufferVulkan>(this, vkBuf, vmaAlloc, vmaAllocInfo);
-    if (desc.Memory != MemoryType::Device && !vmaAllocInfo.pMappedData) {
+    if (desc.Memory != MemoryType::DeviceLocal && !vmaAllocInfo.pMappedData) {
         RADRAY_ERR_LOG("CreateBuffer: host-visible allocation has no mapped address");
         return nullptr;
     }
@@ -1491,14 +1502,11 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
-    VkMemoryPropertyFlags memoryFlags{};
-    vmaGetMemoryTypeProperties(_vma->_vma, vmaAllocInfo.memoryType, &memoryFlags);
-    result->_hostCoherent = (memoryFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
     return result;
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
-    if (IsDeviceLost()) return nullptr;
+    if (IsDeviceLost() || desc.Memory != MemoryType::DeviceLocal) return nullptr;
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -1537,7 +1545,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
         vmaInfo.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     }
     vmaInfo.usage = MapType(desc.Memory);
-    vmaInfo.requiredFlags = 0;
+    vmaInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     vmaInfo.preferredFlags = 0;
     vmaInfo.memoryTypeBits = 0;
     vmaInfo.pool = VK_NULL_HANDLE;
@@ -2865,6 +2873,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     extProperties->Vulkan12.pNext = nullptr;
     if (extProperties->conservativeRasterization) extProperties->conservativeRasterization->pNext = nullptr;
 
+    const bool memoryBudget = IsValidateExtensions(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME, deviceExtsAvailable);
+    if (memoryBudget) needExts.emplace(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     vector<const char*> deviceExts{};
 #if defined(RADRAY_PLATFORM_WINDOWS)
     const bool externalMemoryWin32 = IsValidateExtensions(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, deviceExtsAvailable);
@@ -2929,7 +2939,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     VmaVulkanFunctions vmaFunctions{};
     VmaAllocatorCreateInfo vmaCreateInfo{};
-    vmaCreateInfo.flags = 0;
+    vmaCreateInfo.flags = memoryBudget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0;
     vmaCreateInfo.physicalDevice = deviceR->_physicalDevice;
     vmaCreateInfo.device = deviceR->_device;
     vmaCreateInfo.preferredLargeHeapBlockSize = 0;
@@ -2954,6 +2964,39 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         return nullptr;
     }
     deviceR->_vma = make_unique<VMA>(vma);
+    auto& topology = deviceR->_capabilities.Memory;
+    const auto& physical = selectPhyDevice.memory;
+    bool cachedUnified = false;
+    for (uint32_t i = 0; i < physical.memoryTypeCount; ++i) {
+        const auto& type = physical.memoryTypes[i];
+        const auto flags = type.propertyFlags;
+        if (!(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) deviceR->_hostOnlyMemoryTypeBits |= 1u << i;
+        } else if (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            deviceR->_uploadHeapBits |= 1u << type.heapIndex;
+            constexpr auto cached = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+            cachedUnified |= (flags & cached) == cached;
+        }
+    }
+    for (uint32_t i = 0; i < physical.memoryHeapCount; ++i) {
+        const auto& heap = physical.memoryHeaps[i];
+        if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            deviceR->_localHeapBits |= 1u << i;
+            topology.DeviceLocalBytes += heap.size;
+        } else {
+            topology.HostSharedBytes += heap.size;
+        }
+        if (deviceR->_uploadHeapBits & (1u << i)) topology.HostVisibleDeviceLocalBytes += heap.size;
+    }
+    if (selectPhyDevice.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU || !topology.HostSharedBytes) {
+        topology.Architecture = cachedUnified ? MemoryArchitecture::CacheCoherentUMA : MemoryArchitecture::IntegratedUMA;
+        topology.HostSharedBytes = 0;
+    } else if (topology.HostVisibleDeviceLocalBytes > 512ull * 1024 * 1024 ||
+               topology.HostVisibleDeviceLocalBytes >= (topology.DeviceLocalBytes + 1) / 2) {
+        topology.Architecture = MemoryArchitecture::DiscreteResizableBar;
+    } else {
+        deviceR->_localHeapBits &= ~deviceR->_uploadHeapBits;
+    }
     for (const auto& i : queueRequests) {
         for (const auto& j : i.queueIndices) {
             VkQueue queuePtr = VK_NULL_HANDLE;
@@ -2982,6 +3025,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         caps.Limits = {
             .MaxDrawIndirectCount = deviceR->_enabledFeatures.Core.multiDrawIndirect ? limits.maxDrawIndirectCount : 1u,
             .MaxColorAttachments = limits.maxColorAttachments,
+            .MaxVertexInputBindings = limits.maxVertexInputBindings,
             .MaxTexture1DDimension = limits.maxImageDimension1D,
             .MaxTexture2DDimension = limits.maxImageDimension2D,
             .MaxTexture3DDimension = limits.maxImageDimension3D,
@@ -2990,6 +3034,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             .MaxUniformBufferRange = limits.maxUniformBufferRange,
             .MaxStorageBufferRange = limits.maxStorageBufferRange,
             .MaxPushConstantBytes = limits.maxPushConstantsSize,
+            .BufferCopyOffsetAlignment = 1,
+            .TextureDataPlacementAlignment = limits.optimalBufferCopyOffsetAlignment,
+            .TextureDataPitchAlignment = static_cast<uint32_t>(limits.optimalBufferCopyRowPitchAlignment),
             .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment,
             .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment,
             .TexelBufferOffsetAlignment = limits.minTexelBufferOffsetAlignment,
@@ -3002,7 +3049,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             .SubresourceBarriers = true,
             .IndependentDepthStencilTransitions = deviceR->_enabledFeatures.Vulkan12.separateDepthStencilLayouts != 0,
             .UavMemoryBarrier = true,
-            .UavWriteStages = gpu::ShaderStage::Compute};
+            .UavWriteStages = gpu::ShaderStage::Compute,
+            .IsLayeredRenderingFromVertexShaderSupported = false};
         caps.Features.SamplerAnisotropy = deviceR->_enabledFeatures.Core.samplerAnisotropy != 0;
         caps.Features.SamplerAnisotropyPointMip = caps.Features.SamplerAnisotropy;
         caps.Features.SamplerMirrorClampToEdge = deviceR->_enabledFeatures.Vulkan12.samplerMirrorClampToEdge != 0;
@@ -3040,14 +3088,6 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.VendorId = props.vendorID;
         detail.DriverVersion = fmt::format("{}", props.driverVersion);
         detail.IsSoftware = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
-        detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
-        detail.BufferCopyOffsetAlignment = 1;
-        detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
-        detail.TextureDataPlacementAlignment = deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
-        detail.MaxVertexInputBindings = deviceR->_properties.limits.maxVertexInputBindings;
-        detail.IsUMA = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
-        detail.VramBudget = GetPhysicalDeviceMemoryAllSize(selectPhyDevice.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-        detail.IsLayeredRenderingFromVertexShaderSupported = false;
     }
     RADRAY_INFO_LOG("========== Feature ==========");
     {
@@ -3074,7 +3114,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     RADRAY_INFO_LOG(
         "Layered Rendering From Vertex Shader: {}",
-        deviceR->_capabilities.Detail.IsLayeredRenderingFromVertexShaderSupported);
+        deviceR->_capabilities.Features.IsLayeredRenderingFromVertexShaderSupported);
     RADRAY_INFO_LOG("=============================");
     return deviceR;
 }
@@ -3692,7 +3732,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
     uint32_t mipLevels = dstRange.MipLevelCount;
     uint32_t layerCount = dstRange.ArrayLayerCount;
     bool is3D = dst->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(dst->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(dst->_format) ? 4 : 1, _device->_capabilities.Limits.TextureDataPitchAlignment);
     const VkImageAspectFlags aspectMask = dstRange.Aspects.value();
     uint64_t bufferOffset = srcOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
@@ -3730,7 +3770,7 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
     uint32_t mipLevels = srcRange.MipLevelCount;
     uint32_t layerCount = srcRange.ArrayLayerCount;
     bool is3D = src->_dim == TextureDimension::Dim3D;
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(src->_format) ? 4 : 1, _device->_capabilities.Detail.TextureDataPitchAlignment);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(IsDepthStencilFormat(src->_format) ? 4 : 1, _device->_capabilities.Limits.TextureDataPitchAlignment);
     const VkImageAspectFlags aspectMask = srcRange.Aspects.value();
     uint64_t bufferOffset = dstOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
@@ -4824,7 +4864,12 @@ BufferVulkan::BufferVulkan(
     : _device(device),
       _buffer(buffer),
       _allocation(allocation),
-      _allocInfo(allocInfo) {}
+      _allocInfo(allocInfo) {
+    VkMemoryPropertyFlags flags{};
+    vmaGetMemoryTypeProperties(device->_vma->_vma, allocInfo.memoryType, &flags);
+    _properties = {bool(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT), bool(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT),
+                   bool(flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT), bool(flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)};
+}
 
 BufferVulkan::~BufferVulkan() noexcept {
     this->DestroyImpl();
@@ -4848,17 +4893,19 @@ void BufferVulkan::DestroyImpl() noexcept {
     }
 }
 
+BufferMemoryProperties BufferVulkan::GetMemoryProperties() const noexcept { return _properties; }
+
 Nullable<void*> BufferVulkan::GetMappedData() noexcept {
-    return _buffer && _memory != MemoryType::Device ? _allocInfo.pMappedData : nullptr;
+    return _buffer && _memory != MemoryType::DeviceLocal ? _allocInfo.pMappedData : nullptr;
 }
 
 bool BufferVulkan::FlushMappedRange(BufferRange range) noexcept {
-    if (!_buffer || _memory != MemoryType::Upload || !BufferRangeFits(_reqSizeLogical, range) || _device->IsDeviceLost()) return false;
+    if (!_buffer || !_usage.HasFlag(BufferUse::MapWrite) || !BufferRangeFits(_reqSizeLogical, range) || _device->IsDeviceLost()) return false;
     const uint64_t offset = range.Offset;
     const uint64_t size = range.Size == BufferRange::All()
                               ? _reqSizeLogical - offset
                               : range.Size;
-    if (_allocation != VK_NULL_HANDLE && !_hostCoherent) {
+    if (_allocation != VK_NULL_HANDLE && !_properties.IsHostCoherent) {
         if (auto vr = vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, size);
             vr != VK_SUCCESS) {
             if (_device->MarkDeviceLost(vr, "vmaFlushAllocation")) return false;
@@ -4869,12 +4916,12 @@ bool BufferVulkan::FlushMappedRange(BufferRange range) noexcept {
 }
 
 bool BufferVulkan::InvalidateMappedRange(BufferRange range) noexcept {
-    if (!_buffer || _memory != MemoryType::ReadBack || !BufferRangeFits(_reqSizeLogical, range) || _device->IsDeviceLost()) return false;
+    if (!_buffer || _memory != MemoryType::HostReadBack || !BufferRangeFits(_reqSizeLogical, range) || _device->IsDeviceLost()) return false;
     const uint64_t offset = range.Offset;
     const uint64_t size = range.Size == BufferRange::All()
                               ? _reqSizeLogical - offset
                               : range.Size;
-    if (_allocation != VK_NULL_HANDLE && !_hostCoherent) {
+    if (_allocation != VK_NULL_HANDLE && !_properties.IsHostCoherent) {
         if (auto vr = vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, size);
             vr != VK_SUCCESS) {
             if (_device->MarkDeviceLost(vr, "vmaInvalidateAllocation")) return false;
@@ -5252,6 +5299,27 @@ VkResult DeviceVulkan::WaitPresentationIdle(QueueVulkan& queue) noexcept {
 
 GpuBackend DeviceVulkan::GetBackend() noexcept {
     return GpuBackend::Vulkan;
+}
+
+GpuMemoryBudget DeviceVulkan::QueryMemoryBudget() const noexcept {
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(_vma->_vma, budgets);
+    const VkPhysicalDeviceMemoryProperties* physical{};
+    vmaGetMemoryProperties(_vma->_vma, &physical);
+    GpuMemoryBudget result{};
+    const auto arch = _capabilities.Memory.Architecture;
+    const bool uma = arch == MemoryArchitecture::IntegratedUMA || arch == MemoryArchitecture::CacheCoherentUMA;
+    for (uint32_t i = 0; i < physical->memoryHeapCount; ++i) {
+        const auto add = [&](MemorySegmentBudget& segment) {
+            segment.BudgetBytes += budgets[i].budget;
+            segment.UsageBytes += budgets[i].usage;
+        };
+        if (_localHeapBits & (1u << i)) add(result.DeviceLocal);
+        if (_uploadHeapBits & (1u << i)) add(result.DeviceUpload);
+        if (!uma && !(physical->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) add(result.HostShared);
+    }
+    if (uma) result.DeviceUpload = result.DeviceLocal;
+    return result;
 }
 
 const GpuDeviceCapabilities& DeviceVulkan::GetCapabilities() const noexcept {

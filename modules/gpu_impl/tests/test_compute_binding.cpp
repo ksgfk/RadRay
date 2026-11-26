@@ -58,7 +58,7 @@ protected:
     }
 
     unique_ptr<Buffer> CreateOutput() {
-        return GetDevice().CreateBuffer({.Size = OutputCount * sizeof(uint32_t), .Memory = MemoryType::Device,
+        return GetDevice().CreateBuffer({.Size = OutputCount * sizeof(uint32_t), .Memory = MemoryType::DeviceLocal,
                                          .Usage = BufferUse::UnorderedAccess | BufferUse::CopySource})
             .Unwrap();
     }
@@ -359,9 +359,9 @@ TEST_P(ConcurrentQueueTest, IndependentWorkersCreateResourcesAndSubmitSharedPara
             auto allocator = device.CreateCommandAllocator(queue).Unwrap();
             auto command = device.CreateCommandBuffer(allocator.get()).Unwrap();
             for (int iteration = 0; iteration < 12; ++iteration) {
-                auto buffer = device.CreateBuffer({.Size = 256, .Memory = MemoryType::Device, .Usage = BufferUse::UnorderedAccess}).Unwrap();
+                auto buffer = device.CreateBuffer({.Size = 256, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::UnorderedAccess}).Unwrap();
                 auto texture = device.CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 4, .Height = 4, .DepthOrArraySize = 1,
-                    .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Memory = MemoryType::Device, .Usage = TextureUse::Resource}).Unwrap();
+                    .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Memory = MemoryType::DeviceLocal, .Usage = TextureUse::Resource}).Unwrap();
                 auto view = device.CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::Resource}).Unwrap();
                 auto localSampler = device.CreateSampler(desc).Unwrap();
                 cached[index] = device.GetOrCreateSampler(desc).Get();

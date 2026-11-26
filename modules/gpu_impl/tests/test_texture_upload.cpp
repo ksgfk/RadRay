@@ -17,11 +17,11 @@ TEST(TextureReadbackValidation, RejectsInvalidFormatGeometryAndBufferLayout) {
     TextureDescriptor texture{.Dim = TextureDimension::Dim3D, .Width = 12, .Height = 8, .DepthOrArraySize = 4,
                               .MipLevels = 2, .SampleCount = 1, .Format = TextureFormat::R8_UNORM, .Usage = TextureUse::CopySource};
     BufferDescriptor buffer{.Size = 512 + 4 * 256 + 3, .Usage = BufferUse::CopyDestination};
-    DeviceDetail detail{};
-    detail.TextureDataPlacementAlignment = 512;
-    detail.TextureDataPitchAlignment = 256;
+    DeviceLimits limits{};
+    limits.TextureDataPlacementAlignment = 512;
+    limits.TextureDataPitchAlignment = 256;
     const TextureBufferCopyRegion valid{{0, 0, 2, 1, 3, 2, 1, 2}, 512, 256, 3};
-    auto check = [&](TextureBufferCopyRegion region) { return ValidateTextureReadbackRegion(texture, buffer, region, detail).first; };
+    auto check = [&](TextureBufferCopyRegion region) { return ValidateTextureReadbackRegion(texture, buffer, region, limits).first; };
     EXPECT_TRUE(check(valid));
     --buffer.Size;
     EXPECT_FALSE(check(valid));
@@ -55,7 +55,7 @@ TEST(TextureReadbackValidation, RejectsInvalidFormatGeometryAndBufferLayout) {
         EXPECT_FALSE(check({{0, 0, 0, 0, 12, 8, 0, 4}, 0, 256}));
     }
     texture.Format = TextureFormat::BC1_UNORM;
-    detail.TextureDataPlacementAlignment = detail.TextureDataPitchAlignment = 1;
+    limits.TextureDataPlacementAlignment = limits.TextureDataPitchAlignment = 1;
     region = {{1, 0, 4, 0, 2, 4}, 0, 8};
     EXPECT_TRUE(check(region));
     region.RowPitch = 9;
@@ -137,7 +137,7 @@ TEST_P(TextureUploadTest, BlockFormatsCannotBindAsTexelBuffers) {
     const BindingDescriptor binding{.BindingId = 0, .Kind = BindingKind::TypedBuffer, .Count = 1, .Stages = ShaderStage::Compute,
                                     .D3D12 = D3D12BindingDescriptor{BindingRegisterClass::SRV, 0, 0}, .Vulkan = VulkanBindingDescriptor{0, 0}};
     auto group = device.CreateBindingGroupLayout({std::span{&binding, 1}}).Unwrap();
-    auto buffer = device.CreateBuffer({.Size = 256, .Memory = MemoryType::Device, .Usage = BufferUse::Resource}).Unwrap();
+    auto buffer = device.CreateBuffer({.Size = 256, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::Resource}).Unwrap();
     auto set = device.CreateShaderParameterSet({group.get()}).Unwrap();
     EXPECT_FALSE(set->Set(0, 0, ShaderTexelBufferBinding{buffer.get(), {0, 16}, TextureFormat::BC7_UNORM}));
     EXPECT_EQ(TakeRhiValidationErrors(), 1u);
@@ -150,7 +150,7 @@ TEST_P(TextureUploadTest, RegionReadbackPreservesPaddingAndNonzeroDestinationOff
             .MipLevels = 2, .SampleCount = 1, .Format = format, .Usage = TextureUse::CopyDestination | TextureUse::CopySource}).Unwrap();
         const auto block = GetTextureFormatBlockInfo(format);
         const uint32_t pitch = test::CopyRowPitch(device, block.Columns(16), block.BytesPerBlock);
-        const uint32_t offset = std::max(512u, static_cast<uint32_t>(device.GetDetail().TextureDataPlacementAlignment));
+        const uint32_t offset = std::max(512u, static_cast<uint32_t>(device.GetCapabilities().Limits.TextureDataPlacementAlignment));
         vector<byte> pattern(pitch * block.Rows(16));
         for (size_t i = 0; i < pattern.size(); ++i) pattern[i] = byte((17 * i + i / pitch) & 255);
         vector<byte> expected(offset + pitch * block.Rows(8) + 16, byte{0xad});

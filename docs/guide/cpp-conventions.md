@@ -22,7 +22,7 @@
 **没有 `m_` 前缀**，一律 `_`。公开数据成员用 PascalCase 是刻意的：它让 descriptor struct
 的字段读起来像"属性"而非局部变量。
 
-枚举成员在**新代码里 PascalCase**（`MemoryType::Device`、`QueueType::Direct`），
+枚举成员在**新代码里 PascalCase**（`MemoryType::DeviceLocal`、`QueueType::Direct`），
 部分已有枚举使用 ALL_CAPS（例如 `TextureFormat::UNKNOWN`）。
 **不要为统一风格去改它们**——`AGENTS.md` 禁止重命名枚举成员，`magic_enum` 与序列化数据在消费
 这些名字。

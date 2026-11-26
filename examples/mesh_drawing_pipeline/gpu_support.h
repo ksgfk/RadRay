@@ -111,10 +111,8 @@ struct GpuFrameResources {
     uint32_t Width{0};
     uint32_t Height{0};
     uint64_t RowPitch{0};
-    array<RDGBufferSlice, 2> BoundConstants{};
     Nullable<unique_ptr<gpu::Buffer>> Readback{nullptr};
-    Nullable<shared_ptr<gpu::BindingGroupLayout>> PassGroupLayout;
-    array<Nullable<unique_ptr<gpu::ShaderParameterSet>>, 2> PassParameterSets{};
+    shared_ptr<gpu::BindingGroupLayout> PassGroupLayout;
     Nullable<unique_ptr<gpu::Fence>> CompletionFence{nullptr};
     uint64_t CompletionValue{0};
 };

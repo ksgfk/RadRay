@@ -96,8 +96,8 @@ bool GpuResources::Initialize(gpu::GpuBackend backend, const std::filesystem::pa
 
 bool GpuResources::PrepareGeometry(std::span<const byte> vertices, std::span<const uint32_t> indices) {
     // Scene 可以引用尚未写入的 Device 缓冲；字节由首帧 RDG 的 Staging Copy 上传。
-    VertexBuffer = Device->GetDevice().CreateBuffer({.Size = vertices.size(), .Memory = gpu::MemoryType::Device, .Usage = gpu::BufferUse::Vertex | gpu::BufferUse::CopyDestination});
-    IndexBuffer = Device->GetDevice().CreateBuffer({.Size = indices.size_bytes(), .Memory = gpu::MemoryType::Device, .Usage = gpu::BufferUse::Index | gpu::BufferUse::CopyDestination});
+    VertexBuffer = Device->GetDevice().CreateBuffer({.Size = vertices.size(), .Memory = gpu::MemoryType::DeviceLocal, .Usage = gpu::BufferUse::Vertex | gpu::BufferUse::CopyDestination});
+    IndexBuffer = Device->GetDevice().CreateBuffer({.Size = indices.size_bytes(), .Memory = gpu::MemoryType::DeviceLocal, .Usage = gpu::BufferUse::Index | gpu::BufferUse::CopyDestination});
     PendingVertexBytes.assign(vertices.begin(), vertices.end());
     const auto indexBytes = std::as_bytes(indices);
     PendingIndexBytes.assign(indexBytes.begin(), indexBytes.end());
@@ -108,14 +108,12 @@ bool GpuFrameResources::Initialize(const GpuResources& shared) {
     Width = shared.Width;
     Height = shared.Height;
     auto& device = shared.Device->GetDevice();
-    RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Detail.TextureDataPitchAlignment));
-    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = gpu::MemoryType::ReadBack, .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
+    RowPitch = Align(uint64_t{Width} * 4, std::max<uint64_t>(1, device.GetCapabilities().Limits.TextureDataPitchAlignment));
+    Readback = device.CreateBuffer({.Size = RowPitch * Height, .Memory = gpu::MemoryType::HostReadBack, .Usage = gpu::BufferUse::CopyDestination | gpu::BufferUse::MapRead});
     if (!Readback) return false;
-    PassGroupLayout = shared.PassGroupLayout;
-    for (auto& parameters : PassParameterSets) {
-        parameters = device.CreateShaderParameterSet({PassGroupLayout.Get()});
-        if (!parameters) return false;
-    }
+    auto layout = shared.PassGroupLayout;
+    if (!layout) return false;
+    PassGroupLayout = layout.Release();
     CompletionFence = device.CreateFence();
     return CompletionFence.HasValue();
 }

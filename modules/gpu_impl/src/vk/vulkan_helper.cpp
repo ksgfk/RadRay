@@ -775,9 +775,10 @@ VkAttachmentStoreOp MapType(StoreAction v) noexcept {
 
 VmaMemoryUsage MapType(MemoryType v) noexcept {
     switch (v) {
-        case MemoryType::Device: return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-        case MemoryType::Upload:
-        case MemoryType::ReadBack: return VMA_MEMORY_USAGE_AUTO;
+        case MemoryType::DeviceLocal: return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        case MemoryType::DeviceUpload:
+        case MemoryType::HostUpload:
+        case MemoryType::HostReadBack: return VMA_MEMORY_USAGE_AUTO;
     }
     Unreachable();
 }

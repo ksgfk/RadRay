@@ -1,7 +1,6 @@
 #include <radray/runtime/gpu_resource.h>
 
 #include <algorithm>
-#include <cstring>
 #include <limits>
 
 #include <radray/runtime/rdg.h>
@@ -11,25 +10,53 @@
 
 namespace radray {
 
-Nullable<IntrusivePtr<GpuBuffer>> GpuBuffer::Create(gpu::Device& device, const GpuBufferDescriptor& desc) {
-    const auto allowedUsage = gpu::BufferUse::Common | gpu::BufferUse::CopySource | gpu::BufferUse::CopyDestination | gpu::BufferUse::Index |
-                              gpu::BufferUse::Vertex | gpu::BufferUse::CBuffer | gpu::BufferUse::Resource |
-                              gpu::BufferUse::UnorderedAccess | gpu::BufferUse::Indirect;
-    const auto maxSize = device.GetCapabilities().Limits.MaxBufferSize;
-    if (!desc.Size || (maxSize && desc.Size > maxSize) || (desc.Usage.value() & ~allowedUsage.value())) {
-        RADRAY_ERR_LOG("GpuBuffer: invalid size or Device buffer usage");
-        return nullptr;
-    }
-    auto buffer = device.CreateBuffer({.Size = desc.Size, .Memory = gpu::MemoryType::Device, .Usage = desc.Usage | gpu::BufferUse::CopyDestination});
-    if (!buffer) {
-        RADRAY_ERR_LOG("GpuBuffer: cannot create buffer");
-        return nullptr;
-    }
-    return IntrusivePtr<GpuBuffer>{new GpuBuffer{desc, buffer.Release()}};
+bool CanAllocateDeviceUpload(const gpu::Device& device, uint64_t size) noexcept {
+    if (!device.GetCapabilities().Memory.HostVisibleDeviceLocalBytes) return false;
+    const auto budget = device.QueryMemoryBudget().DeviceUpload;
+    if (!budget.BudgetBytes) return true;
+    const uint64_t limit = budget.BudgetBytes / 100 * 85 + budget.BudgetBytes % 100 * 85 / 100;
+    return budget.UsageBytes <= limit && size <= limit - budget.UsageBytes;
 }
 
-GpuBuffer::GpuBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer) noexcept
-    : _desc(desc), _buffer(std::move(buffer)) {}
+Nullable<IntrusivePtr<GpuBuffer>> GpuBuffer::Create(gpu::Device& device, const GpuBufferDescriptor& desc) {
+    const auto& limits = device.GetCapabilities().Limits;
+    if (!desc.Size || (limits.MaxBufferSize && desc.Size > limits.MaxBufferSize) ||
+        (desc.Usage & (gpu::BufferUse::MapRead | gpu::BufferUse::MapWrite))) return nullptr;
+    const bool local = desc.Memory == GpuBufferMemory::DeviceLocal;
+    gpu::BufferDescriptor native{.Size = desc.Size,
+                                 .Memory = local ? gpu::MemoryType::DeviceLocal : gpu::MemoryType::HostUpload,
+                                 .Usage = desc.Usage | (local ? gpu::BufferUse::CopyDestination : gpu::BufferUse::MapWrite)};
+    if (!gpu::IsBufferMemoryUsageValid(native) || (!local && !desc.Usage)) return nullptr;
+    switch (desc.Memory) {
+        case GpuBufferMemory::DeviceLocal:
+        case GpuBufferMemory::HostUpload: break;
+        case GpuBufferMemory::DeviceUploadWithFallback:
+        case GpuBufferMemory::DeviceUploadStrict:
+            if (CanAllocateDeviceUpload(device, native.Size)) native.Memory = gpu::MemoryType::DeviceUpload;
+            else if (desc.Memory == GpuBufferMemory::DeviceUploadStrict) return nullptr;
+            break;
+        default: return nullptr;
+    }
+    auto buffer = device.CreateBuffer(native);
+    if (!buffer && native.Memory == gpu::MemoryType::DeviceUpload && desc.Memory == GpuBufferMemory::DeviceUploadWithFallback) {
+        native.Memory = gpu::MemoryType::HostUpload;
+        buffer = device.CreateBuffer(native);
+    }
+    if (!buffer) return nullptr;
+    if (local) return IntrusivePtr<GpuBuffer>{new GpuBuffer{desc, buffer.Release(), nullptr, 1}};
+    auto* mapped = static_cast<byte*>(buffer->GetMappedData().Get());
+    if (!mapped) return nullptr;
+    auto alignment = std::max<uint64_t>(1, limits.HostCoherentAtomSize);
+    if (desc.Usage.HasFlag(gpu::BufferUse::CBuffer)) alignment = std::max(alignment, limits.CBufferOffsetAlignment);
+    if (desc.Usage.HasFlag(gpu::BufferUse::Resource)) alignment = std::max({alignment, limits.StorageBufferOffsetAlignment, limits.TexelBufferOffsetAlignment});
+    if (desc.Usage.HasFlag(gpu::BufferUse::CopySource)) alignment = std::max(alignment, limits.BufferCopyOffsetAlignment);
+    if (desc.Usage.HasFlag(gpu::BufferUse::Indirect) || desc.Usage.HasFlag(gpu::BufferUse::Index)) alignment = std::max<uint64_t>(alignment, 4);
+    return IntrusivePtr<GpuBuffer>{new GpuBuffer{desc, buffer.Release(), mapped, alignment}};
+}
+
+GpuBuffer::GpuBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer, Nullable<byte*> mapped, uint64_t alignment) noexcept
+    : _desc(desc), _buffer(std::move(buffer)), _mapped(mapped), _alignment(alignment),
+      _submittedState(mapped ? gpu::BufferState::HostWrite : gpu::BufferState::Common) {}
 
 GpuBuffer::~GpuBuffer() noexcept = default;
 gpu::Buffer* GpuBuffer::GetBuffer() const noexcept { return _buffer.get(); }
@@ -40,56 +67,24 @@ void GpuBuffer::CommitSubmittedState(gpu::BufferStates state) noexcept { _submit
 RDGBufferHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuBuffer& buffer) { return graph.ImportPersistentBorrowed(buffer); }
 RDGBufferHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuBuffer>& buffer) { return graph.ImportPersistentOwned(buffer); }
 
-Nullable<IntrusivePtr<GpuUploadBuffer>> GpuUploadBuffer::Create(gpu::Device& device, const GpuBufferDescriptor& desc) {
-    constexpr auto allowed = gpu::BufferUse::CopySource | gpu::BufferUse::CBuffer | gpu::BufferUse::Vertex |
-                             gpu::BufferUse::Index | gpu::BufferUse::Resource | gpu::BufferUse::Indirect;
-    const auto& limits = device.GetCapabilities().Limits;
-    if (!desc.Size || !desc.Usage || (desc.Usage & ~allowed) || (limits.MaxBufferSize && desc.Size > limits.MaxBufferSize)) return nullptr;
-    auto buffer = device.CreateBuffer({.Size = desc.Size, .Memory = gpu::MemoryType::Upload, .Usage = desc.Usage | gpu::BufferUse::MapWrite});
-    if (!buffer) return nullptr;
-    auto* data = static_cast<byte*>(buffer->GetMappedData().Get());
-    if (!data) return nullptr;
-    auto alignment = std::max<uint64_t>(1, limits.HostCoherentAtomSize);
-    if (desc.Usage.HasFlag(gpu::BufferUse::CBuffer)) alignment = std::max(alignment, limits.CBufferOffsetAlignment);
-    if (desc.Usage.HasFlag(gpu::BufferUse::Resource)) alignment = std::max({alignment, limits.StorageBufferOffsetAlignment, limits.TexelBufferOffsetAlignment});
-    if (desc.Usage.HasFlag(gpu::BufferUse::CopySource)) alignment = std::max(alignment, device.GetDetail().BufferCopyOffsetAlignment);
-    if (desc.Usage.HasFlag(gpu::BufferUse::Indirect) || desc.Usage.HasFlag(gpu::BufferUse::Index)) alignment = std::max<uint64_t>(alignment, 4);
-    return IntrusivePtr<GpuUploadBuffer>{new GpuUploadBuffer{desc, buffer.Release(), data, alignment}};
-}
-
-GpuUploadBuffer::GpuUploadBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer, byte* data, uint64_t alignment) noexcept
-    : _desc(desc), _buffer(std::move(buffer)), _mapped(data), _alignment(alignment) {}
-GpuUploadBuffer::~GpuUploadBuffer() noexcept = default;
-gpu::Buffer* GpuUploadBuffer::GetBuffer() const noexcept { return _buffer.get(); }
-const GpuBufferDescriptor& GpuUploadBuffer::GetDesc() const noexcept { return _desc; }
-byte* GpuUploadBuffer::GetMappedData() const noexcept { return _mapped; }
-uint64_t GpuUploadBuffer::GetSliceAlignment() const noexcept { return _alignment; }
-uint64_t GpuUploadBuffer::AlignSliceSize(uint64_t size) const noexcept {
+bool GpuBuffer::IsHostVisible() const noexcept { return bool(_mapped); }
+gpu::BufferMemoryProperties GpuBuffer::GetMemoryProperties() const noexcept { return _buffer->GetMemoryProperties(); }
+Nullable<byte*> GpuBuffer::GetMappedData() const noexcept { return _mapped; }
+uint64_t GpuBuffer::GetSliceAlignment() const noexcept { return _alignment; }
+uint64_t GpuBuffer::AlignSliceSize(uint64_t size) const noexcept {
     const auto remainder = size % _alignment;
     if (!remainder) return size;
     const auto padding = _alignment - remainder;
     return padding > std::numeric_limits<uint64_t>::max() - size ? 0 : size + padding;
 }
 
-bool GpuUploadBuffer::WriteAndFlush(uint64_t offset, std::span<const byte> data) noexcept {
-    if (offset > _desc.Size || data.size() > _desc.Size - offset) return false;
-    if (data.empty()) return true;
-    std::lock_guard lock{_flushMutex};
-    std::memmove(_mapped + offset, data.data(), data.size());
-    return _buffer->FlushMappedRange({offset, data.size()});
-}
-
-bool GpuUploadBuffer::FlushMappedRange(gpu::BufferRange range) noexcept {
-    if (range.Offset > _desc.Size) return false;
+bool GpuBuffer::FlushMappedRange(gpu::BufferRange range) noexcept {
+    if (!_mapped || range.Offset > _desc.Size) return false;
     if (range.Size == gpu::BufferRange::All()) range.Size = _desc.Size - range.Offset;
     if (range.Size > _desc.Size - range.Offset) return false;
     if (!range.Size) return true;
-    std::lock_guard lock{_flushMutex};
     return _buffer->FlushMappedRange(range);
 }
-
-RDGBufferHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuUploadBuffer& buffer) { return graph.ImportPersistentBorrowed(buffer); }
-RDGBufferHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuUploadBuffer>& buffer) { return graph.ImportPersistentOwned(buffer); }
 
 Nullable<IntrusivePtr<GpuTexture>> GpuTexture::Create(gpu::Device& device, const GpuTextureDescriptor& desc) {
     auto resolved = desc;
@@ -97,7 +92,7 @@ Nullable<IntrusivePtr<GpuTexture>> GpuTexture::Create(gpu::Device& device, const
         resolved.Usage = gpu::IsDepthStencilFormat(desc.Format) ? gpu::TextureUse::DepthStencilRead | gpu::TextureUse::DepthStencilWrite
                                                                : gpu::TextureUse::CopyDestination | gpu::TextureUse::Resource;
     }
-    const gpu::TextureDescriptor native{.Dim = desc.Dim, .Width = desc.Width, .Height = desc.Height, .DepthOrArraySize = desc.ArrayLayers, .MipLevels = desc.MipLevels, .SampleCount = 1, .Format = desc.Format, .Memory = gpu::MemoryType::Device, .Usage = resolved.Usage};
+    const gpu::TextureDescriptor native{.Dim = desc.Dim, .Width = desc.Width, .Height = desc.Height, .DepthOrArraySize = desc.ArrayLayers, .MipLevels = desc.MipLevels, .SampleCount = 1, .Format = desc.Format, .Memory = gpu::MemoryType::DeviceLocal, .Usage = resolved.Usage};
     const auto [valid, diagnostic] = gpu::ValidateTextureDescriptor(native, device);
     if (!valid) {
         RADRAY_ERR_LOG("GpuTexture: {}", diagnostic);

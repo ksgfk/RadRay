@@ -50,25 +50,29 @@ D3D12 与 Vulkan 普通对象操作直接使用有效对象的原生指针或句
 参数与调用顺序由 `rhi_validation.cpp` 统一校验；可复用的描述符与设备能力检查位于 `validation.cpp`。
 后端检查保持薄，聚焦原生能力、格式约束与执行结果。
 
-主机可见缓冲在 `CreateBuffer` 内完成整块映射。`Upload` 须声明 `MapWrite`，`ReadBack` 须声明 `MapRead`，两者均禁止相反的映射用途。`Device` 缓冲禁止这两种用途。`Hints` 可为空或 `Dedicated`。映射失败或设备丢失时创建返回空。成功后 `GetMappedData()` 提供稳定至销毁的基址，Device 缓冲返回空。
+### 物理内存域与预算
 
-CPU 写入 Upload 后须在 GPU 读取前对修改范围调用 `FlushMappedRange`。CPU 读取 ReadBack 前须确认 GPU 写入完成，再对读取范围调用 `InvalidateMappedRange`。两个方法返回布尔值，校验拒绝或设备丢失时返回 false。Vulkan 由 VMA 处理非相干内存的 atom 对齐。调用方负责主机线程间发布及 CPU 与 GPU 的访问顺序。
+缓冲的 `MemoryType` 决定物理落点。普通创建只接受空 Hints 或 `Dedicated`。纹理和外部共享资源使用 `DeviceLocal`。
+
+| 内存域 | 允许的缓冲用途 | CPU 访问 |
+|---|---|---|
+| `DeviceLocal` | 全部 GPU 用途的非空组合 | 无映射 |
+| `DeviceUpload` | 必含 MapWrite，可加 CopySource、Vertex、Index、CBuffer、Resource、Indirect | 顺序写可直写显存 |
+| `HostUpload` | 同 DeviceUpload | 顺序写系统内存 |
+| `HostReadBack` | 必含 MapRead，可加 CopyDestination | CPU 读取 |
+
+可映射缓冲在创建时映射整块内存，地址有效至销毁。GPU 读取前，CPU 须发布写入并对修改范围调用 `FlushMappedRange`。读回时先等待 GPU 写入完成，再调用 `InvalidateMappedRange`。Vulkan 由 VMA 处理非相干内存的 atom 对齐。映射失败或设备丢失时创建返回空值。
+
+`GetCapabilities().Memory` 提供静态架构、主显存容量、CPU 可直写显存容量和共享系统内存容量。
+`QueryMemoryBudget()` 可并发查询分配器报告的预算与用量，单位为字节。独立小 BAR 对应单独的 DeviceUpload 视图，D3D12 不支持 GPU_UPLOAD 时该视图为零。全量 ReBAR 的两个显存视图共享堆，UMA 的 DeviceUpload 等于 DeviceLocal，HostShared 为零。重叠视图不能相加。
+
+Vulkan 按内存类型的属性子集顺序排列纯设备本地类型及其主机可见超集。[Vulkan 内存类型顺序](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceMemoryProperties.html)
+
+Vulkan 使用 VMA，支持时启用 `VK_EXT_memory_budget`。DeviceLocal 要求设备本地类型，独显优先使用不可映射的显存。DeviceUpload 必须同时满足 DEVICE_LOCAL 与 HOST_VISIBLE。独显的 HostUpload 和 HostReadBack 仅使用非设备本地主机内存，分别优先选择非缓存顺序写内存和缓存读回内存。全相干 UMA 优先选择共享缓存类型。`Buffer::GetMemoryProperties()` 报告最终分配类型的本地性、主机可见性、相干性和缓存属性。DeviceLocal 即使分配在具有主机可见属性的堆上也只提供 GPU 访问。
+
+D3D12 通过 D3D12MA 创建四种内存域的缓冲。DEFAULT 与 GPU_UPLOAD 从 COMMON 开始，参与状态转换。UPLOAD 和 READBACK 固定在 GENERIC_READ 和 COPY_DEST。UMA 设备缺少 GPU_UPLOAD 时，DeviceUpload 可使用同一物理池的 UPLOAD 堆。独显上不能满足 DeviceUpload 时创建返回空值。运行时分流规则见 [Rendering runtime](runtime.md#缓冲与持久状态)。
 
 录制命令时，校验层保存被引用对象的地址和创建序号。提交前同时核对两者，即使原地址已被新对象复用也能拒绝提交。成功提交或重置命令分配器会清除这批引用。GPU 工作完成后，独立缓冲、纹理和查询池可在命令分配器重置前释放，视图等对象已有的父子依赖仍须先解除。
-
-Vulkan 创建 Device 缓冲和纹理时使用 VMA 的 `VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE`，优先设备本地内存。
-Upload 和 ReadBack 缓冲使用 `VMA_MEMORY_USAGE_AUTO`。`MemoryType::Upload` 要求主机可见、顺序写入。
-VMA 根据 Vulkan buffer usage 选型。独显上，纯传输用途优先非 `DEVICE_LOCAL` 主机内存，包含顶点、索引、常量、
-着色器资源或间接参数用途时优先可映射的 `DEVICE_LOCAL` 内存。两者均倾向非缓存写入。
-`MemoryType::ReadBack` 声明随机主机访问，优先主机可见的缓存内存。实际类型取决于设备内存拓扑和可用容量，
-首选类型分配失败时由 VMA 尝试其他兼容类型。
-
-D3D12 普通 Upload / ReadBack buffer 分别固定在 GENERIC_READ / COPY_DEST，RHI buffer barrier 不为它们
-录制 transition；Upload 不允许 CopyDestination，ReadBack 只允许 MapRead / CopyDestination。
-带 UnorderedAccess 的可映射 buffer 使用 CUSTOM heap，不受这项固定状态限制；其 Upload 初始状态与
-HostWrite 映射 COMMON，ReadBack 初始状态与 HostRead 映射 COPY_DEST。Host 与 UAV/copy 状态之间
-仍须显式 barrier，CPU 读写前由调用方保证 GPU 已完成。自定义 ReadBack 同时声明 Resource 时允许 SRV。
-原生限制见 [D3D12 heap types](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_heap_type)。
 
 | 非法调用 | 行为 |
 |---|---|
@@ -675,9 +679,10 @@ RDG 上传按 execution group 记录 zone，逐节点 CPU 诊断仍保留，见 
 
 ## 设备能力与纹理支持
 
-`Device::GetCapabilities()` 返回创建后不可变的 `GpuDeviceCapabilities`，包括原
-`DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
-`DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
+`Device::GetCapabilities()` 返回创建后不可变的 `GpuDeviceCapabilities`，包含适配器身份
+`Detail`（`DeviceDetail`）、静态内存拓扑 `Memory`（`DeviceMemoryInfo`）、上限与对齐 `Limits`
+（`DeviceLimits`）、实际启用特性 `Features`（`DeviceFeatures`）与已创建的 `Queues` 数量。方法名避免与
+Windows 的 `DeviceCapabilities` 宏冲突。
 
 `Features.IndirectFirstInstance` 表示间接绘制中非零 `firstInstance` 的实际启用能力。
 D3D12 返回 true；Vulkan 读取创建设备时启用的 `drawIndirectFirstInstance`，不使用物理设备支持值代替。

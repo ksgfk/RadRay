@@ -171,12 +171,12 @@ std::pair<bool, std::string_view> ValidateTextureRegion(const TextureDescriptor&
 
 std::pair<bool, std::string_view> ValidateTransferLayout(
     const TextureDescriptor& texture, const TextureRegion2D& target, uint64_t capacity,
-    uint64_t offset, uint32_t rowPitch, uint32_t rowsPerImage, const DeviceDetail& detail) {
+    uint64_t offset, uint32_t rowPitch, uint32_t rowsPerImage, const DeviceLimits& limits) {
     const auto block = GetTextureFormatBlockInfo(texture.Format);
     const uint64_t rowBytes = uint64_t{block.Columns(target.Width)} * block.BytesPerBlock;
-    if (offset % std::max(uint64_t{1}, detail.TextureDataPlacementAlignment) != 0 ||
+    if (offset % std::max(uint64_t{1}, limits.TextureDataPlacementAlignment) != 0 ||
         offset % block.BytesPerBlock != 0 || rowPitch < rowBytes || rowPitch % block.BytesPerBlock != 0 ||
-        rowPitch % std::max(1u, detail.TextureDataPitchAlignment) != 0)
+        rowPitch % std::max(1u, limits.TextureDataPitchAlignment) != 0)
         return {false, "Texture transfer buffer offset or row pitch is not aligned"};
     const uint32_t rows = block.Rows(target.Height);
     const uint32_t imageRows = rowsPerImage ? rowsPerImage : rows;
@@ -197,11 +197,11 @@ std::pair<bool, std::string_view> ValidateTextureUploadRegion(const TextureDescr
 
 std::pair<bool, std::string_view> ValidateBufferTextureCopyRegion(
     const BufferDescriptor& source, const TextureDescriptor& destination,
-    const BufferTextureCopyRegion& r, const DeviceDetail& detail) {
+    const BufferTextureCopyRegion& r, const DeviceLimits& limits) {
     if (!source.Usage.HasFlag(BufferUse::CopySource)) return {false, "Region upload requires a copy source buffer"};
     auto status = ValidateTextureUploadRegion(destination, r.Destination);
     if (!status.first) return status;
-    return ValidateTransferLayout(destination, r.Destination, source.Size, r.SourceOffset, r.RowPitch, r.RowsPerImage, detail);
+    return ValidateTransferLayout(destination, r.Destination, source.Size, r.SourceOffset, r.RowPitch, r.RowsPerImage, limits);
 }
 
 std::pair<bool, std::string_view> ValidateTextureReadbackRegion(const TextureDescriptor& source, const TextureRegion2D& region) {
@@ -210,11 +210,11 @@ std::pair<bool, std::string_view> ValidateTextureReadbackRegion(const TextureDes
 
 std::pair<bool, std::string_view> ValidateTextureReadbackRegion(
     const TextureDescriptor& source, const BufferDescriptor& destination,
-    const TextureBufferCopyRegion& r, const DeviceDetail& detail) {
+    const TextureBufferCopyRegion& r, const DeviceLimits& limits) {
     if (!destination.Usage.HasFlag(BufferUse::CopyDestination)) return {false, "Region readback requires a copy destination buffer"};
     auto status = ValidateTextureReadbackRegion(source, r.Source);
     if (!status.first) return status;
-    return ValidateTransferLayout(source, r.Source, destination.Size, r.DestinationOffset, r.RowPitch, r.RowsPerImage, detail);
+    return ValidateTransferLayout(source, r.Source, destination.Size, r.DestinationOffset, r.RowPitch, r.RowsPerImage, limits);
 }
 
 bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept {
@@ -238,12 +238,16 @@ bool BufferRangeFits(uint64_t bufferSize, BufferRange range) noexcept {
 }
 
 bool IsBufferMemoryUsageValid(const BufferDescriptor& desc) noexcept {
-    const auto mapped = desc.Usage & (BufferUse::MapRead | BufferUse::MapWrite);
-    if (desc.Hints & ~ResourceHints{ResourceHint::Dedicated}) return false;
+    constexpr auto reads = BufferUse::CopySource | BufferUse::Index | BufferUse::Vertex | BufferUse::CBuffer | BufferUse::Resource | BufferUse::Indirect;
+    if (!desc.Usage || (desc.Hints & ~ResourceHints{ResourceHint::Dedicated})) return false;
     switch (desc.Memory) {
-        case MemoryType::Device: return !mapped;
-        case MemoryType::Upload: return mapped == BufferUse::MapWrite;
-        case MemoryType::ReadBack: return mapped == BufferUse::MapRead;
+        case MemoryType::DeviceLocal:
+            return !(desc.Usage & ~(reads | BufferUse::Common | BufferUse::CopyDestination | BufferUse::UnorderedAccess));
+        case MemoryType::DeviceUpload:
+        case MemoryType::HostUpload:
+            return desc.Usage.HasFlag(BufferUse::MapWrite) && !(desc.Usage & ~(reads | BufferUse::MapWrite));
+        case MemoryType::HostReadBack:
+            return desc.Usage.HasFlag(BufferUse::MapRead) && !(desc.Usage & ~(BufferUse::MapRead | BufferUse::CopyDestination));
     }
     return false;
 }
@@ -253,7 +257,7 @@ std::pair<bool, string> ValidateTextureDescriptor(
     if (!IsValidTextureSupportQuery({desc.Dim, desc.Format, desc.Usage})) {
         return {false, "Dimension, Format or Usage is invalid or incompatible"};
     }
-    if (desc.Memory != MemoryType::Device || (desc.Hints & ~ResourceHints{ResourceHint::Dedicated})) {
+    if (desc.Memory != MemoryType::DeviceLocal || (desc.Hints & ~ResourceHints{ResourceHint::Dedicated})) {
         return {false, "Texture Memory must be Device; only the Dedicated allocation hint is supported"};
     }
     if (desc.Width == 0 || desc.Height == 0 || desc.DepthOrArraySize == 0 || desc.MipLevels == 0) {

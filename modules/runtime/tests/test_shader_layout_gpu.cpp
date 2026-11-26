@@ -113,7 +113,7 @@ TEST_P(ShaderLayoutGpuTest, MatrixArrayConstantsAndResourcesReadBack) {
     EXPECT_EQ(matrices->Size, 92u);
     EXPECT_EQ(matrices->ElementSize, 44u);
     EXPECT_EQ(matrices->ArrayStride, 48u);
-    const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Detail.CBufferAlignment);
+    const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Limits.CBufferOffsetAlignment);
     vector<byte> matrixBytes(static_cast<size_t>(Align(uint64_t{matrixBinding->BufferByteSize}, alignment)), byte{0});
     for (uint32_t matrix = 0; matrix < 2; ++matrix) {
         const auto member = asset->FindBufferMember("MatrixBlock", radray::format("Matrices[{}]", matrix));
@@ -345,7 +345,7 @@ PSOut PSMain() {{
         EXPECT_TRUE(layout);
         const auto cbBinding = shader->FindBinding("MaterialBlock");
         EXPECT_TRUE(cbBinding);
-        const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Detail.CBufferAlignment);
+        const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Limits.CBufferOffsetAlignment);
         vector<byte> cbBytes(static_cast<size_t>(Align(uint64_t{cbBinding->BufferByteSize}, alignment)), byte{0});
         EXPECT_TRUE(map->WriteConstants(proxy, cbBytes));
         auto cbBuffer = gpu::test::CreateUploadBuffer(device, cbBytes, BufferUse::CBuffer).Unwrap();
@@ -466,7 +466,7 @@ float4 PSMain() : SV_Target0 {
     auto ib = gpu::test::CreateUploadBuffer(device, std::as_bytes(std::span{indices}), BufferUse::Index).Unwrap();
 
     const array<float, 4> passBias{0.25f, 0.25f, 0.0f, 0.0f};
-    const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Detail.CBufferAlignment);
+    const auto alignment = std::max<uint64_t>(16, device.GetCapabilities().Limits.CBufferOffsetAlignment);
     vector<byte> cbBytes(static_cast<size_t>(Align(uint64_t{passBinding->BufferByteSize}, alignment)), byte{0});
     std::memcpy(cbBytes.data(), passBias.data(), sizeof(passBias));
     auto cb = gpu::test::CreateUploadBuffer(device, cbBytes, BufferUse::CBuffer).Unwrap();

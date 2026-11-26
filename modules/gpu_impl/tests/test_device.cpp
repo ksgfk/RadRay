@@ -1,5 +1,8 @@
 #include "gpu_test_fixture.h"
 
+#include <string>
+#include <magic_enum/magic_enum.hpp>
+
 #include <array>
 #include <latch>
 #include <thread>
@@ -90,7 +93,7 @@ TEST(D3D12DeviceLoss, WaitRejectsCachedValueOnFirstAndSubsequentLoss) {
     ASSERT_FALSE(device->IsDeviceLost());
     EXPECT_EQ(fence->WaitForStatus(7, 0), FenceStatus::DeviceLost);
     ASSERT_TRUE(device->IsDeviceLost());
-    EXPECT_FALSE(device->CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite}));
+    EXPECT_FALSE(device->CreateBuffer({.Size = 16, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite}));
     EXPECT_EQ(fence->GetCompletedValue(), 7u);
     EXPECT_EQ(fence->WaitForStatus(7, 0), FenceStatus::DeviceLost);
 }
@@ -153,7 +156,39 @@ TEST_P(DeviceTest, CreatesDirectQueueAndReportsAdapter) {
     EXPECT_EQ(capabilities.Queues[static_cast<size_t>(QueueType::Direct)].CreatedCount, 1u);
     EXPECT_EQ(test::DirectQueue(device).GetQueueType(), QueueType::Direct);
     EXPECT_FALSE(capabilities.Detail.GpuName.empty());
+    EXPECT_FALSE(capabilities.Detail.DriverVersion.empty());
+    EXPECT_NE(capabilities.Detail.VendorId, 0u);
+    EXPECT_GT(capabilities.Limits.MaxVertexInputBindings, 0u);
+    EXPECT_GE(capabilities.Limits.BufferCopyOffsetAlignment, 1u);
+    EXPECT_GE(capabilities.Limits.TextureDataPlacementAlignment, 1u);
+    EXPECT_GE(capabilities.Limits.TextureDataPitchAlignment, 1u);
+    EXPECT_GE(capabilities.Limits.CBufferOffsetAlignment, 1u);
     RecordProperty("adapter", capabilities.Detail.GpuName.c_str());
+}
+
+TEST_P(DeviceTest, BudgetViewsFollowAdapterTopology) {
+    const auto& device = GetDevice();
+    const auto& memory = device.GetCapabilities().Memory;
+    const auto budget = device.QueryMemoryBudget();
+    EXPECT_GT(memory.DeviceLocalBytes, 0u);
+    EXPECT_LE(memory.HostVisibleDeviceLocalBytes, memory.DeviceLocalBytes);
+    RecordProperty("adapter", device.GetCapabilities().Detail.GpuName.c_str());
+    RecordProperty("architecture", std::string{magic_enum::enum_name(memory.Architecture)});
+    RecordProperty("host_visible_device_bytes", std::to_string(memory.HostVisibleDeviceLocalBytes));
+    const bool uma = memory.Architecture == MemoryArchitecture::CacheCoherentUMA || memory.Architecture == MemoryArchitecture::IntegratedUMA;
+    if (uma) {
+        EXPECT_EQ(memory.HostSharedBytes, 0u);
+        EXPECT_EQ(budget.HostShared.BudgetBytes, 0u);
+        EXPECT_EQ(budget.HostShared.UsageBytes, 0u);
+    }
+    if (uma || (GetParam() == GpuBackend::D3D12 && memory.HostVisibleDeviceLocalBytes)) {
+        EXPECT_EQ(budget.DeviceUpload.BudgetBytes, budget.DeviceLocal.BudgetBytes);
+        EXPECT_EQ(budget.DeviceUpload.UsageBytes, budget.DeviceLocal.UsageBytes);
+    }
+    if (!memory.HostVisibleDeviceLocalBytes) {
+        EXPECT_EQ(budget.DeviceUpload.BudgetBytes, 0u);
+        EXPECT_EQ(budget.DeviceUpload.UsageBytes, 0u);
+    }
 }
 
 TEST_P(DeviceTest, ExternalExtensionsHaveIndependentLifetimes) {

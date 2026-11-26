@@ -155,7 +155,8 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
     auto device = make_shared<Device>(probe);
     DeviceContext context{device, &device->Queue};
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64 * 1024};
+    StagingBufferPool staging{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
     HeapMemoryResource heap;
     MemoryProbe memory{heap};
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1, memoryProbe ? Nullable<std::pmr::memory_resource*>{&memory} : nullptr).Unwrap();
@@ -169,9 +170,11 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
         const size_t allocationsBefore = memory.Allocations;
         if (load.Kind == Source::Dynamic) slot.GetPassDrawList({0}).VisibleCommands.resize(load.VisibleCount);
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         if (load.Fresh) {
             pool.Clear();
+            staging.Clear();
             uploads.Clear();
         }
         const auto before = probe;
@@ -183,7 +186,7 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
         start(Stage::Build);
         RDGBuilder graph{slot, context.GetRDGConstraints(), {.FullValidation = true}};
         RDGBufferHandle shared;
-        if (load.Pattern) shared = graph.CreateBuffer(BufferDescriptor{.Size = load.BlockSize * load.Count,
+        if (load.Pattern) shared = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = load.BlockSize * load.Count,
                                                                        .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
         for (uint32_t i = 0; i < load.Count; ++i) {
             RDGUploadSource source;
@@ -196,9 +199,9 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
                                                     Generator{load.BlockSize, {load.Kind == Source::Dynamic ? 0u : std::numeric_limits<uint32_t>::max()}}, &Write, load.Kind == Source::Dynamic ? &Layout : nullptr);
             RDGBufferHandle target;
             if (load.Kind == Source::Dynamic) {
-                target = graph.CreateBuffer(RDGDynamicBufferDescriptor{load.BlockSize * 16, BufferUse::CopySource}, std::move(source));
+                target = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{load.BlockSize * 16, BufferUse::CopySource}, std::move(source));
             } else {
-                target = load.Pattern ? shared : graph.CreateBuffer(BufferDescriptor{.Size = load.BlockSize, .Usage = BufferUse::CopyDestination});
+                target = load.Pattern ? shared : graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = load.BlockSize, .Usage = BufferUse::CopyDestination});
                 graph.UploadBuffer(target, load.Pattern == 1 ? i * load.BlockSize : 0, std::move(source));
             }
             if (i * 100 / load.Count < load.AlivePercent) graph.MarkOutput(target);
@@ -212,7 +215,7 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
         stop(Stage::Compile);
         if (!compiled) return false;
         start(Stage::Prepare);
-        const bool prepared = compiled->Prepare(slot, pool, uploads);
+        const bool prepared = compiled->Prepare(slot, pool, staging, uploads);
         stop(Stage::Prepare);
         if (!prepared) return false;
         auto command = slot.AcquireCommandBuffer();
@@ -261,7 +264,7 @@ void Run(benchmark::State& state, Stage stage, Workload load, bool memoryProbe, 
     state.counters["barrier_descriptors"] = double(measuredBarriers) / iterations;
     state.counters["resource_creates"] = double(measuredCreates) / iterations;
     state.counters["maps"] = double(measuredMaps) / iterations;
-    state.counters["retained_upload_capacity"] = double(uploads.GetCapacity());
+    state.counters["retained_upload_capacity"] = double(uploads.GetCapacity() + staging.GetCapacity());
     if (memoryProbe) {
         state.SetLabel("memory probe; timings include instrumentation");
         state.counters["peak_storage_bytes"] = double(memory.Peak);
@@ -283,11 +286,11 @@ void RunPrepareComponent(benchmark::State& state, uint32_t component, bool& fail
     auto scheduler = FrameScheduler::Create(deviceContext, make_unique<test::CallbackPipeline>(), 1).Unwrap();
     auto& slot = scheduler->BeginFrame();
     RDGUploadPrepareContext context{slot, {}};
-    UploadArena uploads{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
     vector<RDGUploadSource> sources;
     for (uint32_t i = 0; i < 64; ++i) sources.push_back(RDGUploadSource::Generated(4096, Generator{80}, &Write, &Layout));
     const auto fill = [&]() {
-        uploads.Reset();
+        uploads.BeginFrame();
         for (auto& source : sources) {
             const auto allocation = uploads.Allocate(80, 256, 256, BufferState::CBuffer);
             if (!allocation) return false;
@@ -580,7 +583,8 @@ void RunRdgDensePass(benchmark::State& state, Stage stage, bool memoryProbe, boo
     auto device = make_shared<Device>(probe);
     DeviceContext context{device, &device->Queue};
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64 * 1024};
+    StagingBufferPool staging{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
     HeapMemoryResource heap;
     MemoryProbe memory{heap};
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1, memoryProbe ? Nullable<std::pmr::memory_resource*>{&memory} : nullptr).Unwrap();
@@ -623,7 +627,8 @@ void RunRdgDensePass(benchmark::State& state, Stage stage, bool memoryProbe, boo
         auto& slot = scheduler->BeginFrame();
         const size_t allocBefore = memory.Allocations;
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         const auto start = [&](Stage value) {
             if (measured && stage == value) state.ResumeTiming();
         };
@@ -671,7 +676,7 @@ void RunRdgDensePass(benchmark::State& state, Stage stage, bool memoryProbe, boo
         const auto compiled = graph.Compile();
         if (!compiled) return false;
         start(Stage::Prepare);
-        const bool prepared = compiled->Prepare(slot, pool, uploads);
+        const bool prepared = compiled->Prepare(slot, pool, staging, uploads);
         stop(Stage::Prepare);
         if (!prepared) return false;
         auto command = slot.AcquireCommandBuffer();
@@ -728,7 +733,8 @@ void RunRdgSparseCopy1024(benchmark::State& state, Stage stage, bool memoryProbe
     auto device = make_shared<Device>(probe);
     DeviceContext context{device, &device->Queue};
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64 * 1024};
+    StagingBufferPool staging{*device, 64 * 1024};
+    DynamicBufferArena uploads{*device, 64 * 1024};
     HeapMemoryResource heap;
     MemoryProbe memory{heap};
     auto scheduler = FrameScheduler::Create(context, make_unique<test::CallbackPipeline>(), 1, memoryProbe ? Nullable<std::pmr::memory_resource*>{&memory} : nullptr).Unwrap();
@@ -739,7 +745,8 @@ void RunRdgSparseCopy1024(benchmark::State& state, Stage stage, bool memoryProbe
         auto& slot = scheduler->BeginFrame();
         const size_t allocBefore = memory.Allocations;
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         const auto start = [&](Stage value) {
             if (measured && stage == value) state.ResumeTiming();
         };
@@ -763,7 +770,7 @@ void RunRdgSparseCopy1024(benchmark::State& state, Stage stage, bool memoryProbe
         const auto compiled = graph.Compile();
         stop(Stage::Compile);
         if (!compiled) return false;
-        const bool prepared = compiled->Prepare(slot, pool, uploads);
+        const bool prepared = compiled->Prepare(slot, pool, staging, uploads);
         if (!prepared) return false;
         auto command = slot.AcquireCommandBuffer();
         if (!command) return false;

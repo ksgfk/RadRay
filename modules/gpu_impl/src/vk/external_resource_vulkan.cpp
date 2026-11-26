@@ -2,6 +2,7 @@
 #include "../external_resource.h"
 
 #include <radray/logger.h>
+#include <radray/gpu_impl/validation.h>
 
 #include <limits>
 
@@ -123,7 +124,7 @@ ExternalResult<unique_ptr<BufferVulkan>> MakeBuffer(DeviceVulkan* device, const 
     auto result = make_unique<BufferVulkan>(device, buffer, allocation, info);
     result->_reqSize = nativeSize;
     result->_reqSizeLogical = desc.Size;
-    result->_memory = MemoryType::Device;
+    result->_memory = MemoryType::DeviceLocal;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints | ResourceHint::Dedicated;
     return result;
@@ -178,7 +179,7 @@ ExternalResult<unique_ptr<ImageVulkan>> MakeImage(DeviceVulkan* device, const Te
     result->_mipLevels = desc.MipLevels;
     result->_sampleCount = desc.SampleCount;
     result->_format = desc.Format;
-    result->_memory = MemoryType::Device;
+    result->_memory = MemoryType::DeviceLocal;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints | ResourceHint::Dedicated;
     result->_createFlags = create.flags;
@@ -228,6 +229,7 @@ ExternalResult<ExternalDeviceIdentity> ExternalResourceVulkan::GetDeviceIdentity
     return result;
 }
 ExternalSupport ExternalResourceVulkan::QueryBufferSupport(const BufferDescriptor& desc, const ExternalResourceDescriptor& external) const noexcept {
+    if (desc.Memory != MemoryType::DeviceLocal || !IsBufferMemoryUsageValid(desc)) return {false, false, {"External buffers require valid DeviceLocal usage"}};
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return {false, false, *error};
     if (!_device->_externalMemoryWin32) return {false, false, {"Vulkan Win32 external memory extension or entry points are unavailable"}};
@@ -239,6 +241,7 @@ ExternalSupport ExternalResourceVulkan::QueryBufferSupport(const BufferDescripto
     return MemorySupport(output.externalMemoryProperties.externalMemoryFeatures, external.HandleType);
 }
 ExternalSupport ExternalResourceVulkan::QueryTextureSupport(const TextureDescriptor& desc, const ExternalTextureDescriptor& external) const noexcept {
+    if (desc.Memory != MemoryType::DeviceLocal) return {false, false, {"External resources require DeviceLocal memory"}};
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return {false, false, *error};
     if (!_device->_externalMemoryWin32) return {false, false, {"Vulkan Win32 external memory extension or entry points are unavailable"}};
@@ -279,7 +282,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceVulkan::CreateExportableBuffe
     if (const auto* error = std::get_if<ExternalError>(&identity)) return Fail("CreateExportableBuffer", *error, params);
     uint64_t size = desc.Size;
     if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
-        const uint64_t alignment = std::max<uint64_t>(256, _device->GetCapabilities().Detail.CBufferAlignment);
+        const uint64_t alignment = std::max<uint64_t>(256, _device->GetCapabilities().Limits.CBufferOffsetAlignment);
         if (size > std::numeric_limits<uint64_t>::max() - (alignment - 1)) return Fail("CreateExportableBuffer", {"Aligned buffer size would overflow uint64_t"}, params);
         size = (size + alignment - 1) / alignment * alignment;
     }

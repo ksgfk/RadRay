@@ -30,6 +30,7 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
+    gpu::BufferMemoryProperties GetMemoryProperties() const noexcept override { return {.IsDeviceLocal = true}; }
     Nullable<void*> GetMappedData() noexcept override { return nullptr; }
     bool FlushMappedRange(gpu::BufferRange) noexcept override { return false; }
     bool InvalidateMappedRange(gpu::BufferRange) noexcept override { return false; }
@@ -65,8 +66,8 @@ public:
     bool IsDeviceLost() const noexcept override { return false; }
     gpu::GpuBackend GetBackend() noexcept override { return gpu::GpuBackend::D3D12; }
     Nullable<unique_ptr<gpu::ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override { return nullptr; }
-    gpu::DeviceDetail GetDetail() const noexcept override { return _caps.Detail; }
     const gpu::GpuDeviceCapabilities& GetCapabilities() const noexcept override { return _caps; }
+    gpu::GpuMemoryBudget QueryMemoryBudget() const noexcept override { return {}; }
     gpu::TextureSupport QueryTextureSupport(const gpu::TextureSupportQuery&) const noexcept override { return {}; }
     gpu::AttachmentResolveSupport QueryAttachmentResolveSupport(gpu::TextureFormat, uint32_t) const noexcept override { return {}; }
     Nullable<gpu::CommandQueue*> GetCommandQueue(gpu::QueueType, uint32_t) noexcept override { return nullptr; }

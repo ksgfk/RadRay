@@ -220,6 +220,7 @@ struct MeshDrawingFramePipeline::PassData {
     RDGBufferHandle Instances;
     RDGBufferHandle Constants;
     RDGBufferSlice InstanceSlice{};
+    Nullable<gpu::ShaderParameterSet*> Parameters{nullptr};
 };
 
 uint64_t MeshDrawingFramePipeline::PrepareInstances(InstanceGenerator& data, RDGUploadPrepareContext& context) noexcept {
@@ -257,22 +258,16 @@ bool MeshDrawingFramePipeline::WriteConstants(const ConstantGenerator& data, RDG
 bool MeshDrawingFramePipeline::PreparePass(PassData& data, RDGPrepareContext& context) noexcept {
     data.InstanceSlice = context.ResolveBuffer(data.Instances);
     const auto constants = context.ResolveBuffer(data.Constants);
-    const auto index = data.Pass.Value == 2 ? 1 : 0;
-    auto& bound = data.Resources->BoundConstants[index];
-    if (bound.Buffer != constants.Buffer || bound.Offset != constants.Offset || bound.Size != constants.Size) {
-        auto& parameters = *data.Resources->PassParameterSets[index];
-        parameters.ResetBindingsForReuse();
-        if (!parameters.Set(0, 0, gpu::ShaderBufferBinding{constants.Buffer.Get(), {constants.Offset, constants.Size}, 0}) || !parameters.FlushWrites()) return false;
-        bound = constants;
-    }
-    return true;
+    const TransientParameterBinding binding{0, 0, gpu::ShaderBufferBinding{constants.Buffer.Get(), {constants.Offset, constants.Size}, 0}};
+    data.Parameters = context.GetSlot().AcquireParameterSet(data.Resources->PassGroupLayout, {&binding, 1});
+    return bool(data.Parameters);
 }
 bool MeshDrawingFramePipeline::RecordPass(const PassData& data, RDGRasterPassContext& context) noexcept {
     if (!data.InstanceSlice.Size) return true;
     auto& encoder = context.GetEncoder();
     encoder.SetViewport(data.View.ViewportRect);
     encoder.SetScissor(data.View.Scissor);
-    const MeshShaderParameterBinding binding{0, data.Resources->PassParameterSets[data.Pass.Value == 2 ? 1 : 0].Get(), {}};
+    const MeshShaderParameterBinding binding{0, data.Parameters.Get(), {}};
     const MeshPassSubmitArgs args{.ParameterSets = std::span{&binding, 1},
                                   .InstanceStream = gpu::VertexBufferBinding{1, {data.InstanceSlice.Buffer.Get(), data.InstanceSlice.Offset, data.InstanceSlice.Size}}};
     return SubmitMeshDrawCommands(encoder, context.GetVisibleCommands(data.Pass), args);
@@ -321,15 +316,15 @@ void MeshDrawingFramePipeline::SetupGraph(RDGBuilder& graph, FrameSlot& slot) no
         graph.MarkOutput(vb);
         graph.MarkOutput(ib);
     }
-    const auto instances = graph.CreateBuffer(RDGDynamicBufferDescriptor{_candidates.size() * sizeof(InstanceData), gpu::BufferUse::Vertex},
+    const auto instances = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{_candidates.size() * sizeof(InstanceData), gpu::BufferUse::Vertex},
                                               RDGUploadSource::Generated(_candidates.size() * sizeof(InstanceData), InstanceGenerator{_input.Get(), _candidates, {}}, &WriteInstances, &PrepareInstances));
     array<RDGBufferHandle, 2> constants;
     for (size_t i = 0; i < constants.size(); ++i) {
-        constants[i] = graph.CreateBuffer(RDGDynamicBufferDescriptor{sizeof(PassConstants), gpu::BufferUse::CBuffer},
+        constants[i] = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{sizeof(PassConstants), gpu::BufferUse::CBuffer},
                                           RDGUploadSource::Generated(sizeof(PassConstants), ConstantGenerator{&_view, i == 0 ? 1.0f : 1.12f}, &WriteConstants));
     }
-    const auto depth = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::D32_FLOAT_S8_UINT, .Memory = gpu::MemoryType::Device, .Usage = gpu::TextureUse::DepthStencilWrite});
-    const auto color = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Memory = gpu::MemoryType::Device, .Usage = gpu::TextureUse::RenderTarget | gpu::TextureUse::CopySource});
+    const auto depth = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::D32_FLOAT_S8_UINT, .Memory = gpu::MemoryType::DeviceLocal, .Usage = gpu::TextureUse::DepthStencilWrite});
+    const auto color = graph.CreateTexture({.Dim = gpu::TextureDimension::Dim2D, .Width = resources.Width, .Height = resources.Height, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = gpu::TextureFormat::RGBA8_UNORM, .Memory = gpu::MemoryType::DeviceLocal, .Usage = gpu::TextureUse::RenderTarget | gpu::TextureUse::CopySource});
     const auto readback = graph.ImportBuffer(resources.Readback.Get(), resources.CompletionValue == 0 ? gpu::BufferState::Undefined : gpu::BufferState::HostRead,
                                              gpu::BufferState::HostRead);
     const array<std::string_view, 4> names{"Tutorial Depth", "Tutorial Color", "Tutorial Outline", "Tutorial Transparent"};

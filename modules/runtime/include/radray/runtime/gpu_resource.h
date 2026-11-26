@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <mutex>
-#include <span>
 #include <utility>
 
 // GPU 资源所有权、上传与持久状态契约见 docs/architecture/runtime.md。
@@ -17,14 +17,24 @@ class RDGBuilder;
 class RDGBufferHandle;
 class RDGTextureHandle;
 
+enum class GpuBufferMemory : uint8_t {
+    DeviceLocal,
+    DeviceUploadWithFallback,
+    DeviceUploadStrict,
+    HostUpload,
+};
+
+bool CanAllocateDeviceUpload(const gpu::Device& device, uint64_t size) noexcept;
+
 struct GpuBufferDescriptor {
     uint64_t Size{0};
     gpu::BufferUses Usage{gpu::BufferUse::Resource};
+    GpuBufferMemory Memory{GpuBufferMemory::DeviceLocal};
 };
 
 class GpuBuffer final : public ThreadSafeRefCountedBase<GpuBuffer> {
 public:
-    // 固定 Device 内存，自动增加 CopyDestination；device 须晚于缓冲销毁。
+    // device 须晚于缓冲销毁。
     // 调用方负责持有缓冲直到全部 GPU 使用和命令存储引用结束。
     static Nullable<IntrusivePtr<GpuBuffer>> Create(gpu::Device& device, const GpuBufferDescriptor& desc);
     ~GpuBuffer() noexcept override;
@@ -36,34 +46,22 @@ public:
     // 仅更新元数据；调用方须在实际提交后按队列顺序发布与命令一致的终态，不发出屏障或等待。
     void CommitSubmittedState(gpu::BufferStates state) noexcept;
 
-private:
-    GpuBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer) noexcept;
-    GpuBufferDescriptor _desc;
-    unique_ptr<gpu::Buffer> _buffer;
-    gpu::BufferStates _submittedState{gpu::BufferState::Common};
-};
-
-class GpuUploadBuffer final : public ThreadSafeRefCountedBase<GpuUploadBuffer> {
-public:
-    static Nullable<IntrusivePtr<GpuUploadBuffer>> Create(gpu::Device& device, const GpuBufferDescriptor& desc);
-    ~GpuUploadBuffer() noexcept override;
-
-    gpu::Buffer* GetBuffer() const noexcept;
-    const GpuBufferDescriptor& GetDesc() const noexcept;
-    byte* GetMappedData() const noexcept;
+    bool IsHostVisible() const noexcept;
+    gpu::BufferMemoryProperties GetMemoryProperties() const noexcept;
+    Nullable<byte*> GetMappedData() const noexcept;
     uint64_t GetSliceAlignment() const noexcept;
     // Returns zero on overflow. Reusing a slice requires GPU completion.
     uint64_t AlignSliceSize(uint64_t size) const noexcept;
-    bool WriteAndFlush(uint64_t offset, std::span<const byte> data) noexcept;
+    // The submitting thread flushes after all writers have finished.
     bool FlushMappedRange(gpu::BufferRange range) noexcept;
 
 private:
-    GpuUploadBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer, byte* data, uint64_t alignment) noexcept;
+    GpuBuffer(const GpuBufferDescriptor& desc, unique_ptr<gpu::Buffer> buffer, Nullable<byte*> mapped, uint64_t alignment) noexcept;
     GpuBufferDescriptor _desc;
     unique_ptr<gpu::Buffer> _buffer;
-    byte* _mapped;
+    Nullable<byte*> _mapped;
     uint64_t _alignment;
-    std::mutex _flushMutex;
+    gpu::BufferStates _submittedState;
 };
 
 struct GpuTextureDescriptor {
@@ -111,13 +109,11 @@ private:
 };
 
 // Borrowed 由外部保活到命令存储重置；Owned 在登记时去重持有 wrapper 引用。
-// 缓冲跨图边界为 Common；可采样纹理为 ShaderRead，其余纹理保持最后使用状态。
+// 设备缓冲跨图边界为 Common，可映射缓冲为 HostWrite；可采样纹理为 ShaderRead，其余纹理保持最后使用状态。
 // 导入读取已提交初态快照；此前相关提交须已发布，后续不得插入使快照失效的提交。
 RDGBufferHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuBuffer& buffer);
-RDGBufferHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuUploadBuffer& buffer);
 RDGTextureHandle ImportPersistentBorrowed(RDGBuilder& graph, GpuTexture& texture);
 RDGBufferHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuBuffer>& buffer);
-RDGBufferHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuUploadBuffer>& buffer);
 RDGTextureHandle ImportPersistentOwned(RDGBuilder& graph, const IntrusivePtr<GpuTexture>& texture);
 
 }  // namespace radray

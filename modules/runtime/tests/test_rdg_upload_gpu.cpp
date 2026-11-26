@@ -342,8 +342,8 @@ TEST_P(BufferUploadGpuTest, DynamicCopyUsesNonzeroSliceOffsetWithoutDeviceUpload
     auto pipeline = make_unique<UploadPipeline>(context, 1);
     pipeline->Build = [&](RDGBuilder& graph, FrameSlot&) {
         const array<byte, 16> first{byte{1}}, second{byte{42}};
-        const auto a = graph.CreateBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(first));
-        const auto b = graph.CreateBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(second));
+        const auto a = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(first));
+        const auto b = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource}, RDGUploadSource::SnapshotBytes(second));
         graph.MarkOutput(a);
         const auto out = graph.ImportBuffer(output.get(), BufferState::HostRead, BufferState::HostRead);
         graph.AddCopyPass("slice", BufferCopyData{b, out, 16}, +[](const BufferCopyData& data, RDGCopyPassContext& context) noexcept {
@@ -380,12 +380,12 @@ TEST_P(BufferUploadGpuTest, ConstantsUseNonzeroOffsetsAcrossPagesAndReuseParamet
     for (uint32_t frame = 0; frame < 2; ++frame) {
         runner->Build = [&](RDGBuilder& graph, FrameSlot&) {
             const array<byte, 256> padding{};
-            const auto prefix = graph.CreateBuffer(RDGDynamicBufferDescriptor{256, BufferUse::CBuffer}, RDGUploadSource::SnapshotBytes(padding));
+            const auto prefix = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{256, BufferUse::CBuffer}, RDGUploadSource::SnapshotBytes(padding));
             graph.MarkOutput(prefix);
             const auto output = graph.ImportBuffer(result.get(), frame ? BufferState::Common : BufferState::Undefined, BufferState::Common);
             for (uint32_t i = 0; i < 2; ++i) {
                 const array<uint32_t, 2> value{42u + frame + i * 49, i};
-                const auto constants = graph.CreateBuffer(RDGDynamicBufferDescriptor{80, BufferUse::CBuffer, 256},
+                const auto constants = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{80, BufferUse::CBuffer, 256},
                                                           RDGUploadSource::Generated(80, value, +[](const array<uint32_t, 2>& data, RDGUploadWriteContext& ctx) noexcept {
                         std::fill(ctx.Bytes.begin(), ctx.Bytes.end(), byte{0});
                         std::memcpy(ctx.Bytes.data(), data.data(), 8);
@@ -465,13 +465,13 @@ protected:
                     const auto width = 4u >> mip;
                     const TextureRegion2D region{mip, layer, 0, 0, width, width};
                     if (initialization == Initialization::CopyPass) {
-                        const auto pitchAlignment = std::max(1u, device.GetDetail().TextureDataPitchAlignment);
+                        const auto pitchAlignment = std::max(1u, device.GetCapabilities().Limits.TextureDataPitchAlignment);
                         const auto pitch = ((width * 4 + pitchAlignment - 1) / pitchAlignment) * pitchAlignment;
                         vector<byte> bytes(pitch * (width - 1) + width * 4);
                         for (uint32_t row = 0; row < width; ++row)
                             std::memcpy(bytes.data() + row * pitch, expected.data() + offsets[layer][mip] + row * width, width * 4);
                         const auto sourceSize = bytes.size();
-                        const auto source = graph.CreateBuffer(RDGDynamicBufferDescriptor{sourceSize, BufferUse::CopySource, device.GetDetail().TextureDataPlacementAlignment}, RDGUploadSource::OwnedBytes(std::move(bytes)));
+                        const auto source = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{sourceSize, BufferUse::CopySource, device.GetCapabilities().Limits.TextureDataPlacementAlignment}, RDGUploadSource::OwnedBytes(std::move(bytes)));
                         struct Data {
                             RDGBufferHandle Source;
                             RDGTextureHandle Target;

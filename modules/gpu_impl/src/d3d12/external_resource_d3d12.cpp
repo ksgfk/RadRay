@@ -2,6 +2,7 @@
 #include "../external_resource.h"
 
 #include <radray/logger.h>
+#include <radray/gpu_impl/validation.h>
 
 #include <limits>
 
@@ -72,6 +73,7 @@ ExternalResult<ExternalDeviceIdentity> ExternalResourceD3D12::GetDeviceIdentity(
     return result;
 }
 ExternalSupport ExternalResourceD3D12::QueryBufferSupport(const BufferDescriptor& d, const ExternalResourceDescriptor& e) const noexcept {
+    if (d.Memory != MemoryType::DeviceLocal || !IsBufferMemoryUsageValid(d)) return {false, false, {"External buffers require valid DeviceLocal usage"}};
     if (e.HandleType != ExternalMemoryHandleType::D3D12Resource) return {false, false, {"D3D12 supports only D3D12_RESOURCE memory handles"}};
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return {false, false, *error};
@@ -79,6 +81,7 @@ ExternalSupport ExternalResourceD3D12::QueryBufferSupport(const BufferDescriptor
     return {true, true, {}};
 }
 ExternalSupport ExternalResourceD3D12::QueryTextureSupport(const TextureDescriptor& d, const ExternalTextureDescriptor& e) const noexcept {
+    if (d.Memory != MemoryType::DeviceLocal) return {false, false, {"External resources require DeviceLocal memory"}};
     if (e.HandleType != ExternalMemoryHandleType::D3D12Resource) return {false, false, {"D3D12 supports only D3D12_RESOURCE memory handles"}};
     const auto identity = GetDeviceIdentity();
     if (const auto* error = std::get_if<ExternalError>(&identity)) return {false, false, *error};
@@ -209,7 +212,7 @@ ExternalResult<unique_ptr<Buffer>> ExternalResourceD3D12::ImportBuffer(BorrowedE
         return Fail("ImportBuffer", {"Exported buffer metadata or native resource parameters do not match"}, params);
     auto result = make_unique<BufferD3D12>(_device, std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_reqSize = info.Descriptor.Size;
-    result->_memory = MemoryType::Device;
+    result->_memory = MemoryType::DeviceLocal;
     result->_usage = info.Descriptor.Usage;
     result->_hints = info.Descriptor.Hints | ResourceHint::Dedicated;
     result->_externalInfo = info;
@@ -234,7 +237,7 @@ ExternalResult<unique_ptr<Texture>> ExternalResourceD3D12::ImportTexture(Borrowe
     auto result = make_unique<TextureD3D12>(std::move(native), ComPtr<D3D12MA::Allocation>{});
     result->_dimension = desc.Dim;
     result->_format = desc.Format;
-    result->_memory = MemoryType::Device;
+    result->_memory = MemoryType::DeviceLocal;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints | ResourceHint::Dedicated;
     result->_externalInfo = info;

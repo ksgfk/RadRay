@@ -153,7 +153,7 @@ Runtime 通过相同开关输出以下 CPU zone。父区间包含子区间，不
 | `RadRay.MeshDraw` | 整批命令提交；Debug 另有 Validate 子区间 |
 | `RadRay.RDG.Compile` | 资源检查、访问检查与依赖构造、裁剪、调度与合并 |
 | `RadRay.RDG` | Prepare、PrepareLayout、AcquireResources、FillUploads、PrepareBindings、Record/RecordGroup 和提交后的 CommitSubmittedStates |
-| `RadRay.UploadArena` | 最终映射页 Allocate 和集中 Flush |
+| `RadRay.MappedBufferPages` | 最终映射页 Allocate 和集中 Flush |
 | `RadRay.RDG.Pool` | 每槽池复用标记重置、资源/视图查找；未命中时的 Create 子区间包含创建与池登记 |
 
 RDG 在逻辑 Pass 录制区间使用 Pass 名称作为动态 CPU zone 名称。相同名称的 Pass 在统计中合并，

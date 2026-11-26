@@ -148,7 +148,7 @@ TEST_P(RenderPassTest, DirectIndexedDrawReadsTheRequestedMappedRange) {
     auto& device = GetDevice();
     auto target = CreateColorTarget();
     auto pipeline = CreateSolidPipeline(std::nullopt);
-    auto indices = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::Index}).Unwrap();
+    auto indices = device.CreateBuffer({.Size = 8192, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::Index}).Unwrap();
     const array<uint16_t, 3> order{0, 1, 2};
     auto* mapped = static_cast<byte*>(indices->GetMappedData().Get());
     ASSERT_NE(mapped, nullptr);

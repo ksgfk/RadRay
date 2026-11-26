@@ -72,7 +72,8 @@ TEST(AsyncReadbackQueue, MapsAtReservationAndInvalidatesAtConsumption) {
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<radray::test::CallbackPipeline>(), 1).Unwrap();
     auto& slot = scheduler->BeginFrame();
     RDGTransientResourcePool pool{*gpu.Device};
-    UploadArena uploads{*gpu.Device, 64};
+    StagingBufferPool staging{*gpu.Device, 64};
+    DynamicBufferArena uploads{*gpu.Device, 64};
     RDGBuilder graph{slot};
     const auto srcBuffer = graph.ImportBuffer(buffer.get(), gpu::BufferState::CopySource);
     const auto srcTexture = graph.ImportTexture(texture.get(), gpu::TextureState::CopySource);
@@ -81,7 +82,7 @@ TEST(AsyncReadbackQueue, MapsAtReservationAndInvalidatesAtConsumption) {
     auto compiled = graph.Compile();
     ASSERT_TRUE(compiled);
     pool.BeginFrame();
-    ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+    ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
     command.Begin();
     ASSERT_TRUE(compiled->Record(command));
     command.End();
@@ -109,7 +110,8 @@ TEST(AsyncReadbackQueue, CancelledGraphCannotPrepareAReusedRequestId) {
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<radray::test::CallbackPipeline>(), 1).Unwrap();
     auto& slot = scheduler->BeginFrame();
     RDGTransientResourcePool pool{*gpu.Device};
-    UploadArena uploads{*gpu.Device, 64};
+    StagingBufferPool staging{*gpu.Device, 64};
+    DynamicBufferArena uploads{*gpu.Device, 64};
     const auto build = [&](RDGBuilder& graph, uint64_t size) {
         auto handle = graph.ImportBuffer(source.get(), gpu::BufferState::CopySource);
         EXPECT_TRUE(reads.EnqueueBuffer(graph, 7, handle, 0, size));
@@ -123,8 +125,8 @@ TEST(AsyncReadbackQueue, CancelledGraphCannotPrepareAReusedRequestId) {
     auto newGraph = build(current, 16);
     ASSERT_TRUE(newGraph);
     pool.BeginFrame();
-    EXPECT_FALSE(oldGraph->Prepare(slot, pool, uploads));
-    ASSERT_TRUE(newGraph->Prepare(slot, pool, uploads));
+    EXPECT_FALSE(oldGraph->Prepare(slot, pool, staging, uploads));
+    ASSERT_TRUE(newGraph->Prepare(slot, pool, staging, uploads));
     ReadbackResultInfo info{};
     EXPECT_EQ(reads.Poll(7, 0, info), ReadbackStatus::Pending);
     gpu.Device->Lost = true;
@@ -185,7 +187,7 @@ TEST_P(ReadbackQueueTest, PersistentUploadOwnedByGraphSuppliesBufferReadback) {
             Upload.Reset();
             EXPECT_TRUE(Reads.EnqueueBuffer(graph, 7, src, 4, 4));
             const array<byte, 4> data{byte{1}, byte{2}, byte{3}, byte{4}};
-            const auto shortSource = graph.CreateBuffer(RDGDynamicBufferDescriptor{.MaxSize = 16, .Usage = gpu::BufferUse::CopySource},
+            const auto shortSource = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{.MaxSize = 16, .Usage = gpu::BufferUse::CopySource},
                                                         RDGUploadSource::SnapshotBytes(data));
             EXPECT_FALSE(graph.IsDynamicBuffer(src));
             EXPECT_FALSE(graph.IsDynamicBuffer({}));
@@ -203,7 +205,7 @@ TEST_P(ReadbackQueueTest, PersistentUploadOwnedByGraphSuppliesBufferReadback) {
         }
         AsyncReadbackQueue& Reads;
         gpu::Fence& Fence;
-        IntrusivePtr<GpuUploadBuffer> Upload;
+        IntrusivePtr<GpuBuffer> Upload;
     };
     auto& device = GetDevice();
     DeviceContext ctx{shared_ptr<gpu::Device>{&device, [](gpu::Device*) {}}, &gpu::test::DirectQueue(device)};
@@ -212,11 +214,12 @@ TEST_P(ReadbackQueueTest, PersistentUploadOwnedByGraphSuppliesBufferReadback) {
     auto pipeline = make_unique<Pipeline>(ctx, reads, *fence);
     const array<byte, 4> payload{byte{5}, byte{7}, byte{11}, byte{13}};
     std::jthread producer{[&] {
-        pipeline->Upload = GpuUploadBuffer::Create(device, {.Size = 8, .Usage = gpu::BufferUse::CopySource}).Release();
-        if (pipeline->Upload) EXPECT_TRUE(pipeline->Upload->WriteAndFlush(4, payload));
+        pipeline->Upload = GpuBuffer::Create(device, {.Size = 8, .Usage = gpu::BufferUse::CopySource, .Memory = GpuBufferMemory::DeviceUploadWithFallback}).Release();
+        if (pipeline->Upload) std::memcpy(pipeline->Upload->GetMappedData().Unwrap() + 4, payload.data(), payload.size());
     }};
     producer.join();
     ASSERT_TRUE(pipeline->Upload);
+    ASSERT_TRUE(pipeline->Upload->FlushMappedRange({4, payload.size()}));
     auto scheduler = FrameScheduler::Create(ctx, std::move(pipeline), 1).Unwrap();
     ASSERT_TRUE(scheduler->RunFrame());
     ReadbackResultInfo info{};

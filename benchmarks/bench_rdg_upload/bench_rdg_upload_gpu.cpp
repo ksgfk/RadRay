@@ -15,7 +15,8 @@
 #include <radray/runtime/gpu_env.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/rdg.h>
-#include <radray/runtime/upload_arena.h>
+#include <radray/runtime/dynamic_buffer_arena.h>
+#include <radray/runtime/staging_buffer_pool.h>
 
 namespace {
 using namespace radray;
@@ -54,14 +55,15 @@ void Run(benchmark::State& state, GpuBackend backend, uint32_t warmup, const str
     auto& queue = context->GetQueue();
     auto buffer = GpuBuffer::Create(device, {.Size = 2048, .Usage = BufferUse::CopySource});
     auto texture = GpuTexture::Create(device, {.Width = 32, .Height = 16, .Format = TextureFormat::RGBA8_UNORM});
-    auto observed = device.CreateBuffer({.Size = 2048, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
+    auto observed = device.CreateBuffer({.Size = 2048, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
     auto queries = device.CreateQueryPool({.Count = 2});
-    auto timestamps = device.CreateBuffer({.Size = 16, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
+    auto timestamps = device.CreateBuffer({.Size = 16, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
     if (!buffer || !texture || !observed || !queries || !timestamps) return fail("resource creation failed");
     const auto calibration = queries->GetTimestampCalibration(&queue);
     if (calibration.TickPeriodNs <= 0) return fail("timestamps unavailable");
     RDGTransientResourcePool pool{device};
-    UploadArena uploads{device};
+    StagingBufferPool staging{device};
+    DynamicBufferArena uploads{device};
     auto scheduler = FrameScheduler::Create(*context, make_unique<WaitPipeline>(), 1).Unwrap();
     vector<Sample> samples;
     samples.reserve(static_cast<size_t>(state.max_iterations));
@@ -69,7 +71,8 @@ void Run(benchmark::State& state, GpuBackend backend, uint32_t warmup, const str
     const auto execute = [&](Sample& sample) {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot, context->GetRDGConstraints(), {.FullValidation = true}};
         const auto dst = graph.ImportPersistentBorrowed(*buffer);
         const auto image = graph.ImportPersistentBorrowed(*texture);
@@ -92,7 +95,7 @@ void Run(benchmark::State& state, GpuBackend backend, uint32_t warmup, const str
         const auto compiled = graph.Compile();
         if (!compiled) return false;
         const auto prepareBegin = Clock::now();
-        const bool prepared = compiled->Prepare(slot, pool, uploads);
+        const bool prepared = compiled->Prepare(slot, pool, staging, uploads);
         const auto prepareEnd = Clock::now();
         if (!prepared) return false;
         auto command = slot.AcquireCommandBuffer();

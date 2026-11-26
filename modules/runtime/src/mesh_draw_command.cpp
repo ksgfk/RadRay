@@ -1032,21 +1032,36 @@ bool SubmitMeshPassIndirectDraws(gpu::GraphicsCommandEncoder& encoder,
         }
     }
 #endif
+    uint64_t indexedArgumentsRequired = 0;
+    uint64_t nonIndexedArgumentsRequired = 0;
     for (const auto& batch : prepared.Batches) {
         if (batch.CommandIndex >= visibleCommands.size() || batch.ArgumentCount == 0) return false;
         if (!visibleCommands[batch.CommandIndex].CachedCommand) return false;
         const size_t cpuCount = batch.Indexed ? prepared.IndexedArguments.size() : prepared.NonIndexedArguments.size();
-        if (uint64_t{batch.FirstArgument} + batch.ArgumentCount > cpuCount) return false;
+        const uint64_t argumentEnd = uint64_t{batch.FirstArgument} + batch.ArgumentCount;
+        if (argumentEnd > cpuCount) return false;
         if (CanBatchUseIndirect(batch, capabilities)) {
-            const RDGBufferSlice& slice = batch.Indexed ? indexedArgBuffer : nonIndexedArgBuffer;
-            const uint64_t stride = batch.Indexed ? sizeof(gpu::DrawIndexedIndirectArguments) : sizeof(gpu::DrawIndirectArguments);
-            if (!slice.Buffer || !slice.Buffer->IsValid()) return false;
-            const auto desc = slice.Buffer->GetDesc();
-            if (!desc.Usage.HasFlag(gpu::BufferUse::Indirect) || (slice.Offset % 4) != 0) return false;
-            if (slice.Offset > desc.Size || slice.Size > desc.Size - slice.Offset) return false;
-            if (uint64_t{batch.FirstArgument} + batch.ArgumentCount > slice.Size / stride) return false;
+            auto& required = batch.Indexed ? indexedArgumentsRequired : nonIndexedArgumentsRequired;
+            required = std::max(required, argumentEnd);
         }
     }
+
+    Nullable<gpu::Buffer*> validatedBuffer{nullptr};
+    uint64_t validatedBufferSize = 0;
+    const auto validateSlice = [&](const RDGBufferSlice& slice, uint64_t requiredBytes) noexcept {
+        if (requiredBytes == 0) return true;
+        if (!slice.Buffer || slice.Offset % 4 != 0 || requiredBytes > slice.Size) return false;
+        if (slice.Buffer.Get() != validatedBuffer.Get()) {
+            if (!slice.Buffer->IsValid()) return false;
+            const auto desc = slice.Buffer->GetDesc();
+            if (!desc.Usage.HasFlag(gpu::BufferUse::Indirect)) return false;
+            validatedBuffer = slice.Buffer;
+            validatedBufferSize = desc.Size;
+        }
+        return slice.Offset <= validatedBufferSize && slice.Size <= validatedBufferSize - slice.Offset;
+    };
+    if (!validateSlice(indexedArgBuffer, indexedArgumentsRequired * sizeof(gpu::DrawIndexedIndirectArguments)) ||
+        !validateSlice(nonIndexedArgBuffer, nonIndexedArgumentsRequired * sizeof(gpu::DrawIndirectArguments))) return false;
 
     MeshDrawCommandStateCache stateCache;
     for (const auto& batch : prepared.Batches) {

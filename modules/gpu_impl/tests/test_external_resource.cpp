@@ -25,9 +25,9 @@ auto RouteName(const testing::TestParamInfo<Route>& info) {
 constexpr uint32_t BufferSize = 256;
 constexpr uint32_t TextureSize = 4;
 
-const BufferDescriptor SharedBuffer{.Size = BufferSize, .Memory = MemoryType::Device, .Usage = BufferUse::CopySource | BufferUse::CopyDestination};
+const BufferDescriptor SharedBuffer{.Size = BufferSize, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::CopySource | BufferUse::CopyDestination};
 const TextureDescriptor SharedTexture{.Dim = TextureDimension::Dim2D, .Width = TextureSize, .Height = TextureSize, .DepthOrArraySize = 1, .MipLevels = 1,
-                                      .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Memory = MemoryType::Device,
+                                      .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Memory = MemoryType::DeviceLocal,
                                       .Usage = TextureUse::CopySource | TextureUse::CopyDestination};
 
 vector<byte> Pattern(size_t size, uint8_t seed) {
@@ -166,6 +166,21 @@ vector<byte> TextureTurn(Device& device, Texture& shared, bool acquire, std::spa
         texels.insert(texels.end(), row, row + rowSize);
     }
     return texels;
+}
+
+TEST_P(ExternalResourceTest, MappableDomainsCannotBeShared) {
+    for (auto memory : {MemoryType::DeviceUpload, MemoryType::HostUpload, MemoryType::HostReadBack}) {
+        const BufferDescriptor buffer{.Size = BufferSize, .Memory = memory,
+                                      .Usage = memory == MemoryType::HostReadBack ? BufferUse::MapRead : BufferUse::MapWrite};
+        const auto bufferSupport = _exporter->QueryBufferSupport(buffer, {.HandleType = GetParam().Handle});
+        EXPECT_FALSE(bufferSupport.CanCreateExportable);
+        EXPECT_FALSE(bufferSupport.CanImport);
+        auto texture = SharedTexture;
+        texture.Memory = memory;
+        const auto textureSupport = _exporter->QueryTextureSupport(texture, {.HandleType = GetParam().Handle});
+        EXPECT_FALSE(textureSupport.CanCreateExportable);
+        EXPECT_FALSE(textureSupport.CanImport);
+    }
 }
 
 TEST_P(ExternalResourceTest, BufferRoundTrip) {

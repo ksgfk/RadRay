@@ -132,8 +132,8 @@ protected:
 
 TEST_P(SwapChainBackBufferTest, FrameViewsSurviveSubmissionAndRecreate) {
     auto& device = GetDevice();
-    EXPECT_NE(device.GetDetail().VendorId, 0u);
-    EXPECT_FALSE(device.GetDetail().DriverVersion.empty());
+    EXPECT_NE(device.GetCapabilities().Detail.VendorId, 0u);
+    EXPECT_FALSE(device.GetCapabilities().Detail.DriverVersion.empty());
     const auto bounds = ClientRect();
     _swapchain = device.CreateSwapChain({.PresentQueue = &test::DirectQueue(device), .NativeHandler = _window,
                                         .Width = uint32_t(bounds.right), .Height = uint32_t(bounds.bottom), .BackBufferCount = 3,

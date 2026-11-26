@@ -26,7 +26,8 @@
 #include <radray/intrusive_ptr.h>
 #include <radray/gpu/types.h>
 #include <radray/runtime/frame_slot.h>
-#include <radray/runtime/upload_arena.h>
+#include <radray/runtime/dynamic_buffer_arena.h>
+#include <radray/runtime/staging_buffer_pool.h>
 
 namespace radray {
 
@@ -87,10 +88,17 @@ struct RDGCompileOptions {
     bool FullValidation{true};
 };
 
+struct RDGTransientBufferDescriptor {
+    uint64_t Size{0};
+    gpu::BufferUses Usage{gpu::BufferUse::UNKNOWN};
+    gpu::ResourceHints Hints{};
+};
+
 struct RDGDynamicBufferDescriptor {
     uint64_t MaxSize{0};
     gpu::BufferUses Usage{gpu::BufferUse::CBuffer};
     uint64_t Alignment{1};
+    DynamicBufferResidency Residency{DynamicBufferResidency::PreferDevice};
 };
 
 class RDGUploadPrepareContext final {
@@ -474,7 +482,7 @@ public:
     // Prepare、Record、CommitSubmittedStates 各一次；Record 要求命令已 Begin。
     // 失败使本帧不可恢复；不支持重试、状态回滚或部分提交。
     ~CompiledRDG() noexcept;
-    bool Prepare(FrameSlot& slot, RDGTransientResourcePool& transientPool, UploadArena& uploadArena) noexcept;
+    bool Prepare(FrameSlot& slot, RDGTransientResourcePool& transientPool, StagingBufferPool& stagingPool, DynamicBufferArena& dynamicArena) noexcept;
     // 计时查询 0/1 保留给整帧，之后按实际 GPU 录制顺序每个 Pass 两项。
     vector<string> GetRecordedPassNames() const;
     bool Record(gpu::CommandBuffer& commandBuffer, Nullable<gpu::QueryPool*> passTimestamps = nullptr) noexcept;
@@ -516,6 +524,7 @@ public:
     RDGTextureHandle CreateTexture(const gpu::TextureDescriptor& desc);
     RDGBlackboard& GetBlackboard() noexcept;
     bool IsDynamicBuffer(RDGBufferHandle buffer) const noexcept;
+    // Dynamic descriptors report the size limit and preferred domain. ResolveBuffer gives the actual slice.
     std::optional<gpu::BufferDescriptor> GetBufferDescriptor(RDGBufferHandle buffer) const noexcept;
     std::optional<gpu::TextureDescriptor> GetTextureDescriptor(RDGTextureHandle texture) const noexcept;
     RDGPassHandle AddClearColor(RDGTextureHandle texture, gpu::ColorClearValue value);
@@ -526,11 +535,9 @@ public:
                                        bool clearDepth = true, bool clearStencil = true, std::optional<Rect> renderArea = std::nullopt);
     RDGPassHandle AddClearDepthStencil(RDGTextureHandle texture, gpu::DepthStencilClearValue value, RDGAttachmentSlice slice,
                                        bool clearDepth = true, bool clearStencil = true, std::optional<Rect> renderArea = std::nullopt);
-    RDGBufferHandle CreateBuffer(const gpu::BufferDescriptor& desc);
-    RDGBufferHandle CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
+    RDGBufferHandle CreateBuffer(const RDGTransientBufferDescriptor& desc);
+    RDGBufferHandle CreateDynamicBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source);
     RDGBufferHandle ImportPersistentBorrowed(GpuBuffer& buffer);
-    RDGBufferHandle ImportPersistentBorrowed(GpuUploadBuffer& buffer);
-    RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuUploadBuffer>& buffer);
     RDGTextureHandle ImportPersistentBorrowed(GpuTexture& texture);
     RDGBufferHandle ImportPersistentOwned(const IntrusivePtr<GpuBuffer>& buffer);
     RDGTextureHandle ImportPersistentOwned(const IntrusivePtr<GpuTexture>& texture);

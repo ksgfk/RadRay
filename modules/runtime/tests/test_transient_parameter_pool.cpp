@@ -29,7 +29,7 @@ TEST_P(TransientParameterPoolTest, ReusesEquivalentBindingsAndUnbindsBeforeFrame
     auto scheduler = FrameScheduler::Create(context, make_unique<EmptyFramePipeline>(), 1).Unwrap();
     for (uint32_t frame = 0; frame < 2; ++frame) {
         auto& slot = scheduler->BeginFrame();
-        auto& buffer = *slot.Emplace<unique_ptr<gpu::Buffer>>(device.CreateBuffer({.Size = 512, .Memory = gpu::MemoryType::Device, .Usage = gpu::BufferUse::CBuffer}).Unwrap());
+        auto& buffer = *slot.Emplace<unique_ptr<gpu::Buffer>>(device.CreateBuffer({.Size = 512, .Memory = gpu::MemoryType::DeviceLocal, .Usage = gpu::BufferUse::CBuffer}).Unwrap());
         TransientParameterBinding input{1, 0, gpu::ShaderBufferBinding{buffer.get(), {0, 256}, 0}};
         auto first = slot.AcquireParameterSet(layout, std::span{&input, 1});
         ASSERT_TRUE(first);
@@ -58,12 +58,11 @@ TEST_P(TransientParameterPoolTest, ColdLayoutsReleaseOwnersAfterPeakLeavesWindow
 
 TEST_P(TransientParameterPoolTest, DynamicUniformSlicesRespectDeviceAlignmentAndDeduplicateUnorderedWrites) {
     auto& device = GetDevice();
-    UploadArena arena{device};
+    DynamicBufferArena arena{device};
     const array<byte, 12> payload{byte{13}, byte{14}};
     auto first = AllocateDynamicUniform(arena, payload);
     auto second = AllocateDynamicUniform(arena, payload);
     ASSERT_TRUE(first && second);
-    EXPECT_EQ(second->Offset % std::max<uint64_t>(1, device.GetDetail().CBufferAlignment), 0u);
     EXPECT_EQ(second->Offset % std::max<uint64_t>(1, device.GetCapabilities().Limits.CBufferOffsetAlignment), 0u);
     EXPECT_GE(second->Offset, first->Offset + first->ReservedSize);
     EXPECT_TRUE(std::equal(payload.begin(), payload.end(), second->Data.Get()));

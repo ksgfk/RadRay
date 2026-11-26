@@ -273,6 +273,9 @@ public:
     BufferValidation(shared_ptr<ValidationContext> context, unique_ptr<Buffer> native)
         : ValidatedObject(std::move(context), std::move(native)), Desc(Real()->GetDesc()) {}
     BufferDescriptor Desc;
+    BufferMemoryProperties GetMemoryProperties() const noexcept override {
+        return Ready("GetMemoryProperties") ? Real()->GetMemoryProperties() : BufferMemoryProperties{};
+    }
     Nullable<void*> GetMappedData() noexcept override {
         return Ready("GetMappedData") ? Real()->GetMappedData() : nullptr;
     }
@@ -929,7 +932,7 @@ public:
         vector<VertexBufferBinding> nativeBindings;
         unordered_set<uint32_t> seen;
         uint32_t low = std::numeric_limits<uint32_t>::max(), high = 0;
-        const auto maximum = Context->NativeDevice->GetDetail().MaxVertexInputBindings;
+        const auto maximum = Context->NativeDevice->GetCapabilities().Limits.MaxVertexInputBindings;
         for (const auto& binding : bindings) {
             const auto native = Lookup(*Context, binding.View.Target, "BindVertexBuffers");
             if (!native) return;
@@ -1281,7 +1284,7 @@ void CommandBufferValidation::CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset
     const auto destination = Lookup(*Context, dst, "CopyBufferToBuffer"), source = Lookup(*Context, src, "CopyBufferToBuffer");
     if (!destination || !source) return;
     const auto d = dst->GetDesc(), s = src->GetDesc();
-    const auto alignment = std::max<uint64_t>(1, Context->NativeDevice->GetDetail().BufferCopyOffsetAlignment);
+    const auto alignment = std::max<uint64_t>(1, Context->NativeDevice->GetCapabilities().Limits.BufferCopyOffsetAlignment);
     if (!d.Usage.HasFlag(BufferUse::CopyDestination) || !s.Usage.HasFlag(BufferUse::CopySource) || !RangeFits(d.Size, dstOffset, size) || !RangeFits(s.Size, srcOffset, size) || dstOffset % alignment || srcOffset % alignment || (dst == src && dstOffset < srcOffset + size && srcOffset < dstOffset + size)) {
         Context->Reject("CopyBufferToBuffer", "copy usage, alignment, overlap, or range is invalid");
         return;
@@ -1308,7 +1311,7 @@ bool CommandBufferValidation::CopyTextureToBufferRegion(const TextureToBufferCop
     const auto destination = Lookup(*Context, desc.Destination, "CopyTextureToBufferRegion");
     if (!source || !destination) return false;
     const auto texture = desc.Source->GetDesc();
-    const auto [valid, reason] = ValidateTextureReadbackRegion(texture, desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Detail);
+    const auto [valid, reason] = ValidateTextureReadbackRegion(texture, desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Limits);
     if (!valid) return Context->Reject("CopyTextureToBufferRegion", reason);
     if (!ValidateTransferQueue(texture, desc.Region.Source, desc.Region.DestinationOffset, "CopyTextureToBufferRegion")) return false;
     if (!Real()->CopyTextureToBufferRegion({source.Get(), destination.Get(), desc.Region})) return false;
@@ -1322,7 +1325,7 @@ bool CommandBufferValidation::CopyBufferToTextureRegion(const BufferToTextureCop
     const auto source = Lookup(*Context, desc.Source, "CopyBufferToTextureRegion");
     const auto destination = Lookup(*Context, desc.Destination, "CopyBufferToTextureRegion");
     if (!source || !destination) return false;
-    const auto [valid, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Detail);
+    const auto [valid, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, Context->NativeDevice->GetCapabilities().Limits);
     if (!valid) return Context->Reject("CopyBufferToTextureRegion", reason);
     if (!ValidateTransferQueue(desc.Destination->GetDesc(), desc.Region.Destination, desc.Region.SourceOffset, "CopyBufferToTextureRegion")) return false;
     if (!Real()->CopyBufferToTextureRegion({source.Get(), destination.Get(), desc.Region})) return false;
@@ -1362,9 +1365,9 @@ bool CommandBufferValidation::ValidateTextureBufferCopy(Texture* texture, Subres
         return true;
     }
 #endif
-    const auto detail = Context->NativeDevice->GetDetail();
-    auto placement = std::max<uint64_t>(1, detail.TextureDataPlacementAlignment);
-    auto pitch = std::max<uint64_t>(1, detail.TextureDataPitchAlignment);
+    const auto& limits = Context->NativeDevice->GetCapabilities().Limits;
+    auto placement = std::max<uint64_t>(1, limits.TextureDataPlacementAlignment);
+    auto pitch = std::max<uint64_t>(1, limits.TextureDataPitchAlignment);
     auto block = GetTextureFormatBlockInfo(t.Format);
 #ifdef RADRAY_ENABLE_VULKAN
     if (Context->NativeDevice->GetBackend() == GpuBackend::Vulkan) {
@@ -1849,13 +1852,12 @@ public:
         if (!native) return nullptr;
         return make_unique<ExternalResourceValidation>(_context, native.Release());
     }
-    DeviceDetail GetDetail() const noexcept override {
-        if (!Ready("GetDetail")) _context->Fatal("GetDetail", "cannot query a destroyed device");
-        return _context->NativeDevice->GetDetail();
-    }
     const GpuDeviceCapabilities& GetCapabilities() const noexcept override {
         if (!Ready("GetCapabilities")) _context->Fatal("GetCapabilities", "cannot query a destroyed device");
         return _context->NativeDevice->GetCapabilities();
+    }
+    GpuMemoryBudget QueryMemoryBudget() const noexcept override {
+        return Ready("QueryMemoryBudget") ? _context->NativeDevice->QueryMemoryBudget() : GpuMemoryBudget{};
     }
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override {
         if (!Ready("QueryTextureSupport")) return {};
@@ -1941,12 +1943,6 @@ public:
             (desc.Usage.value() & ~((uint32_t(BufferUse::Indirect) << 1) - 1)) ||
             (GetCapabilities().Limits.MaxBufferSize && desc.Size > GetCapabilities().Limits.MaxBufferSize)) {
             _context->Reject("CreateBuffer", "invalid buffer size, memory, usage or hints");
-            return nullptr;
-        }
-        if (GetBackend() == GpuBackend::D3D12 && !desc.Usage.HasFlag(BufferUse::UnorderedAccess) &&
-            ((desc.Memory == MemoryType::Upload && desc.Usage.HasFlag(BufferUse::CopyDestination)) ||
-             (desc.Memory == MemoryType::ReadBack && (desc.Usage & ~(BufferUse::MapRead | BufferUse::CopyDestination))))) {
-            _context->Reject("CreateBuffer", "D3D12 upload/readback heap usage is incompatible with its fixed resource state");
             return nullptr;
         }
         auto result = _context->NativeDevice->CreateBuffer(desc);
@@ -2197,7 +2193,7 @@ public:
         };
         if (!shaderEntry(converted.VS, ShaderStage::Vertex) || !shaderEntry(converted.PS, ShaderStage::Pixel)) return nullptr;
         for (const auto& buffer : desc.VertexInput.Buffers)
-            if (buffer.Binding >= GetDetail().MaxVertexInputBindings) {
+            if (buffer.Binding >= GetCapabilities().Limits.MaxVertexInputBindings) {
                 _context->Reject("CreateGraphicsPipelineState", "vertex input slot exceeds device limits");
                 return nullptr;
             }

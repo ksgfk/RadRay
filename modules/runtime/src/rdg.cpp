@@ -116,9 +116,8 @@ struct RDGBuffer {
     RDGExternalOwnership Ownership{};
     Nullable<GpuBuffer*> Persistent{nullptr};
     IntrusivePtr<GpuBuffer> Owner{};
-    IntrusivePtr<GpuUploadBuffer> UploadOwner{};
     bool Dynamic{false};
-    bool OwnerWrites{false};
+    DynamicBufferResidency Residency{DynamicBufferResidency::PreferDevice};
     uint64_t Alignment{1};
     bool Output{false};
     bool Alive{false};
@@ -173,7 +172,7 @@ public:
     const RDGPhysicalResource<gpu::Texture, gpu::TextureState>& GetTexture(uint32_t index) const noexcept { return _textures[index]; }
     const RDGPhysicalResource<gpu::Buffer, gpu::BufferStates>& GetBuffer(uint32_t index) const noexcept { return _buffers[index]; }
     void PrepareHostWrite(uint32_t index) noexcept;
-    void PrepareBarriers(UploadArena& uploads, std::span<RDGPreparedUpload> preparedUploads, std::span<const uint32_t> uploadCounts);
+    void PrepareBarriers(StagingBufferPool& staging, DynamicBufferArena& dynamic, std::span<RDGPreparedUpload> preparedUploads, std::span<const uint32_t> uploadCounts);
     std::span<const gpu::ResourceBarrierDescriptor> GetBeginBarriers() const noexcept { return _beginBarriers; }
     std::span<const gpu::ResourceBarrierDescriptor> GetFinalBarriers() const noexcept { return _finalBarriers; }
     std::span<const gpu::ResourceBarrierDescriptor> GetReleaseBarriers() const noexcept { return _releaseBarriers; }
@@ -198,7 +197,8 @@ struct RDGExecution {
     RDGData& Data;
     FrameSlot& Slot;
     RDGTransientResourcePool& Pool;
-    UploadArena& Uploads;
+    StagingBufferPool& Staging;
+    DynamicBufferArena& Dynamic;
     Nullable<gpu::CommandBuffer*> Command{nullptr};
     RDGStateTracker States{Data};
     Nullable<const RDGPass*> Pass{nullptr};
@@ -300,8 +300,8 @@ bool ValidBufferState(const gpu::BufferDescriptor& desc, gpu::BufferStates state
         case ShaderRead: return desc.Usage.HasFlag(gpu::BufferUse::Resource);
         case gpu::BufferState::UnorderedAccess: return desc.Usage.HasFlag(gpu::BufferUse::UnorderedAccess);
         case gpu::BufferState::Indirect: return desc.Usage.HasFlag(gpu::BufferUse::Indirect);
-        case HostRead: return desc.Memory == gpu::MemoryType::ReadBack && desc.Usage.HasFlag(gpu::BufferUse::MapRead);
-        case HostWrite: return desc.Memory == gpu::MemoryType::Upload && desc.Usage.HasFlag(gpu::BufferUse::MapWrite);
+        case HostRead: return desc.Memory == gpu::MemoryType::HostReadBack && desc.Usage.HasFlag(gpu::BufferUse::MapRead);
+        case HostWrite: return desc.Usage.HasFlag(gpu::BufferUse::MapWrite);
         default: return false;
     }
 }
@@ -705,6 +705,10 @@ std::optional<uint64_t> MergeAlignment(uint64_t a, uint64_t b) noexcept {
     return factor * b;
 }
 
+bool IsStagingOnly(gpu::BufferUses usage) noexcept {
+    return (usage & ~gpu::BufferUses{gpu::BufferUse::MapWrite}) == gpu::BufferUse::CopySource;
+}
+
 gpu::BufferStates BufferReads(gpu::BufferUses usage) noexcept {
     gpu::BufferStates result{};
     if (usage.HasFlag(gpu::BufferUse::CopySource)) result |= gpu::BufferState::CopySource;
@@ -733,14 +737,14 @@ bool ApplyDeviceConstraints(RDGDeviceConstraints& graph, const RDGDeviceConstrai
     return true;
 }
 
-std::optional<UploadAllocation> AllocateStagingBuffer(UploadArena& arena, const RDGDeviceConstraints& c, uint64_t size, uint64_t alignment) {
+std::optional<UploadAllocation> AllocateStagingBuffer(StagingBufferPool& arena, const RDGDeviceConstraints& c, uint64_t size, uint64_t alignment) {
     const auto merged = MergeAlignment(alignment, c.BufferCopyAlignment);
     if (!merged || (c.MaxBufferSize && size > c.MaxBufferSize)) return std::nullopt;
-    return arena.AllocateStaging(size, *merged);
+    return arena.Allocate(size, *merged);
 }
 
-std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDeviceConstraints& c, uint64_t size,
-                                               gpu::BufferUses usage, uint64_t alignment, gpu::BufferStates reads) {
+std::optional<UploadAllocation> AllocateBuffer(DynamicBufferArena& arena, const RDGDeviceConstraints& c, uint64_t size,
+                                               gpu::BufferUses usage, uint64_t alignment, gpu::BufferStates reads, DynamicBufferResidency residency) {
     const auto merge = [&](uint64_t value) {
         const auto result = MergeAlignment(alignment, value);
         if (!result) return false;
@@ -757,7 +761,7 @@ std::optional<UploadAllocation> AllocateBuffer(UploadArena& arena, const RDGDevi
         (usage.HasFlag(gpu::BufferUse::Resource) && c.MaxStorageRange && size > c.MaxStorageRange)) return std::nullopt;
     const auto reserved = AlignBytes(size, usage.HasFlag(gpu::BufferUse::CBuffer) ? c.CBufferSizeAlignment : 1);
     if (!reserved) return std::nullopt;
-    return arena.Allocate(size, alignment, *reserved, reads);
+    return arena.Allocate(size, alignment, *reserved, reads, residency);
 }
 
 }  // namespace
@@ -889,11 +893,9 @@ RDGData::~RDGData() noexcept {
 }
 
 RDGDeviceConstraints QueryRDGDeviceConstraints(const gpu::Device& device) noexcept {
-    const auto& capabilities = device.GetCapabilities();
-    const auto& detail = capabilities.Detail;
-    const auto& limits = capabilities.Limits;
-    return {detail.BufferCopyOffsetAlignment, detail.TextureDataPlacementAlignment, detail.TextureDataPitchAlignment,
-            detail.CBufferAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment,
+    const auto& limits = device.GetCapabilities().Limits;
+    return {limits.BufferCopyOffsetAlignment, limits.TextureDataPlacementAlignment, limits.TextureDataPitchAlignment,
+            limits.CBufferOffsetAlignment, limits.CBufferOffsetAlignment, limits.StorageBufferOffsetAlignment,
             limits.TexelBufferOffsetAlignment, limits.MaxBufferSize, limits.MaxUniformBufferRange, limits.MaxStorageBufferRange};
 }
 
@@ -931,7 +933,7 @@ void RDGStateTracker::TransitionBuffer(uint32_t index, gpu::BufferStates next, b
     auto& current = _buffers[index];
     if (!current.Resource) return;
     const auto& logical = _data.Buffers[index];
-    if (!logical.Imported && logical.Desc.Memory == gpu::MemoryType::Upload) return;
+    if (logical.Dynamic) return;
     const auto before = current.CurrentState;
     if (current.PendingExternalAcquire) {
         barriers.emplace_back(gpu::BarrierBufferDescriptor{.Target = current.Resource.Get(), .Before = before, .After = next, .ExternalTransfer = gpu::ExternalOwnershipTransfer::Acquire});
@@ -949,9 +951,10 @@ void RDGStateTracker::PrepareHostWrite(uint32_t index) noexcept {
     TransitionBuffer(index, gpu::BufferState::HostWrite, false, _beginBarriers);
 }
 
-void RDGStateTracker::PrepareBarriers(UploadArena& uploads, std::span<RDGPreparedUpload> preparedUploads, std::span<const uint32_t> uploadCounts) {
+void RDGStateTracker::PrepareBarriers(StagingBufferPool& staging, DynamicBufferArena& dynamic, std::span<RDGPreparedUpload> preparedUploads, std::span<const uint32_t> uploadCounts) {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.PlanBarriers");
-    uploads.AppendReadBarriers(_beginBarriers);
+    staging.AppendReadBarriers(_beginBarriers);
+    dynamic.AppendReadBarriers(_beginBarriers);
     std::pmr::vector<size_t> seen(_data.Textures.size() + _data.Buffers.size(), std::numeric_limits<size_t>::max(), &_data.ScratchResource);
     for (size_t groupIndex = 0; groupIndex < _data.Groups.size(); ++groupIndex) {
         auto& group = _data.Groups[groupIndex];
@@ -1123,6 +1126,7 @@ RDGTransientTextureAllocation RDGTransientResourcePool::AcquireTexture(const gpu
 
 RDGTransientBufferAllocation RDGTransientResourcePool::AcquireBuffer(const gpu::BufferDescriptor& desc) {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Pool.AcquireBuffer");
+    if (desc.Memory != gpu::MemoryType::DeviceLocal) return {};
     uint64_t bucketSize = desc.Size;
     if (desc.Size > 0) {
         if (desc.Size <= 4096) {
@@ -1157,7 +1161,7 @@ RDGTransientBufferAllocation RDGTransientResourcePool::AcquireBuffer(const gpu::
             resource = _impl->Device.CreateBuffer(actualDesc);
         }
         if (!resource) return {};
-        const auto state = actualDesc.Memory == gpu::MemoryType::Upload ? gpu::BufferState::HostWrite : gpu::BufferState::Undefined;
+        const auto state = gpu::BufferState::Undefined;
         auto& entry = _impl->Buffers.emplace_back(Impl::BufferEntry{actualDesc, resource.Release(), state});
         return {entry.Resource.get(), entry.State};
     }
@@ -1322,21 +1326,9 @@ RDGBufferHandle RDGBuilder::ImportBuffer(gpu::Buffer* buffer, gpu::BufferStates 
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuUploadBuffer& buffer) {
-    const auto handle = ImportBuffer(buffer.GetBuffer(), gpu::BufferState::HostWrite, gpu::BufferState::HostWrite);
-    _data.Buffers[handle.Index].OwnerWrites = true;
-    return handle;
-}
-
-RDGBufferHandle RDGBuilder::ImportPersistentOwned(const IntrusivePtr<GpuUploadBuffer>& buffer) {
-    const auto handle = ImportPersistentBorrowed(*buffer);
-    auto& resource = _data.Buffers[handle.Index];
-    if (!resource.UploadOwner) resource.UploadOwner = buffer;
-    return handle;
-}
-
 RDGBufferHandle RDGBuilder::ImportPersistentBorrowed(GpuBuffer& buffer) {
-    const auto handle = ImportBuffer(buffer.GetBuffer(), buffer.GetSubmittedState(), gpu::BufferState::Common);
+    const auto finalState = buffer.IsHostVisible() ? gpu::BufferState::HostWrite : gpu::BufferState::Common;
+    const auto handle = ImportBuffer(buffer.GetBuffer(), buffer.IsHostVisible() ? gpu::BufferStates{gpu::BufferState::HostWrite} : buffer.GetSubmittedState(), finalState);
     auto& resource = _data.Buffers[handle.Index];
     if (resource.Persistent && resource.Persistent.Get() != &buffer) Fail(_data, "duplicate buffer wrapper");
     resource.Persistent = &buffer;
@@ -1457,18 +1449,21 @@ RDGTextureHandle RDGBuilder::CreateTexture(const gpu::TextureDescriptor& desc) {
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::CreateBuffer(const gpu::BufferDescriptor& desc) {
+RDGBufferHandle RDGBuilder::CreateBuffer(const RDGTransientBufferDescriptor& desc) {
     RequireOpen(_data);
     const auto index = static_cast<uint32_t>(_data.Buffers.size());
-    _data.Buffers.push_back({.Desc = desc, .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}});
+    _data.Buffers.push_back({.Desc = {.Size = desc.Size, .Usage = desc.Usage, .Hints = desc.Hints}, .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource}});
     return {index};
 }
 
-RDGBufferHandle RDGBuilder::CreateBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source) {
-    const auto handle = CreateBuffer(gpu::BufferDescriptor{.Size = desc.MaxSize, .Memory = gpu::MemoryType::Upload, .Usage = desc.Usage | gpu::BufferUse::MapWrite});
-    auto& resource = _data.Buffers[handle.Index];
-    resource.Dynamic = true;
-    resource.Alignment = desc.Alignment;
+RDGBufferHandle RDGBuilder::CreateDynamicBuffer(const RDGDynamicBufferDescriptor& desc, RDGUploadSource source) {
+    RequireOpen(_data);
+    const RDGBufferHandle handle{static_cast<uint32_t>(_data.Buffers.size())};
+    const auto memory = IsStagingOnly(desc.Usage) || desc.Residency == DynamicBufferResidency::HostOnly
+                            ? gpu::MemoryType::HostUpload : gpu::MemoryType::DeviceUpload;
+    _data.Buffers.push_back({.Desc = {.Size = desc.MaxSize, .Memory = memory, .Usage = desc.Usage | gpu::BufferUse::MapWrite},
+                             .Readers = std::pmr::vector<uint32_t>{&_data.MemoryResource},
+                             .Dynamic = true, .Residency = desc.Residency, .Alignment = desc.Alignment});
     UploadBuffer(handle, 0, std::move(source));
     return handle;
 }
@@ -1480,19 +1475,15 @@ RDGPassHandle RDGBuilder::UploadBuffer(RDGBufferHandle dst, uint64_t offset, RDG
         return {};
     }
     const auto& resource = _data.Buffers[dst.Index];
-    if (resource.OwnerWrites) {
-        Fail(_data, "persistent upload buffer is written by its owner");
-        return {};
-    }
     const auto& desc = resource.Desc;
-    if (offset > desc.Size || source.GetMaxSize() > desc.Size - offset || desc.Memory == gpu::MemoryType::ReadBack ||
-        (desc.Memory == gpu::MemoryType::Device && (!desc.Usage.HasFlag(gpu::BufferUse::CopyDestination) || offset % std::max(uint64_t{1}, _data.Constraints.BufferCopyAlignment))) ||
-        (desc.Memory == gpu::MemoryType::Upload && !desc.Usage.HasFlag(gpu::BufferUse::MapWrite))) {
+    if (offset > desc.Size || source.GetMaxSize() > desc.Size - offset || desc.Memory == gpu::MemoryType::HostReadBack ||
+        (desc.Memory == gpu::MemoryType::DeviceLocal && (!desc.Usage.HasFlag(gpu::BufferUse::CopyDestination) || offset % std::max(uint64_t{1}, _data.Constraints.BufferCopyAlignment))) ||
+        (desc.Memory != gpu::MemoryType::DeviceLocal && !desc.Usage.HasFlag(gpu::BufferUse::MapWrite))) {
         Fail(_data, "invalid upload range, memory or usage");
         return {};
     }
     if (!source.GetMaxSize() && !resource.Dynamic) return {};
-    const bool host = desc.Memory == gpu::MemoryType::Upload;
+    const bool host = desc.Usage.HasFlag(gpu::BufferUse::MapWrite);
     const auto payload = static_cast<uint32_t>(_data.Uploads.size());
     _data.Uploads.push_back({std::move(source), {false, dst.Index, static_cast<uint32_t>(host ? gpu::BufferState::HostWrite : gpu::BufferState::CopyDestination), false, true, true}, offset});
     return {AddNode(_data, host ? RDGPassKind::HostWrite : RDGPassKind::Upload, payload)};
@@ -1699,6 +1690,8 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
                 (resource.Imported && (!ValidTextureState(d, resource.InitialState) || (resource.FinalState && !ValidTextureState(d, *resource.FinalState))))) Fail(_data, "invalid texture descriptor or boundary state");
         }
         for (const auto& resource : _data.Buffers) {
+            if (!resource.Imported && (!gpu::IsBufferMemoryUsageValid(resource.Desc) ||
+                (resource.Dynamic && (!resource.Alignment || !(resource.Desc.Usage & ~gpu::BufferUses{gpu::BufferUse::MapWrite}))))) Fail(_data, "invalid transient buffer usage or alignment");
             if ((!resource.Desc.Size && !resource.Dynamic) || (_data.Constraints.MaxBufferSize && resource.Desc.Size > _data.Constraints.MaxBufferSize && !resource.Dynamic) || (resource.Imported && (!ValidBufferState(resource.Desc, resource.InitialState) || (resource.FinalState && !ValidBufferState(resource.Desc, *resource.FinalState))))) Fail(_data, "invalid buffer descriptor or boundary state");
         }
     }
@@ -1719,7 +1712,7 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
             ValidateAttachments(_data, pass);
             for (const auto& access : Accesses(_data, pass)) {
                 if (_data.Options.FullValidation && !ValidAccess(_data, pass, access)) Fail(_data, radray::format("pass '{}': {}#{} state {} is incompatible with usage, access mode or pass kind", PassName(_data, pass), access.Texture ? "texture" : "buffer", access.Index, access.State));
-                if (!access.Texture && _data.Buffers[access.Index].Desc.Memory == gpu::MemoryType::Upload &&
+                if (!access.Texture && _data.Buffers[access.Index].Desc.Usage.HasFlag(gpu::BufferUse::MapWrite) &&
                     access.Write && pass.Kind != RDGPassKind::HostWrite) Fail(_data, "Upload buffers only accept Prepare writes");
                 auto& lastWriter = access.Texture ? _data.Textures[access.Index].LastWriter : _data.Buffers[access.Index].LastWriter;
                 const bool imported = access.Texture ? bool(_data.Textures[access.Index].Imported) : bool(_data.Buffers[access.Index].Imported);
@@ -1735,9 +1728,8 @@ Nullable<CompiledRDG*> RDGBuilder::Compile() {
                 } else if (access.Read) {
                     readers.push_back(index);
                 }
-                if (!access.Texture && _data.Buffers[access.Index].Desc.Memory == gpu::MemoryType::Upload) {
+                if (!access.Texture && _data.Buffers[access.Index].Desc.Usage.HasFlag(gpu::BufferUse::MapWrite)) {
                     if (pass.Kind == RDGPassKind::HostWrite) {
-                        if (_data.Buffers[access.Index].OwnerWrites) Fail(_data, "persistent upload buffer is written by its owner");
                         if (gpuAccessed[access.Index]) Fail(_data, "direct upload must precede GPU access");
                         hostRanges[access.Index].push_back({Upload(_data, pass).UploadOffset, Upload(_data, pass).UploadOffset + Upload(_data, pass).Source.GetMaxSize()});
                     } else {
@@ -1827,12 +1819,12 @@ CompiledRDG::~CompiledRDG() noexcept {
 }
 std::span<const MeshPassId> CompiledRDG::GetAliveMeshPasses() const noexcept { return _data.AliveMeshPasses; }
 
-bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, UploadArena& uploads) noexcept {
+bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, StagingBufferPool& staging, DynamicBufferArena& dynamic) noexcept {
     RADRAY_PROFILE_SCOPE_N("RadRay.RDG.Prepare");
     if (_prepareAttempted) return false;
     _prepareAttempted = true;
     if (&slot.GetMemoryResource() != &_data.MemoryResource) return false;
-    _execution.reset(std::pmr::polymorphic_allocator<>{&_data.MemoryResource}.new_object<RDGExecution>(RDGExecution{_data, slot, pool, uploads}));
+    _execution.reset(std::pmr::polymorphic_allocator<>{&_data.MemoryResource}.new_object<RDGExecution>(RDGExecution{_data, slot, pool, staging, dynamic}));
     auto& execution = *_execution;
     const auto& constraints = _data.Constraints;
     RDGUploadPrepareContext layout{slot, _data.AliveMeshPasses};
@@ -1893,13 +1885,13 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
         for (size_t i = 0; i < _data.Buffers.size(); ++i) {
             const auto& resource = _data.Buffers[i];
             if (!resource.Alive || !sizes[i]) continue;
-            if (!resource.Imported && resource.Desc.Memory == gpu::MemoryType::Upload) {
+            if (resource.Dynamic) {
                 const auto usage = resource.Desc.Usage;
                 const auto resolvedReads = reads[i] ? reads[i] : BufferReads(usage);
-                const bool stagingOnly = (usage & ~gpu::BufferUses{gpu::BufferUse::MapWrite}) == gpu::BufferUse::CopySource;
+                const bool stagingOnly = IsStagingOnly(usage);
                 const auto allocation = stagingOnly
-                                            ? AllocateStagingBuffer(uploads, constraints, sizes[i], resource.Alignment)
-                                            : AllocateBuffer(uploads, constraints, sizes[i], usage, resource.Alignment, resolvedReads);
+                                            ? AllocateStagingBuffer(staging, constraints, sizes[i], resource.Alignment)
+                                            : AllocateBuffer(dynamic, constraints, sizes[i], usage, resource.Alignment, resolvedReads, resource.Residency);
                 if (!allocation) return false;
                 direct[i] = *allocation;
                 execution.Slices[i] = {allocation->Buffer, allocation->Offset, sizes[i]};
@@ -1959,11 +1951,11 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 Prepared(execution, pass).StagingPitch = static_cast<uint32_t>(*pitch);
                 mappedSize = *pitch * lastRow + rowBytes;
                 if (constraints.MaxBufferSize && mappedSize > constraints.MaxBufferSize) return false;
-                const auto allocation = uploads.AllocateStaging(mappedSize, *placement);
+                const auto allocation = staging.Allocate(mappedSize, *placement);
                 if (!allocation) return false;
                 Prepared(execution, pass).Staging = *allocation;
             } else if (pass.Kind == RDGPassKind::Upload) {
-                const auto allocation = AllocateStagingBuffer(uploads, constraints, mappedSize, 1);
+                const auto allocation = AllocateStagingBuffer(staging, constraints, mappedSize, 1);
                 if (!allocation) return false;
                 Prepared(execution, pass).Staging = *allocation;
             } else if (direct[access.Index].Buffer) {
@@ -1973,7 +1965,8 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
                 Prepared(execution, pass).Staging.Size = mappedSize;
             } else {
                 auto& physical = execution.States.GetBuffer(access.Index);
-                auto* mapped = static_cast<byte*>(physical.Resource->GetMappedData().Get());
+                const auto persistent = _data.Buffers[access.Index].Persistent;
+                auto* mapped = persistent ? persistent->GetMappedData().Get() : static_cast<byte*>(physical.Resource->GetMappedData().Get());
                 if (!mapped) return false;
                 Prepared(execution, pass).Staging = {physical.Resource, mapped + Upload(_data, pass).UploadOffset, Upload(_data, pass).UploadOffset, mappedSize, mappedSize};
             }
@@ -1981,7 +1974,9 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
             const bool written = Upload(_data, pass).Source.Write(write, Upload(_data, pass).SourceRowPitch, Upload(_data, pass).SourceRowsPerImage);
             if (pass.Kind == RDGPassKind::HostWrite && _data.Buffers[access.Index].Imported) {
                 auto& physical = execution.States.GetBuffer(access.Index);
-                if (written && !physical.Resource->FlushMappedRange({Upload(_data, pass).UploadOffset, mappedSize})) return false;
+                const auto persistent = _data.Buffers[access.Index].Persistent;
+                const gpu::BufferRange range{Upload(_data, pass).UploadOffset, mappedSize};
+                if (written && !(persistent ? persistent->FlushMappedRange(range) : physical.Resource->FlushMappedRange(range))) return false;
                 execution.States.PrepareHostWrite(access.Index);
             }
             Prepared(execution, pass).Staging.Data = nullptr;
@@ -1998,8 +1993,8 @@ bool CompiledRDG::Prepare(FrameSlot& slot, RDGTransientResourcePool& pool, Uploa
             if (!User(_data, pass).Prepare.Get()(User(_data, pass).Callback.Get(), context)) return false;
         }
     }
-    if (!uploads.Flush()) return false;
-    execution.States.PrepareBarriers(uploads, execution.PreparedUploads, uploadCounts);
+    if (!staging.Flush() || !dynamic.Flush()) return false;
+    execution.States.PrepareBarriers(staging, dynamic, execution.PreparedUploads, uploadCounts);
     for (auto& group : _data.Groups) {
         if (group.Kind == RDGPassKind::Raster) {
             execution.Pass = &_data.Passes[group.Passes.front()];
@@ -2148,9 +2143,10 @@ void CompiledRDG::CommitSubmittedStates() noexcept {
         if (!resource.Alive) continue;
         const auto& physical = execution.States.GetBuffer(static_cast<uint32_t >(i));
         if (resource.Persistent) resource.Persistent->CommitSubmittedState(physical.CurrentState);
-        if (!resource.Imported && resource.Desc.Memory != gpu::MemoryType::Upload) execution.Pool.CommitBufferState(physical.Resource.Get(), physical.CurrentState);
+        if (!resource.Imported && !resource.Dynamic) execution.Pool.CommitBufferState(physical.Resource.Get(), physical.CurrentState);
     }
-    execution.Uploads.CommitSubmittedStates();
+    execution.Staging.CommitSubmittedStates();
+    execution.Dynamic.CommitSubmittedStates();
 }
 
 RDGPrepareContext::RDGPrepareContext(detail::RDGExecution& execution) noexcept : _execution(execution) {}

@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -320,9 +321,8 @@ public:
 
     Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override;
 
-    DeviceDetail GetDetail() const noexcept override;
-
     const GpuDeviceCapabilities& GetCapabilities() const noexcept override;
+    GpuMemoryBudget QueryMemoryBudget() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     AttachmentResolveSupport QueryAttachmentResolveSupport(TextureFormat format, uint32_t samples) const noexcept override;
@@ -391,6 +391,9 @@ public:
     VkPhysicalDevice _physicalDevice;
     VkDevice _device;
     std::unique_ptr<VMA> _vma;
+    uint32_t _hostOnlyMemoryTypeBits{0};
+    uint32_t _uploadHeapBits{0};
+    uint32_t _localHeapBits{0};
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
     unique_ptr<VulkanRenderPassCache> _renderPassCache;
@@ -936,6 +939,7 @@ public:
 
     void Destroy() noexcept override;
 
+    BufferMemoryProperties GetMemoryProperties() const noexcept override;
     Nullable<void*> GetMappedData() noexcept override;
 
     bool FlushMappedRange(BufferRange range) noexcept override;
@@ -956,10 +960,10 @@ public:
     VkDeviceSize _reqSize;
     string _name;
     uint64_t _reqSizeLogical{0};
+    BufferMemoryProperties _properties{};
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
-    bool _hostCoherent{false};
     std::optional<ExternalBufferInfo> _externalInfo;
     OwnedExternalHandle _externalHandle;
 };
@@ -1019,7 +1023,7 @@ public:
     uint32_t _mipLevels{0};
     uint32_t _sampleCount{0};
     TextureFormat _format{TextureFormat::UNKNOWN};
-    MemoryType _memory{MemoryType::Device};
+    MemoryType _memory{MemoryType::DeviceLocal};
     TextureUses _usage{TextureUse::UNKNOWN};
     ResourceHints _hints{ResourceHint::None};
     bool _isSwapchainImage{false};

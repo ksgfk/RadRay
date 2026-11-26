@@ -398,7 +398,7 @@ ctest --preset win-x64-debug-clangcl
 | `test_radray_shader` | `RadRayShaderDiagnostics`、`RadRayShaderContract`、`RadRayShaderArtifact`（不依赖 compiler） |
 | `test_radray_shader`（同一程序内的编译能力用例） | `RadRayShaderCompilerClient`、`RadRayContractDiscovery`、`RadRayDxcMetadata`、`RadRayShaderLibPass` |
 | `test_radray_gpu_impl` | 见下文 [gpu_impl 测试](#gpu_impl-测试) |
-| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`ShaderPublish`（开启样例）、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`TransientParameterPoolFakeTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`UploadArena`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`、`Backends/TransientParameterPoolTest`、`Backends/DeviceContextGpuTest`、`DeviceContextFactoryGpuTest`、`Backends/MdiGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
+| `test_radray_runtime` | `AssetManagerTest`、`MaterialTagTableTest`、`MaterialTagSetTest`、`ShaderAsset`、`ShaderAssetFiles`、`ShaderPublish`（开启样例）、`PipelineLayoutRegistry`、`ShaderLayout`、`ShaderVertexInput`、`MaterialAssetTest`、`MaterialBindingMap`、`VertexInputTest`、`MeshDrawCommandTest`、`SubmitMeshDrawCommandsTest`、`MeshPassProcessorTest`、`SceneTest`、`FrameSlotTest`、`MeshPassFrameDrawListTest`、`FrameSchedulerTest`、`DeviceContextTest`、`TransientParameterPoolFakeTest`、`RDG`、`RDGExecutionTest`、`RDGTransientPool`、`RenderGraphFramePipeline`、`GeometryBufferPool`、`MappedBufferPools`、`FrameSchedulerStages`（CPU fake）；`Backends/ShaderLayoutGpuTest`、`Backends/GeometryUploadGpuTest`、`Backends/BufferUploadGpuTest`、`Backends/TextureUploadGpuTest`、`Backends/TransientParameterPoolTest`、`Backends/DeviceContextGpuTest`、`DeviceContextFactoryGpuTest`、`Backends/MdiGpuTest`（D3D12/Vulkan GPU，几何和纹理用例使用预编译 shader） |
 | `test_radray_runtime_allocations`（`RADRAY_ENABLE_MIMALLOC=OFF`） | `RuntimeAllocationsTest`（独立进程替换全局 `operator new/delete`，验证 RDG 构图、瞬态参数池与稳态有序列表排序零全局堆分配） |
 | `test_radray_window`（Win32） | `NativeEventPumpTest`（串行运行，使用短暂的隐藏窗口） |
 
@@ -597,7 +597,7 @@ cmake --build --preset win-x64-debug --target radrayruntime --parallel 8
 ```powershell
 python tools/compile_test_shaders.py --build-dir build/windows-x64-clangcl/Debug --config Debug
 cmake --build --preset win-x64-debug-clangcl --target test_radray_runtime --parallel 8
-ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|ShaderPublish|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|UploadArena|Backends/((Geometry|Buffer|Texture)UploadGpuTest|ShaderLayoutGpuTest))' --output-on-failure
+ctest --preset win-x64-debug-clangcl -R '^(AssetManagerTest|ShaderAsset|ShaderPublish|Material|VertexInput|MeshDraw|SubmitMeshDraw|MeshPass|Scene|Frame|DeviceContext|RDG|RenderGraphFramePipeline|GeometryBufferPool|MappedBufferPools|Backends/((Geometry|Buffer|Texture)UploadGpuTest|ShaderLayoutGpuTest))' --output-on-failure
 ```
 
 Release 使用同名 `win-x64-release-clangcl` 预设。样例的双后端运行覆盖真实 GPU 路径；
@@ -684,9 +684,8 @@ Color/Transparent Processor 在 `AddMeshBatch` 中读取 Proxy 的 BaseColor/Bri
 经 runtime 构建 helper 复制为绑定池自持有的 16 字节 `MaterialConstants`；Outline Processor 写入固定金色，Depth 不写颜色常量。
 绑定池自持有颜色字节，源栈数据在构建后即可失效。
 `GpuResources::PrepareGeometry` 创建共享的 Device VB / IB 空壳并保存 CPU 字节，Scene 可在上传前引用这些合法缓冲。
-每个 GpuFrameResources 持有可复用的两组 Pass 参数组、读回缓冲和 completion fence。
-实例流与两份 Pass 常量通过 RDG 动态 Upload buffer 声明，Prepare 从本槽 UploadArena 分配最终切片。
-参数组绑定的页或范围变化时，在 Prepare 中 ResetBindingsForReuse、Set 并 FlushWrites；附件及 View 由每槽 RDG 瞬态池拥有。
+每个 GpuFrameResources 持有读回缓冲、Pass 参数布局和 completion fence。
+实例流与两份 Pass 常量通过 RDG 动态缓冲声明，Prepare 从本槽 DynamicBufferArena 分配最终切片，并通过 FrameSlot 获取绑定本帧切片的参数集。附件及 View 由每槽 RDG 瞬态池拥有。
 ExtractFrameData 校验当前帧输入，不构造完整实例或常量字节数组；LocalScale 分别为 1.0 / 1.12 的常量在 Prepare 中直接生成。
 `SetupGraph` 接收只读 Scene，本例使用已准备的共享几何资源声明上传、瞬态深度/颜色附件、四个 Raster Pass 与 Readback Copy。
 首帧共享几何经 RDG 的 Device Staging Copy 上传，并通过 MarkOutput 保活，终态为 Vertex / Index；后续帧沿用该状态。

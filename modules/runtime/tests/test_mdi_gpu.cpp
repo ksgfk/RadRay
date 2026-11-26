@@ -302,15 +302,15 @@ TEST_P(MdiGpuTest, MixedIndexedAndNonIndexedNonZeroOffsetMultiChunkAndEmptyFollo
             }
             // 前置分配 16 B 动态缓冲，强制同页内 indexedArgBuffer.Offset > 0。
             const array<byte, 16> prefixBytes{};
-            const auto prefixBuf = graph.CreateBuffer(
+            const auto prefixBuf = graph.CreateDynamicBuffer(
                 RDGDynamicBufferDescriptor{.MaxSize = prefixBytes.size(), .Usage = BufferUse::CBuffer},
                 RDGUploadSource::BorrowedBytes(prefixBytes));
             const uint64_t maxIdxBytes = 4 * sizeof(DrawIndexedIndirectArguments);
             const uint64_t maxNonIdxBytes = 4 * sizeof(DrawIndirectArguments);
-            const auto idxArgs = graph.CreateBuffer(
+            const auto idxArgs = graph.CreateDynamicBuffer(
                 RDGDynamicBufferDescriptor{.MaxSize = maxIdxBytes, .Usage = BufferUse::Indirect},
                 RDGUploadSource::Generated(maxIdxBytes, IndirectArgsGen{&slot, {0}, maxIdxBytes, true}, &WriteIndirectArgs, &PrepareIndirectArgs));
-            const auto nonIdxArgs = graph.CreateBuffer(
+            const auto nonIdxArgs = graph.CreateDynamicBuffer(
                 RDGDynamicBufferDescriptor{.MaxSize = maxNonIdxBytes, .Usage = BufferUse::Indirect},
                 RDGUploadSource::Generated(maxNonIdxBytes, IndirectArgsGen{&slot, {0}, maxNonIdxBytes, false}, &WriteIndirectArgs, &PrepareIndirectArgs));
 
@@ -453,7 +453,7 @@ TEST_P(MdiGpuTest, CompactedInstancePrepareLayoutAndWriteMatchesDirectUnderBothR
 
                 const auto createInstances = [&]() {
                     const uint64_t maxInstBytes = 8 * sizeof(MdiInstance);
-                    return graph.CreateBuffer(
+                    return graph.CreateDynamicBuffer(
                         RDGDynamicBufferDescriptor{.MaxSize = maxInstBytes, .Usage = BufferUse::Vertex},
                         RDGUploadSource::Generated(
                             maxInstBytes,
@@ -488,10 +488,10 @@ TEST_P(MdiGpuTest, CompactedInstancePrepareLayoutAndWriteMatchesDirectUnderBothR
                 const uint64_t maxIdxBytes = 4 * sizeof(DrawIndexedIndirectArguments);
                 const uint64_t maxNonIdxBytes = 4 * sizeof(DrawIndirectArguments);
                 const auto createIndirect = [&]() {
-                    idxArgs = graph.CreateBuffer(
+                    idxArgs = graph.CreateDynamicBuffer(
                         RDGDynamicBufferDescriptor{.MaxSize = maxIdxBytes, .Usage = BufferUse::Indirect},
                         RDGUploadSource::Generated(maxIdxBytes, IndirectArgsGen{&slot, {0}, maxIdxBytes, true}, &WriteIndirectArgs, &PrepareIndirectArgs));
-                    nonIdxArgs = graph.CreateBuffer(
+                    nonIdxArgs = graph.CreateDynamicBuffer(
                         RDGDynamicBufferDescriptor{.MaxSize = maxNonIdxBytes, .Usage = BufferUse::Indirect},
                         RDGUploadSource::Generated(maxNonIdxBytes, IndirectArgsGen{&slot, {0}, maxNonIdxBytes, false}, &WriteIndirectArgs, &PrepareIndirectArgs));
                 };
@@ -659,7 +659,7 @@ TEST_P(MdiGpuTest, BatchLevelIndirectFirstInstanceFallbackMatchesDirectPixels) {
                 RDGBufferHandle idxArgs{};
                 if (_useMdi) {
                     const uint64_t maxBytes = 4 * sizeof(DrawIndexedIndirectArguments);
-                    idxArgs = graph.CreateBuffer(
+                    idxArgs = graph.CreateDynamicBuffer(
                         RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
                         RDGUploadSource::Generated(maxBytes, IndirectArgsGen{&slot, {0}, maxBytes, true}, &WriteIndirectArgs, &PrepareIndirectArgs));
                 }

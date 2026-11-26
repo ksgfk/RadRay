@@ -358,9 +358,10 @@ DXGI_FORMAT MapType(TextureFormat v) noexcept {
 
 D3D12_HEAP_TYPE MapType(MemoryType v) noexcept {
     switch (v) {
-        case MemoryType::Device: return D3D12_HEAP_TYPE_DEFAULT;
-        case MemoryType::Upload: return D3D12_HEAP_TYPE_UPLOAD;
-        case MemoryType::ReadBack: return D3D12_HEAP_TYPE_READBACK;
+        case MemoryType::DeviceLocal: return D3D12_HEAP_TYPE_DEFAULT;
+        case MemoryType::DeviceUpload: return D3D12_HEAP_TYPE_GPU_UPLOAD;
+        case MemoryType::HostUpload: return D3D12_HEAP_TYPE_UPLOAD;
+        case MemoryType::HostReadBack: return D3D12_HEAP_TYPE_READBACK;
     }
     Unreachable();
 }
@@ -701,9 +702,10 @@ D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept {
 
 D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept {
     switch (v) {
-        case MemoryType::Device: return D3D12_RESOURCE_STATE_COMMON;
-        case MemoryType::Upload: return D3D12_RESOURCE_STATE_GENERIC_READ;
-        case MemoryType::ReadBack: return D3D12_RESOURCE_STATE_COPY_DEST;
+        case MemoryType::DeviceUpload:
+        case MemoryType::DeviceLocal: return D3D12_RESOURCE_STATE_COMMON;
+        case MemoryType::HostUpload: return D3D12_RESOURCE_STATE_GENERIC_READ;
+        case MemoryType::HostReadBack: return D3D12_RESOURCE_STATE_COPY_DEST;
     }
     Unreachable();
 }

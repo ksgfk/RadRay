@@ -16,11 +16,11 @@ bool ValidateVertexInputState(const VertexInputState& state) noexcept;
 std::pair<bool, std::string_view> ValidateTextureUploadRegion(const TextureDescriptor& destination, const TextureRegion2D& target);
 std::pair<bool, std::string_view> ValidateBufferTextureCopyRegion(
     const BufferDescriptor& source, const TextureDescriptor& destination,
-    const BufferTextureCopyRegion& r, const DeviceDetail& detail);
+    const BufferTextureCopyRegion& r, const DeviceLimits& limits);
 std::pair<bool, std::string_view> ValidateTextureReadbackRegion(const TextureDescriptor& source, const TextureRegion2D& region);
 std::pair<bool, std::string_view> ValidateTextureReadbackRegion(
     const TextureDescriptor& source, const BufferDescriptor& destination,
-    const TextureBufferCopyRegion& region, const DeviceDetail& detail);
+    const TextureBufferCopyRegion& region, const DeviceLimits& limits);
 bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept;
 bool BufferRangeFits(uint64_t bufferSize, BufferRange range) noexcept;
 bool IsBufferMemoryUsageValid(const BufferDescriptor& desc) noexcept;

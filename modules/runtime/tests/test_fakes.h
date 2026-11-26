@@ -27,6 +27,7 @@ public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
+    gpu::BufferMemoryProperties GetMemoryProperties() const noexcept override;
     Nullable<void*> GetMappedData() noexcept override { return nullptr; }
     bool FlushMappedRange(gpu::BufferRange) noexcept override { return false; }
     bool InvalidateMappedRange(gpu::BufferRange) noexcept override { return false; }
@@ -58,7 +59,7 @@ class FakeMappedBuffer final : public FakeBuffer {
 public:
     FakeMappedBuffer(gpu::Device& device, const gpu::BufferDescriptor& desc, std::function<void(gpu::BufferRange)>& onFlush, std::function<void(gpu::BufferRange)>& onInvalidate)
         : FakeBuffer(desc.Size, desc.Usage), Bytes(static_cast<size_t>(desc.Size)), _device(device), _onFlush(onFlush), _onInvalidate(onInvalidate) { Desc = desc; }
-    Nullable<void*> GetMappedData() noexcept override { return Desc.Memory == gpu::MemoryType::Device ? nullptr : Bytes.data(); }
+    Nullable<void*> GetMappedData() noexcept override { return Desc.Memory == gpu::MemoryType::DeviceLocal ? nullptr : Bytes.data(); }
     bool FlushMappedRange(gpu::BufferRange range) noexcept override {
         if (_onFlush) _onFlush(range);
         return !_device.IsDeviceLost();
@@ -259,8 +260,9 @@ public:
     bool Lost{false};
     gpu::GpuBackend GetBackend() noexcept override { return gpu::GpuBackend::D3D12; }
     Nullable<unique_ptr<gpu::ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override { return nullptr; }
-    gpu::DeviceDetail GetDetail() const noexcept override { return Capabilities.Detail; }
     const gpu::GpuDeviceCapabilities& GetCapabilities() const noexcept override { return Capabilities; }
+    gpu::GpuMemoryBudget Budget{};
+    gpu::GpuMemoryBudget QueryMemoryBudget() const noexcept override;
     gpu::TextureSupport QueryTextureSupport(const gpu::TextureSupportQuery&) const noexcept override {
         if (!EnableTextures) return {};
         return {.MaxResourceSize = std::numeric_limits<uint64_t>::max(), .MaxWidth = 16384, .MaxHeight = 16384, .MaxDepth = 1, .MaxArrayLayers = 2048, .MaxMipLevels = 15, .SampleCounts = gpu::SampleCount::X1, .Supported = true};
@@ -282,7 +284,7 @@ public:
         if (BuffersUntilFailure > 0) --BuffersUntilFailure;
         if (OnCreateBuffer) OnCreateBuffer(desc);
         if (IsDeviceLost()) return nullptr;
-        if (desc.Memory != gpu::MemoryType::Device) {
+        if (desc.Memory != gpu::MemoryType::DeviceLocal) {
             if (OnMap) OnMap();
             if (FailMaps || IsDeviceLost()) return nullptr;
         }

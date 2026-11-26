@@ -408,9 +408,17 @@ enum class StoreAction : int32_t {
 };
 
 enum class MemoryType : int32_t {
-    Device,
-    Upload,
-    ReadBack,
+    DeviceLocal,
+    DeviceUpload,
+    HostUpload,
+    HostReadBack,
+};
+
+enum class MemoryArchitecture : uint8_t {
+    DiscreteNarrowBar,
+    DiscreteResizableBar,
+    IntegratedUMA,
+    CacheCoherentUMA,
 };
 
 enum class PresentMode : int32_t {
@@ -921,7 +929,7 @@ struct TextureDescriptor {
     uint32_t MipLevels{0};
     uint32_t SampleCount{0};
     TextureFormat Format{TextureFormat::UNKNOWN};
-    MemoryType Memory{MemoryType::Device};
+    MemoryType Memory{MemoryType::DeviceLocal};
     TextureUses Usage{TextureUse::UNKNOWN};
     ResourceHints Hints{ResourceHint::None};
 };
@@ -936,7 +944,7 @@ struct TextureViewDescriptor {
 
 struct BufferDescriptor {
     uint64_t Size{0};
-    MemoryType Memory{};
+    MemoryType Memory{MemoryType::DeviceLocal};
     BufferUses Usage{BufferUse::UNKNOWN};
     ResourceHints Hints{};
 };
@@ -1252,14 +1260,6 @@ struct DeviceDetail {
     string DriverVersion{};
     uint32_t VendorId{};
     bool IsSoftware{};
-    uint64_t BufferCopyOffsetAlignment{1};
-    uint64_t TextureDataPlacementAlignment{1};
-    uint64_t VramBudget{0};
-    uint32_t CBufferAlignment{0};
-    uint32_t TextureDataPitchAlignment{1};
-    uint32_t MaxVertexInputBindings{0};
-    bool IsUMA{false};
-    bool IsLayeredRenderingFromVertexShaderSupported{false};
 };
 
 struct QueueCapabilities {
@@ -1271,6 +1271,7 @@ struct DeviceLimits {
     // Maximum record count per native indirect draw call: 0 unsupported, 1 single-record only.
     uint32_t MaxDrawIndirectCount{0};
     uint32_t MaxColorAttachments{0};
+    uint32_t MaxVertexInputBindings{0};
     uint32_t MaxTexture1DDimension{0};
     uint32_t MaxTexture2DDimension{0};
     uint32_t MaxTexture3DDimension{0};
@@ -1279,6 +1280,9 @@ struct DeviceLimits {
     uint64_t MaxUniformBufferRange{0};
     uint64_t MaxStorageBufferRange{0};
     uint32_t MaxPushConstantBytes{0};
+    uint64_t BufferCopyOffsetAlignment{1};
+    uint64_t TextureDataPlacementAlignment{1};
+    uint32_t TextureDataPitchAlignment{1};
     uint64_t CBufferOffsetAlignment{1};
     uint64_t StorageBufferOffsetAlignment{1};
     uint64_t TexelBufferOffsetAlignment{1};
@@ -1299,10 +1303,37 @@ struct DeviceFeatures {
     bool SamplerAnisotropy{false}, SamplerMirrorClampToEdge{false}, SamplerFilterMinmax{false};
     bool SamplerAnisotropyPointMip{false};
     bool SamplerUnnormalizedCoordinates{false}, SamplerIntegerBorderColor{false};
+    bool IsLayeredRenderingFromVertexShaderSupported{false};
+};
+
+struct DeviceMemoryInfo {
+    MemoryArchitecture Architecture{MemoryArchitecture::DiscreteNarrowBar};
+    uint64_t DeviceLocalBytes{0};
+    uint64_t HostVisibleDeviceLocalBytes{0};
+    uint64_t HostSharedBytes{0};
+};
+
+struct MemorySegmentBudget {
+    uint64_t BudgetBytes{0};
+    uint64_t UsageBytes{0};
+};
+
+struct GpuMemoryBudget {
+    MemorySegmentBudget DeviceLocal;
+    MemorySegmentBudget DeviceUpload;
+    MemorySegmentBudget HostShared;
+};
+
+struct BufferMemoryProperties {
+    bool IsDeviceLocal{false};
+    bool IsHostVisible{false};
+    bool IsHostCoherent{false};
+    bool IsHostCached{false};
 };
 
 struct GpuDeviceCapabilities {
     DeviceDetail Detail;
+    DeviceMemoryInfo Memory{};
     DeviceLimits Limits;
     DeviceFeatures Features;
     array<QueueCapabilities, static_cast<size_t>(QueueType::MAX_COUNT)> Queues{};
@@ -1456,9 +1487,9 @@ public:
     // Each extension is caller-owned and must be released before this device. Null on unsupported platforms.
     virtual Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept = 0;
 
-    virtual DeviceDetail GetDetail() const noexcept = 0;
-
     virtual const GpuDeviceCapabilities& GetCapabilities() const noexcept = 0;
+
+    virtual GpuMemoryBudget QueryMemoryBudget() const noexcept = 0;
 
     virtual TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept = 0;
 
@@ -1740,7 +1771,10 @@ public:
 
     GpuObjectTags GetTag() const noexcept final;
 
-    // Host-visible buffers retain this base address until destruction.
+    // Physical memory type selected for this allocation.
+    virtual BufferMemoryProperties GetMemoryProperties() const noexcept = 0;
+
+    // Mappable buffers retain this base address until destruction.
     virtual Nullable<void*> GetMappedData() noexcept = 0;
 
     virtual bool FlushMappedRange(BufferRange range) noexcept = 0;

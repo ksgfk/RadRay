@@ -253,7 +253,7 @@ Nullable<unique_ptr<Shader>> LoadShader(Device& device, std::string_view source,
 }
 
 Nullable<unique_ptr<Buffer>> CreateUploadBuffer(Device& device, std::span<const byte> data, BufferUses usage) {
-    auto buffer = device.CreateBuffer({.Size = data.size(), .Memory = MemoryType::Upload, .Usage = usage | BufferUse::MapWrite});
+    auto buffer = device.CreateBuffer({.Size = data.size(), .Memory = MemoryType::HostUpload, .Usage = usage | BufferUse::MapWrite});
     if (!buffer) return nullptr;
     void* mapped = buffer->GetMappedData().Get();
     if (!mapped) return nullptr;
@@ -263,7 +263,7 @@ Nullable<unique_ptr<Buffer>> CreateUploadBuffer(Device& device, std::span<const 
 }
 
 Nullable<unique_ptr<Buffer>> CreateReadbackBuffer(Device& device, uint64_t size) {
-    return device.CreateBuffer({.Size = size, .Memory = MemoryType::ReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
+    return device.CreateBuffer({.Size = size, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::CopyDestination | BufferUse::MapRead});
 }
 
 vector<byte> MapAndRead(Buffer& readback) {
@@ -278,7 +278,7 @@ vector<byte> MapAndRead(Buffer& readback) {
 }
 
 uint32_t CopyRowPitch(const Device& device, uint32_t width, uint32_t bytesPerTexel) noexcept {
-    const uint32_t alignment = std::max(1u, device.GetCapabilities().Detail.TextureDataPitchAlignment);
+    const uint32_t alignment = std::max(1u, device.GetCapabilities().Limits.TextureDataPitchAlignment);
     return (width * bytesPerTexel + alignment - 1) / alignment * alignment;
 }
 

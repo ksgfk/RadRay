@@ -1,4 +1,4 @@
-add_executable(bench_rdg_upload bench_rdg_upload.cpp)
+add_executable(bench_rdg_upload bench_rdg_upload.cpp ../../modules/runtime/tests/test_fakes.cpp)
 target_link_libraries(bench_rdg_upload PRIVATE RadRay::runtime benchmark::benchmark)
 radray_default_compile_flags(bench_rdg_upload)
 radray_optimize_flags_binary(bench_rdg_upload)

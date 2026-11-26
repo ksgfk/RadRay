@@ -141,12 +141,11 @@ void TransientParameterSetPool::BeginFrame() noexcept {
     ++_windowIndex;
 }
 
-std::optional<UploadAllocation> AllocateDynamicUniform(UploadArena& arena, std::span<const byte> bytes) {
+std::optional<UploadAllocation> AllocateDynamicUniform(DynamicBufferArena& arena, std::span<const byte> bytes) {
     const auto& caps = arena.GetDevice().GetCapabilities();
     if (bytes.empty() || (caps.Limits.MaxUniformBufferRange && bytes.size() > caps.Limits.MaxUniformBufferRange)) return std::nullopt;
-    const auto sizeAlignment = std::max<uint64_t>(1, caps.Detail.CBufferAlignment);
-    const auto alignment = std::max(sizeAlignment, caps.Limits.CBufferOffsetAlignment);
-    const auto padding = (sizeAlignment - bytes.size() % sizeAlignment) % sizeAlignment;
+    const auto alignment = std::max<uint64_t>(1, caps.Limits.CBufferOffsetAlignment);
+    const auto padding = (alignment - bytes.size() % alignment) % alignment;
     if (padding > std::numeric_limits<uint64_t>::max() - bytes.size()) return std::nullopt;
     auto allocation = arena.Allocate(bytes.size(), alignment, bytes.size() + padding, gpu::BufferState::CBuffer);
     if (allocation) std::memcpy(allocation->Data.Get(), bytes.data(), bytes.size());

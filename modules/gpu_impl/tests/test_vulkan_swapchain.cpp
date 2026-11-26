@@ -294,7 +294,7 @@ TEST_F(VulkanSwapChainWindowTest, FailedCreationLatchesOnlyDeviceLoss) {
     EXPECT_FALSE(device->CreateSwapChain(desc));
     EXPECT_TRUE(device->IsDeviceLost());
     EXPECT_TRUE(device->_lostDrained.load());
-    EXPECT_FALSE(device->CreateBuffer({.Size = 16, .Memory = MemoryType::ReadBack, .Usage = BufferUse::MapRead}));
+    EXPECT_FALSE(device->CreateBuffer({.Size = 16, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::MapRead}));
 }
 
 class VulkanSwapChainCleanupWindowTest : public VulkanSwapChainWindowTest, public testing::WithParamInterface<uint32_t> {

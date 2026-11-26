@@ -22,7 +22,7 @@ vector<byte> Pattern() {
 class BufferTest : public test::BackendTest {
 protected:
     unique_ptr<Buffer> CreateMappable(MemoryType memory, ResourceHints hints = ResourceHint::None) {
-        const BufferUses usage = memory == MemoryType::Upload ? BufferUse::MapWrite | BufferUse::CopySource
+        const BufferUses usage = memory == MemoryType::HostUpload ? BufferUse::MapWrite | BufferUse::CopySource
                                                               : BufferUse::MapRead | BufferUse::CopyDestination;
         return GetDevice().CreateBuffer({.Size = BufferSize, .Memory = memory, .Usage = usage, .Hints = hints}).Unwrap();
     }
@@ -39,6 +39,30 @@ protected:
 
 #if defined(RADRAY_ENABLE_VULKAN)
 class VulkanBufferMappingTest : public test::GpuTest {};
+
+TEST_F(VulkanBufferMappingTest, HostUploadUsesUncachedHostMemoryWhenCompatible) {
+    if (!OpenDevice(GpuBackend::Vulkan)) return;
+    const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
+    auto device = vulkan::CreateDeviceVulkan({.Queues = queues});
+    ASSERT_TRUE(device);
+    const auto arch = device->GetCapabilities().Memory.Architecture;
+    if (arch == MemoryArchitecture::IntegratedUMA || arch == MemoryArchitecture::CacheCoherentUMA) GTEST_SKIP() << "Discrete memory required";
+    auto buffer = device->CreateBuffer({.Size = BufferSize, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CopySource});
+    ASSERT_TRUE(buffer);
+    const auto* native = vulkan::CastVkObject(buffer.Get());
+    VkMemoryRequirements requirements{};
+    device->_ftb.vkGetBufferMemoryRequirements(device->_device, native->_buffer, &requirements);
+    const VkPhysicalDeviceMemoryProperties* memory{};
+    vmaGetMemoryProperties(device->_vma->_vma, &memory);
+    constexpr auto mask = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    for (uint32_t i = 0; i < memory->memoryTypeCount; ++i) {
+        if ((requirements.memoryTypeBits & (1u << i)) && (memory->memoryTypes[i].propertyFlags & mask) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            EXPECT_FALSE(buffer->GetMemoryProperties().IsHostCached);
+            return;
+        }
+    }
+    GTEST_SKIP() << "No compatible uncached host memory";
+}
 
 TEST_F(VulkanBufferMappingTest, NativeMapFailureRejectsBothHostMemoryTypesAtCreation) {
     if (!OpenDevice(GpuBackend::Vulkan)) return;
@@ -60,19 +84,47 @@ TEST_F(VulkanBufferMappingTest, NativeMapFailureRejectsBothHostMemoryTypesAtCrea
     VmaAllocator allocator{};
     ASSERT_EQ(vmaCreateAllocator(&create, &allocator), VK_SUCCESS);
     device->_vma = make_unique<vulkan::VMA>(allocator);
-    EXPECT_FALSE(device->CreateBuffer({.Size = BufferSize, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+    EXPECT_FALSE(device->CreateBuffer({.Size = BufferSize, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CopySource,
                                        .Hints = ResourceHint::Dedicated}));
-    EXPECT_FALSE(device->CreateBuffer({.Size = BufferSize, .Memory = MemoryType::ReadBack, .Usage = BufferUse::MapRead | BufferUse::CopyDestination,
+    EXPECT_FALSE(device->CreateBuffer({.Size = BufferSize, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::MapRead | BufferUse::CopyDestination,
                                        .Hints = ResourceHint::Dedicated}));
     EXPECT_FALSE(device->IsDeviceLost());
     EXPECT_TRUE(device->CreateBuffer({.Size = BufferSize, .Usage = BufferUse::CopySource}));
 }
 #endif
 
+TEST_P(BufferTest, UploadPlacementMatchesPhysicalSegmentAndCopiesToHost) {
+    auto& device = GetDevice();
+    const auto& memory = device.GetCapabilities().Memory;
+    const bool uma = memory.Architecture == MemoryArchitecture::IntegratedUMA || memory.Architecture == MemoryArchitecture::CacheCoherentUMA;
+    for (auto type : {MemoryType::HostUpload, MemoryType::DeviceUpload}) {
+        auto upload = device.CreateBuffer({.Size = BufferSize, .Memory = type, .Usage = BufferUse::MapWrite | BufferUse::CopySource});
+        if (type == MemoryType::DeviceUpload && !memory.HostVisibleDeviceLocalBytes) {
+            EXPECT_FALSE(upload);
+            continue;
+        }
+        ASSERT_TRUE(upload);
+        const auto properties = upload->GetMemoryProperties();
+        EXPECT_TRUE(properties.IsHostVisible);
+        EXPECT_EQ(properties.IsDeviceLocal, uma || type == MemoryType::DeviceUpload);
+        if (device.GetBackend() == GpuBackend::D3D12) {
+            EXPECT_TRUE(properties.IsHostCoherent);
+            EXPECT_EQ(properties.IsHostCached, memory.Architecture == MemoryArchitecture::CacheCoherentUMA);
+        }
+        if (memory.Architecture == MemoryArchitecture::CacheCoherentUMA) EXPECT_TRUE(properties.IsHostCached);
+        auto expected = Pattern();
+        std::memcpy(upload->GetMappedData().Unwrap(), expected.data(), expected.size());
+        ASSERT_TRUE(upload->FlushMappedRange({0, BufferSize}));
+        auto readback = CreateMappable(MemoryType::HostReadBack);
+        CopyToHost(*upload, *readback);
+        EXPECT_EQ(test::MapAndRead(*readback), expected);
+    }
+}
+
 TEST_P(BufferTest, UploadContentCopiesToReadback) {
     const auto expected = Pattern();
-    auto upload = CreateMappable(MemoryType::Upload);
-    auto readback = CreateMappable(MemoryType::ReadBack);
+    auto upload = CreateMappable(MemoryType::HostUpload);
+    auto readback = CreateMappable(MemoryType::HostReadBack);
     void* written = upload->GetMappedData().Get();
     ASSERT_NE(written, nullptr);
     std::memcpy(written, expected.data(), expected.size());
@@ -89,12 +141,17 @@ TEST_P(BufferTest, RejectsIncompatibleMappingDescriptors) {
         EXPECT_FALSE(device.CreateBuffer({.Size = BufferSize, .Memory = memory, .Usage = usage, .Hints = hints}));
         EXPECT_EQ(TakeRhiValidationErrors(), 1u);
     };
-    rejected(MemoryType::Upload, BufferUse::CopySource);
-    rejected(MemoryType::ReadBack, BufferUse::CopyDestination);
-    rejected(MemoryType::Device, BufferUse::MapRead);
-    rejected(MemoryType::Upload, BufferUse::MapRead | BufferUse::MapWrite);
-    rejected(MemoryType::Upload, BufferUse::MapWrite, ResourceHint::External);
-    rejected(MemoryType::ReadBack, BufferUse::MapRead, ResourceHints{1u << 2});
+    for (auto type : {MemoryType::HostUpload, MemoryType::DeviceUpload}) {
+        for (auto invalid : {BufferUse::Common, BufferUse::MapRead, BufferUse::CopyDestination, BufferUse::UnorderedAccess})
+            rejected(type, BufferUse::MapWrite | invalid);
+        rejected(type, BufferUse::CopySource);
+    }
+    rejected(MemoryType::HostReadBack, BufferUse::MapRead | BufferUse::Resource);
+    rejected(MemoryType::HostReadBack, BufferUse::CopyDestination);
+    rejected(MemoryType::DeviceLocal, BufferUse::MapRead);
+    rejected(MemoryType::HostUpload, BufferUse::MapRead | BufferUse::MapWrite);
+    rejected(MemoryType::HostUpload, BufferUse::MapWrite, ResourceHint::External);
+    rejected(MemoryType::HostReadBack, BufferUse::MapRead, ResourceHints{1u << 2});
     auto local = device.CreateBuffer({.Size = BufferSize, .Usage = BufferUse::CopySource}).Unwrap();
     EXPECT_FALSE(local->GetMappedData());
 }
@@ -102,7 +159,7 @@ TEST_P(BufferTest, RejectsIncompatibleMappingDescriptors) {
 TEST_P(BufferTest, RejectsSubmissionAfterEitherCopyResourceWasDestroyed) {
     for (bool destroySource : {false, true}) {
         auto src = GetDevice().CreateBuffer({.Size = BufferSize, .Usage = BufferUse::CopySource}).Unwrap();
-        auto dst = CreateMappable(MemoryType::ReadBack);
+        auto dst = CreateMappable(MemoryType::HostReadBack);
         auto recording = test::BeginRecording(GetDevice());
         recording.Commands->CopyBufferToBuffer(dst.get(), 0, src.get(), 0, BufferSize);
         recording.Commands->End();
@@ -116,8 +173,8 @@ TEST_P(BufferTest, RejectsSubmissionAfterEitherCopyResourceWasDestroyed) {
 TEST_P(BufferTest, PartialUploadFeedsAConcurrentReadbackConsumer) {
     auto& device = GetDevice();
     auto& queue = test::DirectQueue(device);
-    auto upload = CreateMappable(MemoryType::Upload);
-    auto readback = CreateMappable(MemoryType::ReadBack);
+    auto upload = CreateMappable(MemoryType::HostUpload);
+    auto readback = CreateMappable(MemoryType::HostReadBack);
     auto fence = device.CreateFence().Unwrap();
     const auto expected = Pattern();
     auto* mapped = upload->GetMappedData().Get();
@@ -157,10 +214,10 @@ TEST_P(BufferTest, PartialUploadFeedsAConcurrentReadbackConsumer) {
 TEST_P(BufferTest, PipelineReadablePersistentUploadCopiesToReadback) {
     const auto expected = Pattern();
     auto upload = GetDevice().CreateBuffer({.Size = BufferSize,
-                                           .Memory = MemoryType::Upload,
+                                           .Memory = MemoryType::HostUpload,
                                            .Usage = BufferUse::MapWrite | BufferUse::CopySource | BufferUse::CBuffer | BufferUse::Vertex});
     ASSERT_TRUE(upload);
-    auto readback = CreateMappable(MemoryType::ReadBack);
+    auto readback = CreateMappable(MemoryType::HostReadBack);
     void* written = upload->GetMappedData().Get();
     ASSERT_NE(written, nullptr);
     std::memcpy(written, expected.data(), expected.size());
@@ -171,8 +228,8 @@ TEST_P(BufferTest, PipelineReadablePersistentUploadCopiesToReadback) {
 }
 
 TEST_P(BufferTest, CacheOperationsValidateDirectionAndRange) {
-    auto upload = CreateMappable(MemoryType::Upload);
-    auto readback = CreateMappable(MemoryType::ReadBack);
+    auto upload = CreateMappable(MemoryType::HostUpload);
+    auto readback = CreateMappable(MemoryType::HostReadBack);
     EXPECT_FALSE(upload->InvalidateMappedRange({0, BufferSize}));
     EXPECT_FALSE(readback->FlushMappedRange({0, BufferSize}));
     EXPECT_FALSE(upload->FlushMappedRange({1, BufferSize}));

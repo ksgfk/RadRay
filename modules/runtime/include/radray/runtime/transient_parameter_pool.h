@@ -7,7 +7,7 @@
 
 #include <radray/gpu/types.h>
 #include <radray/nullable.h>
-#include <radray/runtime/upload_arena.h>
+#include <radray/runtime/dynamic_buffer_arena.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -58,6 +58,6 @@ private:
     size_t _windowIndex{0};
 };
 
-std::optional<UploadAllocation> AllocateDynamicUniform(UploadArena& arena, std::span<const byte> bytes);
+std::optional<UploadAllocation> AllocateDynamicUniform(DynamicBufferArena& arena, std::span<const byte> bytes);
 
 }  // namespace radray

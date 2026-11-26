@@ -175,7 +175,7 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
         frame.image->_name = name;
         frame.image->_dimension = TextureDimension::Dim2D;
         frame.image->_format = swapChain->_reqFormat;
-        frame.image->_memory = MemoryType::Device;
+        frame.image->_memory = MemoryType::DeviceLocal;
         frame.image->_usage = TextureUse::CopySource | TextureUse::CopyDestination;
         if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) {
             frame.image->_usage |= TextureUse::RenderTarget;
@@ -834,15 +834,13 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         }
     }
     auto result = make_shared<DeviceD3D12>(device, dxgiFactory, adapter, alloc, factoryImpl->_diagnostics, std::move(diagnosticChannel));
+    auto& topology = result->_capabilities.Memory;
     DeviceDetail& detail = result->_capabilities.Detail;
-    detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-    detail.BufferCopyOffsetAlignment = 1;
-    detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
-    detail.TextureDataPlacementAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
-    detail.MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
     {
         DXGI_ADAPTER_DESC1 adapDesc{};
         if (HRESULT hr = adapter->GetDesc1(&adapDesc); SUCCEEDED(hr)) {
+            topology.DeviceLocalBytes = adapDesc.DedicatedVideoMemory;
+            topology.HostSharedBytes = adapDesc.SharedSystemMemory;
             wstring name{adapDesc.Description};
             detail.GpuName = ToMultiByte(name).value_or("???");
             detail.VendorId = adapDesc.VendorId;
@@ -855,11 +853,11 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     }
     {
         ComPtr<IDXGIAdapter3> adapter3;
-        if (SUCCEEDED(adapter.As(&adapter3))) {
+        if (result->_features.UMA() && !topology.DeviceLocalBytes && SUCCEEDED(adapter.As(&adapter3))) {
             DXGI_QUERY_VIDEO_MEMORY_INFO memInfo{};
             if (HRESULT hr = adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo);
                 SUCCEEDED(hr)) {
-                detail.VramBudget = memInfo.Budget;
+                topology.DeviceLocalBytes = memInfo.Budget;
             }
         }
     }
@@ -903,21 +901,29 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         RADRAY_INFO_LOG("Resource Binding Tier: {}", fs.ResourceBindingTier());
         RADRAY_INFO_LOG("Resource Heap Tier: {}", fs.ResourceHeapTier());
         RADRAY_INFO_LOG("TBR: {}", static_cast<bool>(fs.TileBasedRenderer()));
-        detail.IsUMA = static_cast<bool>(fs.UMA());
-        RADRAY_INFO_LOG("UMA: {}", detail.IsUMA);
+        if (fs.UMA()) {
+            topology.Architecture = fs.CacheCoherentUMA() ? MemoryArchitecture::CacheCoherentUMA : MemoryArchitecture::IntegratedUMA;
+            if (!topology.DeviceLocalBytes) topology.DeviceLocalBytes = topology.HostSharedBytes;
+            topology.HostSharedBytes = 0;
+            topology.HostVisibleDeviceLocalBytes = topology.DeviceLocalBytes;
+        } else if (fs.GPUUploadHeapSupported()) {
+            topology.Architecture = MemoryArchitecture::DiscreteResizableBar;
+            topology.HostVisibleDeviceLocalBytes = topology.DeviceLocalBytes;
+        }
     } else {
         RADRAY_WARN_LOG("CD3DX12FeatureSupport::GetStatus failed");
     }
+    bool layeredRenderingFromVS = false;
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         if (HRESULT hr = device->CheckFeatureSupport(
                 D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
             SUCCEEDED(hr)) {
-            detail.IsLayeredRenderingFromVertexShaderSupported =
+            layeredRenderingFromVS =
                 static_cast<bool>(options.VPAndRTArrayIndexFromAnyShaderFeedingRasterizerSupportedWithoutGSEmulation);
             RADRAY_INFO_LOG(
                 "Layered Rendering From Vertex Shader: {}",
-                detail.IsLayeredRenderingFromVertexShaderSupported);
+                layeredRenderingFromVS);
         } else {
             RADRAY_WARN_LOG(
                 "ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS) failed: {} {}",
@@ -929,6 +935,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     caps.Limits = {
         .MaxDrawIndirectCount = std::numeric_limits<uint32_t>::max(),
         .MaxColorAttachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+        .MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT,
         .MaxTexture1DDimension = D3D12_REQ_TEXTURE1D_U_DIMENSION,
         .MaxTexture2DDimension = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
         .MaxTexture3DDimension = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
@@ -936,7 +943,10 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         .MaxBufferSize = D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_A_TERM * uint64_t{1024 * 1024},
         .MaxUniformBufferRange = D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * uint64_t{16},
         .MaxPushConstantBytes = D3D12_MAX_ROOT_COST * 4,
-        .CBufferOffsetAlignment = detail.CBufferAlignment,
+        .BufferCopyOffsetAlignment = 1,
+        .TextureDataPlacementAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,
+        .TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
+        .CBufferOffsetAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT,
         .StorageBufferOffsetAlignment = 4};
     caps.Features = {
         .TimestampQueries = true,
@@ -946,7 +956,8 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         .SubresourceBarriers = true,
         .IndependentDepthStencilTransitions = true,
         .UavMemoryBarrier = true,
-        .UavWriteStages = gpu::ShaderStage::Pixel | gpu::ShaderStage::Compute};
+        .UavWriteStages = gpu::ShaderStage::Pixel | gpu::ShaderStage::Compute,
+        .IsLayeredRenderingFromVertexShaderSupported = layeredRenderingFromVS};
     if (SUCCEEDED(fs.GetStatus()) &&
         fs.MaxSupportedFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) {
         caps.Features.UavWriteStages |= gpu::ShaderStage::Vertex;
@@ -971,10 +982,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
 }
 
 // == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
-
-DeviceDetail DeviceD3D12::GetDetail() const noexcept {
-    return _capabilities.Detail;
-}
 
 Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     const size_t index = static_cast<size_t>(type);
@@ -1234,7 +1241,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     if (desc.Usage.HasFlag(BufferUse::UnorderedAccess)) {
         resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
-    if (desc.Memory == MemoryType::ReadBack && !desc.Usage.HasFlag(BufferUse::Resource)) {
+    if (desc.Memory == MemoryType::HostReadBack) {
         resDesc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
     }
     UINT64 paddedSize;
@@ -1246,61 +1253,40 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     D3D12_RESOURCE_STATES rawInitState = MapMemoryTypeToResourceState(desc.Memory);
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(desc.Memory);
+    if (desc.Memory == MemoryType::DeviceUpload && !_features.GPUUploadHeapSupported()) {
+        if (!_features.UMA()) return nullptr;
+        allocDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        rawInitState = D3D12_RESOURCE_STATE_GENERIC_READ;
+    }
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> buffer;
     ComPtr<D3D12MA::Allocation> allocRes;
-    /**
-     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_heap_type
-     * https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags
-     * upload 和 readback 只能以 GENERIC_READ 和 COPY_DEST 状态创建且不可转换。而 UAV 需要 UNORDERED_ACCESS 状态，需求冲突
-     * 利用 Custom 堆开启 L0 系统内存并设置 WRITE_COMBINE 可以绕开 Abstract 堆的限制
-     * L0 系统内存既可由 CPU 读写，NUMA 可由设备通过 PCIe 读写，UMA 更是能直接读写，可以同时满足 CPU 想 Mapped 读写，GPU 想 UAV 读写的需求
-     * WRITE_COMBINE 设置后 CPU 写入会合并到缓冲区批量提交，NUMA 通过 PCIe 上传到设备。但 CPU 读取会变慢
-     */
-    if (allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT && (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {
-        D3D12_HEAP_PROPERTIES heapProps{};
-        heapProps.Type = D3D12_HEAP_TYPE_CUSTOM;
-        heapProps.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
-        heapProps.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
-        heapProps.VisibleNodeMask = 0;
-        heapProps.CreationNodeMask = 0;
-        if (rawInitState == D3D12_RESOURCE_STATE_GENERIC_READ) {
-            rawInitState = D3D12_RESOURCE_STATE_COMMON;
-        }
-        if (HRESULT hr = _device->CreateCommittedResource(
-                &heapProps,
-                allocDesc.ExtraHeapFlags,
-                &resDesc,
-                rawInitState,
-                nullptr,
-                IID_PPV_ARGS(buffer.GetAddressOf()));
-            FAILED(hr)) {
-            if (!MarkDeviceLost(hr, "CreateBuffer")) RADRAY_ERR_LOG("ID3D12Device::CreateCommittedResource failed: {} {}", GetErrorName(hr), hr);
-            return nullptr;
-        }
-    } else {
-        if (HRESULT hr = _mainAlloc->CreateResource(
-                &allocDesc,
-                &resDesc,
-                rawInitState,
-                nullptr,
-                allocRes.GetAddressOf(),
-                IID_PPV_ARGS(buffer.GetAddressOf()));
-            FAILED(hr)) {
-            if (!MarkDeviceLost(hr, "CreateBuffer")) RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
-            return nullptr;
-        }
+    if (HRESULT hr = _mainAlloc->CreateResource(
+            &allocDesc,
+            &resDesc,
+            rawInitState,
+            nullptr,
+            allocRes.GetAddressOf(),
+            IID_PPV_ARGS(buffer.GetAddressOf()));
+        FAILED(hr)) {
+        if (!MarkDeviceLost(hr, "CreateBuffer")) RADRAY_ERR_LOG("D3D12MA::Allocator::CreateResource failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
     }
     auto result = make_unique<BufferD3D12>(this, std::move(buffer), std::move(allocRes));
+    result->_heapType = allocDesc.HeapType;
+    const bool visible = allocDesc.HeapType != D3D12_HEAP_TYPE_DEFAULT;
+    result->_properties = {
+        !visible || allocDesc.HeapType == D3D12_HEAP_TYPE_GPU_UPLOAD || _features.UMA(),
+        visible, visible, visible && (allocDesc.HeapType == D3D12_HEAP_TYPE_READBACK || _features.CacheCoherentUMA())};
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
     result->_reqSize = logicalSize;
-    if (desc.Memory != MemoryType::Device) {
-        const D3D12_RANGE readRange{0, desc.Memory == MemoryType::ReadBack ? static_cast<SIZE_T>(logicalSize) : 0};
+    if (desc.Memory != MemoryType::DeviceLocal) {
+        const D3D12_RANGE readRange{0, desc.Memory == MemoryType::HostReadBack ? static_cast<SIZE_T>(logicalSize) : 0};
         const HRESULT hr = result->_buf->Map(0, &readRange, &result->_mappedData);
         if (FAILED(hr) || !result->_mappedData) {
             if (!MarkDeviceLost(hr, "ID3D12Resource::Map")) RADRAY_ERR_LOG("CreateBuffer: mapping failed: {}", GetErrorName(hr));
@@ -1313,7 +1299,7 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
-    if (IsDeviceLost()) return nullptr;
+    if (IsDeviceLost() || desc_.Memory != MemoryType::DeviceLocal) return nullptr;
     TextureDescriptor desc = desc_;
     DXGI_FORMAT rawFormat = MapType(desc.Format);
     D3D12_RESOURCE_DESC resDesc{};
@@ -2864,7 +2850,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
     for (const auto& v : barriers) {
         if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
             auto buf = CastD3D12Object(bb->Target);
-            if (buf->_memory != MemoryType::Device && !buf->_usage.HasFlag(BufferUse::UnorderedAccess)) {
+            if (buf->_heapType == D3D12_HEAP_TYPE_UPLOAD || buf->_heapType == D3D12_HEAP_TYPE_READBACK) {
                 continue;
             }
             D3D12_RESOURCE_BARRIER raw{};
@@ -3881,21 +3867,23 @@ void BufferD3D12::Destroy() noexcept {
     _externalInfo.reset();
     if (_mappedData) {
         const D3D12_RANGE noWrites{0, 0};
-        _buf->Unmap(0, _memory == MemoryType::ReadBack ? &noWrites : nullptr);
+        _buf->Unmap(0, _memory == MemoryType::HostReadBack ? &noWrites : nullptr);
     }
     _mappedData = nullptr;
     _buf = nullptr;
     _alloc = nullptr;
 }
 
+BufferMemoryProperties BufferD3D12::GetMemoryProperties() const noexcept { return _properties; }
+
 Nullable<void*> BufferD3D12::GetMappedData() noexcept { return _mappedData; }
 
 bool BufferD3D12::FlushMappedRange(BufferRange range) noexcept {
-    return _mappedData && _memory == MemoryType::Upload && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
+    return _mappedData && _usage.HasFlag(BufferUse::MapWrite) && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
 }
 
 bool BufferD3D12::InvalidateMappedRange(BufferRange range) noexcept {
-    return _mappedData && _memory == MemoryType::ReadBack && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
+    return _mappedData && _memory == MemoryType::HostReadBack && BufferRangeFits(_reqSize, range) && !_device->IsDeviceLost();
 }
 
 void BufferD3D12::SetDebugName(std::string_view name) noexcept {
@@ -4143,6 +4131,16 @@ bool DXGIFactoryImpl::IsValidationEnabled() const noexcept {
 
 GpuBackend DeviceD3D12::GetBackend() noexcept {
     return GpuBackend::D3D12;
+}
+
+GpuMemoryBudget DeviceD3D12::QueryMemoryBudget() const noexcept {
+    D3D12MA::Budget local{}, shared{};
+    _mainAlloc->GetBudget(&local, &shared);
+    GpuMemoryBudget budget{};
+    budget.DeviceLocal = {local.BudgetBytes, local.UsageBytes};
+    if (_features.UMA() || _features.GPUUploadHeapSupported()) budget.DeviceUpload = budget.DeviceLocal;
+    if (!_features.UMA()) budget.HostShared = {shared.BudgetBytes, shared.UsageBytes};
+    return budget;
 }
 
 const GpuDeviceCapabilities& DeviceD3D12::GetCapabilities() const noexcept {

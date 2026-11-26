@@ -95,6 +95,7 @@ struct VertexBufferPoolDescriptor {
     std::span<const gpu::VertexBufferLayout> Layouts{};
     std::span<const VertexInputAttribute> Attributes{};
     std::string_view DebugNamePrefix{"VertexBufferPool"};
+    GpuBufferMemory Memory{GpuBufferMemory::DeviceLocal};
 };
 
 struct IndexBufferPoolDescriptor {
@@ -102,6 +103,7 @@ struct IndexBufferPoolDescriptor {
     uint32_t PageIndexCapacity{300'000};
     gpu::BufferUses AdditionalUsage{};
     std::string_view DebugNamePrefix{"IndexBufferPool"};
+    GpuBufferMemory Memory{GpuBufferMemory::DeviceLocal};
 };
 
 // 池借用设备，所有调用必须串行。

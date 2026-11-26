@@ -346,9 +346,8 @@ public:
 
     Nullable<unique_ptr<ExternalResourceExtension>> CreateExternalResourceExtension() noexcept override;
 
-    DeviceDetail GetDetail() const noexcept override;
-
     const GpuDeviceCapabilities& GetCapabilities() const noexcept override;
+    GpuMemoryBudget QueryMemoryBudget() const noexcept override;
 
     TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
     TextureSupport QueryTextureSupportWithNativeStatus(const TextureSupportQuery& query, HRESULT& status) const noexcept;
@@ -713,6 +712,7 @@ public:
 
     void Destroy() noexcept override;
 
+    BufferMemoryProperties GetMemoryProperties() const noexcept override;
     Nullable<void*> GetMappedData() noexcept override;
 
     bool FlushMappedRange(BufferRange range) noexcept override;
@@ -731,6 +731,8 @@ public:
     D3D12_GPU_VIRTUAL_ADDRESS _gpuAddr;
     string _name;
     uint64_t _reqSize{0};
+    D3D12_HEAP_TYPE _heapType{D3D12_HEAP_TYPE_DEFAULT};
+    BufferMemoryProperties _properties{.IsDeviceLocal = true};
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
@@ -789,7 +791,7 @@ public:
     string _name;
     TextureDimension _dimension{TextureDimension::UNKNOWN};
     TextureFormat _format{TextureFormat::UNKNOWN};
-    MemoryType _memory{MemoryType::Device};
+    MemoryType _memory{MemoryType::DeviceLocal};
     TextureUses _usage{TextureUse::UNKNOWN};
     ResourceHints _hints{ResourceHint::None};
     std::optional<ExternalTextureInfo> _externalInfo;

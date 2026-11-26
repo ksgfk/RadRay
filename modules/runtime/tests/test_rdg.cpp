@@ -77,7 +77,7 @@ public:
     ByteBuffer(BufferDescriptor desc, Probe& probe) : FakeBuffer(desc.Size, desc.Usage), Bytes(desc.Size), _probe(probe) { Desc = desc; }
     Nullable<void*> GetMappedData() noexcept override {
         ++_probe.Maps;
-        return Desc.Memory == MemoryType::Device ? nullptr : Bytes.data();
+        return Desc.Memory == MemoryType::DeviceLocal ? nullptr : Bytes.data();
     }
     bool FlushMappedRange(BufferRange) noexcept override { ++_probe.Flushes; return true; }
     vector<byte> Bytes;
@@ -220,8 +220,9 @@ protected:
         pipeline->OnPrepare = [&](FrameSlot& slot) {
             if (!Compiled) return;
             Pool.BeginFrame();
-            Uploads.Reset();
-            Prepared = Compiled->Prepare(slot, Pool, Uploads);
+            Staging.BeginFrame();
+            Uploads.BeginFrame();
+            Prepared = Compiled->Prepare(slot, Pool, Staging, Uploads);
             if (!Prepared) EXPECT_FALSE(ExpectSuccess);
             if (AfterPrepare) AfterPrepare();
             if (Prepared) {
@@ -265,7 +266,8 @@ protected:
     shared_ptr<ProbeDevice> Device{make_shared<ProbeDevice>(Trace)};
     DeviceContext Context{Device, &Device->Queue};
     RDGTransientResourcePool Pool{*Device};
-    UploadArena Uploads{*Device, 64};
+    StagingBufferPool Staging{*Device, 64};
+    DynamicBufferArena Uploads{*Device, 64};
     bool Prepared{false}, Recorded{false};
     Nullable<CommandBuffer*> PreparedCommand{nullptr};
     Scene Source;
@@ -277,7 +279,7 @@ protected:
 };
 
 TEST_F(RDGExecutionTest, MergesRasterAttachmentsFoldsActionsAndHoistsLaterConstants) {
-    ByteBuffer ubo0{{.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
+    ByteBuffer ubo0{{.Size = 16, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
     ByteBuffer ubo1{ubo0.Desc, Trace};
     Setup = [&](RDGBuilder& graph) {
         const auto constants0 = graph.ImportBuffer(&ubo0, BufferState::HostWrite, BufferState::HostWrite);
@@ -330,29 +332,39 @@ TEST_F(RDGExecutionTest, MergesRasterAttachmentsFoldsActionsAndHoistsLaterConsta
     EXPECT_EQ(Trace.BarrierBatches, (vector<size_t>{4, 2}));
 }
 
-TEST(RDG, PersistentUploadRejectsASecondMapInEitherImportOrder) {
+TEST(RDG, PersistentMappedBufferAcceptsGraphWritesInEitherImportOrder) {
     FakeGpu gpu;
     gpu.Device->EnableHostBuffers = true;
     gpu.Device->Capabilities.Limits.HostCoherentAtomSize = 64;
     size_t maps = 0;
     gpu.Device->OnMap = [&] { ++maps; };
     gpu.Device->FailMaps = true;
-    EXPECT_FALSE(GpuUploadBuffer::Create(*gpu.Device, {128, BufferUse::CopySource}));
+    EXPECT_FALSE(GpuBuffer::Create(*gpu.Device, {128, BufferUse::CopySource, GpuBufferMemory::DeviceUploadWithFallback}));
     gpu.Device->FailMaps = false;
-    auto upload = GpuUploadBuffer::Create(*gpu.Device, {128, BufferUse::CopySource}).Unwrap();
+    auto upload = GpuBuffer::Create(*gpu.Device, {128, BufferUse::CopySource, GpuBufferMemory::DeviceUploadWithFallback}).Unwrap();
     EXPECT_EQ(upload->AlignSliceSize(65), 128u);
     EXPECT_EQ(upload->AlignSliceSize(UINT64_MAX), 0u);
-    const array<byte, 4> bytes{};
-    ASSERT_TRUE(upload->WriteAndFlush(64, bytes));
+    const array<byte, 4> bytes{byte{9}};
+    std::memcpy(upload->GetMappedData().Unwrap() + 64, bytes.data(), bytes.size());
+    ASSERT_TRUE(upload->FlushMappedRange({64, bytes.size()}));
     for (bool rawFirst : {false, true}) {
         auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
-        RDGBuilder graph{scheduler->BeginFrame()};
+        auto& slot = scheduler->BeginFrame();
+        RDGBuilder graph{slot};
         auto raw = graph.ImportBuffer(upload->GetBuffer(), BufferState::HostWrite, BufferState::HostWrite);
         if (!rawFirst) graph.ImportPersistentOwned(upload);
         graph.UploadBuffer(raw, 0, RDGUploadSource::SnapshotBytes(bytes));
         if (rawFirst) graph.ImportPersistentBorrowed(*upload);
         graph.MarkOutput(raw);
-        EXPECT_FALSE(graph.Compile());
+        auto compiled = graph.Compile();
+        ASSERT_TRUE(compiled);
+        RDGTransientResourcePool pool{*gpu.Device};
+        StagingBufferPool staging{*gpu.Device};
+        DynamicBufferArena dynamic{*gpu.Device};
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, dynamic));
+        EXPECT_EQ(upload->GetMappedData().Unwrap()[0], bytes[0]);
+        EXPECT_EQ(upload->GetMappedData().Unwrap()[64], bytes[0]);
+        EXPECT_EQ(staging.GetCapacity(), 0u);
     }
     {
         auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
@@ -602,7 +614,7 @@ TEST_F(RDGExecutionTest, SubresourceViewsUseTheirTextureOwnersAndReleaseRawImpor
 
 TEST(RDG, RejectsOverlappingDirectUploads) {
     FakeBuffer buffer{16, BufferUse::MapWrite | BufferUse::Vertex};
-    buffer.Desc.Memory = MemoryType::Upload;
+    buffer.Desc.Memory = MemoryType::HostUpload;
     FakeGpu gpu;
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
     RDGBuilder graph{scheduler->BeginFrame()};
@@ -665,7 +677,7 @@ TEST(RDG, RejectsClearOfReadOnlyDepthAttachment) {
 }
 
 TEST_F(RDGExecutionTest, DeadPassesDoNotExecuteAllocateOrUpload) {
-    ByteBuffer unused{{.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
+    ByteBuffer unused{{.Size = 16, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
     Setup = [&](RDGBuilder& graph) {
         const auto buffer = graph.ImportBuffer(&unused, BufferState::HostWrite, BufferState::HostWrite);
         const array<byte, 16> bytes{};
@@ -712,7 +724,7 @@ TEST_F(RDGExecutionTest, SegmentedDeviceUploadsRetainCopiedBytesAndFinalStateWit
 }
 
 TEST_F(RDGExecutionTest, DisjointDirectUploadsAreChainedBeforeGpuReads) {
-    ByteBuffer target{{.Size = 8, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::Resource}, Trace};
+    ByteBuffer target{{.Size = 8, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::Resource}, Trace};
     Setup = [&](RDGBuilder& graph) {
         const auto buffer = graph.ImportBuffer(&target, BufferState::HostWrite, BufferState::HostWrite);
         const array bytes{byte{7}, byte{8}, byte{9}, byte{10}};
@@ -742,7 +754,7 @@ TEST_F(RDGExecutionTest, DisjointDirectUploadsAreChainedBeforeGpuReads) {
 
 TEST(RDG, RejectsDirectUploadAfterGpuReadEvenForDisjointRanges) {
     FakeBuffer target{16, BufferUse::MapWrite | BufferUse::Resource};
-    target.Desc.Memory = MemoryType::Upload;
+    target.Desc.Memory = MemoryType::HostUpload;
     FakeGpu gpu;
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
     RDGBuilder graph{scheduler->BeginFrame()};
@@ -1256,13 +1268,13 @@ TEST(RDGTransientPool, ReusesOnlyCompletedMatchingAllocationsAndKeepsTheirState)
     Probe trace;
     ProbeDevice device{trace};
     RDGTransientResourcePool pool{device};
-    const BufferDescriptor desc{.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CopySource};
+    const BufferDescriptor desc{.Size = 16, .Usage = BufferUse::CopySource};
     const auto first = pool.AcquireBuffer(desc);
     const auto sibling = pool.AcquireBuffer(desc);
     ASSERT_TRUE(first.Buffer);
     ASSERT_TRUE(sibling.Buffer);
     EXPECT_NE(first.Buffer.Get(), sibling.Buffer.Get());
-    EXPECT_EQ(first.LastState, BufferState::HostWrite);
+    EXPECT_EQ(first.LastState, BufferState::Undefined);
     pool.CommitBufferState(first.Buffer.Get(), BufferState::CopySource);
     pool.BeginFrame();
     const auto reused = pool.AcquireBuffer(desc);
@@ -1332,7 +1344,7 @@ TEST_F(RDGExecutionTest, ImportedAttachmentUsesExplicitViewAndSynchronizesSameSt
 }
 
 TEST_F(RDGExecutionTest, ReordersUploadsAndIndependentPassesButKeepsMeshDeclarationOrder) {
-    ByteBuffer constants{{.Size = 4, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
+    ByteBuffer constants{{.Size = 4, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CBuffer}, Trace};
     Setup = [&](RDGBuilder& graph) {
         const auto color = graph.CreateTexture(ColorDescriptor());
         const auto other = graph.CreateTexture(ColorDescriptor());
@@ -1480,7 +1492,7 @@ TEST_F(RDGExecutionTest, OrderEdgeDoesNotHideDataEdgeFromSamePredecessor) {
     ByteBuffer target{{.Size = 4, .Usage = BufferUse::Resource | BufferUse::UnorderedAccess}, Trace};
     Setup = [&](RDGBuilder& graph) {
         const auto x = graph.ImportBuffer(&target, BufferState::ShaderRead);
-        const auto y = graph.CreateBuffer(target.Desc);
+        const auto y = graph.CreateBuffer({target.Desc.Size, target.Desc.Usage});
         {
             struct PassData {
                 decltype(&Trace) TraceRef;
@@ -2075,8 +2087,8 @@ TEST(RDG, ValidatedCacheOperationsReportFirstAndLatchedDeviceLoss) {
     auto native = make_shared<FakeDevice>();
     native->EnableHostBuffers = true;
     auto device = gpu::detail::CreateValidationDevice(native, {}).Unwrap();
-    auto target = device->CreateBuffer({.Size = 16, .Memory = MemoryType::ReadBack, .Usage = BufferUse::MapRead | BufferUse::CopyDestination}).Unwrap();
-    auto source = device->CreateBuffer({.Size = 16, .Memory = MemoryType::Upload, .Usage = BufferUse::MapWrite | BufferUse::CopySource}).Unwrap();
+    auto target = device->CreateBuffer({.Size = 16, .Memory = MemoryType::HostReadBack, .Usage = BufferUse::MapRead | BufferUse::CopyDestination}).Unwrap();
+    auto source = device->CreateBuffer({.Size = 16, .Memory = MemoryType::HostUpload, .Usage = BufferUse::MapWrite | BufferUse::CopySource}).Unwrap();
     native->OnInvalidate = [&](BufferRange) { native->Lost = true; };
     EXPECT_FALSE(target->InvalidateMappedRange({0, 16}));
     EXPECT_FALSE(source->FlushMappedRange({0, 16}));
@@ -2613,9 +2625,9 @@ TEST_F(RDGExecutionTest, DeadBorrowAndGeneratorNeverPrepareOrAllocate) {
     };
     array<byte, 64> bytes{};
     Setup = [&](RDGBuilder& graph) {
-        graph.CreateBuffer(RDGDynamicBufferDescriptor{1024 * 1024, BufferUse::Vertex},
+        graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{1024 * 1024, BufferUse::Vertex},
                            RDGUploadSource::Generated(1024 * 1024, Generator{&layouts, &writes}, +[](const Generator& data, RDGUploadWriteContext&) noexcept { ++*data.Writes; return true; }, +[](Generator& data, RDGUploadPrepareContext&) noexcept { ++*data.Layouts; return uint64_t{16}; }));
-        const auto buffer = graph.CreateBuffer(BufferDescriptor{.Size = 64, .Usage = BufferUse::CopyDestination});
+        const auto buffer = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 64, .Usage = BufferUse::CopyDestination});
         graph.UploadBuffer(buffer, 0, RDGUploadSource::BorrowedBytes(bytes));
     };
     Run();
@@ -2627,7 +2639,6 @@ TEST_F(RDGExecutionTest, DeadBorrowAndGeneratorNeverPrepareOrAllocate) {
 }
 
 TEST_F(RDGExecutionTest, ActualDynamicSizeReservesPaddingAndSharesPhysicalReadState) {
-    Device->Capabilities.Detail.CBufferAlignment = 256;
     Device->Capabilities.Limits.CBufferOffsetAlignment = 256;
     RDGBufferSlice constants, vertices;
     uint32_t layouts = 0, writes = 0;
@@ -2636,14 +2647,14 @@ TEST_F(RDGExecutionTest, ActualDynamicSizeReservesPaddingAndSharesPhysicalReadSt
         uint32_t* Writes;
     };
     Setup = [&](RDGBuilder& graph) {
-        const auto a = graph.CreateBuffer(RDGDynamicBufferDescriptor{1024 * 1024, BufferUse::CBuffer},
+        const auto a = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{1024 * 1024, BufferUse::CBuffer},
                                           RDGUploadSource::Generated(1024 * 1024, Generator{&layouts, &writes}, +[](const Generator& data, RDGUploadWriteContext& write) noexcept {
                     ++*data.Writes;
                     EXPECT_EQ(write.Bytes.size(), 80u);
                     std::fill(write.Bytes.begin(), write.Bytes.end(), byte{42});
                     return true; }, +[](Generator& data, RDGUploadPrepareContext&) noexcept { ++*data.Layouts; return uint64_t{80}; }));
         array<byte, 16> bytes{};
-        const auto b = graph.CreateBuffer(RDGDynamicBufferDescriptor{16, BufferUse::Vertex}, RDGUploadSource::SnapshotBytes(bytes));
+        const auto b = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{16, BufferUse::Vertex}, RDGUploadSource::SnapshotBytes(bytes));
         const auto color = graph.CreateTexture(ColorDescriptor());
         struct Data {
             RDGBufferHandle A, B;
@@ -2669,18 +2680,19 @@ TEST_F(RDGExecutionTest, ActualDynamicSizeReservesPaddingAndSharesPhysicalReadSt
 
 TEST_F(RDGExecutionTest, UploadCommandsAndCopyOnlySlicesShareStagingPage) {
     auto& slot = Scheduler->BeginFrame();
-    Device->Capabilities.Detail.BufferCopyOffsetAlignment = 4;
+    Device->Capabilities.Limits.BufferCopyOffsetAlignment = 4;
+    Device->Capabilities.Memory.HostVisibleDeviceLocalBytes = 4096;
     auto constraints = Context.GetRDGConstraints();
     constraints.BufferCopyAlignment = 6;
     constraints.TexturePlacementAlignment = 16;
     RDGBuilder graph{slot, constraints};
     const array<byte, 4> bytes{byte{42}};
-    const auto dynamic = [&](BufferUses usage, uint64_t alignment = 1) {
-        return graph.CreateBuffer(RDGDynamicBufferDescriptor{bytes.size(), usage, alignment}, RDGUploadSource::BorrowedBytes(bytes));
+    const auto dynamic = [&](BufferUses usage, uint64_t alignment = 1, DynamicBufferResidency residency = DynamicBufferResidency::PreferDevice) {
+        return graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{bytes.size(), usage, alignment, residency}, RDGUploadSource::BorrowedBytes(bytes));
     };
     graph.MarkOutput(dynamic(BufferUse::CopySource));
     const auto copy = dynamic(BufferUse::CopySource, 8);
-    const auto vertex = dynamic(BufferUse::Vertex | BufferUse::CopySource);
+    const auto vertex = dynamic(BufferUse::Vertex | BufferUse::CopySource, 1, DynamicBufferResidency::HostOnly);
     const auto constants = dynamic(BufferUse::CBuffer | BufferUse::CopySource);
     array<RDGBufferSlice, 3> slices{};
     struct Sources {
@@ -2704,7 +2716,7 @@ TEST_F(RDGExecutionTest, UploadCommandsAndCopyOnlySlicesShareStagingPage) {
 
     auto compiled = graph.Compile();
     ASSERT_TRUE(compiled);
-    ASSERT_TRUE(compiled->Prepare(slot, Pool, Uploads));
+    ASSERT_TRUE(compiled->Prepare(slot, Pool, Staging, Uploads));
     auto* command = slot.AcquireCommandBuffer().Unwrap();
     command->Begin();
     ASSERT_TRUE(compiled->Record(*command));
@@ -2718,7 +2730,10 @@ TEST_F(RDGExecutionTest, UploadCommandsAndCopyOnlySlicesShareStagingPage) {
     EXPECT_EQ(Trace.LastBufferCopySource.Offset % 12, 0u);
     EXPECT_EQ(Trace.LastTextureCopy.Source, slices[0].Buffer.Get());
     EXPECT_EQ(Trace.LastTextureCopy.Region.SourceOffset % 16, 0u);
-    EXPECT_EQ(slices[1].Buffer, slices[2].Buffer);
+    EXPECT_EQ(slices[0].Buffer->GetDesc().Memory, MemoryType::HostUpload);
+    EXPECT_EQ(slices[1].Buffer->GetDesc().Memory, MemoryType::HostUpload);
+    EXPECT_EQ(slices[2].Buffer->GetDesc().Memory, MemoryType::DeviceUpload);
+    EXPECT_NE(slices[1].Buffer, slices[2].Buffer);
     EXPECT_NE(slices[0].Buffer, slices[1].Buffer);
     EXPECT_TRUE(slices[1].Buffer->GetDesc().Usage.HasFlag(BufferUse::CBuffer | BufferUse::Vertex));
     Scheduler->WaitIdle();
@@ -2732,10 +2747,10 @@ TEST_F(RDGExecutionTest, StagingRespectsGraphSizeLimitForDynamicBuffersAndPadded
     const array<byte, 12> bytes{};
     {
         RDGBuilder graph{slot, constraints};
-        graph.MarkOutput(graph.CreateBuffer(RDGDynamicBufferDescriptor{bytes.size(), BufferUse::CopySource}, RDGUploadSource::BorrowedBytes(bytes)));
+        graph.MarkOutput(graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{bytes.size(), BufferUse::CopySource}, RDGUploadSource::BorrowedBytes(bytes)));
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        EXPECT_FALSE(compiled->Prepare(slot, Pool, Uploads));
+        EXPECT_FALSE(compiled->Prepare(slot, Pool, Staging, Uploads));
     }
     {
         RDGBuilder graph{slot, constraints};
@@ -2746,15 +2761,15 @@ TEST_F(RDGExecutionTest, StagingRespectsGraphSizeLimitForDynamicBuffersAndPadded
         graph.MarkOutput(image);
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        EXPECT_FALSE(compiled->Prepare(slot, Pool, Uploads));
+        EXPECT_FALSE(compiled->Prepare(slot, Pool, Staging, Uploads));
     }
-    EXPECT_EQ(Uploads.GetCapacity(), 0u);
+    EXPECT_EQ(Uploads.GetCapacity() + Staging.GetCapacity(), 0u);
     Scheduler->WaitIdle();
 }
 
 TEST_F(RDGExecutionTest, ZeroDynamicSliceKeepsRasterClearWithoutAllocatingBuffer) {
     Setup = [&](RDGBuilder& graph) {
-        const auto instances = graph.CreateBuffer(RDGDynamicBufferDescriptor{4096, BufferUse::Vertex},
+        const auto instances = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{4096, BufferUse::Vertex},
                                                   RDGUploadSource::Generated(4096, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext&) noexcept { ADD_FAILURE(); return false; }, +[](uint32_t&, RDGUploadPrepareContext&) noexcept { return uint64_t{0}; }));
         const auto color = graph.CreateTexture(ColorDescriptor());
         graph.AddRasterPass("empty", instances, +[](const RDGBufferHandle& handle, RDGRasterPassContext& ctx) noexcept {
@@ -2971,20 +2986,22 @@ TEST(RDGPersistentState, AbandonedRecordingKeepsCreationStateUntilLaterSubmissio
     device->Capabilities.Limits.MaxTextureArrayLayers = 2048;
     DeviceContext context{device, &device->Queue};
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64};
+    StagingBufferPool staging{*device, 64};
+    DynamicBufferArena uploads{*device, 64};
     auto texture = GpuTexture::Create(*device, {.Width = 2, .Height = 2, .Format = TextureFormat::RGBA8_UNORM}).Unwrap();
     auto scheduler = FrameScheduler::Create(context, make_unique<CallbackPipeline>(), 1).Unwrap();
     for (bool submit : {false, true}) {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot};
         const auto image = graph.ImportPersistentOwned(texture);
         graph.AddCopyPass("initialize", image, +[](const RDGTextureHandle&, RDGCopyPassContext&) noexcept { return true; }).WriteTexture(image);
         graph.MarkOutput(image);
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
         EXPECT_EQ(texture->GetSubmittedState(), TextureState::Undefined);
         auto* command = slot.AcquireCommandBuffer().Unwrap();
         command->Begin();
@@ -3005,21 +3022,23 @@ TEST(RDGTransientPool, OnlySubmittedGraphsPublishPoolAndPageStates) {
     auto device = make_shared<ProbeDevice>(trace);
     DeviceContext context{device, &device->Queue};
     RDGTransientResourcePool pool{*device};
-    UploadArena uploads{*device, 64};
+    StagingBufferPool staging{*device, 64};
+    DynamicBufferArena uploads{*device, 64};
     auto scheduler = FrameScheduler::Create(context, make_unique<CallbackPipeline>(), 1).Unwrap();
     const BufferDescriptor desc{.Size = 4, .Usage = BufferUse::CopyDestination};
     const array<byte, 4> bytes{byte{42}};
     for (bool submit : {false, true}) {
         auto& slot = scheduler->BeginFrame();
         pool.BeginFrame();
-        uploads.Reset();
+        staging.BeginFrame();
+        uploads.BeginFrame();
         RDGBuilder graph{slot};
-        const auto dst = graph.CreateBuffer(desc);
+        const auto dst = graph.CreateBuffer({desc.Size, desc.Usage, desc.Hints});
         graph.UploadBuffer(dst, 0, RDGUploadSource::BorrowedBytes(bytes));
         graph.MarkOutput(dst);
         auto compiled = graph.Compile();
         ASSERT_TRUE(compiled);
-        ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+        ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
         auto command = slot.AcquireCommandBuffer().Unwrap();
         command->Begin();
         ASSERT_TRUE(compiled->Record(*command));
@@ -3032,6 +3051,7 @@ TEST(RDGTransientPool, OnlySubmittedGraphsPublishPoolAndPageStates) {
         pool.BeginFrame();
         EXPECT_EQ(pool.AcquireBuffer(desc).LastState, submit ? BufferState::CopyDestination : BufferState::Undefined);
         vector<ResourceBarrierDescriptor> barriers;
+        staging.AppendReadBarriers(barriers);
         uploads.AppendReadBarriers(barriers);
         ASSERT_FALSE(barriers.empty());
         EXPECT_EQ(std::get<BarrierBufferDescriptor>(barriers[0]).Before, submit ? BufferState::CopySource : BufferState::HostWrite);
@@ -3040,7 +3060,7 @@ TEST(RDGTransientPool, OnlySubmittedGraphsPublishPoolAndPageStates) {
 
 TEST_F(RDGExecutionTest, FailedWriterSkipsPassPrepareAndRecord) {
     Setup = [&](RDGBuilder& graph) {
-        const auto buffer = graph.CreateBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource},
+        const auto buffer = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{16, BufferUse::CopySource},
                                                RDGUploadSource::Generated(16, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext&) noexcept { return false; }));
         graph.AddCopyPass("must not run", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { ADD_FAILURE(); return true; }, +[](uint32_t&, RDGPrepareContext&) noexcept { ADD_FAILURE(); return true; }).ReadBuffer(buffer).NeverCull();
     };
@@ -3055,7 +3075,7 @@ TEST(RDG, EmptyUploadDoesNotInitializeFixedBuffer) {
     FakeGpu gpu;
     auto scheduler = FrameScheduler::Create(gpu.Context, make_unique<CallbackPipeline>(), 1).Unwrap();
     RDGBuilder graph{scheduler->BeginFrame()};
-    const auto target = graph.CreateBuffer(BufferDescriptor{.Size = 16, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
+    const auto target = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 16, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
     EXPECT_FALSE(graph.UploadBuffer(target, 0, RDGUploadSource::BorrowedBytes({})).IsValid());
     graph.AddCopyPass("read", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).ReadBuffer(target).NeverCull();
     EXPECT_FALSE(graph.Compile());
@@ -3091,7 +3111,7 @@ TEST(RDG, FrameResetReleasesOwnersAfterAbandonedFailedAndCulledGraphs) {
             const auto target = graph.ImportPersistentOwned(gpuOwner);
             graph.UploadBuffer(target, 0, RDGUploadSource::Generated(4, std::move(sourceOwner), +[](const shared_ptr<uint32_t>&, RDGUploadWriteContext&) noexcept { ADD_FAILURE(); return false; }));
             if (mode == 1) {
-                graph.CreateBuffer(BufferDescriptor{.Size = 0});
+                graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 0});
                 EXPECT_FALSE(graph.Compile());
             } else if (mode == 2) {
                 EXPECT_TRUE(graph.Compile());
@@ -3122,7 +3142,7 @@ TEST_F(RDGExecutionTest, ReusedSlotDoesNotRetainPreviousGraphWork) {
                 return true;
             }).NeverCull();
             for (uint32_t i = 0; i < count; ++i) {
-                const auto target = graph.CreateBuffer(BufferDescriptor{.Size = 4, .Usage = BufferUse::CopyDestination});
+                const auto target = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 4, .Usage = BufferUse::CopyDestination});
                 auto source = i % 2 ? RDGUploadSource::SnapshotBytes(bytes) : RDGUploadSource::BorrowedBytes(bytes);
                 graph.UploadBuffer(target, 0, std::move(source));
                 graph.MarkOutput(target);
@@ -3223,13 +3243,13 @@ TEST(RDG, DefaultBuilderInheritsDeviceMaxBufferSizeConstraint) {
         bool ok = false;
         if (explicitConstraints) {
             RDGBuilder graph{slot, gpu.Context.GetRDGConstraints()};
-            const auto buf = graph.CreateBuffer(BufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
+            const auto buf = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
             graph.AddCopyPass("write", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).WriteBuffer(buf);
             graph.MarkOutput(buf);
             ok = graph.Compile().HasValue();
         } else {
             RDGBuilder graph{slot};
-            const auto buf = graph.CreateBuffer(BufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
+            const auto buf = graph.CreateBuffer(RDGTransientBufferDescriptor{.Size = size, .Usage = BufferUse::CopyDestination | BufferUse::CopySource});
             graph.AddCopyPass("write", uint32_t{0}, +[](const uint32_t&, RDGCopyPassContext&) noexcept { return true; }).WriteBuffer(buf);
             graph.MarkOutput(buf);
             ok = graph.Compile().HasValue();
@@ -3244,16 +3264,16 @@ TEST(RDG, DefaultBuilderInheritsDeviceMaxBufferSizeConstraint) {
 }
 
 TEST_F(RDGExecutionTest, DynamicIndirectBufferAlignsToFourBytesAfterOneByteVertexSlice) {
-    Device->Capabilities.Detail.BufferCopyOffsetAlignment = 1;
+    Device->Capabilities.Limits.BufferCopyOffsetAlignment = 1;
     const array<byte, 1> vertexByte{byte{0x11}};
     const array<byte, sizeof(DrawIndexedIndirectArguments)> indirectBytes{};
     RDGBufferSlice vertexSlice{}, indirectSlice{};
     Setup = [&](RDGBuilder& graph) {
         const auto color = graph.CreateTexture(ColorDescriptor());
-        const auto vertexBuf = graph.CreateBuffer(
+        const auto vertexBuf = graph.CreateDynamicBuffer(
             RDGDynamicBufferDescriptor{.MaxSize = vertexByte.size(), .Usage = BufferUse::Vertex, .Alignment = 1},
             RDGUploadSource::BorrowedBytes(vertexByte));
-        const auto indirectBuf = graph.CreateBuffer(
+        const auto indirectBuf = graph.CreateDynamicBuffer(
             RDGDynamicBufferDescriptor{.MaxSize = indirectBytes.size(), .Usage = BufferUse::Indirect, .Alignment = 1},
             RDGUploadSource::BorrowedBytes(indirectBytes));
         struct Capture {
@@ -3296,7 +3316,7 @@ TEST(RDG, SteadyStatePassesAndInlineGeneratorUseZeroUpstreamAllocationsAndReturn
     const auto buildSmallFrame = [&](FrameSlot& slot) {
         RDGBuilder graph{slot};
         const auto color = graph.CreateTexture(ColorDescriptor());
-        const auto buf = graph.CreateBuffer(
+        const auto buf = graph.CreateDynamicBuffer(
             RDGDynamicBufferDescriptor{.MaxSize = 16, .Usage = BufferUse::CBuffer},
             RDGUploadSource::Generated(16, uint64_t{0x12345678ULL},
                                        +[](const uint64_t& value, RDGUploadWriteContext& ctx) noexcept {
@@ -3516,9 +3536,9 @@ TEST_F(RDGExecutionTest, GeneratedSourceSupportsSboFallbackAndDestroysExactlyOnc
     {
         auto& slot = Scheduler->BeginFrame();
         RDGBuilder badGraph{slot};
-        const auto target = badGraph.CreateBuffer(BufferDescriptor{.Size = 4, .Usage = BufferUse::CopyDestination});
+        const auto target = badGraph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 4, .Usage = BufferUse::CopyDestination});
         badGraph.UploadBuffer(target, 0, RDGUploadSource::Generated(4, InlineContext{505u, failedInlineDestroyed}, +[](const InlineContext&, RDGUploadWriteContext&) noexcept { return true; }));
-        badGraph.CreateBuffer(BufferDescriptor{.Size = 0});
+        badGraph.CreateBuffer(RDGTransientBufferDescriptor{.Size = 0});
         EXPECT_FALSE(badGraph.Compile());
         EXPECT_EQ(failedInlineDestroyed, 0u);
     }
@@ -3651,7 +3671,7 @@ TEST(RDGTransientPool, EvictsUnusedResourcesAndViewsAfterEightFramesAndBucketsBu
     // 1. Default FakeDevice has MaxBufferSize == 0 (unlimited): 200 B and 240 B reuse the same 256 B bucket.
     ASSERT_EQ(device.GetCapabilities().Limits.MaxBufferSize, 0u);
     pool.BeginFrame();
-    const auto buf200 = pool.AcquireBuffer({.Size = 200, .Memory = MemoryType::Device, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
+    const auto buf200 = pool.AcquireBuffer({.Size = 200, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
     ASSERT_TRUE(buf200.Buffer);
     EXPECT_EQ(buf200.Buffer->GetDesc().Size, 256u);
     const auto tex = pool.AcquireTexture(ColorDescriptor());
@@ -3660,7 +3680,7 @@ TEST(RDGTransientPool, EvictsUnusedResourcesAndViewsAfterEightFramesAndBucketsBu
     ASSERT_TRUE(view);
 
     pool.BeginFrame();
-    const auto buf240 = pool.AcquireBuffer({.Size = 240, .Memory = MemoryType::Device, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
+    const auto buf240 = pool.AcquireBuffer({.Size = 240, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::CopyDestination | BufferUse::Resource});
     ASSERT_TRUE(buf240.Buffer);
     EXPECT_EQ(buf240.Buffer.Get(), buf200.Buffer.Get());
     // Texture was NOT re-acquired in this frame (1st unused frame).
@@ -3693,7 +3713,7 @@ TEST(RDGTransientPool, EvictsUnusedResourcesAndViewsAfterEightFramesAndBucketsBu
     device.RejectSizeAbove = k514MiB;
     device.CreatedBufferSizes.clear();
     pool.BeginFrame();
-    const auto big = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    const auto big = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::Resource});
     ASSERT_TRUE(big.Buffer);
     EXPECT_EQ(big.Buffer->GetDesc().Size, k513MiB);
     ASSERT_EQ(device.CreatedBufferSizes.size(), 2u);
@@ -3702,10 +3722,10 @@ TEST(RDGTransientPool, EvictsUnusedResourcesAndViewsAfterEightFramesAndBucketsBu
 
     // Reuses exact 513 MiB buffer on next frame, but does NOT reuse it for 514 MiB request.
     pool.BeginFrame();
-    const auto bigReuse = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    const auto bigReuse = pool.AcquireBuffer({.Size = k513MiB, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::Resource});
     EXPECT_EQ(bigReuse.Buffer.Get(), big.Buffer.Get());
     pool.BeginFrame();
-    const auto bigger = pool.AcquireBuffer({.Size = k514MiB, .Memory = MemoryType::Device, .Usage = BufferUse::Resource});
+    const auto bigger = pool.AcquireBuffer({.Size = k514MiB, .Memory = MemoryType::DeviceLocal, .Usage = BufferUse::Resource});
     ASSERT_TRUE(bigger.Buffer);
     EXPECT_NE(bigger.Buffer.Get(), big.Buffer.Get());
     EXPECT_EQ(bigger.Buffer->GetDesc().Size, k514MiB);
@@ -3727,14 +3747,15 @@ TEST(RDG, IndirectGeneratorPrepareLayoutFailureStopsPrepareBeforeWrite) {
         DeviceContext context{device, &device->Queue};
         auto scheduler = FrameScheduler::Create(context, make_unique<CallbackPipeline>(), 1).Unwrap();
         RDGTransientResourcePool pool{*device};
-        UploadArena uploads{*device, 256};
+        StagingBufferPool staging{*device, 256};
+        DynamicBufferArena uploads{*device, 256};
 
         uint32_t writeCalls = 0;
         auto& slot = scheduler->BeginFrame();
         RDGBuilder graph{slot};
         const auto color = graph.CreateTexture(ColorDescriptor());
         const uint64_t maxBytes = sizeof(DrawIndexedIndirectArguments);
-        const auto argsBuf = graph.CreateBuffer(
+        const auto argsBuf = graph.CreateDynamicBuffer(
             RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
             RDGUploadSource::Generated(
                 maxBytes,
@@ -3760,8 +3781,9 @@ TEST(RDG, IndirectGeneratorPrepareLayoutFailureStopsPrepareBeforeWrite) {
 
         slot.GetPassDrawList(passId).VisibleCommands.push_back(badVisible);
         pool.BeginFrame();
-        uploads.Reset();
-        EXPECT_FALSE(compiled->Prepare(slot, pool, uploads));
+        staging.BeginFrame();
+        uploads.BeginFrame();
+        EXPECT_FALSE(compiled->Prepare(slot, pool, staging, uploads));
         EXPECT_EQ(writeCalls, 0u);
         scheduler->WaitIdle();
     };
@@ -3817,7 +3839,7 @@ TEST(RDG, DeviceLevelIndirectFallbackSkipsIndirectBuffersWhenUnsupportedOrZeroMa
             } else {
                 IndirectArgsCreated = true;
                 const uint64_t maxBytes = 4 * sizeof(DrawIndexedIndirectArguments);  // 80 B > MaxBufferSize=64
-                const auto args = graph.CreateBuffer(
+                const auto args = graph.CreateDynamicBuffer(
                     RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
                     RDGUploadSource::Generated(maxBytes, uint32_t{0}, +[](const uint32_t&, RDGUploadWriteContext&) noexcept { return true; }));
                 graph.AddRasterPass("indirect", uint32_t{0}, +[](const uint32_t&, RDGRasterPassContext&) noexcept { return true; })
@@ -3885,7 +3907,7 @@ TEST(RDG, BatchLevelIndirectFallbackSplitsZeroAndNonZeroFirstInstanceBatches) {
         }
         void SetupGraph(RDGBuilder& graph, FrameSlot& slot) noexcept override {
             const uint64_t maxBytes = 4 * sizeof(DrawIndexedIndirectArguments);
-            const auto args = graph.CreateBuffer(
+            const auto args = graph.CreateDynamicBuffer(
                 RDGDynamicBufferDescriptor{.MaxSize = maxBytes, .Usage = BufferUse::Indirect},
                 RDGUploadSource::Generated(
                     maxBytes,
@@ -4186,7 +4208,8 @@ TEST(RDG, Sparse1024CopyPassesReadingHighIndexBufferDoNotAllocateBuckets) {
         auto device = make_shared<ProbeDevice>(trace);
         DeviceContext context{device, &device->Queue};
         RDGTransientResourcePool pool{*device};
-        UploadArena uploads{*device, 64 * 1024};
+        StagingBufferPool staging{*device, 64 * 1024};
+        DynamicBufferArena uploads{*device, 64 * 1024};
         HeapMemoryResource heap;
         struct PeakProbe final : public std::pmr::memory_resource {
             explicit PeakProbe(std::pmr::memory_resource& upstream) noexcept : Upstream(upstream) {}
@@ -4227,7 +4250,7 @@ TEST(RDG, Sparse1024CopyPassesReadingHighIndexBufferDoNotAllocateBuckets) {
             }
             auto compiled = graph.Compile();
             ASSERT_TRUE(compiled);
-            ASSERT_TRUE(compiled->Prepare(slot, pool, uploads));
+            ASSERT_TRUE(compiled->Prepare(slot, pool, staging, uploads));
             auto cmd = slot.AcquireCommandBuffer();
             ASSERT_TRUE(cmd);
             cmd->Begin();
