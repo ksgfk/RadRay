@@ -212,19 +212,18 @@ TEST(MappedBufferPools, ClearAndDestructionReleasePages) {
     EXPECT_EQ(probe.LiveBuffers, 0u);
 }
 
-TEST(MappedBufferPools, DeviceBudgetGatesNewPagesAndIdlePagesExpireAfterEightUnusedRecycles) {
+TEST(MappedBufferPools, DeviceBudgetGatesNewPagesButAllowsReuse) {
     MappingProbe probe;
     ObservedDevice device{probe};
     device.Capabilities.Memory.HostVisibleDeviceLocalBytes = 4096;
     device.Budget.DeviceUpload = {1000, 750};
     DynamicBufferArena arena{device, 100};
-    StagingBufferPool staging{device, 100};
     const auto allocate = [&](DynamicBufferResidency residency) {
         return arena.Allocate(50, 1, 50, BufferState::Vertex, residency);
     };
     auto local = allocate(DynamicBufferResidency::PreferDevice);
     auto stream = allocate(DynamicBufferResidency::HostOnly);
-    ASSERT_TRUE(local && stream && staging.Allocate(100, 1));
+    ASSERT_TRUE(local && stream);
     EXPECT_EQ(local->Buffer->GetDesc().Memory, MemoryType::DeviceUpload);
     EXPECT_EQ(stream->Buffer->GetDesc().Memory, MemoryType::HostUpload);
     ++device.Budget.DeviceUpload.UsageBytes;
@@ -233,18 +232,59 @@ TEST(MappedBufferPools, DeviceBudgetGatesNewPagesAndIdlePagesExpireAfterEightUnu
     ASSERT_TRUE(reused && spilled);
     EXPECT_EQ(reused->Buffer, local->Buffer);
     EXPECT_EQ(spilled->Buffer, stream->Buffer);
+    arena.BeginFrame();
     for (int i = 0; i < 8; ++i) {
         arena.BeginFrame();
-        staging.BeginFrame();
-        ASSERT_EQ(arena.GetCapacity(), 200u);
-        ASSERT_EQ(staging.GetCapacity(), 100u);
-        ASSERT_TRUE(allocate(DynamicBufferResidency::HostOnly));
     }
+    const auto afterIdle = allocate(DynamicBufferResidency::PreferDevice);
+    ASSERT_TRUE(afterIdle);
+    EXPECT_EQ(afterIdle->Buffer, local->Buffer);
+}
+
+TEST(MappedBufferPools, EighthIdleRecycleKeepsOneStandardPagePerDynamicMemoryType) {
+    MappingProbe probe;
+    ObservedDevice device{probe};
+    device.Capabilities.Memory.HostVisibleDeviceLocalBytes = 4096;
+    device.Capabilities.Limits.MaxBufferSize = 64;
+    DynamicBufferArena arena{device, 128};
+    StagingBufferPool staging{device, 128};
+    for (auto residency : {DynamicBufferResidency::HostOnly, DynamicBufferResidency::PreferDevice}) {
+        ASSERT_TRUE(arena.Allocate(64, 1, 64, BufferState::Vertex, residency));
+        ASSERT_TRUE(arena.Allocate(64, 1, 64, BufferState::Vertex, residency));
+    }
+    ASSERT_TRUE(staging.Allocate(64, 1));
     arena.BeginFrame();
     staging.BeginFrame();
-    EXPECT_EQ(arena.GetCapacity(), 100u);
+    for (int i = 0; i < 7; ++i) {
+        arena.BeginFrame();
+        staging.BeginFrame();
+    }
+    EXPECT_EQ(arena.GetCapacity(), 4u * 64);
+    EXPECT_EQ(staging.GetCapacity(), 64u);
+    arena.BeginFrame();
+    staging.BeginFrame();
+    EXPECT_EQ(arena.GetCapacity(), 2u * 64);
     EXPECT_EQ(staging.GetCapacity(), 0u);
-    EXPECT_EQ(probe.LiveBuffers, 1u);
+    device.Requests.clear();
+    const auto host = arena.Allocate(64, 1, 64, BufferState::Vertex, DynamicBufferResidency::HostOnly);
+    const auto local = arena.Allocate(64, 1, 64, BufferState::Vertex, DynamicBufferResidency::PreferDevice);
+    ASSERT_TRUE(host && local);
+    EXPECT_EQ(host->Buffer->GetDesc().Memory, MemoryType::HostUpload);
+    EXPECT_EQ(local->Buffer->GetDesc().Memory, MemoryType::DeviceUpload);
+    EXPECT_TRUE(device.Requests.empty());
+}
+
+TEST(MappedBufferPools, OversizedOnlyPageExpiresWithoutCreatingAStandardPage) {
+    MappingProbe probe;
+    ObservedDevice device{probe};
+    DynamicBufferArena arena{device, 64};
+    ASSERT_TRUE(arena.Allocate(4, 1, 128, BufferState::CBuffer));
+    arena.BeginFrame();
+    for (int i = 0; i < 7; ++i) arena.BeginFrame();
+    EXPECT_EQ(arena.GetCapacity(), 128u);
+    arena.BeginFrame();
+    EXPECT_EQ(arena.GetCapacity(), 0u);
+    EXPECT_EQ(device.Requests, (vector<MemoryType>{MemoryType::HostUpload}));
 }
 
 TEST(MappedBufferPools, FailedDeviceAllocationRetriesOnlyWithFallbackPolicy) {

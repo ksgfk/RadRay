@@ -3,7 +3,7 @@
 namespace radray {
 
 StagingBufferPool::StagingBufferPool(gpu::Device& device, uint64_t pageSize) noexcept
-    : MappedBufferPages(device, pageSize, gpu::BufferUse::MapWrite | gpu::BufferUse::CopySource) {}
+    : MappedBufferPages(device, pageSize, gpu::BufferUse::MapWrite | gpu::BufferUse::CopySource, IdlePagePolicy::ReleaseAll) {}
 
 std::optional<UploadAllocation> StagingBufferPool::Allocate(uint64_t size, uint64_t alignment) {
     return AllocateInDomain(gpu::MemoryType::HostUpload, size, alignment, size, gpu::BufferState::CopySource);

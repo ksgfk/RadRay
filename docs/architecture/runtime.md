@@ -309,7 +309,10 @@ Pipeline 每槽持有独立的 `StagingBufferPool` 和 `DynamicBufferArena`，�
 
 `DynamicBufferResidency::HostOnly` 只使用 HostUpload 页。默认 PreferDevice 优先复用现有 DeviceUpload 页，空间不足时检查新页容量对应的预算。超限或创建失败时从 HostUpload 页分配。分配不跨页，同帧切片地址稳定。Prepare 按物理页集中刷新修改范围并汇总 GPU 只读状态，Submit 后发布实际终态。
 
-槽完成 GPU 等待、命令存储重置、帧内对象和参数绑定清理后，两个池分别调用 `BeginFrame()`。连续八次槽回收均未使用的页会被释放。`GetCapacity()` 返回当前保留的物理页总容量。引用动态切片的参数集须通过槽的 TransientParameterSetPool 获取，或由调用方在槽回收时解除旧绑定、使用前重新绑定。释放页前须先释放关联的 TypedBuffer 视图。
+槽完成 GPU 等待、命令存储重置、帧内对象和参数绑定清理后，两个池分别调用 `BeginFrame()`。
+每个槽的 `DynamicBufferArena` 按实际分配的 `MemoryType` 保留首张标准大小页，供该域下次分配时复用，直到 `Clear()` 或析构。标准大小取配置页大小，并受设备非零 `MaxBufferSize` 限制。仅分配过超大页的域不会补建标准页。
+其余动态页和全部 Staging 页在同一槽连续第八次空闲回收时释放。`GetCapacity()` 返回当前保留的物理页总容量。
+引用动态切片的参数集须通过槽的 TransientParameterSetPool 获取，或由调用方在槽回收时解除旧绑定、使用前重新绑定。释放页前须先释放关联的 TypedBuffer 视图。
 
 CPU 验证在 `test_rdg.cpp`、`test_mapped_buffer_pools.cpp`；GPU 验证在 `test_rdg_upload_gpu.cpp`，
 覆盖上传时序、部分更新、源 pitch、普通 CopyPass 纹理初始化、切片偏移、参数组复用和槽轮转。

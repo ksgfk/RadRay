@@ -46,7 +46,8 @@ public:
     gpu::Device& GetDevice() const noexcept;
 
 protected:
-    MappedBufferPages(gpu::Device& device, uint64_t pageSize, gpu::BufferUses usage) noexcept;
+    enum class IdlePagePolicy : uint8_t { ReleaseAll, KeepOneStandardPagePerMemoryType };
+    MappedBufferPages(gpu::Device& device, uint64_t pageSize, gpu::BufferUses usage, IdlePagePolicy idlePagePolicy) noexcept;
     ~MappedBufferPages() noexcept = default;
     std::optional<UploadAllocation> AllocateInDomain(gpu::MemoryType memory, uint64_t size, uint64_t alignment, uint64_t reservedSize, gpu::BufferStates reads);
 
@@ -56,6 +57,7 @@ private:
         byte* Data;
         uint64_t Capacity;
         gpu::MemoryType Memory;
+        bool IsBasePage;
         uint8_t IdleFrames{0};
         uint64_t Cursor{0};
         uint64_t DirtyBegin{0}, DirtyEnd{0};
@@ -65,6 +67,7 @@ private:
     gpu::Device& _device;
     uint64_t _pageSize;
     gpu::BufferUses _usage;
+    IdlePagePolicy _idlePagePolicy;
     vector<Page> _pages;
 };
 

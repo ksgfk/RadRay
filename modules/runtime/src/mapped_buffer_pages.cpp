@@ -8,12 +8,12 @@
 
 namespace radray::detail {
 
-MappedBufferPages::MappedBufferPages(gpu::Device& device, uint64_t pageSize, gpu::BufferUses usage) noexcept
-    : _device(device), _pageSize(pageSize), _usage(usage) {}
+MappedBufferPages::MappedBufferPages(gpu::Device& device, uint64_t pageSize, gpu::BufferUses usage, IdlePagePolicy idlePagePolicy) noexcept
+    : _device(device), _pageSize(pageSize), _usage(usage), _idlePagePolicy(idlePagePolicy) {}
 
 void MappedBufferPages::BeginFrame() noexcept {
     for (auto& page : _pages) {
-        page.IdleFrames = page.Cursor ? 0 : static_cast<uint8_t>(page.IdleFrames + 1);
+        page.IdleFrames = (page.Cursor || page.IsBasePage) ? 0 : static_cast<uint8_t>(page.IdleFrames + 1);
         page.Cursor = page.DirtyBegin = page.DirtyEnd = 0;
         page.Reads = {};
     }
@@ -42,20 +42,24 @@ std::optional<UploadAllocation> MappedBufferPages::AllocateInDomain(gpu::MemoryT
         page.Reads |= reads;
         return UploadAllocation{page.Buffer.get(), page.Data + offset, offset, size, reservedSize};
     };
+    bool hasBasePage = false;
     for (auto& page : _pages) {
         if (page.Memory != memory) continue;
         if (auto result = allocate(page)) return result;
+        hasBasePage |= page.IsBasePage;
     }
     const auto maximum = _device.GetCapabilities().Limits.MaxBufferSize;
     if (maximum && reservedSize > maximum) return std::nullopt;
-    const auto capacity = std::max(maximum ? std::min(_pageSize, maximum) : _pageSize, reservedSize);
+    const auto standardCapacity = maximum ? std::min(_pageSize, maximum) : _pageSize;
+    const auto capacity = std::max(standardCapacity, reservedSize);
     if (!capacity || capacity > std::numeric_limits<size_t>::max()) return std::nullopt;
     if (memory == gpu::MemoryType::DeviceUpload && !CanAllocateDeviceUpload(_device, capacity)) return std::nullopt;
     auto buffer = _device.CreateBuffer({.Size = capacity, .Memory = memory, .Usage = _usage});
     if (!buffer) return std::nullopt;
     auto* data = static_cast<byte*>(buffer->GetMappedData().Get());
     if (!data) return std::nullopt;
-    _pages.push_back({buffer.Release(), data, capacity, memory});
+    const bool isBasePage = _idlePagePolicy == IdlePagePolicy::KeepOneStandardPagePerMemoryType && !hasBasePage && capacity == standardCapacity;
+    _pages.push_back({buffer.Release(), data, capacity, memory, isBasePage});
     return allocate(_pages.back());
 }
 
