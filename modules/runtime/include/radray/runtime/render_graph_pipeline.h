@@ -2,6 +2,8 @@
 
 // 固定的 Extract/Prepare/Record/Submit 执行顺序见 docs/architecture/runtime.md。
 
+#include <cstdint>
+
 #include <radray/gpu/types.h>
 #include <radray/runtime/frame_slot.h>
 #include <radray/runtime/mesh_draw_command.h>
@@ -38,6 +40,15 @@ public:
     void Record(FrameSlot& slot) noexcept final;
     bool Submit(FrameSlot& slot) noexcept final;
     void OnSlotRetired(FrameSlot& slot, bool deviceLost) noexcept final;
+    struct UploadPageUsage {
+        uint64_t StagingUsed{};
+        uint64_t StagingCapacity{};
+        uint64_t DynamicUsed{};
+        uint64_t DynamicCapacity{};
+    };
+    // 查询本管线对应槽的上传页。Prepare 重置游标，容量可跨帧保留。
+    UploadPageUsage GetUploadPageUsage(const FrameSlot& slot) const noexcept;
+
     // BeginFrame 后设置，仅应用于本次提交。
     void SetGpuProfiling(FrameSlot& slot, RDGGpuProfilingMode mode, uint64_t userSequence) noexcept;
     // 快照属于已完成的槽，有效至该槽下一次 Prepare。

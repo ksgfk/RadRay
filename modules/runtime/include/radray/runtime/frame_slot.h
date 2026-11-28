@@ -3,6 +3,7 @@
 // 帧循环与所有权契约见 docs/architecture/runtime.md。
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <memory_resource>
 #include <optional>
@@ -94,6 +95,18 @@ public:
         }
     }
 
+    struct AllocationCounts {
+        uint64_t Calls{};
+        uint64_t Bytes{};
+    };
+    struct MemoryUsage {
+        uint64_t InitialBytes{};
+        AllocationCounts LinearOverflow;
+        AllocationCounts ScratchGrowth;
+    };
+    // 本次槽使用期间的上游申请量。首次分配初始线性缓冲的字节单列，槽回收时清零。
+    MemoryUsage GetMemoryUsage() const noexcept;
+
     // 帧内线性存储，首次访问按需申请初始缓冲；外部容器须在帧对象清理前销毁。
     // 不得 release 此资源；槽回收先析构对象再重置存储，保留初始缓冲；下一帧重新获取资源引用。
     std::pmr::memory_resource& GetMemoryResource();
@@ -134,6 +147,18 @@ private:
         T Value;
     };
 
+    class CountingResource final : public std::pmr::memory_resource {
+    public:
+        explicit CountingResource(std::pmr::memory_resource& upstream) noexcept;
+        AllocationCounts Counts{};
+
+    private:
+        void* do_allocate(size_t bytes, size_t alignment) override;
+        void do_deallocate(void* data, size_t bytes, size_t alignment) override;
+        bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override;
+        std::pmr::memory_resource& _upstream;
+    };
+
     DeviceContext& _device;
     uint64_t _frameId{0};
     unique_ptr<gpu::CommandAllocator> _allocator;
@@ -141,6 +166,9 @@ private:
     vector<unique_ptr<gpu::CommandBuffer>> _commands;
     HeapMemoryResource _memoryHeap;
     std::pmr::memory_resource& _memoryUpstream;
+    CountingResource _linearUpstream{_memoryUpstream};
+    CountingResource _scratchUpstream{_memoryUpstream};
+    uint64_t _initialBytes{};
     std::pmr::unsynchronized_pool_resource _scratchPool;
     const size_t _initialCapacity{128 * 1024};
     Nullable<void*> _initialBuffer{nullptr};

@@ -94,6 +94,11 @@ void RenderGraphFramePipeline::SlotState::PrepareTiming(FrameSlot& slot) {
     QueryCount = count;
 }
 
+RenderGraphFramePipeline::UploadPageUsage RenderGraphFramePipeline::GetUploadPageUsage(const FrameSlot& slot) const noexcept {
+    const auto& state = *_slotStates[slot.GetIndex()];
+    return {state.Staging.GetUsedBytes(), state.Staging.GetCapacity(), state.Dynamic.GetUsedBytes(), state.Dynamic.GetCapacity()};
+}
+
 void RenderGraphFramePipeline::SetGpuProfiling(FrameSlot& slot, RDGGpuProfilingMode mode, uint64_t sequence) noexcept {
     auto& state = *_slotStates.at(slot.GetIndex());
     state.BindFrame(slot);

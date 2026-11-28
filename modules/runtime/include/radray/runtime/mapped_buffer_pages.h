@@ -43,6 +43,8 @@ public:
     // 只能在包含这些页的命令正常提交后调用。
     void CommitSubmittedStates() noexcept;
     uint64_t GetCapacity() const noexcept;
+    // 所有页当前游标之和，包括切片对齐和保留范围产生的填充。
+    uint64_t GetUsedBytes() const noexcept;
     gpu::Device& GetDevice() const noexcept;
 
 protected:

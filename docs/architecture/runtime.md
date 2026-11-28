@@ -107,8 +107,11 @@ FrameScheduler 的调用与析构由宿主串行组织，回调期间禁止重�
 `GetMemoryResource()` 返回线性 resource，供帧对象和 RDG 跨阶段数据使用；
 `GetScratchMemoryResource()` 返回临时 pool，供 Compile／Prepare 的局部工作容器使用。
 线性存储的初始缓冲为 128 KiB，首次使用时分配；回收保留初始缓冲，归还额外块。
-二者只供本槽串行 CPU 阶段使用，不提供并发保证，也不跨槽共享。默认直接使用槽内 `HeapMemoryResource`；
+二者只供本槽串行 CPU 阶段使用，不提供并发保证，也不跨槽共享。两者默认共用槽内 `HeapMemoryResource` 作为上游。
 `FrameScheduler::Create` 可传入自定义 memoryUpstream，借用的上游必须晚于调度器销毁。
+
+`FrameSlot::GetMemoryUsage()` 按本次槽使用计量。首次分配线性初始缓冲时，`InitialBytes` 记录 128 KiB，后续帧复用该缓冲时为零。
+`LinearOverflow` 和 `ScratchGrowth` 分别累计线性额外块和临时 pool 向上游成功申请的次数与字节数。归还内存不会扣减计数，复用已有空间不会增加计数。槽回收时三项清零。
 
 调用方在当前槽 BeginFrame 后至 Submit 返回前，用 `slot.Emplace<T>(args...)` 创建帧内对象。
 构造参数原样转发，对象地址与对齐保持有效直到槽回收，调用方不得手动析构或 delete 返回的对象。
@@ -312,6 +315,7 @@ Pipeline 每槽持有独立的 `StagingBufferPool` 和 `DynamicBufferArena`，�
 槽完成 GPU 等待、命令存储重置、帧内对象和参数绑定清理后，两个池分别调用 `BeginFrame()`。
 每个槽的 `DynamicBufferArena` 按实际分配的 `MemoryType` 保留首张标准大小页，供该域下次分配时复用，直到 `Clear()` 或析构。标准大小取配置页大小，并受设备非零 `MaxBufferSize` 限制。仅分配过超大页的域不会补建标准页。
 其余动态页和全部 Staging 页在同一槽连续第八次空闲回收时释放。`GetCapacity()` 返回当前保留的物理页总容量。
+`RenderGraphFramePipeline::GetUploadPageUsage(slot)` 分别返回本管线指定槽的 Staging 和 Dynamic 用量与容量。每个池的用量是各页分配游标之和，包含切片间的对齐空隙和切片尾部的保留空间。每次 `Prepare` 在分配前重置该槽的页游标，复用的页继续计入容量。
 引用动态切片的参数集须通过槽的 TransientParameterSetPool 获取，或由调用方在槽回收时解除旧绑定、使用前重新绑定。释放页前须先释放关联的 TypedBuffer 视图。
 
 CPU 验证在 `test_rdg.cpp`、`test_mapped_buffer_pools.cpp`；GPU 验证在 `test_rdg_upload_gpu.cpp`，

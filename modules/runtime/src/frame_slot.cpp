@@ -110,7 +110,7 @@ Nullable<unique_ptr<FrameSlot>> FrameSlot::Create(DeviceContext& device, uint32_
 FrameSlot::FrameSlot(DeviceContext& device, uint32_t index, unique_ptr<gpu::CommandAllocator> allocator, Nullable<std::pmr::memory_resource*> memoryUpstream)
     : _device(device), _allocator(std::move(allocator)), _parameterSets(device.GetDevice()),
       _memoryUpstream(memoryUpstream ? *memoryUpstream : _memoryHeap),
-      _scratchPool(std::pmr::pool_options{.max_blocks_per_chunk = 4096, .largest_required_pool_block = 64 * 1024}, &_memoryUpstream), _index(index) {}
+      _scratchPool(std::pmr::pool_options{.max_blocks_per_chunk = 4096, .largest_required_pool_block = 64 * 1024}, &_scratchUpstream), _index(index) {}
 
 FrameSlot::~FrameSlot() noexcept {
     ResetCommandStorage();
@@ -138,12 +138,34 @@ const MeshPassFrameDrawList& FrameSlot::GetPassDrawList(MeshPassId pass) const n
     return _passDrawLists[pass.Value];
 }
 
+FrameSlot::CountingResource::CountingResource(std::pmr::memory_resource& upstream) noexcept : _upstream(upstream) {}
+
+void* FrameSlot::CountingResource::do_allocate(size_t bytes, size_t alignment) {
+    auto* result = _upstream.allocate(bytes, alignment);
+    ++Counts.Calls;
+    Counts.Bytes += bytes;
+    return result;
+}
+
+void FrameSlot::CountingResource::do_deallocate(void* data, size_t bytes, size_t alignment) {
+    _upstream.deallocate(data, bytes, alignment);
+}
+
+bool FrameSlot::CountingResource::do_is_equal(const std::pmr::memory_resource& other) const noexcept {
+    return this == &other;
+}
+
+FrameSlot::MemoryUsage FrameSlot::GetMemoryUsage() const noexcept {
+    return {_initialBytes, _linearUpstream.Counts, _scratchUpstream.Counts};
+}
+
 std::pmr::memory_resource& FrameSlot::GetMemoryResource() {
     if (!_memory) {
         auto* buffer = _memoryUpstream.allocate(_initialCapacity, alignof(std::max_align_t));
         auto cleanup = MakeScopeGuard([&]() noexcept { _memoryUpstream.deallocate(buffer, _initialCapacity, alignof(std::max_align_t)); });
-        _memory.emplace(buffer, _initialCapacity, &_memoryUpstream);
+        _memory.emplace(buffer, _initialCapacity, &_linearUpstream);
         _initialBuffer = buffer;
+        _initialBytes = _initialCapacity;
         cleanup.Dismiss();
     }
     return *_memory;
@@ -194,7 +216,10 @@ void FrameSlot::ResetFrameData() noexcept {
             object->Destroy(object);
         }
     }
-    if (_memory) _memory.emplace(_initialBuffer.Get(), _initialCapacity, &_memoryUpstream);
+    _initialBytes = 0;
+    _linearUpstream.Counts = {};
+    _scratchUpstream.Counts = {};
+    if (_memory) _memory.emplace(_initialBuffer.Get(), _initialCapacity, &_linearUpstream);
 }
 
 MeshPassSortMode MeshPassFrameDrawList::GetSortMode() const noexcept {

@@ -301,6 +301,49 @@ protected:
 TEST_P(BufferUploadGpuTest, OverlapIntermediateConsumerTailAndOwnershipSingleSlot) { VerifyUploads(1); }
 TEST_P(BufferUploadGpuTest, OverlapIntermediateConsumerTailAndOwnershipThreeSlots) { VerifyUploads(3); }
 
+TEST_P(BufferUploadGpuTest, UploadPageUsageTracksEachPoolAndFrameSlot) {
+    auto& device = GetDevice();
+    DeviceContext context{shared_ptr<Device>{&device, [](Device*) {}}, &gpu::test::DirectQueue(device)};
+    auto buffer = GpuBuffer::Create(device, {.Size = 32, .Usage = BufferUse::CopySource}).Unwrap();
+    auto pipeline = make_unique<UploadPipeline>(context, 2, 1024);
+    auto* runner = pipeline.get();
+    auto scheduler = FrameScheduler::Create(context, std::move(pipeline), 2).Unwrap();
+    const array<byte, 32> bytes{};
+    runner->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto dst = graph.ImportPersistentOwned(buffer);
+        graph.UploadBuffer(dst, 0, RDGUploadSource::BorrowedBytes(bytes));
+        graph.MarkOutput(dst);
+    };
+    auto& first = scheduler->BeginFrame();
+    ASSERT_TRUE(scheduler->RunFrame());
+    const auto staging = runner->GetUploadPageUsage(first);
+    EXPECT_EQ(staging.StagingUsed, bytes.size());
+    EXPECT_EQ(staging.StagingCapacity, 1024u);
+    EXPECT_EQ(staging.DynamicUsed, 0u);
+    EXPECT_EQ(staging.DynamicCapacity, 0u);
+
+    runner->Build = [&](RDGBuilder& graph, FrameSlot&) {
+        const auto vertex = graph.CreateDynamicBuffer(RDGDynamicBufferDescriptor{bytes.size(), BufferUse::Vertex}, RDGUploadSource::BorrowedBytes(bytes));
+        graph.MarkOutput(vertex);
+    };
+    auto& second = scheduler->BeginFrame();
+    ASSERT_TRUE(scheduler->RunFrame());
+    const auto dynamic = runner->GetUploadPageUsage(second);
+    EXPECT_EQ(dynamic.StagingUsed, 0u);
+    EXPECT_EQ(dynamic.StagingCapacity, 0u);
+    EXPECT_EQ(dynamic.DynamicUsed, bytes.size());
+    EXPECT_EQ(dynamic.DynamicCapacity, 1024u);
+    EXPECT_EQ(runner->GetUploadPageUsage(first).StagingUsed, bytes.size());
+
+    runner->Build = [](RDGBuilder&, FrameSlot&) {};
+    ASSERT_TRUE(scheduler->RunFrame());
+    const auto recycled = runner->GetUploadPageUsage(first);
+    EXPECT_EQ(recycled.StagingUsed, 0u);
+    EXPECT_EQ(recycled.StagingCapacity, staging.StagingCapacity);
+    EXPECT_EQ(runner->GetUploadPageUsage(second).DynamicUsed, bytes.size());
+    scheduler->WaitIdle();
+}
+
 TEST_P(BufferUploadGpuTest, ManySmallMixedUploadsAndOverlappingTilesReadBack) {
     auto& device = GetDevice();
     auto& queue = gpu::test::DirectQueue(device);

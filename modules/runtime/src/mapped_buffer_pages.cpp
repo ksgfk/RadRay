@@ -80,6 +80,12 @@ void MappedBufferPages::CommitSubmittedStates() noexcept {
 
 gpu::Device& MappedBufferPages::GetDevice() const noexcept { return _device; }
 
+uint64_t MappedBufferPages::GetUsedBytes() const noexcept {
+    uint64_t used = 0;
+    for (const auto& page : _pages) used += page.Cursor;
+    return used;
+}
+
 uint64_t MappedBufferPages::GetCapacity() const noexcept {
     uint64_t result = 0;
     for (const auto& page : _pages) result += page.Capacity;

@@ -19,6 +19,47 @@ protected:
     test::CallbackPipeline* Pipeline{nullptr};
 };
 
+TEST_F(FrameSlotTest, CountsLinearOverflowAndScratchGrowthPerUse) {
+    constexpr size_t initialSize = 128 * 1024;
+    constexpr size_t overflowSize = 2 * initialSize;
+    constexpr size_t scratchSize = 96 * 1024;
+    auto scheduler = Create(1);
+    ASSERT_TRUE(scheduler);
+    auto& slot = scheduler->BeginFrame();
+    EXPECT_EQ(slot.GetMemoryUsage().InitialBytes, 0u);
+    auto& linear = slot.GetMemoryResource();
+    auto* small = linear.allocate(16);
+    EXPECT_EQ(slot.GetMemoryUsage().InitialBytes, initialSize);
+    EXPECT_EQ(slot.GetMemoryUsage().LinearOverflow.Calls, 0u);
+    auto* large = linear.allocate(overflowSize);
+    linear.deallocate(large, overflowSize);
+    linear.deallocate(small, 16);
+    const auto used = slot.GetMemoryUsage();
+    EXPECT_EQ(used.LinearOverflow.Calls, 1u);
+    EXPECT_GE(used.LinearOverflow.Bytes, overflowSize);
+    EXPECT_EQ(used.ScratchGrowth.Calls, 0u);
+    ASSERT_TRUE(scheduler->RunFrame());
+
+    auto& next = scheduler->BeginFrame();
+    auto& scratch = next.GetScratchMemoryResource();
+    auto* temp = scratch.allocate(scratchSize);
+    scratch.deallocate(temp, scratchSize);
+    auto& reused = next.GetMemoryResource();
+    auto* reusedSmall = reused.allocate(16);
+    reused.deallocate(reusedSmall, 16);
+    const auto growth = next.GetMemoryUsage();
+    EXPECT_EQ(growth.InitialBytes, 0u);
+    EXPECT_EQ(growth.LinearOverflow.Calls, 0u);
+    EXPECT_EQ(growth.LinearOverflow.Bytes, 0u);
+    EXPECT_GT(growth.ScratchGrowth.Calls, 0u);
+    EXPECT_GE(growth.ScratchGrowth.Bytes, scratchSize);
+    ASSERT_TRUE(scheduler->RunFrame());
+
+    const auto reset = scheduler->BeginFrame().GetMemoryUsage();
+    EXPECT_EQ(reset.ScratchGrowth.Calls, 0u);
+    EXPECT_EQ(reset.ScratchGrowth.Bytes, 0u);
+}
+
 TEST_F(FrameSlotTest, AcquireReturnsDistinctBuffersWithinFrame) {
     auto scheduler = Create(1);
     ASSERT_TRUE(scheduler);
